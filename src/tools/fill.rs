@@ -122,6 +122,12 @@ fn write_px(canvas: &mut Canvas, x: i32, y: i32, p: [u8; 4]) {
 fn matches_target(canvas: &Canvas, x: i32, y: i32, target: [u8; 4], tol: u8) -> bool {
     let p = read_px(canvas, x, y);
     let t = tol as i32;
+    // When filling transparent space, ignore RGB — only check alpha.
+    // This consumes anti-aliased stroke edge pixels so the fill
+    // reaches the solid stroke without a visible gap.
+    if target[3] < 8 {
+        return p[3] as i32 <= 128;
+    }
     (p[0] as i32 - target[0] as i32).abs() <= t
         && (p[1] as i32 - target[1] as i32).abs() <= t
         && (p[2] as i32 - target[2] as i32).abs() <= t

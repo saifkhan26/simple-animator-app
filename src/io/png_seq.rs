@@ -27,8 +27,13 @@ pub fn export_to(project: &Project, dir: &PathBuf) -> Result<()> {
             ImageBuffer::from_raw(flat.width, flat.height, flat.pixels)
                 .context("buffer/dim mismatch")?;
         let path = dir.join(format!("frame_{:04}.png", f));
-        buf.save(&path).with_context(|| format!("writing {path:?}"))?;
+        buf.save(&path)
+            .with_context(|| format!("writing {path:?}"))?;
     }
-    log::info!("Exported {} PNG frames → {}", project.frame_count, dir.display());
+    log::info!(
+        "Exported {} PNG frames → {}",
+        project.frame_count,
+        dir.display()
+    );
     Ok(())
 }

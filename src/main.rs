@@ -10,6 +10,8 @@ mod app;
 mod doc;
 mod input;
 mod io;
+#[cfg(target_os = "windows")]
+mod platform;
 mod timeline;
 mod tools;
 mod ui;
@@ -31,10 +33,9 @@ fn main() -> eframe::Result<()> {
         },
         viewport: egui::ViewportBuilder::default()
             .with_title("Animator")
-            // Decorations OFF is required for true transparent windows on Win11
-            // (DWM only gives an alpha surface to borderless windows). We draw
-            // a custom title bar inside egui so the user keeps drag + window
-            // controls.
+            // Frameless (no caption buttons / title). On Windows we re-apply the
+            // default rounded corners + border via DWM in `platform`. Transparent
+            // so the canvas backdrop alpha shows through.
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(true)

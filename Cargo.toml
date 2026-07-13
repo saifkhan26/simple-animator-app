@@ -22,7 +22,7 @@ egui = "0.29"
 egui_extras   = { version = "0.29", default-features = false, features = ["svg"] }
 egui-phosphor = "0.7"
 
-image  = { version = "0.25", default-features = false, features = ["png"] }
+image  = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
 rfd    = "0.14"
 gif         = "0.13"
 color_quant = "1"
@@ -33,6 +33,7 @@ glam     = { version = "0.29", features = ["bytemuck"] }
 serde    = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 toml     = "0.8"
+arboard  = "3"
 
 anyhow      = "1"
 log         = "0.4"
@@ -48,7 +49,10 @@ libloading  = "0.8"
 windows     = { version = "0.56", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
 ] }
+raw-window-handle = "0.6"
 
 [profile.release]
 opt-level     = 3

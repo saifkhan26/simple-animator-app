@@ -6,3 +6,4 @@
 pub mod canvas;
 pub mod layer;
 pub mod project;
+pub mod transform;

@@ -11,15 +11,16 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(
-    Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     ToolPencil,
     ToolInk,
     ToolEraser,
     ToolFill,
+    ToolColorPicker,
+    PickScreenColor,
+    ToolShape,
     PlayPause,
     FramePrev,
     FrameNext,
@@ -38,8 +39,23 @@ pub enum Action {
     Undo,
     Redo,
     ClearCell,
+    PasteImage,
     ToggleCheckerBg,
     TogglePanels,
+    ToggleMiniTimeline,
+    ZoomReset,
+    PanReset,
+    RotateReset,
+    SaveProject,
+    OpenProject,
+    // Canvas navigation gestures (modifier-only binds: no key, held during drag).
+    CanvasZoom,
+    CanvasPan,
+    CanvasRotate,
+    // Layer transform editing.
+    LayerTransformToggle,
+    TransformKeyAdd,
+    TransformKeyDelete,
 }
 
 impl Action {
@@ -48,6 +64,9 @@ impl Action {
         Action::ToolInk,
         Action::ToolEraser,
         Action::ToolFill,
+        Action::ToolColorPicker,
+        Action::PickScreenColor,
+        Action::ToolShape,
         Action::PlayPause,
         Action::FramePrev,
         Action::FrameNext,
@@ -66,8 +85,21 @@ impl Action {
         Action::Undo,
         Action::Redo,
         Action::ClearCell,
+        Action::PasteImage,
         Action::ToggleCheckerBg,
         Action::TogglePanels,
+        Action::ToggleMiniTimeline,
+        Action::ZoomReset,
+        Action::PanReset,
+        Action::RotateReset,
+        Action::SaveProject,
+        Action::OpenProject,
+        Action::CanvasZoom,
+        Action::CanvasPan,
+        Action::CanvasRotate,
+        Action::LayerTransformToggle,
+        Action::TransformKeyAdd,
+        Action::TransformKeyDelete,
     ];
 
     pub fn label(self) -> &'static str {
@@ -76,6 +108,9 @@ impl Action {
             Action::ToolInk => "Tool: Ink",
             Action::ToolEraser => "Tool: Eraser",
             Action::ToolFill => "Tool: Fill",
+            Action::ToolColorPicker => "Tool: Color picker",
+            Action::PickScreenColor => "Pick color from screen",
+            Action::ToolShape => "Tool: Shape",
             Action::PlayPause => "Play / Pause",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
@@ -94,15 +129,29 @@ impl Action {
             Action::Undo => "Undo",
             Action::Redo => "Redo",
             Action::ClearCell => "Clear current cell",
+            Action::PasteImage => "Paste image as background",
             Action::ToggleCheckerBg => "Toggle checker backdrop",
             Action::TogglePanels => "Toggle floating panels",
+            Action::ToggleMiniTimeline => "Toggle mini timeline",
+            Action::ZoomReset => "Reset zoom",
+            Action::PanReset => "Reset pan",
+            Action::RotateReset => "Reset rotation",
+            Action::SaveProject => "Save project",
+            Action::OpenProject => "Open project",
+            Action::CanvasZoom => "Canvas: zoom (drag)",
+            Action::CanvasPan => "Canvas: pan (drag)",
+            Action::CanvasRotate => "Canvas: rotate (drag)",
+            Action::LayerTransformToggle => "Layer transform mode",
+            Action::TransformKeyAdd => "Add transform key",
+            Action::TransformKeyDelete => "Delete transform key",
         }
     }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub struct KeyCombo {
-    pub key: egui::Key,
+    /// `None` = modifier-only combo (canvas nav gestures held during a drag).
+    pub key: Option<egui::Key>,
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
@@ -110,13 +159,38 @@ pub struct KeyCombo {
 
 impl KeyCombo {
     pub fn plain(key: egui::Key) -> Self {
-        Self { key, ctrl: false, shift: false, alt: false }
+        Self {
+            key: Some(key),
+            ctrl: false,
+            shift: false,
+            alt: false,
+        }
     }
     pub fn ctrl(key: egui::Key) -> Self {
-        Self { key, ctrl: true, shift: false, alt: false }
+        Self {
+            key: Some(key),
+            ctrl: true,
+            shift: false,
+            alt: false,
+        }
     }
     pub fn shift(key: egui::Key) -> Self {
-        Self { key, ctrl: false, shift: true, alt: false }
+        Self {
+            key: Some(key),
+            ctrl: false,
+            shift: true,
+            alt: false,
+        }
+    }
+
+    /// A combo with no key — only modifiers. Used for canvas drag gestures.
+    pub fn modifier_only(ctrl: bool, shift: bool, alt: bool) -> Self {
+        Self {
+            key: None,
+            ctrl,
+            shift,
+            alt,
+        }
     }
 
     pub fn display(self) -> String {
@@ -130,18 +204,40 @@ impl KeyCombo {
         if self.alt {
             s.push_str("Alt+");
         }
-        s.push_str(self.key.name());
+        match self.key {
+            Some(k) => s.push_str(k.name()),
+            None => {
+                // Modifier-only: drop the trailing '+'.
+                if s.ends_with('+') {
+                    s.pop();
+                }
+            }
+        }
         s
     }
 
     /// Matches if the given egui input state had this combo pressed this
-    /// frame (with matching modifier state, ignoring caps/super).
+    /// frame (with matching modifier state, ignoring caps/super). Modifier-only
+    /// combos never match here — they are drag gestures, see `mods_held`.
     pub fn matches(self, i: &egui::InputState) -> bool {
+        let Some(key) = self.key else {
+            return false;
+        };
         let m = i.modifiers;
         if m.ctrl != self.ctrl || m.shift != self.shift || m.alt != self.alt {
             return false;
         }
-        i.key_pressed(self.key)
+        i.key_pressed(key)
+    }
+
+    /// True when exactly this combo's modifiers are currently held (and at least
+    /// one is). Used to pick a canvas navigation gesture at drag start.
+    pub fn mods_held(self, i: &egui::InputState) -> bool {
+        let m = i.modifiers;
+        (self.ctrl || self.shift || self.alt)
+            && m.ctrl == self.ctrl
+            && m.shift == self.shift
+            && m.alt == self.alt
     }
 }
 
@@ -173,8 +269,22 @@ fn parse_combo(s: &str) -> Option<KeyCombo> {
             _ => key_name = Some(part),
         }
     }
-    let key = egui::Key::from_name(key_name?)?;
-    Some(KeyCombo { key, ctrl, shift, alt })
+    let key = match key_name {
+        Some(name) => Some(egui::Key::from_name(name)?),
+        None => {
+            // Modifier-only combo is valid only if at least one modifier is set.
+            if !(ctrl || shift || alt) {
+                return None;
+            }
+            None
+        }
+    };
+    Some(KeyCombo {
+        key,
+        ctrl,
+        shift,
+        alt,
+    })
 }
 
 // --- the map itself ---
@@ -194,6 +304,9 @@ impl Default for ShortcutMap {
         b.insert(Action::ToolInk, KeyCombo::plain(K::W));
         b.insert(Action::ToolEraser, KeyCombo::plain(K::E));
         b.insert(Action::ToolFill, KeyCombo::plain(K::R));
+        b.insert(Action::ToolColorPicker, KeyCombo::plain(K::C));
+        b.insert(Action::PickScreenColor, KeyCombo::shift(K::C));
+        b.insert(Action::ToolShape, KeyCombo::plain(K::G));
         // Frame navigation: A / S.
         b.insert(Action::FramePrev, KeyCombo::plain(K::A));
         b.insert(Action::FrameNext, KeyCombo::plain(K::S));
@@ -220,10 +333,32 @@ impl Default for ShortcutMap {
         b.insert(Action::Redo, KeyCombo::ctrl(K::Y));
         // Cell clear.
         b.insert(Action::ClearCell, KeyCombo::plain(K::Backspace));
+        // Paste clipboard image as a background layer.
+        b.insert(Action::PasteImage, KeyCombo::ctrl(K::V));
         // Backdrop toggle.
         b.insert(Action::ToggleCheckerBg, KeyCombo::plain(K::Backtick));
         // Hide / show all floating panels.
         b.insert(Action::TogglePanels, KeyCombo::plain(K::Tab));
+        // Mini timeline bar (shown when panels are hidden).
+        b.insert(Action::ToggleMiniTimeline, KeyCombo::plain(K::M));
+        // Canvas view resets.
+        b.insert(Action::ZoomReset, KeyCombo::plain(K::Num0));
+        b.insert(Action::PanReset, KeyCombo::plain(K::H));
+        b.insert(Action::RotateReset, KeyCombo::plain(K::J));
+        // Project file.
+        b.insert(Action::SaveProject, KeyCombo::ctrl(K::S));
+        b.insert(Action::OpenProject, KeyCombo::ctrl(K::O));
+        // Canvas navigation gestures (held during a canvas drag).
+        b.insert(Action::CanvasZoom, KeyCombo::modifier_only(true, false, false));
+        b.insert(Action::CanvasPan, KeyCombo::modifier_only(false, true, false));
+        b.insert(
+            Action::CanvasRotate,
+            KeyCombo::modifier_only(false, false, true),
+        );
+        // Layer transform editing.
+        b.insert(Action::LayerTransformToggle, KeyCombo::plain(K::B));
+        b.insert(Action::TransformKeyAdd, KeyCombo::plain(K::K));
+        b.insert(Action::TransformKeyDelete, KeyCombo::shift(K::K));
         Self { bindings: b }
     }
 }
@@ -243,12 +378,18 @@ impl ShortcutMap {
         ctx.input(|i| {
             let mut out: Vec<Action> = Vec::new();
             for (&action, combo) in &self.bindings {
+                // Modifier-only combos (canvas gestures) are not press actions.
+                if combo.key.is_none() {
+                    continue;
+                }
                 if combo.matches(i) {
                     out.push(action);
                 }
             }
             // Ctrl+Shift+Z alias for Redo, regardless of user map.
-            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z)
+            if i.modifiers.ctrl
+                && i.modifiers.shift
+                && i.key_pressed(egui::Key::Z)
                 && !out.contains(&Action::Redo)
             {
                 out.push(Action::Redo);

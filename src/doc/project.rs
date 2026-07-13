@@ -9,6 +9,7 @@
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer};
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub width: u32,
     pub height: u32,
@@ -195,6 +196,43 @@ impl Project {
         let layer = Layer::new(name, self.frame_count);
         self.layers.push(layer);
         self.current_layer = self.layers.len() - 1;
+    }
+
+    /// Grow the timeline to at least `n` frames, padding every layer with holds
+    /// so all layers stay the same length. No-op if already long enough.
+    pub fn ensure_frame_count(&mut self, n: usize) {
+        if n > self.frame_count {
+            let extra = n - self.frame_count;
+            for layer in &mut self.layers {
+                for _ in 0..extra {
+                    layer.exposures.push(None);
+                }
+            }
+            self.frame_count = n;
+            self.loop_end = n;
+        }
+    }
+
+    /// Insert a fresh, full-length layer directly *below* the active layer
+    /// (lower index). The previously-active layer stays selected (its index
+    /// shifts up by one). Returns the new layer's index.
+    pub fn add_layer_below_active(&mut self, name: impl Into<String>) -> usize {
+        let idx = self.current_layer.min(self.layers.len());
+        let layer = Layer::new(name, self.frame_count);
+        self.layers.insert(idx, layer);
+        self.current_layer = idx + 1;
+        idx
+    }
+
+    /// Insert a fresh, full-length layer at the very bottom of the stack
+    /// (index 0, drawn behind everything) — a background. The previously-active
+    /// layer stays selected (its index shifts up by one). Returns the new
+    /// layer's index, always 0.
+    pub fn add_background_layer(&mut self, name: impl Into<String>) -> usize {
+        let layer = Layer::new(name, self.frame_count);
+        self.layers.insert(0, layer);
+        self.current_layer += 1;
+        0
     }
 
     pub fn delete_layer(&mut self) {
