@@ -756,47 +756,74 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
 
 fn frame_strip(state: &mut AppState, ui: &mut egui::Ui) {
     let n = state.project.frame_count.max(1);
-    let avail = ui.available_size_before_wrap();
+    let cur = state.project.current_frame;
     let height = 26.0;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(avail.x, height), Sense::click_and_drag());
-    let painter = ui.painter_at(rect);
-    let cell_w = rect.width() / n as f32;
+    // Fill the panel while frames fit; clamp so cells never squeeze below a
+    // readable width — the strip scrolls instead.
+    let cell_w = (ui.available_width() / n as f32).max(22.0);
 
-    painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(10, 11, 14, 220));
-    for i in 0..n {
-        let x = rect.min.x + i as f32 * cell_w;
-        let r = Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(cell_w, height));
-        let fill = if i == state.project.current_frame {
-            theme::ACCENT
-        } else if i >= state.project.loop_start && i < state.project.loop_end {
-            theme::BG_HOVER
-        } else {
-            theme::BG_INACTIVE
-        };
-        painter.rect_filled(r.shrink(1.5), 3.0, fill);
-        if cell_w > 18.0 {
-            let txt_color = if i == state.project.current_frame {
-                Color32::WHITE
-            } else {
-                theme::TEXT_MUTED
-            };
-            painter.text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                format!("{i}"),
-                egui::FontId::monospace(10.0),
-                txt_color,
+    egui::ScrollArea::horizontal()
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            let (rect, resp) = ui.allocate_exact_size(
+                egui::vec2(n as f32 * cell_w, height),
+                Sense::click_and_drag(),
             );
-        }
-    }
+            let painter = ui.painter_at(rect);
 
-    if resp.dragged() || resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            let rel = ((pos.x - rect.min.x) / cell_w).floor() as isize;
-            let idx = rel.clamp(0, n as isize - 1) as usize;
-            state.project.goto(idx);
-        }
-    }
+            painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(10, 11, 14, 220));
+            for i in 0..n {
+                let x = rect.min.x + i as f32 * cell_w;
+                let r = Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(cell_w, height));
+                let fill = if i == cur {
+                    theme::ACCENT
+                } else if i >= state.project.loop_start && i < state.project.loop_end {
+                    theme::BG_HOVER
+                } else {
+                    theme::BG_INACTIVE
+                };
+                painter.rect_filled(r.shrink(1.5), 3.0, fill);
+                if cell_w > 18.0 {
+                    let txt_color = if i == cur {
+                        Color32::WHITE
+                    } else {
+                        theme::TEXT_MUTED
+                    };
+                    painter.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{i}"),
+                        egui::FontId::monospace(10.0),
+                        txt_color,
+                    );
+                }
+            }
+
+            // Keep the active frame centered, but only when it changes so the
+            // user can still scroll the strip freely, and never while
+            // drag-scrubbing (recentering would shift the content under the
+            // pointer and make the drag jump).
+            let mem_id = ui.id().with("frame_strip_frame");
+            let last: Option<usize> = ui.data(|d| d.get_temp(mem_id));
+            if last != Some(cur) {
+                if !resp.dragged() {
+                    let active = Rect::from_center_size(
+                        egui::pos2(rect.min.x + (cur as f32 + 0.5) * cell_w, rect.center().y),
+                        egui::vec2(cell_w * 3.0, height),
+                    );
+                    ui.scroll_to_rect(active, Some(egui::Align::Center));
+                }
+                ui.data_mut(|d| d.insert_temp(mem_id, cur));
+            }
+
+            if resp.dragged() || resp.clicked() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let rel = ((pos.x - rect.min.x) / cell_w).floor() as isize;
+                    let idx = rel.clamp(0, n as isize - 1) as usize;
+                    state.project.goto(idx);
+                }
+            }
+        });
 }
 
 fn onion_content(state: &mut AppState, ui: &mut egui::Ui) {
