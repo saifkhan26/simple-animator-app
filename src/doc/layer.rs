@@ -12,6 +12,16 @@ pub type CellId = usize;
 
 use crate::doc::transform::{Transform, TransformKey};
 
+/// One frame's stabilization tracking points, in document space.
+/// `a` is the primary point (translation); `b` is optional and enables
+/// rotation/scale correction when present on both the reference frame and the
+/// tracked frame.
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct TrackSample {
+    pub a: Option<[f32; 2]>,
+    pub b: Option<[f32; 2]>,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Layer {
     pub name: String,
@@ -30,6 +40,12 @@ pub struct Layer {
     /// Sorted keyframes for the layer transform. Empty = static `transform`.
     #[serde(default)]
     pub transform_keys: Vec<TransformKey>,
+    /// Per-frame stabilization tracking samples, parallel to `exposures`.
+    /// Empty vec = tracker unused on this layer. Project frame edits keep the
+    /// indices aligned with `exposures`. Must stay the LAST field: the `.anim`
+    /// format (postcard) is positional.
+    #[serde(default)]
+    pub track_points: Vec<TrackSample>,
 }
 
 impl Layer {
@@ -43,6 +59,28 @@ impl Layer {
             exposures: vec![None; frames.max(1)],
             transform: Transform::default(),
             transform_keys: Vec::new(),
+            track_points: Vec::new(),
+        }
+    }
+
+    /// Keep `track_points` index-aligned with `exposures` after a frame is
+    /// inserted at `at`. No-op while the tracker is unused (empty vec).
+    pub fn track_insert_frame(&mut self, at: usize) {
+        if self.track_points.is_empty() {
+            return;
+        }
+        if at >= self.track_points.len() {
+            self.track_points.push(TrackSample::default());
+        } else {
+            self.track_points.insert(at, TrackSample::default());
+        }
+    }
+
+    /// Keep `track_points` index-aligned with `exposures` after frame `at` is
+    /// removed. No-op while the tracker is unused (empty vec).
+    pub fn track_remove_frame(&mut self, at: usize) {
+        if at < self.track_points.len() {
+            self.track_points.remove(at);
         }
     }
 

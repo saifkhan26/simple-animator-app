@@ -97,10 +97,16 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     state.begin_layer_xform();
                 } else if state.nav_drag.is_none() {
                     if let Some(pos) = resp.interact_pointer_pos() {
-                        let (cx, cy) = doc_to_active_cell(state, canvas_to_doc(pos));
-                        let t = ui.input(|i| i.time as f32);
-                        let s = state.make_sample(cx, cy, t);
-                        state.pointer_down(s);
+                        if state.tool == ActiveTool::Tracker {
+                            // Tracker takes the raw doc-space point — no cell
+                            // mapping, no cell allocation.
+                            state.tracker_click(canvas_to_doc(pos));
+                        } else {
+                            let (cx, cy) = doc_to_active_cell(state, canvas_to_doc(pos));
+                            let t = ui.input(|i| i.time as f32);
+                            let s = state.make_sample(cx, cy, t);
+                            state.pointer_down(s);
+                        }
                     }
                 }
             }
@@ -406,6 +412,8 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 tool_toggle(ui, state, ActiveTool::Fill, ic::PAINT_BUCKET, &f);
                 tool_toggle(ui, state, ActiveTool::ColorPicker, ic::EYEDROPPER, &c);
                 tool_toggle(ui, state, ActiveTool::Shape, ic::SHAPES, &g);
+                let tr = tip(state, Action::ToolTracker, "Tracker (stabilize)");
+                tool_toggle(ui, state, ActiveTool::Tracker, ic::CROSSHAIR, &tr);
                 ui.add_space(6.0);
                 // Screen colour pick — an action, not a persistent tool: opens a
                 // fullscreen snapshot overlay to sample any pixel on the desktop.
@@ -429,6 +437,56 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                     shape_kind_toggle(ui, state, ShapeKind::Ellipse, ic::CIRCLE, "Ellipse");
                 });
                 ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=64.0).text("Thickness"));
+            } else if state.tool == ActiveTool::Tracker {
+                ui.label(
+                    egui::RichText::new(
+                        "Click the same feature on each frame — the view advances a frame per point. Re-click a frame to fix a miss.",
+                    )
+                    .color(theme::TEXT_MUTED)
+                    .size(11.0),
+                );
+                let two_before = state.tracker_two_points;
+                ui.checkbox(
+                    &mut state.tracker_two_points,
+                    "Second point (fix rotation/zoom)",
+                )
+                .on_hover_text(
+                    "Each frame takes two clicks: point A, then point B on another feature. \
+                     Stabilize then corrects rotation and zoom shake too.",
+                );
+                if two_before != state.tracker_two_points {
+                    state.tracker_pending_b = None;
+                }
+                if state.tracker_pending_b == Some(state.project.current_frame) {
+                    ui.label(
+                        egui::RichText::new("Now click point B…")
+                            .color(theme::ACCENT)
+                            .size(11.0),
+                    );
+                }
+                let count = state.tracked_point_count();
+                ui.label(
+                    egui::RichText::new(format!("Tracked frames: {count}"))
+                        .color(theme::TEXT_MUTED)
+                        .size(11.0),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(count >= 2, egui::Button::new("Stabilize"))
+                        .on_hover_text(
+                            "Offset this layer per frame so the tracked point stays still",
+                        )
+                        .clicked()
+                    {
+                        state.stabilize_active_layer();
+                    }
+                    if ui
+                        .add_enabled(count > 0, egui::Button::new("Clear points"))
+                        .clicked()
+                    {
+                        state.clear_track_points();
+                    }
+                });
             } else if state.tool == ActiveTool::ColorPicker {
                 ui.label(
                     egui::RichText::new("Click the canvas to sample a colour.")
@@ -684,6 +742,7 @@ fn tool_icon(tool: ActiveTool) -> &'static str {
         ActiveTool::Fill => ic::PAINT_BUCKET,
         ActiveTool::ColorPicker => ic::EYEDROPPER,
         ActiveTool::Shape => ic::SHAPES,
+        ActiveTool::Tracker => ic::CROSSHAIR,
     }
 }
 
@@ -695,6 +754,7 @@ fn tool_name(tool: ActiveTool) -> &'static str {
         ActiveTool::Fill => "Fill",
         ActiveTool::ColorPicker => "Color picker",
         ActiveTool::Shape => "Shape",
+        ActiveTool::Tracker => "Tracker",
     }
 }
 
@@ -856,6 +916,11 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 if theme::icon_button(ui, ic::ARROW_DOWN, "Move layer down").clicked() {
                     state.project.move_layer_down();
                 }
+                ui.add_enabled_ui(state.can_merge_down(), |ui| {
+                    if theme::icon_button(ui, ic::ARROWS_MERGE, "Merge layer down").clicked() {
+                        state.merge_layer_down();
+                    }
+                });
             });
             ui.add_space(4.0);
             ui.separator();
@@ -1505,6 +1570,55 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
+    // Tracker markers: the active layer's points for the current frame, plus a
+    // dimmed ghost of the previous frame's point so the user can re-click the
+    // same feature. Doc-space points map straight through the view transform.
+    if state.tool == crate::tools::ActiveTool::Tracker {
+        if let Some(layer) = state.project.layers.get(cur_layer) {
+            let a_col = theme::ACCENT;
+            let b_col = Color32::from_rgb(255, 170, 60);
+            let draw_marker = |p: [f32; 2], col: Color32, alpha: u8, label: &str| {
+                let col = Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), alpha);
+                let pos = xf.doc_to_screen(p[0], p[1]);
+                let arm = 7.0;
+                painter.line_segment(
+                    [egui::pos2(pos.x - arm, pos.y), egui::pos2(pos.x + arm, pos.y)],
+                    Stroke::new(1.5, col),
+                );
+                painter.line_segment(
+                    [egui::pos2(pos.x, pos.y - arm), egui::pos2(pos.x, pos.y + arm)],
+                    Stroke::new(1.5, col),
+                );
+                painter.circle_stroke(pos, 4.0, Stroke::new(1.5, col));
+                painter.text(
+                    pos + egui::vec2(6.0, -6.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    label,
+                    egui::FontId::proportional(10.0),
+                    col,
+                );
+            };
+            if cur_frame > 0 {
+                if let Some(s) = layer.track_points.get(cur_frame - 1) {
+                    if let Some(p) = s.a {
+                        draw_marker(p, a_col, 90, "");
+                    }
+                    if let Some(p) = s.b {
+                        draw_marker(p, b_col, 90, "");
+                    }
+                }
+            }
+            if let Some(s) = layer.track_points.get(cur_frame) {
+                if let Some(p) = s.a {
+                    draw_marker(p, a_col, 255, "A");
+                }
+                if let Some(p) = s.b {
+                    draw_marker(p, b_col, 255, "B");
+                }
+            }
+        }
+    }
+
     // Stroke/shape previews are captured in active-cell pixel space (the same
     // space they're rasterised into). Map them through the layer transform into
     // document space before going to screen, so previews line up with the
@@ -1847,6 +1961,22 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
                 Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
             );
             painter.circle_stroke(pos, 4.0, Stroke::new(1.2, white));
+        }
+        ActiveTool::Tracker => {
+            // Wide crosshair with an open centre — precise point placement.
+            let arm = 12.0;
+            let gap = 3.0;
+            for (w, col) in [(1.4, black), (0.8, white)] {
+                for (a, b) in [
+                    (egui::pos2(pos.x - arm, pos.y), egui::pos2(pos.x - gap, pos.y)),
+                    (egui::pos2(pos.x + gap, pos.y), egui::pos2(pos.x + arm, pos.y)),
+                    (egui::pos2(pos.x, pos.y - arm), egui::pos2(pos.x, pos.y - gap)),
+                    (egui::pos2(pos.x, pos.y + gap), egui::pos2(pos.x, pos.y + arm)),
+                ] {
+                    painter.line_segment([a, b], Stroke::new(w, col));
+                }
+            }
+            painter.circle_stroke(pos, gap, Stroke::new(1.0, theme::ACCENT));
         }
     }
 }

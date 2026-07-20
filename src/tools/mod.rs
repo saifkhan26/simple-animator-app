@@ -16,6 +16,8 @@ pub enum ActiveTool {
     Fill,
     ColorPicker,
     Shape,
+    /// Stabilization tracker — places per-frame tracking points, draws nothing.
+    Tracker,
 }
 
 impl ActiveTool {
@@ -27,6 +29,7 @@ impl ActiveTool {
             ActiveTool::Fill => 3,
             ActiveTool::ColorPicker => 4,
             ActiveTool::Shape => 5,
+            ActiveTool::Tracker => 6,
         }
     }
 }

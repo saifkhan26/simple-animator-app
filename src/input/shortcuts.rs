@@ -21,6 +21,7 @@ pub enum Action {
     ToolColorPicker,
     PickScreenColor,
     ToolShape,
+    ToolTracker,
     PlayPause,
     FramePrev,
     FrameNext,
@@ -67,6 +68,7 @@ impl Action {
         Action::ToolColorPicker,
         Action::PickScreenColor,
         Action::ToolShape,
+        Action::ToolTracker,
         Action::PlayPause,
         Action::FramePrev,
         Action::FrameNext,
@@ -111,6 +113,7 @@ impl Action {
             Action::ToolColorPicker => "Tool: Color picker",
             Action::PickScreenColor => "Pick color from screen",
             Action::ToolShape => "Tool: Shape",
+            Action::ToolTracker => "Tool: Tracker",
             Action::PlayPause => "Play / Pause",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
@@ -307,6 +310,7 @@ impl Default for ShortcutMap {
         b.insert(Action::ToolColorPicker, KeyCombo::plain(K::C));
         b.insert(Action::PickScreenColor, KeyCombo::shift(K::C));
         b.insert(Action::ToolShape, KeyCombo::plain(K::G));
+        b.insert(Action::ToolTracker, KeyCombo::plain(K::X));
         // Frame navigation: A / S.
         b.insert(Action::FramePrev, KeyCombo::plain(K::A));
         b.insert(Action::FrameNext, KeyCombo::plain(K::S));

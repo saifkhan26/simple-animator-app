@@ -30,7 +30,7 @@ pub fn flatten_frame(project: &Project, frame: usize) -> Canvas {
 /// path when the transform is identity and the cell already matches the canvas
 /// size; otherwise inverse-maps each destination pixel and bilinearly samples
 /// the source.
-fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacity: f32, pw: u32, ph: u32) {
+pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacity: f32, pw: u32, ph: u32) {
     if xform.is_identity() && src.width == pw && src.height == ph {
         composite_over(dst, src, opacity);
         return;

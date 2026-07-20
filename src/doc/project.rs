@@ -133,6 +133,7 @@ impl Project {
             } else {
                 l.exposures.insert(insert_at, None);
             }
+            l.track_insert_frame(insert_at);
         }
         self.frame_count += 1;
         self.current_frame = insert_at;
@@ -144,6 +145,8 @@ impl Project {
         for l in &mut self.layers {
             let resolved = l.resolve(self.current_frame);
             l.exposures.insert(insert_at, resolved);
+            // Same cell shows, but the user hasn't tracked the new frame.
+            l.track_insert_frame(insert_at);
         }
         self.frame_count += 1;
         self.current_frame = insert_at;
@@ -157,6 +160,7 @@ impl Project {
                 if !l.exposures.is_empty() {
                     l.exposures[0] = None;
                 }
+                l.track_points.clear();
             }
             for c in &mut self.cells {
                 c.clear();
@@ -168,6 +172,7 @@ impl Project {
             if f < l.exposures.len() {
                 l.exposures.remove(f);
             }
+            l.track_remove_frame(f);
         }
         self.frame_count -= 1;
         self.current_frame = self.current_frame.min(self.frame_count - 1);
@@ -206,6 +211,7 @@ impl Project {
             for layer in &mut self.layers {
                 for _ in 0..extra {
                     layer.exposures.push(None);
+                    layer.track_insert_frame(layer.exposures.len() - 1);
                 }
             }
             self.frame_count = n;

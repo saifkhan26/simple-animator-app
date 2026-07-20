@@ -10,7 +10,7 @@ use eframe::CreationContext;
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
 use crate::doc::canvas::{Canvas, DirtyRect};
-use crate::doc::layer::CellId;
+use crate::doc::layer::{CellId, TrackSample};
 use crate::doc::project::Project;
 use crate::doc::transform::Transform;
 use crate::input::pointer::PointerSample;
@@ -170,7 +170,7 @@ pub struct AppState {
     pub tool: ActiveTool,
     pub brush: BrushSettings,
     /// Per-tool brush settings preserved across tool switches.
-    pub tool_brushes: [BrushSettings; 6],
+    pub tool_brushes: [BrushSettings; 7],
     /// Previous drawing tool — used by ColorPicker to restore the tool after
     /// a colour sample.
     pub prev_tool: Option<ActiveTool>,
@@ -243,6 +243,12 @@ pub struct AppState {
     /// buffer is only reloaded from keys when the cursor actually moves.
     xform_sync_last: Option<(usize, usize)>,
 
+    /// Tracker tool: when on, each frame takes two clicks (point A then B) so
+    /// stabilization can correct rotation/zoom shake as well as position.
+    pub tracker_two_points: bool,
+    /// Frame awaiting its second (B) tracker click in two-point mode.
+    pub tracker_pending_b: Option<usize>,
+
     /// In-flight background import step (ffmpeg / decode), polled each frame.
     pub bg_job: Option<BgJob>,
     /// Label for the modal "busy" overlay while a `bg_job` runs.
@@ -314,6 +320,8 @@ impl AppState {
                 BrushSettings::default_fill(),
                 BrushSettings::default_pencil(),
                 BrushSettings::default_shape(),
+                // Tracker draws nothing; slot only keeps tool indexing safe.
+                BrushSettings::default_shape(),
             ],
             prev_tool: None,
             stroke: None,
@@ -347,6 +355,8 @@ impl AppState {
             nav_to_layer: false,
             layer_xform_before: None,
             xform_sync_last: None,
+            tracker_two_points: false,
+            tracker_pending_b: None,
             bg_job: None,
             bg_label: None,
             preview_tex: HashMap::new(),
@@ -385,6 +395,7 @@ impl AppState {
             BrushSettings::default_fill(),
             BrushSettings::default_pencil(),
             BrushSettings::default_shape(),
+            BrushSettings::default_shape(),
         ];
         self.stroke = None;
         self.stroke_target = None;
@@ -413,6 +424,7 @@ impl AppState {
         self.nav_to_layer = false;
         self.layer_xform_before = None;
         self.xform_sync_last = None;
+        self.tracker_pending_b = None;
         self.bg_job = None;
         self.bg_label = None;
         self.preview_tex.clear();
@@ -518,6 +530,94 @@ impl AppState {
                     p.layers[idx].set_key(f, id);
                 }
             }
+        });
+    }
+
+    /// True when the active layer can be merged onto the layer below: there is
+    /// a layer below, and neither layer is locked or a reference layer.
+    pub fn can_merge_down(&self) -> bool {
+        let li = self.project.current_layer;
+        if li == 0 {
+            return false;
+        }
+        let (Some(top), Some(below)) = (self.project.layers.get(li), self.project.layers.get(li - 1))
+        else {
+            return false;
+        };
+        !top.locked && !below.locked && !top.reference && !below.reference
+    }
+
+    /// Merge the active layer onto the layer below and remove it.
+    ///
+    /// Both layers' per-frame transforms and opacities are baked into fresh
+    /// doc-sized cells, so the merged layer ends up with an identity transform
+    /// at full opacity. Only *creates* cells — existing cells are untouched, so
+    /// a cheap `TimelineState` snapshot is a correct undo (undo leaves the new
+    /// cells orphaned in the pool, same as layer import).
+    pub fn merge_layer_down(&mut self) {
+        if !self.can_merge_down() {
+            return;
+        }
+        self.playback.stop();
+        let li = self.project.current_layer;
+        let bi = li - 1;
+        let p = &self.project;
+        let (pw, ph) = (p.width, p.height);
+        let top = &p.layers[li];
+        let below = &p.layers[bi];
+
+        // Interpolated transforms change the picture on every frame; otherwise
+        // only exposure keys (and a lone transform key's frame) matter.
+        let animated = top.transform_keys.len() >= 2 || below.transform_keys.len() >= 2;
+        let mut bake_frames: Vec<usize> = if animated {
+            (0..p.frame_count).collect()
+        } else {
+            let mut fs: Vec<usize> = (0..p.frame_count)
+                .filter(|&f| {
+                    top.exposures.get(f).copied().flatten().is_some()
+                        || below.exposures.get(f).copied().flatten().is_some()
+                })
+                .collect();
+            for l in [top, below] {
+                for k in &l.transform_keys {
+                    fs.push(k.frame.min(p.frame_count.saturating_sub(1)));
+                }
+            }
+            fs.push(0);
+            fs.sort_unstable();
+            fs.dedup();
+            fs
+        };
+        bake_frames.retain(|&f| f < p.frame_count);
+
+        let baked: Vec<(usize, Canvas)> = bake_frames
+            .into_iter()
+            .map(|f| {
+                let mut out = Canvas::new(pw, ph);
+                for l in [below, top] {
+                    let Some(id) = l.resolve(f) else { continue };
+                    let Some(src) = p.cell(id) else { continue };
+                    let xform = l.resolve_transform(f);
+                    crate::io::composite::composite_layer(&mut out, src, &xform, l.opacity, pw, ph);
+                }
+                (f, out)
+            })
+            .collect();
+
+        self.structural_edit(false, move |p| {
+            let n = p.frame_count;
+            let merged = &mut p.layers[bi];
+            merged.exposures = vec![None; n];
+            merged.transform = Transform::default();
+            merged.transform_keys.clear();
+            merged.opacity = 1.0;
+            for (f, canvas) in baked {
+                let id = p.cells.len();
+                p.cells.push(canvas);
+                p.layers[bi].set_key(f, id);
+            }
+            p.layers.remove(li);
+            p.current_layer = bi;
         });
     }
 
@@ -826,6 +926,171 @@ impl AppState {
                 l.transform = l.resolve_transform(f);
             }
         });
+    }
+
+    // --- Tracker / stabilization ---
+
+    /// Record a stabilization tracking point (doc space) on the active layer at
+    /// the current frame.
+    ///
+    /// Single-point mode: sets point A and advances one frame (no wrap) so the
+    /// user can click straight through the clip. Two-point mode: the first
+    /// click on a frame sets A, the second sets B, then the frame advances.
+    /// Clicks are not pushed to undo history — re-click a frame to fix a miss.
+    pub fn tracker_click(&mut self, doc: (f32, f32)) {
+        self.playback.stop();
+        let li = self.project.current_layer;
+        let f = self.project.current_frame;
+        let n = self.project.frame_count;
+        let Some(l) = self.project.layers.get_mut(li) else {
+            return;
+        };
+        if l.locked {
+            return;
+        }
+        if l.track_points.len() < n {
+            l.track_points.resize(n, TrackSample::default());
+        }
+        let pt = Some([doc.0, doc.1]);
+        let mut advance = true;
+        if self.tracker_two_points {
+            if self.tracker_pending_b == Some(f) {
+                l.track_points[f].b = pt;
+                self.tracker_pending_b = None;
+            } else {
+                l.track_points[f] = TrackSample { a: pt, b: None };
+                self.tracker_pending_b = Some(f);
+                advance = false;
+            }
+        } else {
+            l.track_points[f].a = pt;
+        }
+        if advance && f + 1 < n {
+            self.project.goto(f + 1);
+        }
+    }
+
+    /// Number of frames with a tracking point on the active layer.
+    pub fn tracked_point_count(&self) -> usize {
+        self.project
+            .layers
+            .get(self.project.current_layer)
+            .map(|l| l.track_points.iter().filter(|s| s.a.is_some()).count())
+            .unwrap_or(0)
+    }
+
+    /// Remove every tracking point on the active layer. Undoable.
+    pub fn clear_track_points(&mut self) {
+        self.tracker_pending_b = None;
+        if self.tracked_point_count() == 0 {
+            return;
+        }
+        self.structural_edit(false, |p| {
+            let li = p.current_layer;
+            if let Some(l) = p.layers.get_mut(li) {
+                l.track_points.clear();
+            }
+        });
+    }
+
+    /// Write transform keys on the active layer so the tracked feature stays
+    /// where it is on the first tracked frame (the reference). Frames whose
+    /// sample has both points get rotation/zoom correction as well; A-only
+    /// frames get translation only. One undo entry.
+    pub fn stabilize_active_layer(&mut self) {
+        if self.active_layer_locked() {
+            return;
+        }
+        self.playback.stop();
+        self.tracker_pending_b = None;
+        let li = self.project.current_layer;
+        let Some(layer) = self.project.layers.get(li) else {
+            return;
+        };
+        let tracked: Vec<(usize, TrackSample)> = layer
+            .track_points
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.a.is_some())
+            .map(|(f, s)| (f, *s))
+            .collect();
+        if tracked.len() < 2 {
+            return;
+        }
+        let (_, r) = tracked[0];
+        let ra = r.a.unwrap();
+        // Resolve every base transform against the pre-stabilize key set —
+        // inserting keys as we go would skew later resolves.
+        let bases: Vec<Transform> = tracked
+            .iter()
+            .map(|&(f, _)| layer.resolve_transform(f))
+            .collect();
+        let (pw, ph) = (self.project.width as f32, self.project.height as f32);
+        let (ccx, ccy) = (pw * 0.5, ph * 0.5);
+
+        let keys: Vec<(usize, Transform)> = tracked
+            .iter()
+            .zip(&bases)
+            .map(|(&(f, s), &base)| {
+                let pa = s.a.unwrap();
+                // Two-point similarity needs B on both this frame and the
+                // reference, and a non-degenerate A→B span.
+                let two = match (s.b, r.b) {
+                    (Some(pb), Some(rb)) => {
+                        let v = [pb[0] - pa[0], pb[1] - pa[1]];
+                        let w = [rb[0] - ra[0], rb[1] - ra[1]];
+                        let vlen = (v[0] * v[0] + v[1] * v[1]).sqrt();
+                        let wlen = (w[0] * w[0] + w[1] * w[1]).sqrt();
+                        (vlen > 1e-3).then(|| {
+                            let sd = wlen / vlen;
+                            let theta = w[1].atan2(w[0]) - v[1].atan2(v[0]);
+                            (sd, theta)
+                        })
+                    }
+                    _ => None,
+                };
+                let t = match two {
+                    Some((sd, theta)) => {
+                        // Doc-space similarity about the canvas center that maps
+                        // this frame's points onto the reference points, composed
+                        // with the frame's base transform.
+                        let (sin, cos) = theta.sin_cos();
+                        let rot = |x: f32, y: f32| (x * cos - y * sin, x * sin + y * cos);
+                        let (px, py) = (pa[0] - ccx, pa[1] - ccy);
+                        let (rpx, rpy) = rot(px, py);
+                        let dx = (ra[0] - ccx) - sd * rpx;
+                        let dy = (ra[1] - ccy) - sd * rpy;
+                        let (rtx, rty) = rot(base.tx, base.ty);
+                        Transform {
+                            tx: sd * rtx + dx,
+                            ty: sd * rty + dy,
+                            scale: base.scale * sd,
+                            rot: base.rot + theta,
+                        }
+                    }
+                    None => Transform {
+                        tx: base.tx + (ra[0] - pa[0]),
+                        ty: base.ty + (ra[1] - pa[1]),
+                        ..base
+                    },
+                };
+                (f, t)
+            })
+            .collect();
+
+        self.structural_edit(false, move |p| {
+            let li = p.current_layer;
+            let f = p.current_frame;
+            if let Some(l) = p.layers.get_mut(li) {
+                for (frame, t) in keys {
+                    l.set_transform_key(frame, t);
+                }
+                // Keep the live edit buffer showing the current frame's pose.
+                l.transform = l.resolve_transform(f);
+            }
+        });
+        // The buffer changed under the cursor-sync cache — force a re-sync.
+        self.xform_sync_last = None;
     }
 
     /// Poll the active background import job; advance state when it completes.
@@ -1453,6 +1718,11 @@ impl AppState {
                 self.tool_brushes[self.tool.idx()] = self.brush.clone();
                 self.tool = ActiveTool::Shape;
                 self.brush = self.tool_brushes[ActiveTool::Shape.idx()].clone();
+            }
+            Action::ToolTracker => {
+                self.tool_brushes[self.tool.idx()] = self.brush.clone();
+                self.tool = ActiveTool::Tracker;
+                self.brush = self.tool_brushes[ActiveTool::Tracker.idx()].clone();
             }
             Action::PlayPause => {
                 let now = 0.0; // refreshed by playback.tick on next frame
