@@ -238,7 +238,7 @@ fn screen_pick_live(state: &mut AppState, ctx: &egui::Context) {
 
     // Refresh the loupe texture (kept on AppState so it outlives this frame).
     if let Some(r) = &region {
-        let img = egui::ColorImage::from_rgba_unmultiplied([r.w as usize, r.h as usize], &r.buf);
+        let img = crate::app::premultiplied_image([r.w as usize, r.h as usize], &r.buf);
         if let Some(t) = &mut state.screen_pick_tex {
             t.set(img, egui::TextureOptions::NEAREST);
         } else {
@@ -836,8 +836,14 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let n = state.project.layers.len();
             let cur = state.project.current_layer;
             let mut select: Option<usize> = None;
+            let mut start_rename: Option<usize> = None;
+            let mut rename_commit = false;
+            let mut rename_cancel = false;
+            // Split borrow: rows need &mut layer while the rename edit buffer
+            // lives on AppState next to it.
+            let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);
             for i in (0..n).rev() {
-                let layer = &mut state.project.layers[i];
+                let layer = &mut layers[i];
                 let selected = i == cur;
 
                 Frame::none()
@@ -888,18 +894,59 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                             {
                                 layer.reference = !layer.reference;
                             }
-                            // Name select.
-                            let resp = ui.add(egui::SelectableLabel::new(
-                                selected,
-                                egui::RichText::new(&layer.name).strong(),
-                            ));
-                            if resp.clicked() {
-                                select = Some(i);
+                            // Name: click selects, double-click renames inline.
+                            let editing = matches!(rename.as_ref(), Some(r) if r.index == i);
+                            if editing {
+                                let r = rename.as_mut().unwrap();
+                                let te = ui.add(
+                                    egui::TextEdit::singleline(&mut r.buf).desired_width(110.0),
+                                );
+                                if !r.focused {
+                                    te.request_focus();
+                                    r.focused = true;
+                                }
+                                if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
+                                    rename_cancel = true;
+                                } else if te.lost_focus() {
+                                    // Covers Enter and clicking away.
+                                    rename_commit = true;
+                                }
+                            } else {
+                                let resp = ui
+                                    .add(egui::SelectableLabel::new(
+                                        selected,
+                                        egui::RichText::new(&layer.name).strong(),
+                                    ))
+                                    .on_hover_text("Double-click to rename");
+                                if resp.double_clicked() {
+                                    start_rename = Some(i);
+                                } else if resp.clicked() {
+                                    select = Some(i);
+                                }
                             }
                         });
                         ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
                     });
                 ui.add_space(2.0);
+            }
+            if rename_cancel {
+                state.layer_rename = None;
+            } else if rename_commit {
+                if let Some(r) = state.layer_rename.take() {
+                    let name = r.buf.trim().to_string();
+                    if !name.is_empty()
+                        && r.index < state.project.layers.len()
+                        && state.project.layers[r.index].name != name
+                    {
+                        state.structural_edit(false, |p| p.layers[r.index].name = name);
+                    }
+                }
+            } else if let Some(i) = start_rename {
+                state.layer_rename = Some(crate::app::LayerRename {
+                    index: i,
+                    buf: state.project.layers[i].name.clone(),
+                    focused: false,
+                });
             }
             if let Some(i) = select {
                 state.project.current_layer = i;
@@ -1456,12 +1503,19 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         if let (Some((tail, _)), Some(cur)) = (builder.live_tail(), builder.current_node()) {
             let is_eraser = builder.tool == crate::tools::ActiveTool::Eraser;
             let a = builder.brush.opacity.clamp(0.0, 1.0);
+            // Premultiply in gamma space to match the CPU compositor; egui's
+            // `from_rgba_unmultiplied` premultiplies in linear space, which
+            // over-brightens light colors at fractional alpha.
+            let gamma_premul = |c: [u8; 3], a: u8| {
+                let m = |v: u8| ((v as u16 * a as u16 + 127) / 255) as u8;
+                Color32::from_rgba_premultiplied(m(c[0]), m(c[1]), m(c[2]), a)
+            };
             let fill = if is_eraser {
                 // Translucent cool-grey — reads as "lifting", not painting.
-                Color32::from_rgba_unmultiplied(150, 158, 172, (a * 80.0) as u8)
+                gamma_premul([150, 158, 172], (a * 80.0) as u8)
             } else {
                 let c = builder.brush.color;
-                Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (a * 255.0) as u8)
+                gamma_premul([c[0], c[1], c[2]], (a * 255.0) as u8)
             };
             let p0 = cell_to_screen(tail.x, tail.y);
             let p1 = cell_to_screen(cur.x, cur.y);

@@ -7,7 +7,7 @@ use std::thread;
 
 use anyhow::Result;
 use eframe::CreationContext;
-use egui::{ColorImage, TextureHandle, TextureOptions};
+use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::layer::CellId;
@@ -151,6 +151,14 @@ pub enum BgJob {
     Mp4Export(Receiver<Result<()>>),
 }
 
+/// In-progress inline layer rename: which layer, the edit buffer, and
+/// whether the TextEdit has been given focus yet (first frame only).
+pub struct LayerRename {
+    pub index: usize,
+    pub buf: String,
+    pub focused: bool,
+}
+
 pub struct AppState {
     pub project: Project,
 
@@ -202,6 +210,8 @@ pub struct AppState {
     /// While `Some(action)`, the next key press from the user becomes the
     /// new binding for that action.
     pub rebinding: Option<Action>,
+    /// In-progress inline layer rename in the layers panel.
+    pub layer_rename: Option<LayerRename>,
     pub show_settings: bool,
     /// Master visibility of all floating panel windows. Tab toggles it.
     pub show_panels: bool,
@@ -323,6 +333,7 @@ impl AppState {
             preview_upload_rect: None,
             shortcuts: shortcuts::load(),
             rebinding: None,
+            layer_rename: None,
             show_settings: false,
             show_panels: true,
             show_mini_timeline: true,
@@ -389,6 +400,7 @@ impl AppState {
         self.stroke_pre_pixels = None;
         self.preview_upload_rect = None;
         self.rebinding = None;
+        self.layer_rename = None;
         self.show_settings = false;
         self.show_panels = true;
         self.show_mini_timeline = true;
@@ -971,7 +983,7 @@ impl AppState {
         };
         match rx.try_recv() {
             Ok(Ok((w, h, buf))) => {
-                let img = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &buf);
+                let img = premultiplied_image([w as usize, h as usize], &buf);
                 let tex = ctx.load_texture(format!("preview_{idx}"), img, TextureOptions::LINEAR);
                 self.preview_tex.insert(idx, tex);
             }
@@ -1018,7 +1030,7 @@ impl AppState {
                             let row = ((y * c.width + rect.min_x) * 4) as usize;
                             buf.extend_from_slice(&c.pixels[row..row + w * 4]);
                         }
-                        let img = ColorImage::from_rgba_unmultiplied([w, h], &buf);
+                        let img = premultiplied_image([w, h], &buf);
                         if let Some(tex) = self.cell_textures.get_mut(&target) {
                             tex.set_partial(
                                 [rect.min_x as usize, rect.min_y as usize],
@@ -1072,10 +1084,7 @@ impl AppState {
             let Some(c) = self.project.cell(id) else {
                 continue;
             };
-            let image = ColorImage::from_rgba_unmultiplied(
-                [c.width as usize, c.height as usize],
-                &c.pixels,
-            );
+            let image = premultiplied_image([c.width as usize, c.height as usize], &c.pixels);
             if let Some(tex) = self.cell_textures.get_mut(&id) {
                 tex.set(image, TextureOptions::LINEAR);
             } else {
@@ -1741,19 +1750,38 @@ impl eframe::App for AppState {
     }
 }
 
+/// Build a `ColorImage` by premultiplying straight-alpha RGBA8 in gamma
+/// (sRGB) space. egui's `from_rgba_unmultiplied` premultiplies in linear
+/// space, which over-brightens fractional-alpha AA edges once egui blends
+/// them in gamma space — light strokes get a white rim.
+pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
+    let pixels = rgba
+        .chunks_exact(4)
+        .map(|p| match p[3] {
+            0 => Color32::TRANSPARENT,
+            255 => Color32::from_rgb(p[0], p[1], p[2]),
+            a => {
+                let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
+                Color32::from_rgba_premultiplied(m(p[0]), m(p[1]), m(p[2]), a)
+            }
+        })
+        .collect();
+    ColorImage { size, pixels }
+}
+
 /// Build a small (≤360px wide) preview `ColorImage` from RGBA pixels.
 fn preview_color_image(w: u32, h: u32, pixels: &[u8]) -> ColorImage {
     let maxw = 360u32;
     if w <= maxw {
-        return ColorImage::from_rgba_unmultiplied([w as usize, h as usize], pixels);
+        return premultiplied_image([w as usize, h as usize], pixels);
     }
     match image::RgbaImage::from_raw(w, h, pixels.to_vec()) {
         Some(im) => {
             let nh = (h * maxw / w).max(1);
             let r = image::imageops::resize(&im, maxw, nh, image::imageops::FilterType::Triangle);
-            ColorImage::from_rgba_unmultiplied([maxw as usize, nh as usize], r.as_raw())
+            premultiplied_image([maxw as usize, nh as usize], r.as_raw())
         }
-        None => ColorImage::from_rgba_unmultiplied([w as usize, h as usize], pixels),
+        None => premultiplied_image([w as usize, h as usize], pixels),
     }
 }
 
