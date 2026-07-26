@@ -50,6 +50,7 @@ impl From<LayerV2> for Layer {
             exposures: l.exposures,
             transform: l.transform,
             transform_keys: l.transform_keys,
+            lines_from: None,
             track_points: Vec::new(),
         }
     }

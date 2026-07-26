@@ -40,6 +40,12 @@ pub struct Layer {
     /// Sorted keyframes for the layer transform. Empty = static `transform`.
     #[serde(default)]
     pub transform_keys: Vec<TransformKey>,
+    /// Index of the layer whose strokes bound this layer's flood fills — the
+    /// line-art layer for a paint layer. `None` = fill reads this layer's own
+    /// pixels (plain bucket behaviour). Session-only: not written to `.anim`,
+    /// so it resets on load.
+    #[serde(skip)]
+    pub lines_from: Option<usize>,
     /// Per-frame stabilization tracking samples, parallel to `exposures`.
     /// Empty vec = tracker unused on this layer. Project frame edits keep the
     /// indices aligned with `exposures`. Must stay the LAST field: the `.anim`
@@ -59,6 +65,7 @@ impl Layer {
             exposures: vec![None; frames.max(1)],
             transform: Transform::default(),
             transform_keys: Vec::new(),
+            lines_from: None,
             track_points: Vec::new(),
         }
     }

@@ -196,6 +196,43 @@ impl Project {
 
     // --- Layer edits ---
 
+    /// Keep `lines_from` links valid after a layer is inserted at `at`:
+    /// everything from `at` up shifted one slot higher.
+    fn relink_after_insert(&mut self, at: usize) {
+        for layer in &mut self.layers {
+            if let Some(src) = layer.lines_from {
+                if src >= at {
+                    layer.lines_from = Some(src + 1);
+                }
+            }
+        }
+    }
+
+    /// Keep `lines_from` links valid after the layer at `at` is removed:
+    /// links to it are dropped, links above it shift one slot lower.
+    pub fn relink_after_remove(&mut self, at: usize) {
+        for layer in &mut self.layers {
+            match layer.lines_from {
+                Some(src) if src == at => layer.lines_from = None,
+                Some(src) if src > at => layer.lines_from = Some(src - 1),
+                _ => {}
+            }
+        }
+    }
+
+    /// Keep `lines_from` links valid after layers `a` and `b` swap places.
+    fn relink_after_swap(&mut self, a: usize, b: usize) {
+        for layer in &mut self.layers {
+            if let Some(src) = layer.lines_from {
+                if src == a {
+                    layer.lines_from = Some(b);
+                } else if src == b {
+                    layer.lines_from = Some(a);
+                }
+            }
+        }
+    }
+
     pub fn add_layer(&mut self) {
         let name = format!("Layer {}", self.layers.len() + 1);
         let layer = Layer::new(name, self.frame_count);
@@ -226,6 +263,7 @@ impl Project {
         let idx = self.current_layer.min(self.layers.len());
         let layer = Layer::new(name, self.frame_count);
         self.layers.insert(idx, layer);
+        self.relink_after_insert(idx);
         self.current_layer = idx + 1;
         idx
     }
@@ -237,6 +275,7 @@ impl Project {
     pub fn add_background_layer(&mut self, name: impl Into<String>) -> usize {
         let layer = Layer::new(name, self.frame_count);
         self.layers.insert(0, layer);
+        self.relink_after_insert(0);
         self.current_layer += 1;
         0
     }
@@ -245,7 +284,9 @@ impl Project {
         if self.layers.len() <= 1 {
             return;
         }
-        self.layers.remove(self.current_layer);
+        let i = self.current_layer;
+        self.layers.remove(i);
+        self.relink_after_remove(i);
         self.current_layer = self.current_layer.min(self.layers.len() - 1);
     }
 
@@ -253,6 +294,7 @@ impl Project {
         let i = self.current_layer;
         if i + 1 < self.layers.len() {
             self.layers.swap(i, i + 1);
+            self.relink_after_swap(i, i + 1);
             self.current_layer = i + 1;
         }
     }
@@ -261,6 +303,7 @@ impl Project {
         let i = self.current_layer;
         if i > 0 {
             self.layers.swap(i, i - 1);
+            self.relink_after_swap(i, i - 1);
             self.current_layer = i - 1;
         }
     }

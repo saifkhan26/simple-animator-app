@@ -30,14 +30,34 @@ fn combo_text(state: &AppState, action: Action) -> String {
 
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if state.show_panels {
+        // Did the window change size since panels were last drawn? If so each
+        // panel is nudged to keep its distance from the screen edge it sits
+        // nearest, so the right-hand column tracks the right edge instead of
+        // being stranded mid-canvas. The baseline is only updated on frames that
+        // actually draw panels — a resize while they're hidden is still applied
+        // once they come back.
+        let screen = ctx.screen_rect();
+        let resized = state
+            .viewport_rect
+            .replace(screen)
+            .filter(|prev| *prev != screen);
+
         menu_window(state, ctx);
         // Left: tools + brush.  Right: layers / onion / x-sheet.  Bottom: timeline.
-        panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true);
-        panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 232.0, true);
-        panel_window(state, ctx, PanelId::Layers, [1004.0, 48.0], 252.0, true);
-        panel_window(state, ctx, PanelId::Onion, [1004.0, 300.0], 252.0, false);
-        panel_window(state, ctx, PanelId::Xsheet, [1004.0, 470.0], 252.0, false);
-        panel_window(state, ctx, PanelId::Timeline, [320.0, 600.0], 640.0, true);
+        panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, resized);
+        panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 232.0, true, resized);
+        panel_window(state, ctx, PanelId::Layers, [1004.0, 48.0], 252.0, true, resized);
+        panel_window(state, ctx, PanelId::Onion, [1004.0, 300.0], 252.0, false, resized);
+        panel_window(state, ctx, PanelId::Xsheet, [1004.0, 470.0], 252.0, false, resized);
+        panel_window(
+            state,
+            ctx,
+            PanelId::Timeline,
+            [320.0, 600.0],
+            640.0,
+            true,
+            resized,
+        );
         settings_window(state, ctx);
     } else if state.show_mini_timeline {
         mini_timeline_window(state, ctx);
@@ -48,6 +68,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if let Some(label) = state.bg_label {
         busy_overlay(ctx, label);
     }
+    save_error_dialog(state, ctx);
+    save_toast(state, ctx);
 
     egui::CentralPanel::default()
         .frame(Frame::none().fill(Color32::TRANSPARENT))
@@ -197,9 +219,14 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     screen_pick_live(state, ctx);
 }
 
-/// Drive live screen-pick mode: read the pixel under the OS cursor (the desktop
-/// behind our now-transparent backdrop), show a swatch/hex loupe at the cursor,
-/// and commit the colour on the next tap. Escape cancels.
+/// Drive live screen-pick mode: read the pixel under the OS cursor straight
+/// from the screen, show a swatch/hex loupe at the cursor, and commit the
+/// colour on the next tap. Escape cancels.
+///
+/// Because the sample comes from the OS framebuffer, this picks whatever is
+/// literally on screen — the canvas and its backdrop as currently configured,
+/// or whatever sits behind the window wherever the backdrop is transparent.
+/// Pick mode never changes the backdrop to make that happen.
 fn screen_pick_live(state: &mut AppState, ctx: &egui::Context) {
     if !state.screen_pick {
         return;
@@ -226,7 +253,7 @@ fn screen_pick_live(state: &mut AppState, ctx: &egui::Context) {
     }
 
     // Don't sample/commit when the pointer is over a floating panel (toolbar
-    // etc.) — only the see-through canvas reveals what's behind. NOTE: can't use
+    // etc.) — a click there is aimed at the widget, not at a colour. NOTE: can't use
     // `is_pointer_over_area()` here: the canvas allocates its whole rect as a
     // widget, so that returns true over the canvas too. Check the layer instead
     // — the canvas is `Order::Background`, floating panels are `Order::Middle`.
@@ -363,6 +390,20 @@ fn panel_meta(id: PanelId) -> (&'static str, &'static str) {
     }
 }
 
+/// Stable egui Id for a panel window. Without this the Id is hashed from the
+/// window's title — which embeds a phosphor glyph — so bumping the icon font or
+/// editing a title in `panel_meta` would silently orphan every saved position.
+fn panel_key(id: PanelId) -> &'static str {
+    match id {
+        PanelId::Tools => "panel_tools",
+        PanelId::Brush => "panel_brush",
+        PanelId::Layers => "panel_layers",
+        PanelId::Onion => "panel_onion",
+        PanelId::Xsheet => "panel_xsheet",
+        PanelId::Timeline => "panel_timeline",
+    }
+}
+
 /// Draw a panel's body.
 fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, id: PanelId) {
     match id {
@@ -376,6 +417,9 @@ fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, i
 }
 
 /// Render a panel as a draggable floating window.
+///
+/// `resized` carries the previous viewport rect on frames where the window
+/// changed size; the panel is then re-stuck to its nearest edge.
 fn panel_window(
     state: &mut AppState,
     ctx: &egui::Context,
@@ -383,16 +427,76 @@ fn panel_window(
     default_pos: [f32; 2],
     width: f32,
     open: bool,
+    resized: Option<Rect>,
 ) {
     let (icon, title) = panel_meta(id);
-    egui::Window::new(theme::icon_text(icon, title))
+    let mut window = egui::Window::new(theme::icon_text(icon, title))
+        .id(egui::Id::new(panel_key(id)))
         .default_pos(default_pos)
         .default_width(width)
         .default_open(open)
         .resizable(true)
         .collapsible(true)
-        .frame(floating_frame())
-        .show(ctx, |ui| panel_content(state, ctx, ui, id));
+        .frame(floating_frame());
+    if let Some(old) = resized {
+        if let Some(pos) = resticked_pos(ctx, panel_key(id), old, ctx.screen_rect()) {
+            window = window.current_pos(pos);
+        }
+    }
+    window.show(ctx, |ui| panel_content(state, ctx, ui, id));
+}
+
+/// Where a panel should sit after the viewport went from `old` to `new`.
+///
+/// Each axis is handled independently and keeps the panel's gap from whichever
+/// edge it was nearest — a right-hand panel tracks the right edge, a bottom one
+/// tracks the bottom. `None` means leave it alone.
+fn resticked_pos(ctx: &egui::Context, key: &str, old: Rect, new: Rect) -> Option<[f32; 2]> {
+    let st = egui::AreaState::load(ctx, egui::Id::new(key))?;
+    // `size` is `None` until the area has been laid out once (and it is
+    // deliberately not persisted by egui). Without it `rect()` reports a
+    // zero-sized box and every gap below would be nonsense.
+    let size = st.size?;
+    let top_left = st.left_top_pos();
+    Some([
+        restick_axis(
+            top_left.x,
+            top_left.x + size.x,
+            size.x,
+            old.min.x,
+            old.max.x,
+            new.min.x,
+            new.max.x,
+        ),
+        restick_axis(
+            top_left.y,
+            top_left.y + size.y,
+            size.y,
+            old.min.y,
+            old.max.y,
+            new.min.y,
+            new.max.y,
+        ),
+    ])
+}
+
+/// One axis of [`resticked_pos`] — returns the new minimum coordinate.
+fn restick_axis(lo: f32, hi: f32, len: f32, o_lo: f32, o_hi: f32, n_lo: f32, n_hi: f32) -> f32 {
+    let gap_lo = lo - o_lo;
+    let gap_hi = o_hi - hi;
+    // A panel that was centred to within a few pixels stays centred, so the
+    // bottom-centre Timeline doesn't slide off to one side on a wider window.
+    const CENTRED_TOL: f32 = 8.0;
+    let pos = if (gap_lo - gap_hi).abs() <= CENTRED_TOL {
+        n_lo + ((n_hi - n_lo) - len) * 0.5
+    } else if gap_lo <= gap_hi {
+        n_lo + gap_lo
+    } else {
+        n_hi - gap_hi - len
+    };
+    // Never push a panel off the new viewport. `max` guards the case where the
+    // panel is larger than the window, which would invert the clamp range.
+    pos.clamp(n_lo, (n_hi - len).max(n_lo))
 }
 
 fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
@@ -407,18 +511,19 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 tool_toggle(ui, state, ActiveTool::Eraser, ic::ERASER, &e);
                 ui.add_space(6.0);
                 let f = tip(state, Action::ToolFill, "Fill");
-                let c = tip(state, Action::ToolColorPicker, "Color picker");
                 let g = tip(state, Action::ToolShape, "Shape");
+                let l = tip(state, Action::ToolLasso, "Lasso erase");
                 tool_toggle(ui, state, ActiveTool::Fill, ic::PAINT_BUCKET, &f);
-                tool_toggle(ui, state, ActiveTool::ColorPicker, ic::EYEDROPPER, &c);
                 tool_toggle(ui, state, ActiveTool::Shape, ic::SHAPES, &g);
+                tool_toggle(ui, state, ActiveTool::Lasso, ic::LASSO, &l);
                 let tr = tip(state, Action::ToolTracker, "Tracker (stabilize)");
                 tool_toggle(ui, state, ActiveTool::Tracker, ic::CROSSHAIR, &tr);
                 ui.add_space(6.0);
-                // Screen colour pick — an action, not a persistent tool: opens a
-                // fullscreen snapshot overlay to sample any pixel on the desktop.
-                let sp = tip(state, Action::PickScreenColor, "Pick color from screen");
-                if theme::icon_toggle(ui, ic::EYEDROPPER_SAMPLE, &sp, false).clicked() {
+                // The one colour picker — a momentary mode, not a persistent
+                // tool. Samples any pixel on screen, canvas included, leaving
+                // the backdrop as-is, then returns to the tool that was active.
+                let sp = tip(state, Action::PickScreenColor, "Color picker");
+                if theme::icon_toggle(ui, ic::EYEDROPPER, &sp, state.screen_pick).clicked() {
                     state.dispatch(Action::PickScreenColor);
                 }
             });
@@ -430,6 +535,20 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 ui.add(
                     egui::Slider::new(&mut state.brush.fill_tolerance, 0..=128).text("Tolerance"),
                 );
+                ui.add(egui::Slider::new(&mut state.brush.fill_expand, 0..=8).text("Expand (px)"))
+                    .on_hover_text(
+                        "Grow the fill by this many pixels so the colour tucks under \
+                         anti-aliased lines instead of leaving a halo. Meant for the \
+                         'lines from' workflow — on a same-layer fill it eats into \
+                         your own strokes.",
+                    );
+                // The boundary source is a per-layer link, set in the Layers
+                // panel — surface it here so the coupling is visible.
+                let hint = match state.fill_boundary_name() {
+                    Some(name) => format!("Lines from: {name}"),
+                    None => "Lines from: this layer — set it in the Layers panel".to_string(),
+                };
+                ui.label(egui::RichText::new(hint).color(theme::TEXT_MUTED).size(11.0));
             } else if state.tool == ActiveTool::Shape {
                 ui.horizontal(|ui| {
                     shape_kind_toggle(ui, state, ShapeKind::Line, ic::LINE_SEGMENT, "Line");
@@ -487,18 +606,15 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                         state.clear_track_points();
                     }
                 });
-            } else if state.tool == ActiveTool::ColorPicker {
+            } else if state.tool == ActiveTool::Lasso {
                 ui.label(
-                    egui::RichText::new("Click the canvas to sample a colour.")
-                        .color(theme::TEXT_MUTED)
-                        .size(11.0),
+                    egui::RichText::new(
+                        "Draw a loop — everything inside it is erased from the active layer. \
+                         The path closes itself on release.",
+                    )
+                    .color(theme::TEXT_MUTED)
+                    .size(11.0),
                 );
-                let hint = tip(
-                    state,
-                    Action::PickScreenColor,
-                    "Sample any pixel behind the window (drops backdrop)",
-                );
-                ui.label(egui::RichText::new(hint).color(theme::TEXT_MUTED).size(11.0));
             } else {
                 ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=128.0).text("Size"));
                 ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Flow"));
@@ -740,9 +856,9 @@ fn tool_icon(tool: ActiveTool) -> &'static str {
         ActiveTool::Ink => ic::PEN_NIB,
         ActiveTool::Eraser => ic::ERASER,
         ActiveTool::Fill => ic::PAINT_BUCKET,
-        ActiveTool::ColorPicker => ic::EYEDROPPER,
         ActiveTool::Shape => ic::SHAPES,
         ActiveTool::Tracker => ic::CROSSHAIR,
+        ActiveTool::Lasso => ic::LASSO,
     }
 }
 
@@ -752,9 +868,9 @@ fn tool_name(tool: ActiveTool) -> &'static str {
         ActiveTool::Ink => "Ink",
         ActiveTool::Eraser => "Eraser",
         ActiveTool::Fill => "Fill",
-        ActiveTool::ColorPicker => "Color picker",
         ActiveTool::Shape => "Shape",
         ActiveTool::Tracker => "Tracker",
+        ActiveTool::Lasso => "Lasso erase",
     }
 }
 
@@ -931,6 +1047,14 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut start_rename: Option<usize> = None;
             let mut rename_commit = false;
             let mut rename_cancel = false;
+            // Owned copy: the "lines from" combo lists every layer's name while
+            // a single layer is mutably borrowed below.
+            let names: Vec<String> = state
+                .project
+                .layers
+                .iter()
+                .map(|l| l.name.clone())
+                .collect();
             // Split borrow: rows need &mut layer while the rename edit buffer
             // lives on AppState next to it.
             let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);
@@ -1018,6 +1142,35 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                             }
                         });
                         ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
+                        // Flood fill on this layer reads its boundaries from
+                        // the linked layer — line art above, colour below.
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("lines from")
+                                    .color(theme::TEXT_MUTED)
+                                    .size(11.0),
+                            );
+                            let current = match layer.lines_from {
+                                Some(s) => names.get(s).map(String::as_str).unwrap_or("—"),
+                                None => "— none —",
+                            };
+                            egui::ComboBox::from_id_salt(("lines_from", i))
+                                .selected_text(egui::RichText::new(current).size(11.0))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut layer.lines_from, None, "— none —");
+                                    for (j, name) in names.iter().enumerate() {
+                                        if j == i {
+                                            continue;
+                                        }
+                                        ui.selectable_value(&mut layer.lines_from, Some(j), name);
+                                    }
+                                });
+                        })
+                        .response
+                        .on_hover_text(
+                            "Flood fill on this layer stops at the linked layer's strokes, \
+                             so colour can be painted under line art.",
+                        );
                     });
                 ui.add_space(2.0);
             }
@@ -1402,9 +1555,6 @@ fn tool_toggle(
 ) {
     let selected = state.tool == target;
     if theme::icon_toggle(ui, icon, label, selected).clicked() && !selected {
-        if target == ActiveTool::ColorPicker {
-            state.prev_tool = Some(state.tool);
-        }
         state.tool_brushes[state.tool.idx()] = state.brush.clone();
         state.tool = target;
         state.brush = state.tool_brushes[target.idx()].clone();
@@ -1433,8 +1583,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
 
     // Checker backdrop. Follows zoom/pan; skipped while rotated (the rotated
     // doc quad isn't axis-aligned and a flat fallback would be misleading).
-    // Also skipped during screen-pick so the desktop behind stays visible.
-    if state.show_checker && state.view.rotation.abs() < 1e-3 && !state.screen_pick {
+    // Left alone during screen-pick: the picker no longer alters the backdrop,
+    // so hiding the checker would be the same unwanted change by another route.
+    if state.show_checker && state.view.rotation.abs() < 1e-3 {
         let dst = Rect::from_two_pos(corners[0], corners[2]);
         let cell = 12.0;
         let cols = (dst.width() / cell).ceil() as i32;
@@ -1711,6 +1862,30 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
+    // Lasso preview: the path so far plus a dashed-looking closing chord back
+    // to the start, so it's obvious the loop seals itself on release. Drawn in
+    // cell space like the other previews, since that is what gets rasterised.
+    if let Some(path) = &state.lasso {
+        if path.len() >= 2 {
+            let pts: Vec<egui::Pos2> = path.iter().map(|&(x, y)| cell_to_screen(x, y)).collect();
+            // Two-tone stroke: readable over both ink and empty canvas.
+            painter.add(egui::Shape::line(
+                pts.clone(),
+                Stroke::new(2.2, Color32::from_black_alpha(180)),
+            ));
+            painter.add(egui::Shape::line(
+                pts.clone(),
+                Stroke::new(1.0, Color32::WHITE),
+            ));
+            let (first, last) = (pts[0], pts[pts.len() - 1]);
+            painter.line_segment([last, first], Stroke::new(2.2, Color32::from_black_alpha(120)));
+            painter.line_segment(
+                [last, first],
+                Stroke::new(1.0, Color32::from_white_alpha(140)),
+            );
+        }
+    }
+
     let outline_a = (state.bg_opacity * 180.0) as u8;
     if outline_a > 0 {
         painter.add(egui::Shape::closed_line(
@@ -1923,44 +2098,23 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
             );
             painter.circle_stroke(pos, 2.8, Stroke::new(0.8, black));
         }
-        ActiveTool::ColorPicker => {
-            // Simple crosshair + colour preview dot.
-            let arm = 9.0;
-            painter.line_segment(
-                [
-                    egui::pos2(pos.x - arm, pos.y),
-                    egui::pos2(pos.x + arm, pos.y),
-                ],
-                Stroke::new(1.4, black),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(pos.x, pos.y - arm),
-                    egui::pos2(pos.x, pos.y + arm),
-                ],
-                Stroke::new(1.4, black),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(pos.x - arm, pos.y),
-                    egui::pos2(pos.x + arm, pos.y),
-                ],
-                Stroke::new(0.8, white),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(pos.x, pos.y - arm),
-                    egui::pos2(pos.x, pos.y + arm),
-                ],
-                Stroke::new(0.8, white),
-            );
-            let c = state.brush.color;
-            painter.circle_filled(
-                pos,
-                4.0,
-                Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
-            );
-            painter.circle_stroke(pos, 4.0, Stroke::new(1.2, white));
+        ActiveTool::Lasso => {
+            // Small crosshair (the path is the real feedback) with an open
+            // loop above-right, mirroring the tool icon.
+            let arm = 7.0;
+            for (w, col) in [(1.4, black), (0.8, white)] {
+                painter.line_segment(
+                    [egui::pos2(pos.x - arm, pos.y), egui::pos2(pos.x + arm, pos.y)],
+                    Stroke::new(w, col),
+                );
+                painter.line_segment(
+                    [egui::pos2(pos.x, pos.y - arm), egui::pos2(pos.x, pos.y + arm)],
+                    Stroke::new(w, col),
+                );
+            }
+            let c = pos + egui::vec2(9.0, -9.0);
+            painter.circle_stroke(c, 5.0, Stroke::new(1.6, black));
+            painter.circle_stroke(c, 5.0, Stroke::new(0.9, white));
         }
         ActiveTool::Tracker => {
             // Wide crosshair with an open centre — precise point placement.
@@ -2130,20 +2284,38 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             .clicked()
         {
             match project_file::load_dialog() {
-                Ok(Some(p)) => state.load_project(p),
+                Ok(Some((p, path))) => state.load_project(p, Some(path)),
                 Ok(None) => {}
                 Err(e) => log::error!("Open project failed: {e:#}"),
             }
             ui.close_menu();
         }
-        let save_label = format!("Save project…    {}", combo_text(state, Action::SaveProject));
+        // Name the file Save is about to overwrite — it no longer prompts, so
+        // this is where you check what you are clobbering.
+        let save_label = match state.project_path.as_ref().and_then(|p| p.file_name()) {
+            Some(name) => format!(
+                "Save  {}    {}",
+                name.to_string_lossy(),
+                combo_text(state, Action::SaveProject)
+            ),
+            None => format!("Save project…    {}", combo_text(state, Action::SaveProject)),
+        };
         if ui
             .button(theme::icon_text(ic::FLOPPY_DISK, &save_label))
             .clicked()
         {
-            if let Err(e) = project_file::save_dialog(&state.project) {
-                log::error!("Save project failed: {e:#}");
-            }
+            state.save_project();
+            ui.close_menu();
+        }
+        let save_as_label = format!(
+            "Save project as…    {}",
+            combo_text(state, Action::SaveProjectAs)
+        );
+        if ui
+            .button(theme::icon_text(ic::FLOPPY_DISK_BACK, &save_as_label))
+            .clicked()
+        {
+            state.save_project_as();
             ui.close_menu();
         }
         ui.separator();
@@ -2517,6 +2689,84 @@ fn preview_box(ui: &mut egui::Ui, label: &str, idx: usize, tex: &Option<egui::Te
 }
 
 /// Modal "busy" overlay shown while a background import job runs.
+/// Transient "saved" confirmation. Ctrl+S no longer opens a dialog, so this is
+/// the only sign the write happened at all.
+fn save_toast(state: &mut AppState, ctx: &egui::Context) {
+    let Some((name, deadline)) = state.save_toast.clone() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let Some(left) = deadline.checked_duration_since(now) else {
+        state.save_toast = None;
+        return;
+    };
+    // Keep the frames coming, or the toast lingers until the next mouse move.
+    ctx.request_repaint_after(left);
+    // Fade over the last half second.
+    let a = (left.as_secs_f32() / 0.5).clamp(0.0, 1.0);
+    let fade = |c: Color32| {
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * a) as u8)
+    };
+
+    egui::Area::new(egui::Id::new("save_toast"))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(fade(theme::BG_PANEL))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(ic::CHECK_CIRCLE)
+                                .color(fade(theme::ACCENT))
+                                .size(15.0),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("Saved  {name}")).color(fade(theme::TEXT)),
+                        );
+                    });
+                });
+        });
+}
+
+/// Modal report for a failed write. Blocking on purpose: a save that silently
+/// failed leaves you believing your work is on disk when it isn't.
+fn save_error_dialog(state: &mut AppState, ctx: &egui::Context) {
+    let Some(msg) = state.save_error.clone() else {
+        return;
+    };
+    let mut dismiss = false;
+    let mut save_as = false;
+
+    egui::Window::new(theme::icon_text(ic::WARNING, "Save failed"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .frame(floating_frame())
+        .show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(egui::RichText::new(&msg).color(theme::TEXT));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save As…").clicked() {
+                    save_as = true;
+                }
+                if ui.button("OK").clicked() {
+                    dismiss = true;
+                }
+            });
+        });
+
+    // Resolve outside the closure so `state` isn't borrowed twice.
+    if save_as {
+        state.save_error = None;
+        state.save_project_as();
+    } else if dismiss {
+        state.save_error = None;
+    }
+}
+
 fn busy_overlay(ctx: &egui::Context, label: &str) {
     egui::Area::new(egui::Id::new("import_busy"))
         .order(egui::Order::Foreground)
@@ -2532,4 +2782,65 @@ fn busy_overlay(ctx: &egui::Context, label: &str) {
                     });
                 });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restick_axis;
+
+    /// The un-maximized default layout, and the maximized window it grows into.
+    const SMALL: (f32, f32) = (0.0, 1280.0);
+    const WIDE: (f32, f32) = (0.0, 2560.0);
+
+    fn restick(lo: f32, len: f32, old: (f32, f32), new: (f32, f32)) -> f32 {
+        restick_axis(lo, lo + len, len, old.0, old.1, new.0, new.1)
+    }
+
+    #[test]
+    fn right_hand_column_tracks_the_right_edge() {
+        // Layers/Onion/X-sheet default: x=1004, width 252 → 24px from the right.
+        // That gap is what must survive, not the absolute x.
+        assert_eq!(restick(1004.0, 252.0, SMALL, WIDE), 2560.0 - 24.0 - 252.0);
+    }
+
+    #[test]
+    fn left_hand_column_stays_put() {
+        // Tools/Brush default: x=12, width 232.
+        assert_eq!(restick(12.0, 232.0, SMALL, WIDE), 12.0);
+    }
+
+    #[test]
+    fn centred_panel_recentres_instead_of_drifting() {
+        // Timeline default: x=320, width 640 → equal 320px gaps either side.
+        // Nearest-edge alone would tie and pin it left; it should re-centre.
+        assert_eq!(restick(320.0, 640.0, SMALL, WIDE), (2560.0 - 640.0) / 2.0);
+    }
+
+    #[test]
+    fn bottom_anchored_panel_tracks_the_bottom() {
+        // Timeline vertically: y=600, height 180 on an 800-tall window → 20px up
+        // from the bottom.
+        let tall = (0.0, 1400.0);
+        assert_eq!(restick(600.0, 180.0, (0.0, 800.0), tall), 1400.0 - 20.0 - 180.0);
+    }
+
+    #[test]
+    fn shrinking_keeps_the_panel_on_screen() {
+        // Right-anchored panel, window shrinks: still 24px from the new right
+        // edge, not hanging off it.
+        assert_eq!(restick(1004.0, 252.0, SMALL, (0.0, 700.0)), 700.0 - 24.0 - 252.0);
+    }
+
+    #[test]
+    fn panel_wider_than_the_window_clamps_to_the_left() {
+        // Clamp range would invert here; must not produce a negative position.
+        assert_eq!(restick(1004.0, 252.0, SMALL, (0.0, 100.0)), 0.0);
+    }
+
+    #[test]
+    fn no_resize_is_a_no_op() {
+        for lo in [12.0, 320.0, 1004.0] {
+            assert_eq!(restick(lo, 252.0, SMALL, SMALL), lo, "lo={lo}");
+        }
+    }
 }

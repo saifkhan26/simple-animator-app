@@ -4,6 +4,8 @@
 //! serialised with `postcard` behind a small magic + version header so old/
 //! foreign files are rejected cleanly and the format can evolve.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{bail, Context, Result};
 
 use crate::doc::project::Project;
@@ -101,23 +103,39 @@ mod tests {
     }
 }
 
-/// Prompt for a path and save `project`. Returns `Ok(())` if the user cancels.
-pub fn save_dialog(project: &Project) -> Result<()> {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("Animator Project", &[EXT])
-        .set_file_name("project.anim")
-        .save_file()
-    else {
-        return Ok(());
-    };
+/// Write `project` to `path`, overwriting whatever is there.
+///
+/// Deliberately separate from [`ask_save_path`]: the caller keeps the path so it
+/// can save to the same file again without prompting.
+pub fn save_to(project: &Project, path: &Path) -> Result<()> {
     let bytes = encode(project)?;
-    std::fs::write(&path, bytes).with_context(|| format!("writing {path:?}"))?;
+    std::fs::write(path, bytes).with_context(|| format!("writing {path:?}"))?;
     log::info!("Saved project → {}", path.display());
     Ok(())
 }
 
-/// Prompt for a path and load a project. Returns `Ok(None)` if the user cancels.
-pub fn load_dialog() -> Result<Option<Project>> {
+/// Prompt for a destination. When `current` is set the dialog opens on that
+/// file's folder and name, so "Save As" starts from where the project already
+/// lives. `None` = the user cancelled.
+pub fn ask_save_path(current: Option<&Path>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().add_filter("Animator Project", &[EXT]);
+    match current {
+        Some(p) => {
+            if let Some(dir) = p.parent() {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                dialog = dialog.set_file_name(name);
+            }
+        }
+        None => dialog = dialog.set_file_name("project.anim"),
+    }
+    dialog.save_file()
+}
+
+/// Prompt for a file and load it, returning the path it came from so the caller
+/// can remember it. `Ok(None)` if the user cancels.
+pub fn load_dialog() -> Result<Option<(Project, PathBuf)>> {
     let Some(path) = rfd::FileDialog::new()
         .add_filter("Animator Project", &[EXT])
         .pick_file()
@@ -127,5 +145,5 @@ pub fn load_dialog() -> Result<Option<Project>> {
     let bytes = std::fs::read(&path).with_context(|| format!("reading {path:?}"))?;
     let project = decode(&bytes)?;
     log::info!("Loaded project ← {}", path.display());
-    Ok(Some(project))
+    Ok(Some((project, path)))
 }

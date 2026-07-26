@@ -17,6 +17,9 @@ eframe = { version = "0.29", default-features = false, features = [
     "wgpu",
     "wayland",
     "x11",
+    # Enables `egui/persistence`, which is what makes `egui::Memory` — where
+    # floating-panel positions, sizes and collapse state live — serializable.
+    "persistence",
 ] }
 egui = "0.29"
 egui_extras   = { version = "0.29", default-features = false, features = ["svg"] }

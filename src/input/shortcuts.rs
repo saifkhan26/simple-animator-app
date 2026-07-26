@@ -18,10 +18,14 @@ pub enum Action {
     ToolInk,
     ToolEraser,
     ToolFill,
+    /// Retired — the in-canvas eyedropper was folded into `PickScreenColor`.
+    /// Kept so a `shortcuts.toml` written before the merge still deserializes;
+    /// `load` strips it. Not in [`Action::ALL`], so it never reaches the UI.
     ToolColorPicker,
     PickScreenColor,
     ToolShape,
     ToolTracker,
+    ToolLasso,
     PlayPause,
     FramePrev,
     FrameNext,
@@ -32,6 +36,7 @@ pub enum Action {
     LayerAdd,
     LayerDelete,
     LayerToggleVisible,
+    LayerLast,
     KeyBlank,
     KeyCopy,
     Hold,
@@ -48,6 +53,7 @@ pub enum Action {
     PanReset,
     RotateReset,
     SaveProject,
+    SaveProjectAs,
     OpenProject,
     // Canvas navigation gestures (modifier-only binds: no key, held during drag).
     CanvasZoom,
@@ -65,10 +71,10 @@ impl Action {
         Action::ToolInk,
         Action::ToolEraser,
         Action::ToolFill,
-        Action::ToolColorPicker,
         Action::PickScreenColor,
         Action::ToolShape,
         Action::ToolTracker,
+        Action::ToolLasso,
         Action::PlayPause,
         Action::FramePrev,
         Action::FrameNext,
@@ -79,6 +85,7 @@ impl Action {
         Action::LayerAdd,
         Action::LayerDelete,
         Action::LayerToggleVisible,
+        Action::LayerLast,
         Action::KeyBlank,
         Action::KeyCopy,
         Action::Hold,
@@ -95,6 +102,7 @@ impl Action {
         Action::PanReset,
         Action::RotateReset,
         Action::SaveProject,
+        Action::SaveProjectAs,
         Action::OpenProject,
         Action::CanvasZoom,
         Action::CanvasPan,
@@ -110,10 +118,11 @@ impl Action {
             Action::ToolInk => "Tool: Ink",
             Action::ToolEraser => "Tool: Eraser",
             Action::ToolFill => "Tool: Fill",
-            Action::ToolColorPicker => "Tool: Color picker",
-            Action::PickScreenColor => "Pick color from screen",
+            Action::ToolColorPicker => "Tool: Color picker (retired)",
+            Action::PickScreenColor => "Tool: Color picker",
             Action::ToolShape => "Tool: Shape",
             Action::ToolTracker => "Tool: Tracker",
+            Action::ToolLasso => "Tool: Lasso erase",
             Action::PlayPause => "Play / Pause",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
@@ -124,6 +133,7 @@ impl Action {
             Action::LayerAdd => "Add layer",
             Action::LayerDelete => "Delete layer",
             Action::LayerToggleVisible => "Toggle layer visibility",
+            Action::LayerLast => "Go to last selected layer",
             Action::KeyBlank => "Insert blank key",
             Action::KeyCopy => "Insert duplicate key",
             Action::Hold => "Hold (delete key)",
@@ -140,6 +150,7 @@ impl Action {
             Action::PanReset => "Reset pan",
             Action::RotateReset => "Reset rotation",
             Action::SaveProject => "Save project",
+            Action::SaveProjectAs => "Save project as…",
             Action::OpenProject => "Open project",
             Action::CanvasZoom => "Canvas: zoom (drag)",
             Action::CanvasPan => "Canvas: pan (drag)",
@@ -181,6 +192,14 @@ impl KeyCombo {
         Self {
             key: Some(key),
             ctrl: false,
+            shift: true,
+            alt: false,
+        }
+    }
+    pub fn ctrl_shift(key: egui::Key) -> Self {
+        Self {
+            key: Some(key),
+            ctrl: true,
             shift: true,
             alt: false,
         }
@@ -307,10 +326,12 @@ impl Default for ShortcutMap {
         b.insert(Action::ToolInk, KeyCombo::plain(K::W));
         b.insert(Action::ToolEraser, KeyCombo::plain(K::E));
         b.insert(Action::ToolFill, KeyCombo::plain(K::R));
-        b.insert(Action::ToolColorPicker, KeyCombo::plain(K::C));
-        b.insert(Action::PickScreenColor, KeyCombo::shift(K::C));
+        // One picker now: it samples the canvas and anything behind the window.
+        b.insert(Action::PickScreenColor, KeyCombo::plain(K::C));
         b.insert(Action::ToolShape, KeyCombo::plain(K::G));
         b.insert(Action::ToolTracker, KeyCombo::plain(K::X));
+        // Y is the only free key left in the left cluster (see module docs).
+        b.insert(Action::ToolLasso, KeyCombo::plain(K::Y));
         // Frame navigation: A / S.
         b.insert(Action::FramePrev, KeyCombo::plain(K::A));
         b.insert(Action::FrameNext, KeyCombo::plain(K::S));
@@ -325,6 +346,7 @@ impl Default for ShortcutMap {
         b.insert(Action::LayerAdd, KeyCombo::plain(K::T));
         b.insert(Action::LayerDelete, KeyCombo::shift(K::T));
         b.insert(Action::LayerToggleVisible, KeyCombo::plain(K::V));
+        b.insert(Action::LayerLast, KeyCombo::plain(K::Z));
         // X-sheet keys: 1 / 2 / 3 (numeric row, left side).
         b.insert(Action::KeyBlank, KeyCombo::plain(K::Num1));
         b.insert(Action::KeyCopy, KeyCombo::plain(K::Num2));
@@ -349,8 +371,11 @@ impl Default for ShortcutMap {
         b.insert(Action::ZoomReset, KeyCombo::plain(K::Num0));
         b.insert(Action::PanReset, KeyCombo::plain(K::H));
         b.insert(Action::RotateReset, KeyCombo::plain(K::J));
-        // Project file.
+        // Project file. Save overwrites the current file once there is one;
+        // Save As always prompts. `matches` compares modifiers exactly, so
+        // Ctrl+Shift+S never also fires Save.
         b.insert(Action::SaveProject, KeyCombo::ctrl(K::S));
+        b.insert(Action::SaveProjectAs, KeyCombo::ctrl_shift(K::S));
         b.insert(Action::OpenProject, KeyCombo::ctrl(K::O));
         // Canvas navigation gestures (held during a canvas drag).
         b.insert(Action::CanvasZoom, KeyCombo::modifier_only(true, false, false));
@@ -403,9 +428,15 @@ impl ShortcutMap {
     }
 }
 
+/// This app's config folder. Everything the app persists across runs lives
+/// here — shortcuts, and eframe's UI-layout state (see `main.rs`).
+pub fn config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("animator-app"))
+}
+
 /// Path to the persisted shortcuts file.
 fn config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("animator-app").join("shortcuts.toml"))
+    config_dir().map(|d| d.join("shortcuts.toml"))
 }
 
 pub fn load() -> ShortcutMap {
@@ -416,8 +447,17 @@ pub fn load() -> ShortcutMap {
         return ShortcutMap::default();
     };
     match toml::from_str::<ShortcutMap>(&text) {
-        Ok(map) => {
+        Ok(mut map) => {
             log::info!("Loaded shortcuts from {}", path.display());
+            // Migration: the in-canvas eyedropper was folded into the screen
+            // picker. Drop the retired binding, and hand its key to the picker
+            // that replaced it unless the user had already rebound that one.
+            if let Some(old) = map.bindings.remove(&Action::ToolColorPicker) {
+                let picker = map.bindings.get(&Action::PickScreenColor).copied();
+                if picker.is_none() || picker == Some(KeyCombo::shift(egui::Key::C)) {
+                    map.bindings.insert(Action::PickScreenColor, old);
+                }
+            }
             // Merge in any missing defaults so newly added actions are bound.
             let mut full = ShortcutMap::default();
             for (a, c) in map.bindings {

@@ -78,7 +78,7 @@ pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacit
 
 /// Bilinear RGBA sample at floating `(x, y)` in source pixel space, clamped to
 /// edges.
-fn sample_bilinear(src: &Canvas, x: f32, y: f32) -> [u8; 4] {
+pub(crate) fn sample_bilinear(src: &Canvas, x: f32, y: f32) -> [u8; 4] {
     let w = src.width as i32;
     let h = src.height as i32;
     let x0 = x.floor() as i32;

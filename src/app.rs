@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use eframe::CreationContext;
@@ -90,6 +91,28 @@ pub enum NavKind {
     Rotate,
 }
 
+/// Storage key for [`UiPrefs`].
+const UI_PREFS_KEY: &str = "ui_prefs";
+
+/// UI state that outlives a run but that egui's own memory doesn't cover.
+/// Panel positions, sizes and collapse state ride along in `egui::Memory`
+/// (persisted by eframe automatically); these two toggles are plain `AppState`
+/// fields, so they need saving by hand.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UiPrefs {
+    show_panels: bool,
+    show_mini_timeline: bool,
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self {
+            show_panels: true,
+            show_mini_timeline: true,
+        }
+    }
+}
+
 /// The tool panels (each rendered as a floating window).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PanelId {
@@ -161,6 +184,15 @@ pub struct LayerRename {
 
 pub struct AppState {
     pub project: Project,
+    /// File this project was last saved to or loaded from. `None` = never
+    /// saved, so Save has to ask for a destination.
+    pub project_path: Option<PathBuf>,
+    /// Transient "saved" confirmation and the instant it expires. A silent
+    /// overwrite is otherwise indistinguishable from a save that never ran.
+    pub save_toast: Option<(String, Instant)>,
+    /// Failed write, shown as a modal until dismissed. Never merely logged — a
+    /// silent save that silently failed is how work gets lost.
+    pub save_error: Option<String>,
 
     /// GPU texture handle per CellId, lazily created.
     pub cell_textures: HashMap<CellId, TextureHandle>,
@@ -171,14 +203,14 @@ pub struct AppState {
     pub brush: BrushSettings,
     /// Per-tool brush settings preserved across tool switches.
     pub tool_brushes: [BrushSettings; 7],
-    /// Previous drawing tool — used by ColorPicker to restore the tool after
-    /// a colour sample.
-    pub prev_tool: Option<ActiveTool>,
     pub stroke: Option<StrokeBuilder>,
     /// CellId being painted into during the current stroke.
     pub stroke_target: Option<CellId>,
     /// In-progress Shape-tool drag (preview only until pointer-up).
     pub shape_drag: Option<ShapeDrag>,
+    /// In-progress Lasso path in active-cell pixel space. Preview only; the
+    /// enclosed pixels are erased on pointer-up.
+    pub lasso: Option<Vec<(f32, f32)>>,
 
     /// Canvas view transform (zoom / pan / rotate).
     pub view: View,
@@ -243,6 +275,14 @@ pub struct AppState {
     /// buffer is only reloaded from keys when the cursor actually moves.
     xform_sync_last: Option<(usize, usize)>,
 
+    /// Layer selected before the current one, for the "jump back" shortcut.
+    /// Maintained by `track_layer_change` rather than by every site that
+    /// assigns `current_layer` — there are eight of those.
+    prev_layer: Option<usize>,
+    /// Previous frame's (current_layer, layer count), the baseline that
+    /// `track_layer_change` diffs against.
+    layer_watch: (usize, usize),
+
     /// Tracker tool: when on, each frame takes two clicks (point A then B) so
     /// stabilization can correct rotation/zoom shake as well as position.
     pub tracker_two_points: bool,
@@ -269,16 +309,25 @@ pub struct AppState {
     /// huge source image can't exceed the limit and crash the texture upload.
     pub max_tex: u32,
 
+    /// Viewport rect as of the last frame that drew panels. Compared each frame
+    /// to detect a window resize, which re-sticks panels to their nearest edge.
+    pub viewport_rect: Option<egui::Rect>,
+
     /// One-shot guard: native window chrome (rounded corners/border) applied.
     window_styled: bool,
+    /// One-shot: maximize on the first frame. `ViewportBuilder::with_maximized`
+    /// alone does not take on this frameless window — winit creates it at the
+    /// requested inner size and the creation-time flag is lost. Sending the
+    /// viewport command once the window exists goes through `set_maximized`,
+    /// which does.
+    startup_maximize: bool,
 
-    /// Live screen colour-pick mode: while true, the pixel under the cursor
-    /// (including apps behind our transparent backdrop) is sampled and the next
-    /// tap commits it as the brush colour.
+    /// Live screen colour-pick mode: while true, the pixel under the cursor is
+    /// sampled from the OS framebuffer and the next tap commits it as the brush
+    /// colour. The backdrop is left untouched, so what you see is what you pick:
+    /// the canvas where it's opaque, whatever is behind the window where it
+    /// isn't.
     pub screen_pick: bool,
-    /// Backdrop opacity to restore when screen-pick mode ends (we force the
-    /// backdrop transparent while picking so the desktop behind is visible).
-    screen_pick_prev_opacity: f32,
     /// Consume the press that opened pick mode: wait for the pointer to be
     /// released once before a tap counts as a commit.
     pub screen_pick_arm: bool,
@@ -307,8 +356,15 @@ impl AppState {
             .map(|rs| rs.device.limits().max_texture_dimension_2d)
             .unwrap_or(8192)
             .max(2048);
+        let prefs: UiPrefs = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, UI_PREFS_KEY))
+            .unwrap_or_default();
         Self {
             project,
+            project_path: None,
+            save_toast: None,
+            save_error: None,
             cell_textures: HashMap::new(),
             cell_dirty,
             tool: ActiveTool::Pencil,
@@ -318,15 +374,16 @@ impl AppState {
                 BrushSettings::default_ink(),
                 BrushSettings::default_eraser(),
                 BrushSettings::default_fill(),
-                BrushSettings::default_pencil(),
                 BrushSettings::default_shape(),
-                // Tracker draws nothing; slot only keeps tool indexing safe.
+                // Tracker and Lasso draw nothing; the slots only keep tool
+                // indexing into this array safe.
+                BrushSettings::default_shape(),
                 BrushSettings::default_shape(),
             ],
-            prev_tool: None,
             stroke: None,
             stroke_target: None,
             shape_drag: None,
+            lasso: None,
             view: View::default(),
             nav_drag: None,
             playback: Playback::default(),
@@ -343,8 +400,8 @@ impl AppState {
             rebinding: None,
             layer_rename: None,
             show_settings: false,
-            show_panels: true,
-            show_mini_timeline: true,
+            show_panels: prefs.show_panels,
+            show_mini_timeline: prefs.show_mini_timeline,
             show_new_project: false,
             new_project_cfg: NewProjectConfig::default(),
             show_mp4_export: false,
@@ -355,6 +412,8 @@ impl AppState {
             nav_to_layer: false,
             layer_xform_before: None,
             xform_sync_last: None,
+            prev_layer: None,
+            layer_watch: (0, 1),
             tracker_two_points: false,
             tracker_pending_b: None,
             bg_job: None,
@@ -363,9 +422,10 @@ impl AppState {
             preview_rx: None,
             preview_clear_pending: false,
             max_tex,
+            viewport_rect: None,
             window_styled: false,
+            startup_maximize: true,
             screen_pick: false,
-            screen_pick_prev_opacity: 1.0,
             screen_pick_arm: false,
             screen_pick_return_tool: ActiveTool::Pencil,
             screen_pick_tex: None,
@@ -381,6 +441,11 @@ impl AppState {
 
     pub fn reset_with(&mut self, width: u32, height: u32, fps: f32) {
         self.project = Project::new(width, height, fps);
+        // Forget the old file, or the next Save silently overwrites the project
+        // the user just navigated away from.
+        self.project_path = None;
+        self.save_toast = None;
+        self.save_error = None;
         self.cell_textures.clear();
         self.cell_dirty.clear();
         for id in 0..self.project.cells.len() {
@@ -393,13 +458,14 @@ impl AppState {
             BrushSettings::default_ink(),
             BrushSettings::default_eraser(),
             BrushSettings::default_fill(),
-            BrushSettings::default_pencil(),
+            BrushSettings::default_shape(),
             BrushSettings::default_shape(),
             BrushSettings::default_shape(),
         ];
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
+        self.lasso = None;
         self.view = View::default();
         self.nav_drag = None;
         self.playback = Playback::default();
@@ -413,9 +479,9 @@ impl AppState {
         self.rebinding = None;
         self.layer_rename = None;
         self.show_settings = false;
-        self.show_panels = true;
-        self.show_mini_timeline = true;
-        self.prev_tool = None;
+        // `show_panels` / `show_mini_timeline` are deliberately not reset here.
+        // They're preferences that persist across runs, like `shortcuts` — a new
+        // project shouldn't shove hidden panels back on screen.
         self.new_project_cfg = NewProjectConfig { width, height, fps };
         self.show_mp4_export = false;
         self.show_import_range = false;
@@ -424,6 +490,8 @@ impl AppState {
         self.nav_to_layer = false;
         self.layer_xform_before = None;
         self.xform_sync_last = None;
+        self.prev_layer = None;
+        self.layer_watch = (self.project.current_layer, self.project.layers.len());
         self.tracker_pending_b = None;
         self.bg_job = None;
         self.bg_label = None;
@@ -617,6 +685,7 @@ impl AppState {
                 p.layers[bi].set_key(f, id);
             }
             p.layers.remove(li);
+            p.relink_after_remove(li);
             p.current_layer = bi;
         });
     }
@@ -1378,10 +1447,18 @@ impl AppState {
             let opts = crate::tools::fill::FillOptions {
                 tolerance: self.brush.fill_tolerance,
                 color: self.brush.color,
+                expand: self.brush.fill_expand,
             };
+            // Owned, so the immutable project borrow ends before `cell_mut`.
+            let (cw, ch) = {
+                let c = &self.project.cells[target];
+                (c.width, c.height)
+            };
+            let boundary = self.fill_boundary(self.project.current_layer, cw, ch);
             if let Some(c) = self.project.cell_mut(target) {
                 crate::tools::fill::flood(
                     c,
+                    boundary.as_ref(),
                     sample.x.round() as i32,
                     sample.y.round() as i32,
                     opts,
@@ -1394,25 +1471,11 @@ impl AppState {
             return;
         }
 
-        if self.tool == ActiveTool::ColorPicker {
-            let x = sample.x.round() as i32;
-            let y = sample.y.round() as i32;
-            let picked = self.pick_color(x, y);
-            if let Some(color) = picked {
-                self.brush.color = color;
-                for b in &mut self.tool_brushes {
-                    b.color = color;
-                }
-            }
-            // Restore the previous drawing tool so the user can keep working
-            // with the sampled colour immediately.
-            if let Some(prev) = self.prev_tool.take() {
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = prev;
-                self.brush = self.tool_brushes[prev.idx()].clone();
-            }
+        if self.tool == ActiveTool::Lasso {
+            // Collect the path; the enclosed pixels are erased on pointer-up.
+            // Preview is drawn by egui shapes in `paint_canvas` until then.
+            self.lasso = Some(vec![(sample.x, sample.y)]);
             self.stroke = None;
-            self.stroke_target = None;
             return;
         }
 
@@ -1457,6 +1520,18 @@ impl AppState {
             drag.end = (sample.x, sample.y);
             return;
         }
+        if let Some(path) = &mut self.lasso {
+            // Decimate: a pen emits far more samples than the polygon needs,
+            // and every extra vertex costs an edge test on every scanline.
+            let far = path
+                .last()
+                .map(|&(x, y)| (sample.x - x).hypot(sample.y - y) >= 1.0)
+                .unwrap_or(true);
+            if far {
+                path.push((sample.x, sample.y));
+            }
+            return;
+        }
         let Some(builder) = &mut self.stroke else {
             return;
         };
@@ -1476,10 +1551,20 @@ impl AppState {
         let Some(target) = self.stroke_target.take() else {
             self.stroke = None;
             self.shape_drag = None;
+            self.lasso = None;
             self.stroke_pre_pixels = None;
             self.preview_upload_rect = None;
             return;
         };
+        if let Some(path) = self.lasso.take() {
+            if let Some(c) = self.project.cell_mut(target) {
+                crate::tools::lasso::erase(c, &path);
+            }
+            self.mark_dirty(target);
+            self.preview_upload_rect = None;
+            self.commit_undo(target);
+            return;
+        }
         if let Some(drag) = self.shape_drag.take() {
             // Rasterise the final shape now; undo records the dirty rect below.
             let brush = self.brush.clone();
@@ -1553,39 +1638,38 @@ impl AppState {
         });
     }
 
-    /// Enter live screen-pick mode: force the backdrop transparent so the
-    /// desktop behind shows through, and arm so the press that opened the mode
-    /// is consumed before a tap commits.
+    /// Enter live screen-pick mode, arming so the press that opened the mode is
+    /// consumed before a tap commits.
+    ///
+    /// The backdrop is left exactly as the user set it. Sampling reads the OS
+    /// framebuffer, so whatever is actually on screen is what gets picked —
+    /// an opaque backdrop simply means the canvas is sampled instead of the
+    /// desktop behind it.
     pub fn begin_screen_pick(&mut self) {
         if self.screen_pick {
             return;
         }
-        // Tool to return to after a commit. If the eyedropper tool is what
-        // launched us, fall back to whatever drawing tool preceded it.
-        self.screen_pick_return_tool = if self.tool == ActiveTool::ColorPicker {
-            self.prev_tool.unwrap_or(ActiveTool::Pencil)
-        } else {
-            self.tool
-        };
+        // Picking is a momentary mode, not a tool: return to whatever was
+        // active once a colour is committed.
+        self.screen_pick_return_tool = self.tool;
         self.screen_pick = true;
-        self.screen_pick_prev_opacity = self.bg_opacity;
-        self.bg_opacity = 0.0;
         self.screen_pick_arm = true;
         // Drop any in-flight stroke so the gesture that toggled the mode can't
         // leave ink.
         self.stroke = None;
         self.stroke_target = None;
+        self.shape_drag = None;
+        self.lasso = None;
         self.preview_upload_rect = None;
     }
 
-    /// Leave screen-pick mode and restore the previous backdrop opacity. Does
-    /// not change the colour or tool — used for cancel (Esc / toggle off).
+    /// Leave screen-pick mode. Does not change the colour, tool or backdrop —
+    /// used for cancel (Esc / toggle off).
     pub fn end_screen_pick(&mut self) {
         if !self.screen_pick {
             return;
         }
         self.screen_pick = false;
-        self.bg_opacity = self.screen_pick_prev_opacity;
         self.screen_pick_arm = false;
         // NB: do NOT free `screen_pick_tex` here. End can be called mid-frame
         // (on a commit tap) *after* the loupe already painted with that texture
@@ -1598,7 +1682,7 @@ impl AppState {
     /// that was active before picking, and leave pick mode.
     pub fn commit_screen_pick(&mut self, color: [u8; 4]) {
         // Apply to the active brush and every tool's stored colour so the sample
-        // sticks across tool switches (mirrors the in-canvas picker).
+        // sticks across tool switches.
         for b in &mut self.tool_brushes {
             b.color = color;
         }
@@ -1618,65 +1702,103 @@ impl AppState {
         }
     }
 
-    pub fn pick_color(&self, x: i32, y: i32) -> Option<[u8; 4]> {
-        if x < 0 || y < 0 || x >= self.project.width as i32 || y >= self.project.height as i32 {
+    /// Render the layer linked from `layer_idx` via `lines_from` into the *cell
+    /// space* of that layer's own cell, so flood fill can treat its strokes as
+    /// walls. `None` when no link is set or the link can't be resolved on this
+    /// frame — the caller then falls back to plain same-layer filling.
+    ///
+    /// The linked layer bounds the fill even when hidden or set as a reference
+    /// layer: the link is an explicit choice, visibility is a display concern.
+    fn fill_boundary(&self, layer_idx: usize, cell_w: u32, cell_h: u32) -> Option<Canvas> {
+        let p = &self.project;
+        let dst_layer = p.layers.get(layer_idx)?;
+        let src_idx = dst_layer.lines_from?;
+        if src_idx == layer_idx {
             return None;
         }
-        let ux = x as u32;
-        let uy = y as u32;
-        let mut out = [0u8; 4];
-        for layer in &self.project.layers {
-            if !layer.visible || layer.reference {
-                continue;
-            }
-            let Some(id) = layer.resolve(self.project.current_frame) else {
-                continue;
-            };
-            let Some(cell) = self.project.cell(id) else {
-                continue;
-            };
-            let idx = ((uy * cell.width + ux) * 4) as usize;
-            if idx + 3 >= cell.pixels.len() {
-                continue;
-            }
-            let mut px = [
-                cell.pixels[idx],
-                cell.pixels[idx + 1],
-                cell.pixels[idx + 2],
-                cell.pixels[idx + 3],
-            ];
-            if px[3] == 0 {
-                continue;
-            }
-            let op = layer.opacity.clamp(0.0, 1.0);
-            if op < 1.0 {
-                px[3] = (px[3] as f32 * op).round().min(255.0) as u8;
-            }
-            let sa = px[3] as f32 / 255.0;
-            let da = out[3] as f32 / 255.0;
-            let out_a = sa + da * (1.0 - sa);
-            if out_a <= 0.0 {
-                continue;
-            }
-            for c in 0..3 {
-                let s = px[c] as f32 / 255.0;
-                let d = out[c] as f32 / 255.0;
-                out[c] = ((s * sa + d * da * (1.0 - sa)) / out_a * 255.0)
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
-            }
-            out[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        let src_layer = p.layers.get(src_idx)?;
+        let src = p.cell(src_layer.resolve(p.current_frame)?)?;
+
+        let frame = p.current_frame;
+        let src_xform = src_layer.resolve_transform(frame);
+        let dst_xform = dst_layer.resolve_transform(frame);
+
+        // Both layers sit unmoved on a doc-sized cell — the common case.
+        if src_xform.is_identity()
+            && dst_xform.is_identity()
+            && src.width == cell_w
+            && src.height == cell_h
+        {
+            return Some(src.clone());
         }
-        if out[3] > 0 {
-            return Some(out);
+
+        // Otherwise bake the source layer into document space. Opacity is
+        // forced to 1.0: a line-art layer dialled down to 30% must still be a
+        // solid wall, or the fill leaks straight through it.
+        let (pw, ph) = (p.width, p.height);
+        let mut doc = Canvas::new(pw, ph);
+        crate::io::composite::composite_layer(&mut doc, src, &src_xform, 1.0, pw, ph);
+
+        if dst_xform.is_identity() && cell_w == pw && cell_h == ph {
+            return Some(doc);
         }
-        let c = [
-            (self.bg_color[0] * 255.0) as u8,
-            (self.bg_color[1] * 255.0) as u8,
-            (self.bg_color[2] * 255.0) as u8,
-            255,
-        ];
-        Some(c)
+
+        // The destination cell is transformed, so walk its pixels and pull the
+        // matching document-space sample for each.
+        let mut out = Canvas::new(cell_w, cell_h);
+        let (cw, ch) = (cell_w as f32, cell_h as f32);
+        let (pwf, phf) = (pw as f32, ph as f32);
+        for v in 0..cell_h {
+            for u in 0..cell_w {
+                let (dx, dy) =
+                    dst_xform.cell_to_doc(u as f32 + 0.5, v as f32 + 0.5, cw, ch, pwf, phf);
+                let (sx, sy) = (dx - 0.5, dy - 0.5);
+                if sx < -0.5 || sy < -0.5 || sx > pwf - 0.5 || sy > phf - 0.5 {
+                    continue;
+                }
+                let px = crate::io::composite::sample_bilinear(&doc, sx, sy);
+                let i = ((v * cell_w + u) * 4) as usize;
+                out.pixels[i..i + 4].copy_from_slice(&px);
+            }
+        }
+        Some(out)
+    }
+
+    /// Remember the layer we just came from, so `Action::LayerLast` can jump
+    /// back. Run once per frame: `current_layer` is assigned from eight
+    /// different places (panel clicks, x-sheet clicks, add/delete/move, undo,
+    /// import), and diffing here catches all of them without touching any.
+    ///
+    /// A change in layer *count* drops the link instead of remapping it — after
+    /// an add or delete the stored index may mean a different layer, and
+    /// silently jumping to the wrong one is worse than not jumping.
+    fn track_layer_change(&mut self) {
+        let now = (self.project.current_layer, self.project.layers.len());
+        if now.1 != self.layer_watch.1 {
+            self.prev_layer = None;
+        } else if now.0 != self.layer_watch.0 {
+            self.prev_layer = Some(self.layer_watch.0);
+        }
+        self.layer_watch = now;
+    }
+
+    /// Jump to the layer selected before the current one. No-op when there
+    /// isn't one yet or it has gone stale.
+    pub fn goto_last_layer(&mut self) {
+        let Some(prev) = self.prev_layer else { return };
+        if prev < self.project.layers.len() && prev != self.project.current_layer {
+            self.project.current_layer = prev;
+        }
+    }
+
+    /// Name of the layer bounding the active layer's fills, for UI hints.
+    pub fn fill_boundary_name(&self) -> Option<&str> {
+        let src = self
+            .project
+            .layers
+            .get(self.project.current_layer)?
+            .lines_from?;
+        Some(self.project.layers.get(src)?.name.as_str())
     }
 
     pub fn dispatch(&mut self, action: Action) {
@@ -1701,12 +1823,10 @@ impl AppState {
                 self.tool = ActiveTool::Fill;
                 self.brush = self.tool_brushes[ActiveTool::Fill.idx()].clone();
             }
-            Action::ToolColorPicker => {
-                self.prev_tool = Some(self.tool);
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::ColorPicker;
-                self.brush = self.tool_brushes[ActiveTool::ColorPicker.idx()].clone();
-            }
+            // Retired: the in-canvas eyedropper was folded into PickScreenColor,
+            // which samples the canvas as well as everything behind the window.
+            // The variant survives only so an old shortcuts.toml still parses.
+            Action::ToolColorPicker => {}
             Action::PickScreenColor => {
                 if self.screen_pick {
                     self.end_screen_pick();
@@ -1723,6 +1843,11 @@ impl AppState {
                 self.tool_brushes[self.tool.idx()] = self.brush.clone();
                 self.tool = ActiveTool::Tracker;
                 self.brush = self.tool_brushes[ActiveTool::Tracker.idx()].clone();
+            }
+            Action::ToolLasso => {
+                self.tool_brushes[self.tool.idx()] = self.brush.clone();
+                self.tool = ActiveTool::Lasso;
+                self.brush = self.tool_brushes[ActiveTool::Lasso.idx()].clone();
             }
             Action::PlayPause => {
                 let now = 0.0; // refreshed by playback.tick on next frame
@@ -1745,6 +1870,7 @@ impl AppState {
                     l.visible = !l.visible;
                 }
             }
+            Action::LayerLast => self.goto_last_layer(),
             Action::KeyBlank => {
                 self.structural_edit(false, |p| {
                     p.insert_blank_key_here();
@@ -1779,13 +1905,10 @@ impl AppState {
             Action::ZoomReset => self.view.zoom = 1.0,
             Action::PanReset => self.view.pan = egui::Vec2::ZERO,
             Action::RotateReset => self.view.rotation = 0.0,
-            Action::SaveProject => {
-                if let Err(e) = crate::io::project_file::save_dialog(&self.project) {
-                    log::error!("Save project failed: {e:#}");
-                }
-            }
+            Action::SaveProject => self.save_project(),
+            Action::SaveProjectAs => self.save_project_as(),
             Action::OpenProject => match crate::io::project_file::load_dialog() {
-                Ok(Some(p)) => self.load_project(p),
+                Ok(Some((p, path))) => self.load_project(p, Some(path)),
                 Ok(None) => {}
                 Err(e) => log::error!("Open project failed: {e:#}"),
             },
@@ -1798,11 +1921,59 @@ impl AppState {
         }
     }
 
+    /// How long a "saved" toast stays up.
+    const TOAST_TTL: Duration = Duration::from_millis(2200);
+
+    /// Save shortcut: overwrite the remembered file, or ask when there isn't
+    /// one yet.
+    pub fn save_project(&mut self) {
+        match self.project_path.clone() {
+            Some(path) => self.write_project(path),
+            None => self.save_project_as(),
+        }
+    }
+
+    /// Save-As shortcut: always prompt, seeded from the current path.
+    pub fn save_project_as(&mut self) {
+        if let Some(path) = crate::io::project_file::ask_save_path(self.project_path.as_deref()) {
+            self.write_project(path);
+        }
+    }
+
+    /// Write to `path`; remember it and raise a toast on success, or surface the
+    /// failure as a modal. `project_path` is left alone on failure so a retry
+    /// still targets the same file.
+    fn write_project(&mut self, path: PathBuf) {
+        match crate::io::project_file::save_to(&self.project, &path) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("project")
+                    .to_string();
+                self.project_path = Some(path);
+                self.save_toast = Some((name, Instant::now() + Self::TOAST_TTL));
+                self.save_error = None;
+            }
+            Err(e) => {
+                log::error!("Save project failed: {e:#}");
+                self.save_error = Some(format!("{e:#}"));
+            }
+        }
+    }
+
     /// Replace the current project with a loaded one, resetting derived editing
     /// state (textures, history, in-flight strokes, view) but keeping user
     /// preferences (tools, brushes, shortcuts, pen).
-    pub fn load_project(&mut self, project: Project) {
+    ///
+    /// `path` is where it came from — taking it as a parameter rather than an
+    /// assignment at the call site means a caller can't forget to update it and
+    /// leave Save pointing at the previous file.
+    pub fn load_project(&mut self, project: Project, path: Option<PathBuf>) {
         self.project = project;
+        self.project_path = path;
+        self.save_toast = None;
+        self.save_error = None;
         self.cell_textures.clear();
         self.cell_dirty.clear();
         for id in 0..self.project.cells.len() {
@@ -1811,6 +1982,7 @@ impl AppState {
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
+        self.lasso = None;
         self.stroke_pre_pixels = None;
         self.preview_upload_rect = None;
         self.history = History::default();
@@ -1837,6 +2009,20 @@ impl AppState {
 }
 
 impl eframe::App for AppState {
+    /// Called by eframe on exit and every `auto_save_interval` (30s). Panel
+    /// geometry and collapse state are saved separately via
+    /// `persist_egui_memory`, which defaults to true.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(
+            storage,
+            UI_PREFS_KEY,
+            &UiPrefs {
+                show_panels: self.show_panels,
+                show_mini_timeline: self.show_mini_timeline,
+            },
+        );
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         let a = self.bg_opacity.clamp(0.0, 1.0);
         [
@@ -1848,11 +2034,30 @@ impl eframe::App for AppState {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Pick up any layer selection made last frame, whatever moved it.
+        self.track_layer_change();
+
         // Resolve any deferred preview-texture free now, before drawing, so the
         // freed textures are never referenced by this frame's paint list.
         if self.preview_clear_pending {
             self.preview_tex.clear();
             self.preview_clear_pending = false;
+        }
+
+        // First frame: maximize. Done here rather than at build time because the
+        // creation-time flag doesn't survive on a frameless window (see the
+        // `startup_maximize` field). Also keeps us on the monitor work area, so
+        // an undecorated window can't end up covering the taskbar.
+        //
+        // Deliberately *after* the first frame lays panels out, not before: the
+        // panel `default_pos` values are absolute and tuned for the un-maximized
+        // size, so they're only correct on that first small frame. Maximizing
+        // then produces a resize, and the edge re-stick in `ui::shell::draw`
+        // carries the panels out to the new edges. Maximize before frame one and
+        // there is no resize to react to, leaving them stranded mid-screen.
+        if self.startup_maximize {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            self.startup_maximize = false;
         }
 
         // First frame: re-apply the OS rounded corners + border to our frameless

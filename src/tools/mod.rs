@@ -4,6 +4,7 @@
 //! Phase D will split into per-tool dynamics + tablet pressure curves.
 
 pub mod fill;
+pub mod lasso;
 pub mod ribbon;
 pub mod shape;
 pub mod stroke;
@@ -14,10 +15,12 @@ pub enum ActiveTool {
     Ink,
     Eraser,
     Fill,
-    ColorPicker,
     Shape,
     /// Stabilization tracker — places per-frame tracking points, draws nothing.
     Tracker,
+    /// Freehand lasso; everything inside the closed path is erased from the
+    /// active layer's cell on pointer-up.
+    Lasso,
 }
 
 impl ActiveTool {
@@ -27,9 +30,9 @@ impl ActiveTool {
             ActiveTool::Ink => 1,
             ActiveTool::Eraser => 2,
             ActiveTool::Fill => 3,
-            ActiveTool::ColorPicker => 4,
-            ActiveTool::Shape => 5,
-            ActiveTool::Tracker => 6,
+            ActiveTool::Shape => 4,
+            ActiveTool::Tracker => 5,
+            ActiveTool::Lasso => 6,
         }
     }
 }
@@ -62,6 +65,10 @@ pub struct BrushSettings {
     pub pressure_opacity: f32,
     /// Flood-fill tolerance per channel (0..=255). Only used by Fill tool.
     pub fill_tolerance: u8,
+    /// Grow the filled region by this many pixels after the flood, so colour
+    /// tucks under the anti-aliased edge of lines living on another layer.
+    /// Only used by the Fill tool.
+    pub fill_expand: u8,
     /// Outline shape to draw. Only used by the Shape tool.
     pub shape_kind: ShapeKind,
 }
@@ -77,6 +84,7 @@ impl BrushSettings {
             pressure_size: 0.7,
             pressure_opacity: 0.5,
             fill_tolerance: 16,
+            fill_expand: 0,
             shape_kind: ShapeKind::Line,
         }
     }
@@ -91,6 +99,7 @@ impl BrushSettings {
             pressure_size: 0.9,
             pressure_opacity: 0.2,
             fill_tolerance: 16,
+            fill_expand: 0,
             shape_kind: ShapeKind::Line,
         }
     }
@@ -105,6 +114,7 @@ impl BrushSettings {
             pressure_size: 0.5,
             pressure_opacity: 0.3,
             fill_tolerance: 16,
+            fill_expand: 0,
             shape_kind: ShapeKind::Line,
         }
     }
@@ -119,6 +129,10 @@ impl BrushSettings {
             pressure_size: 0.0,
             pressure_opacity: 0.0,
             fill_tolerance: 24,
+            // Off by default: on a same-layer fill, growing the region eats
+            // into the user's own strokes. It is opt-in for the line-art-on-
+            // another-layer workflow, where the grown ring hides under the ink.
+            fill_expand: 0,
             shape_kind: ShapeKind::Line,
         }
     }
@@ -134,6 +148,7 @@ impl BrushSettings {
             pressure_size: 0.0,
             pressure_opacity: 0.0,
             fill_tolerance: 16,
+            fill_expand: 0,
             shape_kind: ShapeKind::Line,
         }
     }

@@ -31,14 +31,29 @@ fn main() -> eframe::Result<()> {
             present_mode: eframe::wgpu::PresentMode::Mailbox,
             ..Default::default()
         },
+        // Always open maximized, so don't let eframe restore the last native
+        // window rect — it defaults to true and would fight `with_maximized`.
+        // Panel layout is separate (egui memory) and still persists.
+        persist_window: false,
+        // Keep UI state beside shortcuts.toml rather than in eframe's own data
+        // dir: one folder to look in, one file to delete to reset the layout.
+        persistence_path: input::shortcuts::config_dir().map(|d| d.join("ui.ron")),
         viewport: egui::ViewportBuilder::default()
             .with_title("Animator")
+            .with_app_id("animator-app")
             // Frameless (no caption buttons / title). On Windows we re-apply the
             // default rounded corners + border via DWM in `platform`. Transparent
             // so the canvas backdrop alpha shows through.
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(true)
+            // Not sufficient on its own for a frameless window — winit creates
+            // it at `inner_size` and the creation-time flag is lost. The maximize
+            // that actually lands is the first-frame `ViewportCommand::Maximized`
+            // in `AppState::update`; keep both so platforms where this does work
+            // skip the startup resize flash.
+            .with_maximized(true)
+            // Size used once un-maximized.
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([640.0, 480.0]),
         ..Default::default()
