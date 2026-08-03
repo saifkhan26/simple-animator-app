@@ -96,12 +96,18 @@ const UI_PREFS_KEY: &str = "ui_prefs";
 
 /// UI state that outlives a run but that egui's own memory doesn't cover.
 /// Panel positions, sizes and collapse state ride along in `egui::Memory`
-/// (persisted by eframe automatically); these two toggles are plain `AppState`
-/// fields, so they need saving by hand.
+/// (persisted by eframe automatically); these are plain `AppState` fields, so
+/// they need saving by hand.
+///
+/// `#[serde(default)]` is what keeps a prefs blob written by an older build
+/// loadable after a field is added here — without it a missing key fails the
+/// whole struct and silently resets every other preference too.
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct UiPrefs {
     show_panels: bool,
     show_mini_timeline: bool,
+    frame_step: usize,
 }
 
 impl Default for UiPrefs {
@@ -109,6 +115,7 @@ impl Default for UiPrefs {
         Self {
             show_panels: true,
             show_mini_timeline: true,
+            frame_step: 1,
         }
     }
 }
@@ -219,6 +226,11 @@ pub struct AppState {
 
     pub playback: Playback,
     pub onion: OnionConfig,
+
+    /// Frames moved per FramePrev / FrameNext press, and per ◀ / ▶ click.
+    /// Read through [`AppState::frame_step_delta`], which clamps it to >= 1 —
+    /// a zero would turn frame navigation into a no-op.
+    pub frame_step: usize,
 
     pub bg_opacity: f32,
     /// Background clear color (RGB, 0..1).
@@ -388,6 +400,7 @@ impl AppState {
             nav_drag: None,
             playback: Playback::default(),
             onion: OnionConfig::default(),
+            frame_step: prefs.frame_step,
             bg_opacity: 1.0,
             bg_color: [0.12, 0.12, 0.13],
             show_checker: false,
@@ -521,6 +534,18 @@ impl AppState {
         for id in 0..self.project.cells.len() {
             self.cell_dirty.insert(id, true);
         }
+    }
+
+    /// Frames moved or inserted by one step action, from the user's step size.
+    /// `max(1)` so a step of zero — from a cleared input or a stale prefs blob
+    /// — still does something instead of silently doing nothing.
+    pub fn frame_step_count(&self) -> usize {
+        self.frame_step.max(1)
+    }
+
+    /// Signed form of [`AppState::frame_step_count`], for `Project::step`.
+    pub fn frame_step_delta(&self) -> isize {
+        self.frame_step_count() as isize
     }
 
     /// Run a timeline/layer edit while recording it on the undo stack.
@@ -1854,10 +1879,26 @@ impl AppState {
                 let _ = now;
                 self.playback.playing = !self.playback.playing;
             }
-            Action::FramePrev => self.project.step(-1),
-            Action::FrameNext => self.project.step(1),
-            Action::FrameAdd => self.structural_edit(false, Project::add_frame),
-            Action::FrameDuplicate => self.structural_edit(false, Project::duplicate_frame),
+            Action::FramePrev => self.project.step(-self.frame_step_delta()),
+            Action::FrameNext => self.project.step(self.frame_step_delta()),
+            // Insert the user's step size worth of frames. One `structural_edit`
+            // wraps the whole loop, so N frames cost one undo entry, not N.
+            Action::FrameAdd => {
+                let n = self.frame_step_count();
+                self.structural_edit(false, |p| {
+                    for _ in 0..n {
+                        p.add_frame();
+                    }
+                });
+            }
+            Action::FrameDuplicate => {
+                let n = self.frame_step_count();
+                self.structural_edit(false, |p| {
+                    for _ in 0..n {
+                        p.duplicate_frame();
+                    }
+                });
+            }
             Action::FrameDelete => {
                 let wipes_pixels = self.project.frame_count <= 1;
                 self.structural_edit(wipes_pixels, Project::delete_frame);
@@ -2019,6 +2060,7 @@ impl eframe::App for AppState {
             &UiPrefs {
                 show_panels: self.show_panels,
                 show_mini_timeline: self.show_mini_timeline,
+                frame_step: self.frame_step,
             },
         );
     }

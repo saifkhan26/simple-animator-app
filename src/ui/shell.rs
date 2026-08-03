@@ -738,20 +738,55 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
                 }
                 let prev_tip = tip(state, Action::FramePrev, "Step back");
                 if theme::icon_button(ui, ic::CARET_LEFT, &prev_tip).clicked() {
-                    state.project.step(-1);
+                    state.project.step(-state.frame_step_delta());
                 }
                 let next_tip = tip(state, Action::FrameNext, "Step forward");
                 if theme::icon_button(ui, ic::CARET_RIGHT, &next_tip).clicked() {
-                    state.project.step(1);
+                    state.project.step(state.frame_step_delta());
                 }
+                // One value for both halves of the toolbar: how far the arrows
+                // move, and how many frames the + / copy buttons insert.
+                let step_tip = format!(
+                    "Step size — frames moved by {} / {}, frames inserted by {} / {}",
+                    combo_text(state, Action::FramePrev),
+                    combo_text(state, Action::FrameNext),
+                    combo_text(state, Action::FrameAdd),
+                    combo_text(state, Action::FrameDuplicate),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut state.frame_step)
+                        .range(1..=999)
+                        .speed(1)
+                        .prefix("×"),
+                )
+                .on_hover_text(step_tip);
                 ui.separator();
-                let add_tip = tip(state, Action::FrameAdd, "Add frame (hold)");
+                let n = state.frame_step_count();
+                let add_base = if n == 1 {
+                    "Add frame (hold)".to_string()
+                } else {
+                    format!("Add {n} frames (hold)")
+                };
+                let add_tip = tip(state, Action::FrameAdd, &add_base);
                 if theme::icon_button(ui, ic::PLUS, &add_tip).clicked() {
-                    state.structural_edit(false, |p| p.add_frame());
+                    state.structural_edit(false, |p| {
+                        for _ in 0..n {
+                            p.add_frame();
+                        }
+                    });
                 }
-                let dup_tip = tip(state, Action::FrameDuplicate, "Duplicate frame");
+                let dup_base = if n == 1 {
+                    "Duplicate frame".to_string()
+                } else {
+                    format!("Duplicate frame ×{n}")
+                };
+                let dup_tip = tip(state, Action::FrameDuplicate, &dup_base);
                 if theme::icon_button(ui, ic::COPY, &dup_tip).clicked() {
-                    state.structural_edit(false, |p| p.duplicate_frame());
+                    state.structural_edit(false, |p| {
+                        for _ in 0..n {
+                            p.duplicate_frame();
+                        }
+                    });
                 }
                 let del_tip = tip(state, Action::FrameDelete, "Delete frame");
                 if theme::icon_button(ui, ic::TRASH, &del_tip).clicked() {
@@ -813,12 +848,21 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 }
                 let prev_tip = tip(state, Action::FramePrev, "Step back");
                 if theme::icon_button(ui, ic::CARET_LEFT, &prev_tip).clicked() {
-                    state.project.step(-1);
+                    state.project.step(-state.frame_step_delta());
                 }
                 let next_tip = tip(state, Action::FrameNext, "Step forward");
                 if theme::icon_button(ui, ic::CARET_RIGHT, &next_tip).clicked() {
-                    state.project.step(1);
+                    state.project.step(state.frame_step_delta());
                 }
+                // Same step size as the timeline panel. Drag-only here: the
+                // panels-hidden path surrenders keyboard focus every frame.
+                ui.add(
+                    egui::DragValue::new(&mut state.frame_step)
+                        .range(1..=999)
+                        .speed(1)
+                        .prefix("×"),
+                )
+                .on_hover_text("Step size (move / insert)");
                 ui.separator();
                 let n = state.project.frame_count.max(1);
                 ui.label(
