@@ -3,6 +3,7 @@
 //! Each `Command` captures a localised before/after pixel snapshot, so undoing
 //! a full-canvas stroke only costs the dirty-rect area in memory.
 
+use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer};
 use crate::doc::project::Project;
@@ -29,6 +30,8 @@ pub struct TimelineState {
     pub current_layer: usize,
     pub loop_start: usize,
     pub loop_end: usize,
+    pub camera: Camera,
+    pub camera_keys: Vec<CameraKey>,
 }
 
 impl TimelineState {
@@ -40,6 +43,8 @@ impl TimelineState {
             current_layer: project.current_layer,
             loop_start: project.loop_start,
             loop_end: project.loop_end,
+            camera: project.camera,
+            camera_keys: project.camera_keys.clone(),
         }
     }
 
@@ -50,6 +55,8 @@ impl TimelineState {
         project.current_layer = self.current_layer;
         project.loop_start = self.loop_start;
         project.loop_end = self.loop_end;
+        project.camera = self.camera;
+        project.camera_keys = self.camera_keys.clone();
     }
 }
 
@@ -79,6 +86,18 @@ pub enum Command {
         before: TimelineState,
         after: TimelineState,
         cell_pixels: Vec<CellPixelDelta>,
+    },
+    /// A layer's drawable buffer was resized, re-padding every cell it owns.
+    /// No existing command covers this — `Structural` restores layers but not
+    /// `project.cells`.
+    ///
+    /// Only the originals are stored; redo re-runs the deterministic re-pad
+    /// rather than keeping a second full copy of every cell.
+    LayerCanvasResize {
+        layer: usize,
+        before_size: (u32, u32),
+        after_size: (u32, u32),
+        before: Vec<(CellId, Canvas)>,
     },
 }
 
@@ -164,6 +183,33 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
                         max_x: c.width,
                         max_y: c.height,
                     });
+                }
+            }
+            Touched::All
+        }
+        Command::LayerCanvasResize {
+            layer,
+            before_size,
+            after_size,
+            before,
+        } => {
+            if forward {
+                project.expand_layer_canvas(*layer, after_size.0, after_size.1);
+            } else {
+                for (id, canvas) in before {
+                    if let Some(c) = project.cell_mut(*id) {
+                        *c = canvas.clone();
+                        c.dirty = Some(crate::doc::canvas::DirtyRect {
+                            min_x: 0,
+                            min_y: 0,
+                            max_x: c.width,
+                            max_y: c.height,
+                        });
+                    }
+                }
+                if let Some(l) = project.layers.get_mut(*layer) {
+                    l.cell_w = before_size.0;
+                    l.cell_h = before_size.1;
                 }
             }
             Touched::All

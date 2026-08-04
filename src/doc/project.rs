@@ -6,11 +6,14 @@
 //!   * `frame_count` — total timeline length; every layer.exposures matches.
 //!   * `current_frame`, `current_layer` — the editing cursor.
 
+use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Project {
+    /// Output resolution, and the size of the camera's frame rect. Layers may
+    /// sit outside it — see `crate::doc::camera`.
     pub width: u32,
     pub height: u32,
     pub fps: f32,
@@ -24,6 +27,15 @@ pub struct Project {
 
     pub loop_start: usize,
     pub loop_end: usize,
+
+    /// Live / static camera. Used directly when `camera_keys` is empty;
+    /// otherwise it is the working buffer for the current frame, mirroring how
+    /// `Layer::transform` relates to `Layer::transform_keys`.
+    #[serde(default)]
+    pub camera: Camera,
+    /// Sorted camera keyframes. Empty = static `camera`.
+    #[serde(default)]
+    pub camera_keys: Vec<CameraKey>,
 }
 
 impl Project {
@@ -43,7 +55,38 @@ impl Project {
             current_layer: 0,
             loop_start: 0,
             loop_end: 1,
+            camera: Camera::default(),
+            camera_keys: Vec::new(),
         }
+    }
+
+    /// The camera showing on `frame`.
+    pub fn resolve_camera(&self, frame: usize) -> Camera {
+        Camera::resolve(&self.camera_keys, self.camera, frame)
+    }
+
+    pub fn has_camera_key(&self, frame: usize) -> bool {
+        self.camera_keys.iter().any(|k| k.frame == frame)
+    }
+
+    /// Insert (or replace) a camera key at `frame`, keeping keys sorted. A
+    /// replaced key keeps its existing ease.
+    pub fn set_camera_key(&mut self, frame: usize, camera: Camera) {
+        match self.camera_keys.iter_mut().find(|k| k.frame == frame) {
+            Some(k) => k.camera = camera,
+            None => {
+                self.camera_keys.push(CameraKey {
+                    frame,
+                    camera,
+                    ease: crate::doc::camera::Ease::default(),
+                });
+                self.camera_keys.sort_by_key(|k| k.frame);
+            }
+        }
+    }
+
+    pub fn delete_camera_key(&mut self, frame: usize) {
+        self.camera_keys.retain(|k| k.frame != frame);
     }
 
     pub fn cell(&self, id: CellId) -> Option<&Canvas> {
@@ -53,9 +96,19 @@ impl Project {
         self.cells.get_mut(id)
     }
 
-    /// Allocates a new blank cell and returns its CellId.
+    /// Allocates a new blank cell sized for the active layer.
     pub fn alloc_cell(&mut self) -> CellId {
-        self.cells.push(Canvas::new(self.width, self.height));
+        self.alloc_cell_for(self.current_layer)
+    }
+
+    /// Allocates a new blank cell sized for `layer` — layers with an expanded
+    /// canvas get the bigger buffer.
+    pub fn alloc_cell_for(&mut self, layer: usize) -> CellId {
+        let (w, h) = match self.layers.get(layer) {
+            Some(l) => l.cell_size(self.width, self.height),
+            None => (self.width, self.height),
+        };
+        self.cells.push(Canvas::new(w, h));
         self.cells.len() - 1
     }
 
@@ -108,12 +161,50 @@ impl Project {
         let resolved = self.layers[cur_layer].resolve(cur_frame);
         let new_cell = match resolved {
             Some(src) => self.cells[src].clone(),
-            None => Canvas::new(self.width, self.height),
+            None => {
+                let (w, h) = self.layers[cur_layer].cell_size(self.width, self.height);
+                Canvas::new(w, h)
+            }
         };
         self.cells.push(new_cell);
         let id = self.cells.len() - 1;
         self.layers[cur_layer].set_key(cur_frame, id);
         id
+    }
+
+    /// Every distinct cell id this layer's exposures reference.
+    ///
+    /// Safe to resize in place: no cell is ever shared between two layers —
+    /// every site that keys a cell allocates (or clones) a fresh one first.
+    pub fn layer_cell_ids(&self, layer: usize) -> Vec<CellId> {
+        let Some(l) = self.layers.get(layer) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<CellId> = l.exposures.iter().flatten().copied().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Grow (or shrink) this layer's drawable buffer to `new_w`×`new_h`,
+    /// re-padding every cell it owns with the old pixels centered.
+    ///
+    /// Centering is what keeps the artwork visually still: `Transform` places a
+    /// cell by its *center*, so a symmetric pad leaves the layer exactly where
+    /// it was while giving strokes more room before the rasterizer clips them.
+    pub fn expand_layer_canvas(&mut self, layer: usize, new_w: u32, new_h: u32) {
+        let (new_w, new_h) = (new_w.max(1), new_h.max(1));
+        for id in self.layer_cell_ids(layer) {
+            if let Some(c) = self.cells.get_mut(id) {
+                if c.width != new_w || c.height != new_h {
+                    *c = recenter(c, new_w, new_h);
+                }
+            }
+        }
+        if let Some(l) = self.layers.get_mut(layer) {
+            l.cell_w = new_w;
+            l.cell_h = new_h;
+        }
     }
 
     /// Hold the previous cell at the active slot (delete its key).
@@ -306,5 +397,75 @@ impl Project {
             self.relink_after_swap(i, i - 1);
             self.current_layer = i - 1;
         }
+    }
+}
+
+/// Copy `src` into a fresh `new_w`×`new_h` buffer with the old content
+/// centered. Content that no longer fits (a shrink) is cropped.
+pub fn recenter(src: &Canvas, new_w: u32, new_h: u32) -> Canvas {
+    let mut out = Canvas::new(new_w, new_h);
+    // Offset of the old origin inside the new buffer; negative when shrinking.
+    let ox = (new_w as i64 - src.width as i64) / 2;
+    let oy = (new_h as i64 - src.height as i64) / 2;
+    let y0 = (-oy).max(0);
+    let y1 = (src.height as i64).min(new_h as i64 - oy);
+    let x0 = (-ox).max(0);
+    let x1 = (src.width as i64).min(new_w as i64 - ox);
+    if x1 <= x0 || y1 <= y0 {
+        return out;
+    }
+    let row_bytes = ((x1 - x0) * 4) as usize;
+    for y in y0..y1 {
+        let s = ((y * src.width as i64 + x0) * 4) as usize;
+        let d = (((y + oy) * new_w as i64 + x0 + ox) * 4) as usize;
+        out.pixels[d..d + row_bytes].copy_from_slice(&src.pixels[s..s + row_bytes]);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A symmetric grow leaves the old pixels centered, which is what keeps a
+    /// layer visually still (its transform is defined about the cell center).
+    #[test]
+    fn recenter_grows_symmetrically() {
+        let mut src = Canvas::new(2, 2);
+        src.pixels.copy_from_slice(&[
+            1, 1, 1, 255, 2, 2, 2, 255, // row 0
+            3, 3, 3, 255, 4, 4, 4, 255, // row 1
+        ]);
+        let out = recenter(&src, 4, 4);
+        let at = |x: usize, y: usize| out.pixels[(y * 4 + x) * 4];
+        assert_eq!((at(1, 1), at(2, 1), at(1, 2), at(2, 2)), (1, 2, 3, 4));
+        assert_eq!(at(0, 0), 0, "pad is transparent");
+        assert_eq!(out.pixels.len(), 4 * 4 * 4);
+    }
+
+    /// Shrinking crops around the center rather than panicking on the copy.
+    #[test]
+    fn recenter_shrinks_by_cropping() {
+        let mut src = Canvas::new(4, 4);
+        for (i, px) in src.pixels.chunks_mut(4).enumerate() {
+            px[0] = i as u8;
+            px[3] = 255;
+        }
+        let out = recenter(&src, 2, 2);
+        // The 2x2 block starting at (1,1) of the source survives.
+        assert_eq!(out.pixels[0], 5);
+        assert_eq!(out.pixels[4], 6);
+    }
+
+    /// New cells on an expanded layer come out at the layer's size, not the
+    /// project's — otherwise the next key would silently shrink back.
+    #[test]
+    fn expanded_layer_allocates_bigger_cells() {
+        let mut p = Project::new(8, 6, 12.0);
+        p.add_frame();
+        p.expand_layer_canvas(0, 16, 12);
+        assert_eq!(p.cells[0].width, 16);
+        let id = p.insert_blank_key_here();
+        assert_eq!((p.cells[id].width, p.cells[id].height), (16, 12));
     }
 }

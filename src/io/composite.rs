@@ -6,10 +6,17 @@ use crate::doc::project::Project;
 use crate::doc::transform::Transform;
 
 /// Composite all visible non-reference layers of `frame` into a fresh
-/// RGBA8 unmultiplied buffer, applying each layer's transform.
+/// RGBA8 unmultiplied buffer sized to the output frame, applying each layer's
+/// transform as seen through the camera.
+///
+/// The camera is folded into each layer transform rather than applied as a
+/// second pass: both are similarity transforms, so the composition is just
+/// another one and costs nothing extra. An identity camera folds to a no-op,
+/// which keeps the 1:1 fast path below alive for pre-camera projects.
 pub fn flatten_frame(project: &Project, frame: usize) -> Canvas {
     let mut out = Canvas::new(project.width, project.height);
     let (pw, ph) = (project.width, project.height);
+    let cam = project.resolve_camera(frame);
     for layer in &project.layers {
         if !layer.visible || layer.reference {
             continue;
@@ -20,7 +27,7 @@ pub fn flatten_frame(project: &Project, frame: usize) -> Canvas {
         let Some(src) = project.cell(id) else {
             continue;
         };
-        let xform = layer.resolve_transform(frame);
+        let xform = cam.apply(&layer.resolve_transform(frame));
         composite_layer(&mut out, src, &xform, layer.opacity, pw, ph);
     }
     out
@@ -73,6 +80,118 @@ pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacit
             }
             d[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc::camera::Camera;
+
+    /// Paint one opaque red pixel at `(x, y)` of the project's only cell.
+    fn dot_project(x: u32, y: u32) -> Project {
+        let mut p = Project::new(8, 8, 12.0);
+        let id = p.layers[0].resolve(0).unwrap();
+        let c = p.cell_mut(id).unwrap();
+        let i = ((y * 8 + x) * 4) as usize;
+        c.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+        p
+    }
+
+    fn red_at(c: &Canvas, x: u32, y: u32) -> bool {
+        let i = ((y * c.width + x) * 4) as usize;
+        c.pixels[i] > 200 && c.pixels[i + 3] > 200
+    }
+
+    /// An untouched project must export exactly as it did before the camera
+    /// existed: the identity camera folds to a no-op.
+    #[test]
+    fn identity_camera_exports_unchanged() {
+        let p = dot_project(3, 5);
+        let out = flatten_frame(&p, 0);
+        assert!(red_at(&out, 3, 5));
+        assert!(!red_at(&out, 4, 5));
+    }
+
+    /// Panning the camera right moves the artwork left in the exported frame —
+    /// which is how a character parked off to the side comes into shot.
+    #[test]
+    fn panning_the_camera_shifts_the_frame() {
+        let mut p = dot_project(3, 5);
+        p.camera = Camera {
+            tx: 2.0,
+            ..Default::default()
+        };
+        let out = flatten_frame(&p, 0);
+        assert!(red_at(&out, 1, 5), "dot should land 2px left of 3");
+        assert!(!red_at(&out, 3, 5));
+    }
+
+    /// A layer parked a full frame to the right is invisible until the camera
+    /// keys pan over to it.
+    #[test]
+    fn offscreen_layer_appears_only_once_the_camera_arrives() {
+        let mut p = dot_project(3, 5);
+        p.layers[0].transform.tx = 8.0;
+        assert!(!flatten_frame(&p, 0).pixels.iter().any(|&b| b > 200));
+        p.camera = Camera {
+            tx: 8.0,
+            ..Default::default()
+        };
+        assert!(red_at(&flatten_frame(&p, 0), 3, 5));
+    }
+
+    /// The whole point, end to end: character A in frame, character B parked
+    /// off to the right, keyed camera pans from one to the other.
+    #[test]
+    fn keyed_camera_pans_between_two_characters() {
+        use crate::doc::camera::{CameraKey, Ease};
+        use crate::doc::layer::Layer;
+
+        let mut p = dot_project(3, 5); // A, on layer 0, in frame at rest
+        p.ensure_frame_count(11);
+
+        // B: its own layer, shoved a full frame width to the right.
+        let mut b = Layer::new("B", 11);
+        let bid = p.alloc_cell_for(0);
+        let c = p.cell_mut(bid).unwrap();
+        let i = ((5 * 8 + 3) * 4) as usize;
+        c.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+        b.set_key(0, bid);
+        b.transform.tx = 8.0;
+        p.layers.push(b);
+
+        p.camera_keys = vec![
+            CameraKey {
+                frame: 0,
+                camera: Camera::default(),
+                ease: Ease::Both,
+            },
+            CameraKey {
+                frame: 10,
+                camera: Camera {
+                    tx: 8.0,
+                    ..Default::default()
+                },
+                ease: Ease::Linear,
+            },
+        ];
+
+        // Frame 0: looking at A only.
+        let f0 = flatten_frame(&p, 0);
+        assert!(red_at(&f0, 3, 5), "A in frame at the start");
+        // Frame 10: camera has arrived at B, and A has left.
+        let f10 = flatten_frame(&p, 10);
+        assert!(red_at(&f10, 3, 5), "B in frame at the end");
+        assert_eq!(
+            f10.pixels.iter().filter(|&&b| b > 200).count(),
+            f0.pixels.iter().filter(|&&b| b > 200).count(),
+            "exactly one character in frame at each end"
+        );
+        // Mid-move both are off to the sides, and smoothstep means the camera
+        // has barely left A by frame 1.
+        let early = p.resolve_camera(1).tx;
+        assert!(early < 0.8, "ease-both should crawl out of the key: {early}");
     }
 }
 

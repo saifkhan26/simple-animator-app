@@ -5,6 +5,7 @@ use egui::{Align, Color32, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as ic;
 
 use crate::app::{AppState, NavKind, PanelId, MP4_PRESETS};
+use crate::doc::camera::Ease;
 use crate::input::shortcuts::{Action, KeyCombo};
 use crate::io::{composite, gif_export, png_import, png_save, png_seq, project_file};
 use crate::timeline::onion::OnionDirection;
@@ -48,6 +49,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 232.0, true, resized);
         panel_window(state, ctx, PanelId::Layers, [1004.0, 48.0], 252.0, true, resized);
         panel_window(state, ctx, PanelId::Onion, [1004.0, 300.0], 252.0, false, resized);
+        panel_window(state, ctx, PanelId::Camera, [1004.0, 400.0], 252.0, false, resized);
         panel_window(state, ctx, PanelId::Xsheet, [1004.0, 470.0], 252.0, false, resized);
         panel_window(
             state,
@@ -115,8 +117,12 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     None
                 });
                 state.nav_to_layer = state.layer_xform && nav_gesture.is_some();
+                state.nav_to_camera =
+                    !state.nav_to_layer && state.camera_edit && nav_gesture.is_some();
                 if state.nav_to_layer {
                     state.begin_layer_xform();
+                } else if state.nav_to_camera {
+                    state.begin_camera_drag();
                 } else if state.nav_drag.is_none() {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         if state.tool == ActiveTool::Tracker {
@@ -137,11 +143,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     // Apply the gesture to the active layer's transform.
                     match state.nav_drag {
                         Some(NavKind::Pan) => {
+                            // Un-rotate through the transform actually used to
+                            // render, not `view.rotation` — they differ while
+                            // the view is locked to the camera.
                             let xform = Xform::new(state, canvas_rect);
-                            let d = resp.drag_delta();
-                            let (s, c) = state.view.rotation.sin_cos();
-                            let ddx = (d.x * c + d.y * s) / xform.scale;
-                            let ddy = (-d.x * s + d.y * c) / xform.scale;
+                            let (ddx, ddy) = xform.screen_delta_to_doc(resp.drag_delta());
                             state.apply_layer_pan(ddx, ddy);
                         }
                         Some(NavKind::Rotate) => {
@@ -155,6 +161,31 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                         }
                         None => {}
                     }
+                } else if state.nav_to_camera {
+                    // Same retarget as the layer path, aimed at the camera. The
+                    // guide rect follows the cursor: drag right to look right.
+                    match state.nav_drag {
+                        Some(NavKind::Pan) => {
+                            let xform = Xform::new(state, canvas_rect);
+                            let (ddx, ddy) = xform.screen_delta_to_doc(resp.drag_delta());
+                            state.apply_camera_pan(ddx, ddy);
+                        }
+                        Some(NavKind::Rotate) => {
+                            state.apply_camera_rotate(resp.drag_delta().x * 0.01);
+                        }
+                        Some(NavKind::Zoom) => {
+                            let dy = resp.drag_delta().y;
+                            if dy.abs() > 0.0 {
+                                state.apply_camera_zoom((-dy * 0.01).exp());
+                            }
+                        }
+                        None => {}
+                    }
+                } else if state.camera_look_through && state.nav_drag.is_some() {
+                    // While the view is locked to the camera, `Xform` ignores
+                    // `state.view` entirely. Swallow the view gestures rather
+                    // than let them accumulate invisibly and jump the canvas
+                    // the moment the lock comes off.
                 } else {
                     match state.nav_drag {
                         Some(NavKind::Pan) => {
@@ -193,11 +224,14 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             if resp.drag_stopped() {
                 if state.nav_to_layer {
                     state.commit_layer_xform();
+                } else if state.nav_to_camera {
+                    state.commit_camera_drag();
                 } else if state.nav_drag.is_none() {
                     state.pointer_up();
                 }
                 state.nav_drag = None;
                 state.nav_to_layer = false;
+                state.nav_to_camera = false;
             }
 
             // Tool cursor preview — only while drawing (not during nav gestures),
@@ -387,6 +421,7 @@ fn panel_meta(id: PanelId) -> (&'static str, &'static str) {
         PanelId::Onion => (ic::CIRCLES_THREE, "Onion"),
         PanelId::Xsheet => (ic::TABLE, "X-sheet"),
         PanelId::Timeline => (ic::FILM_STRIP, "Timeline"),
+        PanelId::Camera => (ic::VIDEO_CAMERA, "Camera"),
     }
 }
 
@@ -401,6 +436,7 @@ fn panel_key(id: PanelId) -> &'static str {
         PanelId::Onion => "panel_onion",
         PanelId::Xsheet => "panel_xsheet",
         PanelId::Timeline => "panel_timeline",
+        PanelId::Camera => "panel_camera",
     }
 }
 
@@ -413,6 +449,7 @@ fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, i
         PanelId::Onion => onion_content(state, ui),
         PanelId::Xsheet => xsheet_content(state, ui),
         PanelId::Timeline => timeline_content(state, ctx, ui),
+        PanelId::Camera => camera_content(state, ui),
     }
 }
 
@@ -1061,6 +1098,138 @@ fn onion_content(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// Camera panel — what the export sees, and how that moves over time.
+fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.label(
+        egui::RichText::new(
+            "The camera frames the exported video. Layers can sit outside it — park a \
+             character off to the side, then key the camera to pan over.",
+        )
+        .color(theme::TEXT_MUTED)
+        .size(10.5),
+    );
+    ui.add_space(6.0);
+
+    ui.checkbox(&mut state.camera_edit, "Camera edit mode");
+    let toggle = combo_text(state, Action::CameraEditToggle);
+    ui.label(
+        egui::RichText::new(format!(
+            "Toggle ({toggle}), then drag with your canvas gesture keys: pan-key = move the \
+             camera, zoom-key = push in, rotate-key = roll.",
+        ))
+        .color(theme::TEXT_MUTED)
+        .size(10.5),
+    );
+    ui.add_space(4.0);
+
+    ui.horizontal(|ui| {
+        ui.label("X");
+        ui.add(egui::DragValue::new(&mut state.project.camera.tx).speed(1.0));
+        ui.label("Y");
+        ui.add(egui::DragValue::new(&mut state.project.camera.ty).speed(1.0));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Zoom");
+        ui.add(
+            egui::DragValue::new(&mut state.project.camera.zoom)
+                .speed(0.01)
+                .range(0.05..=64.0),
+        );
+        ui.label("Roll°");
+        let mut deg = state.project.camera.rot.to_degrees();
+        if ui.add(egui::DragValue::new(&mut deg).speed(0.5)).changed() {
+            state.project.camera.rot = deg.to_radians();
+        }
+    });
+
+    let cf = state.project.current_frame;
+    let nkeys = state.project.camera_keys.len();
+    let here = state.project.has_camera_key(cf);
+    let status = if nkeys == 0 {
+        "no keys (static)".to_string()
+    } else {
+        format!(
+            "{nkeys} key(s){}",
+            if here { " — keyed on this frame" } else { "" }
+        )
+    };
+    ui.label(
+        egui::RichText::new(status)
+            .color(theme::TEXT_MUTED)
+            .size(10.5),
+    );
+
+    // Ease of the key on this frame. It shapes the segment running *from* this
+    // key to the next, which is why it lives on the key rather than the pair.
+    let mut ease = state
+        .project
+        .camera_keys
+        .iter()
+        .find(|k| k.frame == cf)
+        .map(|k| k.ease)
+        .unwrap_or_default();
+    ui.add_enabled_ui(here, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Ease out of key");
+            let mut changed = false;
+            egui::ComboBox::from_id_salt("cam_ease")
+                .selected_text(ease.label())
+                .show_ui(ui, |ui| {
+                    for e in Ease::ALL {
+                        changed |= ui.selectable_value(&mut ease, e, e.label()).changed();
+                    }
+                });
+            if changed {
+                state.set_camera_key_ease(ease);
+            }
+        });
+    });
+
+    ui.horizontal(|ui| {
+        let add = combo_text(state, Action::CameraKeyAdd);
+        if ui
+            .button(theme::icon_text(ic::PLUS_SQUARE, &format!("Add key ({add})")))
+            .clicked()
+        {
+            state.add_camera_key();
+        }
+        if ui.button(theme::icon_text(ic::X, "Del key")).clicked() {
+            state.delete_camera_key();
+        }
+        if ui
+            .button(theme::icon_text(ic::ARROW_COUNTER_CLOCKWISE, "Reset"))
+            .clicked()
+        {
+            state.reset_camera();
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.separator();
+    theme::section_header(ui, ic::EYE, "View");
+    let look = combo_text(state, Action::CameraLookThrough);
+    ui.checkbox(
+        &mut state.camera_look_through,
+        format!("Look through camera ({look})"),
+    );
+    ui.checkbox(&mut state.show_camera_guide, "Show camera frame");
+    ui.checkbox(&mut state.dim_outside_camera, "Dim outside camera");
+    ui.checkbox(&mut state.show_layer_bounds, "Show active layer bounds");
+
+    if state.project.camera.zoom > 1.001 {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "Zoom {:.2}× upscales: the export is fixed at {}×{}. For a clean push-in, \
+                 expand the layer canvas and start zoomed out.",
+                state.project.camera.zoom, state.project.width, state.project.height
+            ))
+            .color(theme::TEXT_MUTED)
+            .size(10.5),
+        );
+    }
+}
+
 fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
             ui.horizontal(|ui| {
@@ -1314,6 +1483,61 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                     state.reset_active_layer_transform();
                 }
             });
+
+            // --- Layer canvas ---
+            //
+            // Strokes are clipped to the cell buffer, so a layer parked off to
+            // the side of the camera still only gets a frame-sized sheet to
+            // draw on until it's expanded here.
+            ui.add_space(6.0);
+            ui.separator();
+            theme::section_header(ui, ic::FRAME_CORNERS, "Layer canvas");
+            let (cur_w, cur_h) = state.active_layer_cell_size();
+            let li = state.project.current_layer;
+            let (mut ew, mut eh) = match state.expand_cfg {
+                Some((l, w, h)) if l == li => (w, h),
+                _ => (cur_w, cur_h),
+            };
+            ui.horizontal(|ui| {
+                ui.label("W");
+                ui.add(egui::DragValue::new(&mut ew).speed(8.0).range(1..=32768));
+                ui.label("H");
+                ui.add(egui::DragValue::new(&mut eh).speed(8.0).range(1..=32768));
+            });
+            state.expand_cfg = Some((li, ew, eh));
+            ui.horizontal(|ui| {
+                for (label, mul) in [("2×", 2u32), ("3×", 3)] {
+                    if ui.small_button(label).clicked() {
+                        state.expand_cfg =
+                            Some((li, state.project.width * mul, state.project.height * mul));
+                    }
+                }
+                if ui.small_button("Frame").clicked() {
+                    state.expand_cfg = Some((li, state.project.width, state.project.height));
+                }
+            });
+            let cells = state.active_layer_cell_count().max(1);
+            let mb = (ew as u64 * eh as u64 * 4 * cells as u64) as f64 / (1024.0 * 1024.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "now {cur_w}×{cur_h} · {cells} cell(s) · resize costs {mb:.0} MB"
+                ))
+                .color(theme::TEXT_MUTED)
+                .size(10.5),
+            );
+            let changed = (ew, eh) != (cur_w, cur_h);
+            if ui
+                .add_enabled(
+                    changed,
+                    egui::Button::new(theme::icon_text(ic::ARROWS_OUT, "Resize layer canvas")),
+                )
+                .on_hover_text(
+                    "Re-pads every cell on this layer, keeping the artwork centred. Undoable.",
+                )
+                .clicked()
+            {
+                state.expand_active_layer_canvas(ew, eh);
+            }
     }
 }
 
@@ -1930,13 +2154,164 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
+    // --- Camera guide + layer bounds ---
+    //
+    // The document rect is no longer "the drawable area" — it is just where a
+    // resting camera looks. Layers can sit anywhere in doc space, so the guide
+    // is what tells the user which slab of their world the export will contain.
+    let cam = state.display_camera(cur_frame);
+    let cam_corners = layer_screen_corners(&xf, cam.as_frame_transform(), pw, ph, pw, ph);
+
+    // Faint doc-rect outline. Skipped when the bright guide would land on the
+    // exact same pixels.
     let outline_a = (state.bg_opacity * 180.0) as u8;
-    if outline_a > 0 {
+    if outline_a > 0 && !(state.show_camera_guide && cam.is_identity()) {
         painter.add(egui::Shape::closed_line(
             corners.to_vec(),
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 80, 80, outline_a)),
         ));
     }
+
+    // Active layer's cell bounds. Strokes past this edge are silently dropped
+    // by the rasterizer, so without an outline they just vanish. Only worth
+    // drawing once the layer has moved or grown away from the doc rect.
+    if state.show_layer_bounds {
+        let interesting = state
+            .project
+            .layers
+            .get(cur_layer)
+            .map(|l| {
+                (l.cell_w, l.cell_h) != (0, 0) || !state.display_transform(cur_layer, cur_frame).is_identity()
+            })
+            .unwrap_or(false);
+        let resolved = state
+            .project
+            .layers
+            .get(cur_layer)
+            .and_then(|l| l.resolve(cur_frame));
+        if interesting {
+            if let Some(c) = resolved.and_then(|id| cell_corners(cur_layer, id)) {
+                painter.add(egui::Shape::closed_line(
+                    c.to_vec(),
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 160, 220, 110)),
+                ));
+            }
+        }
+    }
+
+    if state.show_camera_guide {
+        if state.dim_outside_camera {
+            fill_outside_quad(&painter, rect, cam_corners, Color32::from_black_alpha(110));
+        }
+        let accent = if state.camera_edit {
+            Color32::from_rgb(255, 190, 90)
+        } else {
+            Color32::from_rgb(235, 235, 245)
+        };
+        // Two-tone, like the lasso preview: readable over ink and over empty
+        // canvas alike.
+        painter.add(egui::Shape::closed_line(
+            cam_corners.to_vec(),
+            Stroke::new(2.6, Color32::from_black_alpha(150)),
+        ));
+        painter.add(egui::Shape::closed_line(
+            cam_corners.to_vec(),
+            Stroke::new(1.2, accent),
+        ));
+        // Corner ticks, so the quad reads as a camera frame against busy art.
+        let edge = |a: egui::Pos2, b: egui::Pos2| (b - a).length();
+        let tick = (edge(cam_corners[0], cam_corners[1]).min(edge(cam_corners[1], cam_corners[2]))
+            * 0.08)
+            .clamp(4.0, 28.0);
+        for i in 0..4 {
+            let c = cam_corners[i];
+            for n in [cam_corners[(i + 1) % 4], cam_corners[(i + 3) % 4]] {
+                let d = n - c;
+                let len = d.length();
+                if len > 1e-3 {
+                    painter.line_segment([c, c + d / len * tick], Stroke::new(2.6, accent));
+                }
+            }
+        }
+    }
+}
+
+/// Fill everything *outside* the convex quad `inner` (TL, TR, BR, BL) with
+/// `color`, by triangulating the ring between it and a much larger outer quad.
+///
+/// The outer quad is built in the *inner quad's own frame*, not axis-aligned:
+/// the ring is only well formed while corner `i` of the outer quad stays
+/// angularly beside corner `i` of the inner one, and an axis-aligned outer
+/// loses that pairing once the camera rolls past ~45°, folding the ring
+/// segments into bowties that paint as dark diagonal bands. Sizing it along
+/// the inner quad's axes keeps the pairing exact at every roll angle.
+///
+/// It is inflated past the clip rect, so the ring always properly contains
+/// `inner` — however the camera is rotated, zoomed, or pushed off screen. The
+/// painter's own clip trims the excess, and because it is one ring (not four
+/// overlapping slabs) the corners don't double-darken.
+fn fill_outside_quad(painter: &egui::Painter, clip: Rect, inner: [egui::Pos2; 4], color: Color32) {
+    use egui::epaint::{Vertex, WHITE_UV};
+
+    let center =
+        ((inner[0].to_vec2() + inner[1].to_vec2() + inner[2].to_vec2() + inner[3].to_vec2()) / 4.0)
+            .to_pos2();
+    let (ax, ay) = (inner[1] - inner[0], inner[3] - inner[0]);
+    let (lx, ly) = (ax.length(), ay.length());
+    // A degenerate quad (zero-sized cell) has no axes to borrow; fall back to
+    // screen axes, where any pairing is as good as any other.
+    let (u, v) = if lx > 1e-3 && ly > 1e-3 {
+        (ax / lx, ay / ly)
+    } else {
+        (Vec2::X, Vec2::Y)
+    };
+
+    // Extent along those axes of everything the ring must cover.
+    let (mut min_u, mut max_u) = (f32::MAX, f32::MIN);
+    let (mut min_v, mut max_v) = (f32::MAX, f32::MIN);
+    for p in [
+        clip.left_top(),
+        clip.right_top(),
+        clip.right_bottom(),
+        clip.left_bottom(),
+    ]
+    .iter()
+    .chain(inner.iter())
+    {
+        let d = *p - center;
+        let (a, b) = (d.dot(u), d.dot(v));
+        min_u = min_u.min(a);
+        max_u = max_u.max(a);
+        min_v = min_v.min(b);
+        max_v = max_v.max(b);
+    }
+    let pad = clip.width() + clip.height() + 64.0;
+    let (min_u, max_u) = (min_u - pad, max_u + pad);
+    let (min_v, max_v) = (min_v - pad, max_v + pad);
+    // Same corner order as `inner`: (−u,−v), (+u,−v), (+u,+v), (−u,+v).
+    let c = |a: f32, b: f32| center + u * a + v * b;
+    let outer = [
+        c(min_u, min_v),
+        c(max_u, min_v),
+        c(max_u, max_v),
+        c(min_u, max_v),
+    ];
+
+    let mut mesh = egui::Mesh::default();
+    for p in outer.iter().chain(inner.iter()) {
+        mesh.vertices.push(Vertex {
+            pos: *p,
+            uv: WHITE_UV,
+            color,
+        });
+    }
+    for i in 0..4u32 {
+        let (a, b) = (i, (i + 1) % 4);
+        // outer[a] outer[b] inner[b] / outer[a] inner[b] inner[a]
+        mesh.indices
+            .extend_from_slice(&[a, b, b + 4, a, b + 4, a + 4]);
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// Canvas view transform: fit-to-window base scale combined with the user's
@@ -1959,11 +2334,31 @@ impl Xform {
         let cw = state.project.width as f32;
         let ch = state.project.height as f32;
         let base = (rect.width() / cw).min(rect.height() / ch);
-        let scale = (base * state.view.zoom).max(1e-6);
-        let (rot_sin, rot_cos) = state.view.rotation.sin_cos();
+        // "Look through camera" is not a second render path: locking the view
+        // to the camera collapses into this same (scale, rot, pan) triple,
+        // because the camera is a similarity transform like the view is. That
+        // keeps `screen_to_doc` an exact inverse, so drawing still works while
+        // locked.
+        let (scale, rotation, pan) = if state.camera_look_through {
+            let cam = state.display_camera(state.project.current_frame);
+            let s = (base * cam.zoom).max(1e-6);
+            let (sn, cs) = (-cam.rot).sin_cos();
+            let pan = Vec2::new(
+                -(cam.tx * cs - cam.ty * sn) * s,
+                -(cam.tx * sn + cam.ty * cs) * s,
+            );
+            (s, -cam.rot, pan)
+        } else {
+            (
+                (base * state.view.zoom).max(1e-6),
+                state.view.rotation,
+                state.view.pan,
+            )
+        };
+        let (rot_sin, rot_cos) = rotation.sin_cos();
         Self {
             center: rect.center(),
-            pan: state.view.pan,
+            pan,
             scale,
             rot_sin,
             rot_cos,
@@ -1980,6 +2375,15 @@ impl Xform {
         let rx = ox * self.rot_cos - oy * self.rot_sin;
         let ry = ox * self.rot_sin + oy * self.rot_cos;
         self.center + self.pan + Vec2::new(rx, ry)
+    }
+
+    /// A screen-space drag delta expressed in document pixels — the rotation
+    /// and scale part of `screen_to_doc`, without the translation.
+    fn screen_delta_to_doc(&self, d: Vec2) -> (f32, f32) {
+        (
+            (d.x * self.rot_cos + d.y * self.rot_sin) / self.scale,
+            (-d.x * self.rot_sin + d.y * self.rot_cos) / self.scale,
+        )
     }
 
     fn screen_to_doc(&self, p: egui::Pos2) -> (f32, f32) {

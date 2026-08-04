@@ -10,6 +10,7 @@ use anyhow::Result;
 use eframe::CreationContext;
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
+use crate::doc::camera::{Camera, Ease};
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
 use crate::doc::project::Project;
@@ -108,6 +109,9 @@ struct UiPrefs {
     show_panels: bool,
     show_mini_timeline: bool,
     frame_step: usize,
+    show_camera_guide: bool,
+    dim_outside_camera: bool,
+    show_layer_bounds: bool,
 }
 
 impl Default for UiPrefs {
@@ -116,6 +120,9 @@ impl Default for UiPrefs {
             show_panels: true,
             show_mini_timeline: true,
             frame_step: 1,
+            show_camera_guide: true,
+            dim_outside_camera: true,
+            show_layer_bounds: true,
         }
     }
 }
@@ -129,6 +136,7 @@ pub enum PanelId {
     Onion,
     Xsheet,
     Timeline,
+    Camera,
 }
 
 impl Default for NewProjectConfig {
@@ -287,6 +295,30 @@ pub struct AppState {
     /// buffer is only reloaded from keys when the cursor actually moves.
     xform_sync_last: Option<(usize, usize)>,
 
+    /// Camera edit mode: when on, the canvas pan/zoom/rotate gestures move the
+    /// camera instead of the canvas view. Same retarget trick as `layer_xform`.
+    pub camera_edit: bool,
+    /// True while the current drag is targeting the camera (decided at drag
+    /// start) rather than the canvas view.
+    pub nav_to_camera: bool,
+    /// Timeline snapshot captured at the start of a camera drag, so the whole
+    /// drag lands as one undo entry.
+    camera_drag_before: Option<undo::TimelineState>,
+    /// Last frame the camera edit buffer was synced for.
+    cam_sync_last: Option<usize>,
+    /// Lock the editor viewport to the camera, so what you see is the shot.
+    pub camera_look_through: bool,
+    /// Draw the camera's frame rect over the canvas.
+    pub show_camera_guide: bool,
+    /// Dim everything the camera can't see.
+    pub dim_outside_camera: bool,
+    /// Outline the active layer's cell bounds, so it's visible where a layer's
+    /// drawable buffer ends (strokes past it are silently clipped).
+    pub show_layer_bounds: bool,
+    /// Edit buffer for the "expand layer canvas" fields: `(layer, w, h)`.
+    /// `None` (or a stale layer) means prefill from the active layer's size.
+    pub expand_cfg: Option<(usize, u32, u32)>,
+
     /// Layer selected before the current one, for the "jump back" shortcut.
     /// Maintained by `track_layer_change` rather than by every site that
     /// assigns `current_layer` — there are eight of those.
@@ -425,6 +457,15 @@ impl AppState {
             nav_to_layer: false,
             layer_xform_before: None,
             xform_sync_last: None,
+            camera_edit: false,
+            nav_to_camera: false,
+            camera_drag_before: None,
+            cam_sync_last: None,
+            camera_look_through: false,
+            show_camera_guide: prefs.show_camera_guide,
+            dim_outside_camera: prefs.dim_outside_camera,
+            show_layer_bounds: prefs.show_layer_bounds,
+            expand_cfg: None,
             prev_layer: None,
             layer_watch: (0, 1),
             tracker_two_points: false,
@@ -503,6 +544,14 @@ impl AppState {
         self.nav_to_layer = false;
         self.layer_xform_before = None;
         self.xform_sync_last = None;
+        // Camera guide / dim / bounds are view preferences, kept like the panel
+        // toggles above; only the transient edit + lock modes reset.
+        self.camera_edit = false;
+        self.nav_to_camera = false;
+        self.camera_drag_before = None;
+        self.cam_sync_last = None;
+        self.camera_look_through = false;
+        self.expand_cfg = None;
         self.prev_layer = None;
         self.layer_watch = (self.project.current_layer, self.project.layers.len());
         self.tracker_pending_b = None;
@@ -683,15 +732,42 @@ impl AppState {
         };
         bake_frames.retain(|&f| f < p.frame_count);
 
+        // Off-frame artwork is a first-class thing now (see `doc::camera`), so
+        // the baked cell has to be big enough to hold both layers wherever they
+        // sit — baking into the doc rect would silently crop a layer parked
+        // outside the camera. The bake is placed with an identity transform, so
+        // it stays centred on the doc centre and only a half-extent is needed.
+        let (pwf, phf) = (pw as f32, ph as f32);
+        let (mut hx, mut hy) = (pwf * 0.5, phf * 0.5);
+        for l in [top, below] {
+            for &f in &bake_frames {
+                let Some(id) = l.resolve(f) else { continue };
+                let Some(src) = p.cell(id) else { continue };
+                let t = l.resolve_transform(f);
+                let (cw, ch) = (src.width as f32, src.height as f32);
+                for (u, v) in [(0.0, 0.0), (cw, 0.0), (cw, ch), (0.0, ch)] {
+                    let (x, y) = t.cell_to_doc(u, v, cw, ch, pwf, phf);
+                    hx = hx.max((x - pwf * 0.5).abs());
+                    hy = hy.max((y - phf * 0.5).abs());
+                }
+            }
+        }
+        let cap = self.max_tex as f32 * 0.5;
+        let bw = ((hx.min(cap).ceil() as u32) * 2).max(pw);
+        let bh = ((hy.min(cap).ceil() as u32) * 2).max(ph);
+
         let baked: Vec<(usize, Canvas)> = bake_frames
             .into_iter()
             .map(|f| {
-                let mut out = Canvas::new(pw, ph);
+                let mut out = Canvas::new(bw, bh);
                 for l in [below, top] {
                     let Some(id) = l.resolve(f) else { continue };
                     let Some(src) = p.cell(id) else { continue };
                     let xform = l.resolve_transform(f);
-                    crate::io::composite::composite_layer(&mut out, src, &xform, l.opacity, pw, ph);
+                    // Passing the *baked* size as the doc size keeps the
+                    // transform maths centred on the same point, since the
+                    // baked cell is itself centred on the doc.
+                    crate::io::composite::composite_layer(&mut out, src, &xform, l.opacity, bw, bh);
                 }
                 (f, out)
             })
@@ -704,6 +780,10 @@ impl AppState {
             merged.transform = Transform::default();
             merged.transform_keys.clear();
             merged.opacity = 1.0;
+            // Keep future keys on the merged layer the same size as the bake,
+            // or the next blank key would shrink back to the doc rect.
+            merged.cell_w = bw;
+            merged.cell_h = bh;
             for (f, canvas) in baked {
                 let id = p.cells.len();
                 p.cells.push(canvas);
@@ -1020,6 +1100,151 @@ impl AppState {
                 l.transform = l.resolve_transform(f);
             }
         });
+    }
+
+    // --- Camera ---
+
+    /// The camera to draw the guide with: the live edit buffer on the current
+    /// frame (so panel edits and drags show immediately), resolved from the
+    /// keys everywhere else. Mirrors `display_transform`.
+    pub fn display_camera(&self, frame: usize) -> Camera {
+        if frame == self.project.current_frame {
+            self.project.camera
+        } else {
+            self.project.resolve_camera(frame)
+        }
+    }
+
+    /// Keep the camera edit buffer in sync with its keyed value as the frame
+    /// cursor moves. Same contract as `sync_active_transform_buffer`: only on
+    /// an actual frame change, never mid-drag, and never when there are no keys
+    /// (then the buffer *is* the value).
+    fn sync_camera_buffer(&mut self) {
+        if self.nav_to_camera {
+            return;
+        }
+        let f = self.project.current_frame;
+        if self.cam_sync_last == Some(f) {
+            return;
+        }
+        self.cam_sync_last = Some(f);
+        if !self.project.camera_keys.is_empty() {
+            self.project.camera = self.project.resolve_camera(f);
+        }
+    }
+
+    /// Snapshot timeline state at the start of a camera drag.
+    pub fn begin_camera_drag(&mut self) {
+        self.camera_drag_before = Some(undo::TimelineState::capture(&self.project));
+    }
+
+    /// Push a single undo entry for a completed camera drag.
+    pub fn commit_camera_drag(&mut self) {
+        if let Some(before) = self.camera_drag_before.take() {
+            let after = undo::TimelineState::capture(&self.project);
+            self.history.push(undo::Command::Structural {
+                before,
+                after,
+                cell_pixels: Vec::new(),
+            });
+        }
+    }
+
+    /// Move the camera by a document-space delta. The guide rect follows the
+    /// cursor, so dragging right shows what is to the right.
+    pub fn apply_camera_pan(&mut self, dx: f32, dy: f32) {
+        self.project.camera.tx += dx;
+        self.project.camera.ty += dy;
+    }
+
+    /// Push the camera in/out by `factor` (multiplicative).
+    pub fn apply_camera_zoom(&mut self, factor: f32) {
+        self.project.camera.zoom = (self.project.camera.zoom * factor).clamp(0.05, 64.0);
+    }
+
+    /// Roll the camera by `d` radians.
+    pub fn apply_camera_rotate(&mut self, d: f32) {
+        self.project.camera.rot += d;
+    }
+
+    /// Reset the camera to identity — frame rect back on the document rect.
+    /// Undoable.
+    pub fn reset_camera(&mut self) {
+        self.structural_edit(false, |p| p.camera = Camera::default());
+    }
+
+    /// Add (or replace) a camera key at the current frame from the live camera.
+    /// Undoable.
+    pub fn add_camera_key(&mut self) {
+        self.structural_edit(false, |p| {
+            let f = p.current_frame;
+            let cam = p.camera;
+            p.set_camera_key(f, cam);
+        });
+    }
+
+    /// Delete the camera key at the current frame (if any). Undoable.
+    pub fn delete_camera_key(&mut self) {
+        if !self.project.has_camera_key(self.project.current_frame) {
+            return;
+        }
+        self.structural_edit(false, |p| {
+            let f = p.current_frame;
+            p.delete_camera_key(f);
+            // Keep the live buffer consistent with the new resolved value.
+            p.camera = p.resolve_camera(f);
+        });
+    }
+
+    /// Set the easing of the camera key on the current frame. Undoable.
+    pub fn set_camera_key_ease(&mut self, ease: Ease) {
+        let f = self.project.current_frame;
+        self.structural_edit(false, |p| {
+            if let Some(k) = p.camera_keys.iter_mut().find(|k| k.frame == f) {
+                k.ease = ease;
+            }
+        });
+    }
+
+    /// Cell size the active layer draws into, and how many cells a resize would
+    /// touch — the Layers panel shows both so the memory cost is visible.
+    pub fn active_layer_cell_size(&self) -> (u32, u32) {
+        self.project
+            .layers
+            .get(self.project.current_layer)
+            .map(|l| l.cell_size(self.project.width, self.project.height))
+            .unwrap_or((self.project.width, self.project.height))
+    }
+
+    pub fn active_layer_cell_count(&self) -> usize {
+        self.project.layer_cell_ids(self.project.current_layer).len()
+    }
+
+    /// Grow the active layer's drawable buffer, so its artwork can extend past
+    /// what the camera sees. Undoable.
+    pub fn expand_active_layer_canvas(&mut self, w: u32, h: u32) {
+        if self.active_layer_locked() {
+            return;
+        }
+        let layer = self.project.current_layer;
+        let before_size = self.active_layer_cell_size();
+        if (w, h) == before_size {
+            return;
+        }
+        let before: Vec<(CellId, Canvas)> = self
+            .project
+            .layer_cell_ids(layer)
+            .into_iter()
+            .filter_map(|id| self.project.cell(id).map(|c| (id, c.clone())))
+            .collect();
+        self.project.expand_layer_canvas(layer, w, h);
+        self.history.push(undo::Command::LayerCanvasResize {
+            layer,
+            before_size,
+            after_size: (w, h),
+            before,
+        });
+        self.mark_all_dirty();
     }
 
     // --- Tracker / stabilization ---
@@ -1443,9 +1668,19 @@ impl AppState {
             let Some(c) = self.project.cell(id) else {
                 continue;
             };
-            let image = premultiplied_image([c.width as usize, c.height as usize], &c.pixels);
-            if let Some(tex) = self.cell_textures.get_mut(&id) {
-                tex.set(image, TextureOptions::LINEAR);
+            let dims = [c.width as usize, c.height as usize];
+            let image = premultiplied_image(dims, &c.pixels);
+            // Expanding a layer's canvas resizes cells under their textures, so
+            // only reuse a handle whose dimensions still match; otherwise
+            // allocate a fresh one.
+            let reusable = self
+                .cell_textures
+                .get(&id)
+                .is_some_and(|t| t.size() == dims);
+            if reusable {
+                if let Some(tex) = self.cell_textures.get_mut(&id) {
+                    tex.set(image, TextureOptions::LINEAR);
+                }
             } else {
                 let tex = ctx.load_texture(format!("cell_{id}"), image, TextureOptions::LINEAR);
                 self.cell_textures.insert(id, tex);
@@ -1959,6 +2194,17 @@ impl AppState {
             Action::LayerTransformToggle => self.layer_xform = !self.layer_xform,
             Action::TransformKeyAdd => self.add_transform_key(),
             Action::TransformKeyDelete => self.delete_transform_key(),
+            Action::CameraEditToggle => {
+                self.camera_edit = !self.camera_edit;
+                // The two retarget modes claim the same drag gestures, so only
+                // one can be live at a time.
+                if self.camera_edit {
+                    self.layer_xform = false;
+                }
+            }
+            Action::CameraKeyAdd => self.add_camera_key(),
+            Action::CameraKeyDelete => self.delete_camera_key(),
+            Action::CameraLookThrough => self.camera_look_through = !self.camera_look_through,
         }
     }
 
@@ -2030,6 +2276,12 @@ impl AppState {
         self.view = View::default();
         self.nav_drag = None;
         self.playback = Playback::default();
+        // The loaded project brings its own camera and layer poses; drop the
+        // caches that decide when to reload the live edit buffers.
+        self.xform_sync_last = None;
+        self.cam_sync_last = None;
+        self.nav_to_camera = false;
+        self.camera_drag_before = None;
     }
 
     pub fn undo(&mut self) {
@@ -2061,6 +2313,9 @@ impl eframe::App for AppState {
                 show_panels: self.show_panels,
                 show_mini_timeline: self.show_mini_timeline,
                 frame_step: self.frame_step,
+                show_camera_guide: self.show_camera_guide,
+                dim_outside_camera: self.dim_outside_camera,
+                show_layer_bounds: self.show_layer_bounds,
             },
         );
     }
@@ -2244,6 +2499,7 @@ impl eframe::App for AppState {
 
         // Keep the active layer's transform edit buffer synced while scrubbing.
         self.sync_active_transform_buffer();
+        self.sync_camera_buffer();
 
         // Advance background import jobs / preview fetches without blocking.
         self.poll_bg_jobs();

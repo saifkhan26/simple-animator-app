@@ -48,10 +48,17 @@ pub struct Layer {
     pub lines_from: Option<usize>,
     /// Per-frame stabilization tracking samples, parallel to `exposures`.
     /// Empty vec = tracker unused on this layer. Project frame edits keep the
-    /// indices aligned with `exposures`. Must stay the LAST field: the `.anim`
-    /// format (postcard) is positional.
+    /// indices aligned with `exposures`.
     #[serde(default)]
     pub track_points: Vec<TrackSample>,
+    /// Cell buffer size for this layer's drawings. `0` = use the project frame
+    /// size. Larger than the frame lets a single layer's artwork extend past
+    /// what the camera sees. Must stay the LAST fields: the `.anim` format
+    /// (postcard) is positional.
+    #[serde(default)]
+    pub cell_w: u32,
+    #[serde(default)]
+    pub cell_h: u32,
 }
 
 impl Layer {
@@ -67,7 +74,18 @@ impl Layer {
             transform_keys: Vec::new(),
             lines_from: None,
             track_points: Vec::new(),
+            cell_w: 0,
+            cell_h: 0,
         }
+    }
+
+    /// Size of the cells this layer draws into: its own override, or the
+    /// project frame size when unset.
+    pub fn cell_size(&self, pw: u32, ph: u32) -> (u32, u32) {
+        (
+            if self.cell_w == 0 { pw } else { self.cell_w },
+            if self.cell_h == 0 { ph } else { self.cell_h },
+        )
     }
 
     /// Keep `track_points` index-aligned with `exposures` after a frame is

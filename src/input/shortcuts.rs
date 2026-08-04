@@ -63,6 +63,11 @@ pub enum Action {
     LayerTransformToggle,
     TransformKeyAdd,
     TransformKeyDelete,
+    // Camera.
+    CameraEditToggle,
+    CameraKeyAdd,
+    CameraKeyDelete,
+    CameraLookThrough,
 }
 
 impl Action {
@@ -110,6 +115,10 @@ impl Action {
         Action::LayerTransformToggle,
         Action::TransformKeyAdd,
         Action::TransformKeyDelete,
+        Action::CameraEditToggle,
+        Action::CameraKeyAdd,
+        Action::CameraKeyDelete,
+        Action::CameraLookThrough,
     ];
 
     pub fn label(self) -> &'static str {
@@ -158,6 +167,10 @@ impl Action {
             Action::LayerTransformToggle => "Layer transform mode",
             Action::TransformKeyAdd => "Add transform key",
             Action::TransformKeyDelete => "Delete transform key",
+            Action::CameraEditToggle => "Camera edit mode",
+            Action::CameraKeyAdd => "Add camera key",
+            Action::CameraKeyDelete => "Delete camera key",
+            Action::CameraLookThrough => "Look through camera",
         }
     }
 }
@@ -388,6 +401,12 @@ impl Default for ShortcutMap {
         b.insert(Action::LayerTransformToggle, KeyCombo::plain(K::B));
         b.insert(Action::TransformKeyAdd, KeyCombo::plain(K::K));
         b.insert(Action::TransformKeyDelete, KeyCombo::shift(K::K));
+        // Camera — shifted/ctrl'd siblings of the layer-transform binds above,
+        // since the left cluster has no plain keys left.
+        b.insert(Action::CameraEditToggle, KeyCombo::shift(K::B));
+        b.insert(Action::CameraKeyAdd, KeyCombo::ctrl(K::K));
+        b.insert(Action::CameraKeyDelete, KeyCombo::ctrl_shift(K::K));
+        b.insert(Action::CameraLookThrough, KeyCombo::shift(K::V));
         Self { bindings: b }
     }
 }
