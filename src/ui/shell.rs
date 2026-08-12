@@ -192,7 +192,22 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             state.view.pan += resp.drag_delta();
                         }
                         Some(NavKind::Rotate) => {
-                            state.view.rotation += resp.drag_delta().x * 0.01;
+                            let dx = resp.drag_delta().x;
+                            if dx.abs() > 0.0 {
+                                // Anchor rotation on the viewport center, so the
+                                // doc point in the middle of the window holds
+                                // still. Without the correction the pivot is the
+                                // *document* center — invisible at fit zoom, but
+                                // it swings the canvas off-screen once you are
+                                // zoomed in and panned away from it.
+                                let anchor = canvas_rect.center();
+                                let before =
+                                    Xform::new(state, canvas_rect).screen_to_doc(anchor);
+                                state.view.rotation += dx * 0.01;
+                                let after =
+                                    Xform::new(state, canvas_rect).doc_to_screen(before.0, before.1);
+                                state.view.pan += anchor - after;
+                            }
                         }
                         Some(NavKind::Zoom) => {
                             let dy = resp.drag_delta().y;
@@ -962,6 +977,7 @@ fn tool_name(tool: ActiveTool) -> &'static str {
 fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
     let n = state.project.frame_count.max(1);
     let cur = state.project.current_frame;
+    let (layer_keys, camera_keys) = key_flags(state, n);
     let dot_step = 14.0;
     let height = 16.0;
     let view_w = 320.0_f32;
@@ -985,6 +1001,17 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
                     let in_loop = i >= state.project.loop_start && i < state.project.loop_end;
                     let col = if in_loop { theme::TEXT_MUTED } else { theme::BG_HOVER };
                     painter.circle_filled(center, 2.6, col);
+                }
+                // Keyed frames get a tick under the dot — same two channels and
+                // colours as the full frame strip.
+                let ty = rect.max.y - 1.5;
+                if layer_keys[i] {
+                    let x = center.x - if camera_keys[i] { 2.5 } else { 0.0 };
+                    painter.circle_filled(egui::pos2(x, ty), 1.5, KEY_LAYER);
+                }
+                if camera_keys[i] {
+                    let x = center.x + if layer_keys[i] { 2.5 } else { 0.0 };
+                    painter.circle_filled(egui::pos2(x, ty), 1.5, KEY_CAMERA);
                 }
             }
 
@@ -1011,9 +1038,40 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
         });
 }
 
+/// Marker colour for active-layer transform keys — same blue as the layer
+/// bounds outline on the canvas.
+const KEY_LAYER: Color32 = Color32::from_rgb(120, 160, 220);
+/// Marker colour for camera keys — same amber as the camera-edit guide.
+const KEY_CAMERA: Color32 = Color32::from_rgb(255, 190, 90);
+
+/// Per-frame "is there a key here" flags for the active layer's transform and
+/// for the camera, as two `n`-long tables.
+///
+/// Built once per timeline widget rather than probed inside the draw loop:
+/// `has_transform_key` is a linear scan, so asking it per frame is quadratic on
+/// a long scene.
+fn key_flags(state: &AppState, n: usize) -> (Vec<bool>, Vec<bool>) {
+    let mut layer = vec![false; n];
+    let mut camera = vec![false; n];
+    if let Some(l) = state.project.layers.get(state.project.current_layer) {
+        for k in &l.transform_keys {
+            if k.frame < n {
+                layer[k.frame] = true;
+            }
+        }
+    }
+    for k in &state.project.camera_keys {
+        if k.frame < n {
+            camera[k.frame] = true;
+        }
+    }
+    (layer, camera)
+}
+
 fn frame_strip(state: &mut AppState, ui: &mut egui::Ui) {
     let n = state.project.frame_count.max(1);
     let cur = state.project.current_frame;
+    let (layer_keys, camera_keys) = key_flags(state, n);
     let height = 26.0;
     // Fill the panel while frames fit; clamp so cells never squeeze below a
     // readable width — the strip scrolls instead.
@@ -1053,6 +1111,16 @@ fn frame_strip(state: &mut AppState, ui: &mut egui::Ui) {
                         egui::FontId::monospace(10.0),
                         txt_color,
                     );
+                }
+                // Keyframe markers: layer transform bottom-left, camera
+                // bottom-right. Without these the only sign a frame is keyed is
+                // a text count in the panels.
+                let y = r.max.y - 4.0;
+                if layer_keys[i] {
+                    painter.circle_filled(egui::pos2(r.min.x + 5.0, y), 2.0, KEY_LAYER);
+                }
+                if camera_keys[i] {
+                    painter.circle_filled(egui::pos2(r.max.x - 5.0, y), 2.0, KEY_CAMERA);
                 }
             }
 
@@ -1465,6 +1533,38 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 );
             }
 
+            // Ease of the key on this frame, same contract as the camera's: it
+            // shapes the segment running *from* this key to the next.
+            let here = state
+                .project
+                .layers
+                .get(li)
+                .map(|l| l.has_transform_key(cf))
+                .unwrap_or(false);
+            let mut ease = state
+                .project
+                .layers
+                .get(li)
+                .and_then(|l| l.transform_keys.iter().find(|k| k.frame == cf))
+                .map(|k| k.ease)
+                .unwrap_or_default();
+            ui.add_enabled_ui(here, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Ease out of key");
+                    let mut changed = false;
+                    egui::ComboBox::from_id_salt("layer_ease")
+                        .selected_text(ease.label())
+                        .show_ui(ui, |ui| {
+                            for e in Ease::ALL {
+                                changed |= ui.selectable_value(&mut ease, e, e.label()).changed();
+                            }
+                        });
+                    if changed {
+                        state.set_transform_key_ease(ease);
+                    }
+                });
+            });
+
             ui.horizontal(|ui| {
                 let add = combo_text(state, Action::TransformKeyAdd);
                 if ui
@@ -1612,6 +1712,14 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                                     let label = match cell {
                                         Some(id) => format!("{id}"),
                                         None => "·".to_string(),
+                                    };
+                                    // The sheet is frames × layers, so unlike the
+                                    // frame strip it can show every layer's
+                                    // transform keys, not just the active one.
+                                    let label = if state.project.layers[li].has_transform_key(f) {
+                                        format!("{label} ◆")
+                                    } else {
+                                        label
                                     };
                                     let selected = active_f && active_l;
                                     let resp = ui.selectable_label(selected, label);
@@ -2606,21 +2714,15 @@ fn canvas_to_doc_mapping(state: &AppState, rect: Rect) -> impl Fn(egui::Pos2) ->
 
 /// Map a document point to the active layer's cell-local pixel space, inverting
 /// the layer transform so drawing lands correctly on moved/scaled/rotated
-/// layers. Falls back to project size when the frame has no cell yet.
+/// layers. Sizes through `Project::draw_cell_size`, so an unkeyed frame maps
+/// into the cell that is about to be allocated rather than a frame-sized one.
 fn doc_to_active_cell(state: &AppState, doc: (f32, f32)) -> (f32, f32) {
     let li = state.project.current_layer;
     let f = state.project.current_frame;
     let t = state.display_transform(li, f);
-    let (cw, ch) = state
-        .project
-        .layers
-        .get(li)
-        .and_then(|l| l.resolve(f))
-        .and_then(|id| state.project.cell(id))
-        .map(|c| (c.width as f32, c.height as f32))
-        .unwrap_or((state.project.width as f32, state.project.height as f32));
+    let (cw, ch) = state.project.draw_cell_size(li, f);
     let (pw, ph) = (state.project.width as f32, state.project.height as f32);
-    t.doc_to_cell(doc.0, doc.1, cw, ch, pw, ph)
+    t.doc_to_cell(doc.0, doc.1, cw as f32, ch as f32, pw, ph)
 }
 
 /// Small floating menu strip: File / Edit menus + a panel-visibility toggle.

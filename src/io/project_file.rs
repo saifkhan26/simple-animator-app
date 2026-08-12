@@ -16,7 +16,8 @@ const MAGIC: &[u8; 4] = b"ANIM";
 // v3 appends per-layer stabilization `track_points`; v2 files are migrated via
 // the mirror structs in `crate::io::legacy`.
 // v4 appends the project camera + camera keys, and the per-layer cell size.
-const VERSION: u32 = 4;
+// v5 appends `ease` to each layer transform key, matching camera keys.
+const VERSION: u32 = 5;
 const EXT: &str = "anim";
 
 /// Encode a project into the on-disk byte layout: `MAGIC | version_le | postcard`.
@@ -37,7 +38,10 @@ fn decode(bytes: &[u8]) -> Result<Project> {
     let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let body = &bytes[8..];
     let project: Project = match version {
-        4 => postcard::from_bytes(body).context("parsing project body")?,
+        5 => postcard::from_bytes(body).context("parsing project body")?,
+        4 => postcard::from_bytes::<crate::io::legacy::ProjectV4>(body)
+            .context("parsing v4 project body")?
+            .into(),
         3 => postcard::from_bytes::<crate::io::legacy::ProjectV3>(body)
             .context("parsing v3 project body")?
             .into(),
@@ -52,7 +56,9 @@ fn decode(bytes: &[u8]) -> Result<Project> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::legacy::{LayerV2, LayerV3, ProjectV2, ProjectV3};
+    use crate::io::legacy::{
+        LayerV2, LayerV3, LayerV4, ProjectV2, ProjectV3, ProjectV4, TransformKeyV4,
+    };
 
     /// A v2-era file (no `track_points`) must decode and migrate cleanly.
     #[test]
@@ -134,9 +140,71 @@ mod tests {
         assert_eq!((p.layers[0].cell_w, p.layers[0].cell_h), (0, 0));
     }
 
+    /// A v4-era file (transform keys without `ease`) must decode with its keys
+    /// intact and default to Linear, which reproduces v4 playback exactly.
+    #[test]
+    fn decodes_v4_project() {
+        let cam = crate::doc::camera::Camera {
+            tx: 7.0,
+            ty: 0.0,
+            zoom: 2.0,
+            rot: 0.0,
+        };
+        let v4 = ProjectV4 {
+            width: 4,
+            height: 3,
+            fps: 12.0,
+            cells: vec![crate::doc::canvas::Canvas::new(8, 6)],
+            layers: vec![LayerV4 {
+                name: "L1".into(),
+                opacity: 1.0,
+                visible: true,
+                locked: false,
+                reference: false,
+                exposures: vec![Some(0), None],
+                transform: Default::default(),
+                transform_keys: vec![TransformKeyV4 {
+                    frame: 1,
+                    transform: crate::doc::transform::Transform {
+                        tx: 12.0,
+                        ty: 0.0,
+                        scale: 2.0,
+                        rot: 0.0,
+                    },
+                }],
+                track_points: Vec::new(),
+                cell_w: 8,
+                cell_h: 6,
+            }],
+            frame_count: 2,
+            current_frame: 0,
+            current_layer: 0,
+            loop_start: 0,
+            loop_end: 2,
+            camera: cam,
+            camera_keys: Vec::new(),
+        };
+        let body = postcard::to_stdvec(&v4).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&body);
+
+        let p = decode(&bytes).expect("v4 decode");
+        assert_eq!((p.layers[0].cell_w, p.layers[0].cell_h), (8, 6));
+        assert_eq!(p.layers[0].transform_keys.len(), 1);
+        assert_eq!(p.layers[0].transform_keys[0].transform.tx, 12.0);
+        assert_eq!(
+            p.layers[0].transform_keys[0].ease,
+            crate::doc::transform::Ease::Linear
+        );
+        // The camera landed in v4, so it must survive rather than reset.
+        assert_eq!(p.camera, cam);
+    }
+
     /// Current-version round trip through encode/decode.
     #[test]
-    fn round_trips_v4_project() {
+    fn round_trips_v5_project() {
         let mut p = Project::new(4, 3, 12.0);
         p.layers[0].track_points = vec![crate::doc::layer::TrackSample {
             a: Some([1.0, 2.0]),
@@ -155,14 +223,20 @@ mod tests {
             camera: p.camera,
             ease: crate::doc::camera::Ease::Both,
         }];
+        p.layers[0].set_transform_key(2, Default::default());
+        p.layers[0].set_transform_key_ease(2, crate::doc::transform::Ease::Out);
         let bytes = encode(&p).unwrap();
-        let q = decode(&bytes).expect("v4 decode");
+        let q = decode(&bytes).expect("v5 decode");
         assert_eq!(q.layers[0].track_points.len(), 1);
         assert_eq!(q.layers[0].track_points[0].a, Some([1.0, 2.0]));
         assert_eq!((q.layers[0].cell_w, q.layers[0].cell_h), (8, 6));
         assert_eq!(q.camera, p.camera);
         assert_eq!(q.camera_keys.len(), 1);
         assert_eq!(q.camera_keys[0].ease, crate::doc::camera::Ease::Both);
+        assert_eq!(
+            q.layers[0].transform_keys[0].ease,
+            crate::doc::transform::Ease::Out
+        );
     }
 }
 

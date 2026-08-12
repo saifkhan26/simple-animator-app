@@ -10,7 +10,7 @@
 
 pub type CellId = usize;
 
-use crate::doc::transform::{Transform, TransformKey};
+use crate::doc::transform::{Ease, Transform, TransformKey};
 
 /// One frame's stabilization tracking points, in document space.
 /// `a` is the primary point (translation); `b` is optional and enables
@@ -110,8 +110,8 @@ impl Layer {
     }
 
     /// The transform shown on `frame`: the static `transform` when there are no
-    /// keys, otherwise the piecewise-linear interpolation of the keys (held flat
-    /// before the first and after the last key).
+    /// keys, otherwise the eased interpolation of the keys (held flat before the
+    /// first and after the last key). Mirrors `Camera::resolve`.
     pub fn resolve_transform(&self, frame: usize) -> Transform {
         let keys = &self.transform_keys;
         if keys.is_empty() {
@@ -129,7 +129,7 @@ impl Layer {
             let (a, b) = (w[0], w[1]);
             if frame >= a.frame && frame <= b.frame {
                 let span = (b.frame - a.frame).max(1) as f32;
-                let t = (frame - a.frame) as f32 / span;
+                let t = a.ease.apply((frame - a.frame) as f32 / span);
                 return Transform::lerp(a.transform, b.transform, t);
             }
         }
@@ -140,14 +140,27 @@ impl Layer {
         self.transform_keys.iter().any(|k| k.frame == frame)
     }
 
-    /// Insert (or replace) a transform key at `frame`, keeping keys sorted.
+    /// Insert (or replace) a transform key at `frame`, keeping keys sorted. A
+    /// replaced key keeps its existing ease.
     pub fn set_transform_key(&mut self, frame: usize, transform: Transform) {
         match self.transform_keys.iter_mut().find(|k| k.frame == frame) {
             Some(k) => k.transform = transform,
             None => {
-                self.transform_keys.push(TransformKey { frame, transform });
+                self.transform_keys.push(TransformKey {
+                    frame,
+                    transform,
+                    ease: Ease::default(),
+                });
                 self.transform_keys.sort_by_key(|k| k.frame);
             }
+        }
+    }
+
+    /// Set the ease on the key at `frame`, if there is one. No-op otherwise —
+    /// ease belongs to a key, not to a bare frame.
+    pub fn set_transform_key_ease(&mut self, frame: usize, ease: Ease) {
+        if let Some(k) = self.transform_keys.iter_mut().find(|k| k.frame == frame) {
+            k.ease = ease;
         }
     }
 
@@ -180,5 +193,66 @@ impl Layer {
         if frame < self.exposures.len() {
             self.exposures[frame] = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keyed(a: Transform, b: Transform, ease: Ease) -> Layer {
+        let mut l = Layer::new("L", 11);
+        l.set_transform_key(0, a);
+        l.set_transform_key(10, b);
+        l.set_transform_key_ease(0, ease);
+        l
+    }
+
+    /// The scroll case: two keys, linear ease, even movement in between.
+    #[test]
+    fn resolve_transform_interpolates_linearly_by_default() {
+        let b = Transform {
+            tx: 100.0,
+            ..Default::default()
+        };
+        let l = keyed(Transform::default(), b, Ease::Linear);
+        assert!((l.resolve_transform(5).tx - 50.0).abs() < 1e-4);
+        // Held flat outside the key range.
+        assert!((l.resolve_transform(0).tx).abs() < 1e-6);
+        assert!((l.resolve_transform(99).tx - 100.0).abs() < 1e-6);
+    }
+
+    /// Ease shapes the segment running *out of* the key it sits on.
+    #[test]
+    fn resolve_transform_applies_ease_of_the_left_key() {
+        let b = Transform {
+            tx: 100.0,
+            ..Default::default()
+        };
+        let slow_start = keyed(Transform::default(), b, Ease::In).resolve_transform(5);
+        let linear = keyed(Transform::default(), b, Ease::Linear).resolve_transform(5);
+        let fast_start = keyed(Transform::default(), b, Ease::Out).resolve_transform(5);
+        assert!(slow_start.tx < linear.tx, "ease-in should lag at midpoint");
+        assert!(fast_start.tx > linear.tx, "ease-out should lead at midpoint");
+        // Endpoints are unaffected by easing.
+        assert!((keyed(Transform::default(), b, Ease::Both).resolve_transform(10).tx - 100.0).abs() < 1e-4);
+    }
+
+    /// Replacing a key keeps the ease already set on it — re-posing a keyframe
+    /// shouldn't silently reset its timing.
+    #[test]
+    fn set_transform_key_preserves_ease() {
+        let mut l = Layer::new("L", 4);
+        l.set_transform_key(1, Transform::default());
+        l.set_transform_key_ease(1, Ease::Both);
+        l.set_transform_key(
+            1,
+            Transform {
+                tx: 9.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(l.transform_keys[0].ease, Ease::Both);
+        assert_eq!(l.transform_keys[0].transform.tx, 9.0);
     }
 }

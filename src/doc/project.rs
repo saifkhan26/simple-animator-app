@@ -112,6 +112,23 @@ impl Project {
         self.cells.len() - 1
     }
 
+    /// Pixel size of the buffer a stroke on `(layer, frame)` will land in: the
+    /// resolved cell's own size, or — when the slot has no cell yet — the size
+    /// [`Project::alloc_cell_for`] is about to create.
+    ///
+    /// Input mapping must agree with allocation. When it didn't, the first
+    /// stroke on a fresh oversized layer was mapped as if the cell were frame
+    /// sized and then painted into a bigger one, landing offset by half the pad.
+    pub fn draw_cell_size(&self, layer: usize, frame: usize) -> (u32, u32) {
+        let Some(l) = self.layers.get(layer) else {
+            return (self.width, self.height);
+        };
+        l.resolve(frame)
+            .and_then(|id| self.cell(id))
+            .map(|c| (c.width, c.height))
+            .unwrap_or_else(|| l.cell_size(self.width, self.height))
+    }
+
     /// Resolved cell id for the currently active (layer, frame).
     pub fn resolved_current(&self) -> Option<CellId> {
         self.layers
@@ -441,6 +458,28 @@ mod tests {
         assert_eq!((at(1, 1), at(2, 1), at(1, 2), at(2, 2)), (1, 2, 3, 4));
         assert_eq!(at(0, 0), 0, "pad is transparent");
         assert_eq!(out.pixels.len(), 4 * 4 * 4);
+    }
+
+    /// Input mapping sizes an unkeyed slot by the layer's own cell size, not
+    /// the frame size — otherwise the first stroke on a fresh oversized layer
+    /// is mapped for one buffer and painted into a bigger one.
+    #[test]
+    fn draw_cell_size_matches_what_alloc_will_create() {
+        let mut p = Project::new(100, 50, 12.0);
+        p.add_layer();
+        let li = p.current_layer;
+        p.expand_layer_canvas(li, 400, 50);
+        // Nothing drawn yet: no cell exists on this slot.
+        assert!(p.layers[li].resolve(p.current_frame).is_none());
+        assert_eq!(p.draw_cell_size(li, p.current_frame), (400, 50));
+
+        // Once the cell exists, its real size wins.
+        let id = p.ensure_active_cell();
+        assert_eq!((p.cells[id].width, p.cells[id].height), (400, 50));
+        assert_eq!(p.draw_cell_size(li, p.current_frame), (400, 50));
+
+        // A layer with no override still reports the frame size.
+        assert_eq!(p.draw_cell_size(0, 0), (100, 50));
     }
 
     /// Shrinking crops around the center rather than panicking on the copy.

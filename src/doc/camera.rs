@@ -33,42 +33,9 @@ impl Default for Camera {
     }
 }
 
-/// Timing curve for the segment that *starts* at a given key.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Ease {
-    #[default]
-    Linear,
-    /// Slow out of the key, full speed into the next.
-    In,
-    /// Full speed out of the key, slow into the next.
-    Out,
-    /// Slow at both ends (smoothstep) — the usual look for a camera move.
-    Both,
-}
-
-impl Ease {
-    pub const ALL: [Ease; 4] = [Ease::Linear, Ease::In, Ease::Out, Ease::Both];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Ease::Linear => "Linear",
-            Ease::In => "Ease in",
-            Ease::Out => "Ease out",
-            Ease::Both => "Ease both",
-        }
-    }
-
-    /// Remap normalised segment time.
-    pub fn apply(self, t: f32) -> f32 {
-        let t = t.clamp(0.0, 1.0);
-        match self {
-            Ease::Linear => t,
-            Ease::In => t * t,
-            Ease::Out => t * (2.0 - t),
-            Ease::Both => t * t * (3.0 - 2.0 * t),
-        }
-    }
-}
+/// `Ease` now lives with the transform keys it is also used by. Re-exported
+/// here so `crate::doc::camera::Ease` keeps resolving.
+pub use crate::doc::transform::Ease;
 
 /// A camera keyframe. `ease` shapes the segment running from this key to the
 /// *next* one; it is ignored on the last key.

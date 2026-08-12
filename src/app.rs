@@ -1079,6 +1079,20 @@ impl AppState {
         });
     }
 
+    /// Set the easing of the active layer's transform key on the current frame.
+    /// Undoable. Mirrors [`AppState::set_camera_key_ease`].
+    pub fn set_transform_key_ease(&mut self, ease: Ease) {
+        if self.active_layer_locked() {
+            return;
+        }
+        self.structural_edit(false, |p| {
+            let (li, f) = (p.current_layer, p.current_frame);
+            if let Some(l) = p.layers.get_mut(li) {
+                l.set_transform_key_ease(f, ease);
+            }
+        });
+    }
+
     /// Delete the transform key at the current frame (if any). Undoable.
     pub fn delete_transform_key(&mut self) {
         let (li, f) = (self.project.current_layer, self.project.current_frame);
