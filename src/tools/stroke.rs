@@ -37,11 +37,21 @@ pub struct StrokeBuilder {
     smooth_pos: Option<(f32, f32)>,
     /// Smoothed pressure (exponential moving average).
     smooth_pressure: Option<f32>,
+    /// Screen pixels per canvas pixel at the time the stroke started. Samples
+    /// arrive already mapped into canvas space, so this is what lets `push`
+    /// specify its filter in the units the hand and the device actually work
+    /// in. Latched per stroke — see `AppState::cell_view_scale`.
+    view_scale: f32,
 }
 
-/// Smoothing factor for exponential moving average of pointer input.
-/// 0.0 = maximum smoothing (sluggish), 1.0 = no smoothing.
-const SMOOTH_FACTOR: f32 = 0.45;
+/// Distance over which the input filter converges, in *screen* pixels.
+///
+/// The filter strength has to be pinned to something the user can see: the OS
+/// quantizes pointer positions to whole screen pixels, so in canvas space that
+/// jitter is `1 / view_scale` px — negligible zoomed in, more than a pixel
+/// zoomed out. A fixed per-sample factor would smooth those two cases by
+/// different amounts and make the same gesture draw differently at each zoom.
+const SMOOTH_LEN: f32 = 3.0;
 
 /// Emit a spine node whenever the curve direction has turned this much since
 /// the last node, regardless of arc length (keeps tight curls smooth with
@@ -49,10 +59,11 @@ const SMOOTH_FACTOR: f32 = 0.45;
 const ANGLE_COS: f32 = 0.984_807_75;
 
 impl StrokeBuilder {
-    pub fn new(brush: BrushSettings, tool: ActiveTool) -> Self {
+    pub fn new(brush: BrushSettings, tool: ActiveTool, view_scale: f32) -> Self {
         Self {
             brush,
             tool,
+            view_scale: view_scale.max(1e-6),
             samples: Vec::with_capacity(256),
             spine: Vec::with_capacity(256),
             raster_from: 0,
@@ -67,8 +78,25 @@ impl StrokeBuilder {
     }
 
     /// Push a raw pointer sample, applying input smoothing.
+    ///
+    /// The blend factor is driven by how far the pointer travelled *on screen*
+    /// rather than by a fixed per-sample constant, so the filter's cutoff is
+    /// the same at every zoom. A one-screen-pixel step — the device's own
+    /// quantization — blends at `1 - e^(-1/3) ≈ 0.28` and is largely rejected;
+    /// a fast stride of `4 * SMOOTH_LEN` blends at ~0.98, so corners and quick
+    /// direction changes survive without the lag a fixed factor would add.
     pub fn push(&mut self, s: PointerSample) {
-        let f = SMOOTH_FACTOR;
+        let f = match self.smooth_pos {
+            Some((sx, sy)) => {
+                let d = (s.x - sx).hypot(s.y - sy) * self.view_scale;
+                // Floored so a pointer that stops still converges instead of
+                // freezing the smoothed position short of the real one.
+                (1.0 - (-d / SMOOTH_LEN).exp()).clamp(0.02, 1.0)
+            }
+            // Pen-down: take the first sample exactly, so the dot lands where
+            // the user pressed.
+            None => 1.0,
+        };
         let s = match self.smooth_pos {
             Some((sx, sy)) => PointerSample {
                 x: sx * (1.0 - f) + s.x * f,
@@ -79,7 +107,8 @@ impl StrokeBuilder {
         };
         self.smooth_pos = Some((s.x, s.y));
 
-        // Smooth pressure separately to avoid sudden thickness jumps.
+        // Pressure rides the same factor: a separate one would let thickness
+        // drift out of step with position on fast strokes.
         let s = match self.smooth_pressure {
             Some(sp) => PointerSample {
                 pressure: sp * (1.0 - f) + s.pressure * f,
@@ -89,9 +118,12 @@ impl StrokeBuilder {
         };
         self.smooth_pressure = Some(s.pressure);
 
-        // Drop duplicate position (egui may emit zero-delta moves).
+        // Drop duplicate position (egui may emit zero-delta moves). Expressed
+        // in screen pixels like the filter above, so it means the same thing at
+        // every zoom.
+        let dup = 0.05 / self.view_scale;
         if let Some(last) = self.samples.last() {
-            if (last.x - s.x).abs() < 0.01 && (last.y - s.y).abs() < 0.01 {
+            if (last.x - s.x).abs() < dup && (last.y - s.y).abs() < dup {
                 return;
             }
         }
@@ -353,4 +385,143 @@ fn dist(a: PointerSample, b: PointerSample) -> f32 {
     let dx = a.x - b.x;
     let dy = a.y - b.y;
     (dx * dx + dy * dy).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(x: f32, y: f32) -> PointerSample {
+        PointerSample {
+            x,
+            y,
+            pressure: 1.0,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            t: 0.0,
+        }
+    }
+
+    /// Run a screen-space path through the builder at a given view scale,
+    /// returning the emitted spine mapped back into screen pixels.
+    ///
+    /// Both the sample positions and the brush radius are divided by the scale,
+    /// which is exactly what the screen-size brush lock does — so the two runs
+    /// describe the same gesture drawn with the same on-screen pen at two
+    /// different zooms.
+    fn spine_in_screen_px(view_scale: f32, screen_path: &[(f32, f32)]) -> Vec<(f32, f32)> {
+        let mut brush = BrushSettings::default_ink();
+        brush.radius = 8.0 / view_scale;
+
+        let mut canvas = Canvas::new(512, 512);
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(512, 512, brush.hardness, brush.grain);
+
+        let mut b = StrokeBuilder::new(brush, ActiveTool::Ink, view_scale);
+        for &(x, y) in screen_path {
+            b.push(sample(x / view_scale, y / view_scale));
+            b.flush(&mut canvas, &mut ws, &pre);
+        }
+        b.finish(&mut canvas, &mut ws, &pre);
+
+        b.spine
+            .iter()
+            .map(|n| (n.x * view_scale, n.y * view_scale))
+            .collect()
+    }
+
+    /// A zigzag with a sharp reversal — the shape whose corners are the first
+    /// thing a badly-scaled filter rounds off.
+    fn zigzag() -> Vec<(f32, f32)> {
+        let mut p = Vec::new();
+        for i in 0..40 {
+            let t = i as f32;
+            p.push((60.0 + t * 3.0, 120.0 + if i % 2 == 0 { 0.0 } else { 14.0 }));
+        }
+        p
+    }
+
+    /// The same gesture at two zooms must produce the same stroke.
+    ///
+    /// This guards the `* self.view_scale` term in `push`: without it the new
+    /// distance-keyed filter would blend by a canvas-space distance, which is
+    /// zoom-dependent. (The old fixed-per-sample factor also passed this — an
+    /// EMA is affine, so it was already scale-invariant in *shape*. The defect
+    /// it had is covered by `screen_pixel_quantization_is_attenuated`.)
+    #[test]
+    fn smoothing_is_zoom_independent() {
+        let path = zigzag();
+        let out = spine_in_screen_px(0.5, &path);
+        let zin = spine_in_screen_px(2.0, &path);
+
+        assert!(
+            out.len() > 20,
+            "test is vacuous unless the zigzag emits a real spine, got {}",
+            out.len()
+        );
+        assert_eq!(
+            out.len(),
+            zin.len(),
+            "same gesture must emit the same node count at any zoom"
+        );
+        for (i, (a, b)) in out.iter().zip(zin.iter()).enumerate() {
+            assert!(
+                (a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05,
+                "node {i} diverged between zooms: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    /// One screen pixel is the pointer's own quantization step, not hand
+    /// motion: it must be largely rejected. Checked at two zooms, because in
+    /// canvas units the very same step is 2 px at one and 0.5 px at the other.
+    ///
+    /// This is the regression guard for the reported bug — the old fixed
+    /// `SMOOTH_FACTOR = 0.45` passed 0.45 screen px of that jitter straight
+    /// through at every zoom, which showed up as lumpy stroke edges once
+    /// zoomed out far enough for one screen pixel to exceed a canvas pixel.
+    #[test]
+    fn screen_pixel_quantization_is_attenuated() {
+        for view_scale in [0.5, 2.0] {
+            let mut b = StrokeBuilder::new(BrushSettings::default_ink(), ActiveTool::Ink, view_scale);
+            b.push(sample(100.0, 100.0));
+            // Exactly one screen pixel along x.
+            b.push(sample(100.0 + 1.0 / view_scale, 100.0));
+
+            let (sx, _) = b.smooth_pos.unwrap();
+            let moved_screen = (sx - 100.0) * view_scale;
+            assert!(
+                moved_screen < 0.4,
+                "1px jitter passed through at scale {view_scale}: {moved_screen} screen px"
+            );
+        }
+    }
+
+    /// The flip side: a fast stride must not be smeared, or the filter would
+    /// just be trading zoom-dependent jitter for lag and cut corners.
+    #[test]
+    fn fast_strides_are_not_lagged() {
+        for view_scale in [0.5, 2.0] {
+            let mut b = StrokeBuilder::new(BrushSettings::default_ink(), ActiveTool::Ink, view_scale);
+            b.push(sample(100.0, 100.0));
+            let step = 4.0 * SMOOTH_LEN / view_scale;
+            b.push(sample(100.0 + step, 100.0));
+
+            let (sx, _) = b.smooth_pos.unwrap();
+            let covered = (sx - 100.0) / step;
+            assert!(
+                covered > 0.95,
+                "fast stride lagged at scale {view_scale}: covered {covered} of the step"
+            );
+        }
+    }
+
+    /// Pen-down must land exactly where the user pressed — no filter warm-up.
+    #[test]
+    fn first_sample_is_exact() {
+        let mut b = StrokeBuilder::new(BrushSettings::default_ink(), ActiveTool::Ink, 1.0);
+        b.push(sample(42.0, 77.0));
+        assert_eq!(b.smooth_pos, Some((42.0, 77.0)));
+    }
 }

@@ -112,6 +112,7 @@ struct UiPrefs {
     show_camera_guide: bool,
     dim_outside_camera: bool,
     show_layer_bounds: bool,
+    lock_brush_to_view: bool,
 }
 
 impl Default for UiPrefs {
@@ -123,6 +124,7 @@ impl Default for UiPrefs {
             show_camera_guide: true,
             dim_outside_camera: true,
             show_layer_bounds: true,
+            lock_brush_to_view: false,
         }
     }
 }
@@ -229,6 +231,19 @@ pub struct AppState {
 
     /// Canvas view transform (zoom / pan / rotate).
     pub view: View,
+    /// Screen pixels per *document* pixel, republished by the canvas each
+    /// frame (`View::zoom` alone can't say this — the fit-to-window base scale
+    /// depends on the canvas rect, which only the UI knows).
+    ///
+    /// The stroke pipeline runs entirely in cell pixels while the pen and the
+    /// OS pointer work in screen pixels; this is the conversion factor that
+    /// lets input conditioning be specified in what the user actually sees.
+    pub view_scale: f32,
+    /// Keep the brush a fixed size *on screen* instead of in document pixels,
+    /// so the same hand gesture lays down the same-looking stroke at any zoom.
+    /// Off by default: line weight is normally absolute in document pixels,
+    /// which is what makes exports predictable.
+    pub lock_brush_to_view: bool,
     /// Active non-drawing canvas gesture for the current drag, if any.
     pub nav_drag: Option<NavKind>,
 
@@ -429,6 +444,8 @@ impl AppState {
             shape_drag: None,
             lasso: None,
             view: View::default(),
+            view_scale: 1.0,
+            lock_brush_to_view: prefs.lock_brush_to_view,
             nav_drag: None,
             playback: Playback::default(),
             onion: OnionConfig::default(),
@@ -521,6 +538,9 @@ impl AppState {
         self.shape_drag = None;
         self.lasso = None;
         self.view = View::default();
+        // Republished by the canvas next frame; kept in step with `view` so a
+        // reset never leaves a stale scale behind for one frame of input.
+        self.view_scale = 1.0;
         self.nav_drag = None;
         self.playback = Playback::default();
         self.onion = OnionConfig::default();
@@ -570,6 +590,26 @@ impl AppState {
             tilt_x: 0.0,
             tilt_y: 0.0,
             t,
+        }
+    }
+
+    /// Screen pixels per *active-cell* pixel: the view scale folded with the
+    /// active layer's own scale, since strokes are rasterized in cell space.
+    /// Mirrors the `scale * layer_scale` product the canvas uses for previews.
+    pub fn cell_view_scale(&self) -> f32 {
+        let t = self.display_transform(self.project.current_layer, self.project.current_frame);
+        (self.view_scale * t.scale.abs()).max(1e-6)
+    }
+
+    /// Brush radius in active-cell pixels. With `lock_brush_to_view` the stored
+    /// radius means *screen* pixels, so it is divided back out by the current
+    /// scale — the brush then keeps a constant on-screen footprint and the same
+    /// gesture draws the same stroke at any zoom.
+    pub fn effective_radius(&self) -> f32 {
+        if self.lock_brush_to_view {
+            (self.brush.radius / self.cell_view_scale()).clamp(0.1, 4096.0)
+        } else {
+            self.brush.radius
         }
     }
 
@@ -1772,7 +1812,11 @@ impl AppState {
         self.stroke_ws
             .begin(cw, ch, self.brush.hardness, self.brush.grain);
 
-        let mut builder = StrokeBuilder::new(self.brush.clone(), self.tool);
+        // Resolve the radius and the view scale once, here: a stroke must not
+        // change width or smoothing behaviour partway through if the view moves.
+        let mut brush = self.brush.clone();
+        brush.radius = self.effective_radius();
+        let mut builder = StrokeBuilder::new(brush, self.tool, self.cell_view_scale());
         builder.push(sample);
         if let (Some(pre), Some(c)) = (
             self.stroke_pre_pixels.as_deref(),
@@ -1841,7 +1885,8 @@ impl AppState {
         }
         if let Some(drag) = self.shape_drag.take() {
             // Rasterise the final shape now; undo records the dirty rect below.
-            let brush = self.brush.clone();
+            let mut brush = self.brush.clone();
+            brush.radius = self.effective_radius();
             let (cw, ch) = {
                 let c = &self.project.cells[target];
                 (c.width, c.height)
@@ -2288,6 +2333,9 @@ impl AppState {
         self.preview_upload_rect = None;
         self.history = History::default();
         self.view = View::default();
+        // Republished by the canvas next frame; kept in step with `view` so a
+        // reset never leaves a stale scale behind for one frame of input.
+        self.view_scale = 1.0;
         self.nav_drag = None;
         self.playback = Playback::default();
         // The loaded project brings its own camera and layer poses; drop the
@@ -2330,6 +2378,7 @@ impl eframe::App for AppState {
                 show_camera_guide: self.show_camera_guide,
                 dim_outside_camera: self.dim_outside_camera,
                 show_layer_bounds: self.show_layer_bounds,
+                lock_brush_to_view: self.lock_brush_to_view,
             },
         );
     }

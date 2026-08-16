@@ -78,6 +78,10 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         .show(ctx, |ui| {
             let avail = ui.available_size();
             let (canvas_rect, resp) = ui.allocate_exact_size(avail, Sense::drag());
+            // Republish the doc → screen scale before anything reads it: the
+            // brush-size lock and the stroke input filter both need it, and
+            // only the canvas knows the fit-to-window base scale.
+            state.view_scale = Xform::new(state, canvas_rect).scale;
             paint_canvas(state, ui, canvas_rect);
 
             // While live screen-pick is active the canvas swallows all drawing
@@ -607,7 +611,13 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                     shape_kind_toggle(ui, state, ShapeKind::Rect, ic::RECTANGLE, "Rectangle");
                     shape_kind_toggle(ui, state, ShapeKind::Ellipse, ic::CIRCLE, "Ellipse");
                 });
-                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=64.0).text("Thickness"));
+                brush_size_lock(state, ui);
+                let label = if state.lock_brush_to_view {
+                    "Thickness (screen px)"
+                } else {
+                    "Thickness"
+                };
+                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=64.0).text(label));
             } else if state.tool == ActiveTool::Tracker {
                 ui.label(
                     egui::RichText::new(
@@ -668,10 +678,28 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                     .size(11.0),
                 );
             } else {
-                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=128.0).text("Size"));
+                brush_size_lock(state, ui);
+                let label = if state.lock_brush_to_view {
+                    "Size (screen px)"
+                } else {
+                    "Size"
+                };
+                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=128.0).text(label));
                 ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Flow"));
             }
     }
+}
+
+/// "Lock brush to screen size" toggle, shared by the freehand and Shape size
+/// sliders (both of which relabel themselves when it is on).
+fn brush_size_lock(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.checkbox(&mut state.lock_brush_to_view, "Lock brush to screen size")
+        .on_hover_text(
+            "Keep the brush the same size on screen at every zoom, so the same \
+             hand movement always draws the same stroke.\n\nOff (default): size \
+             is in document pixels, so a line keeps its weight in the exported \
+             frame no matter what zoom you drew it at.",
+        );
 }
 
 fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
@@ -2203,7 +2231,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         // rotation and the layer transform, matching the rasterised result.
         let c = state.brush.color;
         let col = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255);
-        let thick = (state.brush.radius * 2.0 * scale * layer_scale).max(1.0);
+        let thick = (state.effective_radius() * 2.0 * scale * layer_scale).max(1.0);
         let stroke = Stroke::new(thick, col);
         let (sx, sy) = drag.start;
         let (ex, ey) = drag.end;
@@ -2570,8 +2598,16 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
             let pressure = state.pen.current_pressure().unwrap_or(1.0);
             let p_size = state.brush.pressure_size.clamp(0.0, 1.0);
             let pressure_mul = (1.0 - p_size) + p_size * pressure;
-            let r_doc = (state.brush.radius * pressure_mul).max(0.5);
-            let r = (r_doc * scale).max(2.0);
+            let r_cell = (state.effective_radius() * pressure_mul).max(0.5);
+            // `effective_radius` is in *cell* pixels, so the layer's own scale
+            // belongs here too — otherwise the ring misreports the stroke width
+            // on a scaled layer, and misses the point entirely under the
+            // screen-size lock (which divides that same factor back out).
+            let layer_scale = state
+                .display_transform(state.project.current_layer, state.project.current_frame)
+                .scale
+                .abs();
+            let r = (r_cell * scale * layer_scale).max(2.0);
 
             // Double-ring (black outside, white inside) so cursor stays visible
             // on any background.
