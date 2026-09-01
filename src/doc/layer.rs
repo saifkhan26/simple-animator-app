@@ -183,6 +183,13 @@ impl Layer {
         None
     }
 
+    /// True when `frame` carries its own key rather than holding an earlier
+    /// one. `resolve` can't answer this — it walks back through holds — so the
+    /// auto-key-on-draw path asks here before breaking a hold.
+    pub fn is_key(&self, frame: usize) -> bool {
+        self.exposures.get(frame).is_some_and(Option::is_some)
+    }
+
     pub fn set_key(&mut self, frame: usize, cell: CellId) {
         if frame < self.exposures.len() {
             self.exposures[frame] = Some(cell);
@@ -254,5 +261,19 @@ mod tests {
         );
         assert_eq!(l.transform_keys[0].ease, Ease::Both);
         assert_eq!(l.transform_keys[0].transform.tx, 9.0);
+    }
+
+    #[test]
+    fn is_key_distinguishes_keys_from_holds() {
+        let mut l = Layer::new("L", 4);
+        l.set_key(0, 7);
+        l.set_key(2, 8);
+        assert!(l.is_key(0));
+        assert!(!l.is_key(1));
+        assert!(l.is_key(2));
+        // Frame 1 holds cell 7 even though it is not a key.
+        assert_eq!(l.resolve(1), Some(7));
+        // Out of range is not a key.
+        assert!(!l.is_key(99));
     }
 }

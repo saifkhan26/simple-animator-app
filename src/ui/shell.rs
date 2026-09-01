@@ -1182,6 +1182,13 @@ fn frame_strip(state: &mut AppState, ui: &mut egui::Ui) {
 fn onion_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
             ui.checkbox(&mut state.onion.enabled, "Enabled");
+            ui.checkbox(&mut state.onion.by_key, "Step by drawings")
+                .on_hover_text(
+                    "Count distinct drawings instead of frames, so on twos and \
+                     threes Prev = 2 reaches the two previous drawings rather \
+                     than two frames of the same held one.\n\nOff: steps frame \
+                     by frame, and a hold simply shows fewer ghosts.",
+                );
             ui.add_space(4.0);
             ui.add(egui::Slider::new(&mut state.onion.prev, 0..=8).text("Prev"));
             ui.add(egui::Slider::new(&mut state.onion.next, 0..=8).text("Next"));
@@ -1512,6 +1519,14 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             theme::section_header(ui, ic::RECTANGLE, "Transform");
 
             ui.checkbox(&mut state.layer_xform, "Transform mode");
+            ui.checkbox(&mut state.auto_key_transform, "Auto-key transform")
+                .on_hover_text(
+                    "Moving, scaling or rotating the active layer sets a \
+                     transform key on the current frame, so the change animates \
+                     from here instead of shifting the layer on every \
+                     frame.\n\nOff (default): the layer moves as a whole until \
+                     you add a key yourself.",
+                );
             let toggle = combo_text(state, Action::LayerTransformToggle);
             ui.label(
                 egui::RichText::new(format!(
@@ -1524,25 +1539,35 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
 
             let cf = state.project.current_frame;
             let li = state.project.current_layer;
+            // Set once an edit *settles*, never on every `changed()`: keying
+            // mid-drag would push one undo entry per mouse-move.
+            let mut xform_settled = false;
             if let Some(l) = state.project.layers.get_mut(li) {
+                let mut settle = |r: &egui::Response| {
+                    if r.drag_stopped() || r.lost_focus() {
+                        xform_settled = true;
+                    }
+                };
                 ui.horizontal(|ui| {
                     ui.label("X");
-                    ui.add(egui::DragValue::new(&mut l.transform.tx).speed(1.0));
+                    settle(&ui.add(egui::DragValue::new(&mut l.transform.tx).speed(1.0)));
                     ui.label("Y");
-                    ui.add(egui::DragValue::new(&mut l.transform.ty).speed(1.0));
+                    settle(&ui.add(egui::DragValue::new(&mut l.transform.ty).speed(1.0)));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Scale");
-                    ui.add(
+                    settle(&ui.add(
                         egui::DragValue::new(&mut l.transform.scale)
                             .speed(0.01)
                             .range(0.01..=100.0),
-                    );
+                    ));
                     ui.label("Rot°");
                     let mut deg = l.transform.rot.to_degrees();
-                    if ui.add(egui::DragValue::new(&mut deg).speed(0.5)).changed() {
+                    let r = ui.add(egui::DragValue::new(&mut deg).speed(0.5));
+                    if r.changed() {
                         l.transform.rot = deg.to_radians();
                     }
+                    settle(&r);
                 });
                 let nkeys = l.transform_keys.len();
                 let here = l.has_transform_key(cf);
@@ -1559,6 +1584,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                         .color(theme::TEXT_MUTED)
                         .size(10.5),
                 );
+            }
+            if xform_settled && state.auto_key_transform {
+                state.add_transform_key();
             }
 
             // Ease of the key on this frame, same contract as the camera's: it
@@ -1686,6 +1714,16 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                     state.structural_edit(false, |p| p.hold_here());
                 }
             });
+            ui.checkbox(&mut state.auto_key_draw, "Auto-key drawing")
+                .on_hover_text(
+                    "Drawing on a held frame starts a new blank key on that \
+                     frame first, so you can keep drawing frame after frame \
+                     without inserting keys by hand.\n\nOff (default): the \
+                     stroke edits the cell shared by every frame in the \
+                     hold.\n\nThe previous drawing stays visible through onion \
+                     skin, and an auto-keyed stroke takes two undos — one for \
+                     the stroke, one for the key.",
+                );
             ui.add_space(4.0);
             ui.separator();
 
@@ -1920,7 +1958,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
     state.show_settings = open;
 }
 
-fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 4]) {
+fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3]) {
     ui.horizontal(|ui| {
         let mut rgb = [
             c[0] as f32 / 255.0,
@@ -2027,57 +2065,28 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // Onion ghosts of the active layer at nearby frames. Drawn inside the layer
     // loop so they sit at the active layer's depth (prev just behind its cell,
     // next just in front) instead of behind/above the whole stack.
-    let draw_onion_prev = || {
-        if !state.onion.enabled {
-            return;
-        }
-        let Some(layer) = state.project.layers.get(cur_layer) else {
-            return;
-        };
-        for k in (1..=state.onion.prev).rev() {
-            let f_i = cur_frame as isize - k as isize;
-            if f_i < 0 {
+    // Ghosts come from `ghost_textures` — silhouettes already baked in the
+    // tint colour. The vertex colour only fades them: multiplying a tint over
+    // the plain cell texture leaves black line art black.
+    let draw_onion = |dir: OnionDirection| {
+        // Farthest first so the nearest ghost — the most opaque one, and the
+        // one the user is comparing against — ends up on top.
+        for step in state.onion_steps(dir).into_iter().rev() {
+            let Some((_, tex)) = state.ghost_textures.get(&step.cell) else {
                 continue;
-            }
-            let f = f_i as usize;
-            if let Some(id) = layer.resolve(f) {
-                if let (Some(tex), Some(cell)) =
-                    (state.cell_textures.get(&id), state.project.cell(id))
-                {
-                    let tint = state.onion.tint_for(k, OnionDirection::Prev);
-                    let c = Color32::from_rgba_unmultiplied(tint[0], tint[1], tint[2], tint[3]);
-                    let t = state.display_transform(cur_layer, f);
-                    let lc =
-                        layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
-                    image_quad(&painter, tex.id(), lc, c);
-                }
-            }
-        }
-    };
-    let draw_onion_next = || {
-        if !state.onion.enabled {
-            return;
-        }
-        let Some(layer) = state.project.layers.get(cur_layer) else {
-            return;
-        };
-        for k in 1..=state.onion.next {
-            let f = cur_frame + k as usize;
-            if f >= state.project.frame_count {
+            };
+            let Some(cell) = state.project.cell(step.cell) else {
                 continue;
-            }
-            if let Some(id) = layer.resolve(f) {
-                if let (Some(tex), Some(cell)) =
-                    (state.cell_textures.get(&id), state.project.cell(id))
-                {
-                    let tint = state.onion.tint_for(k, OnionDirection::Next);
-                    let c = Color32::from_rgba_unmultiplied(tint[0], tint[1], tint[2], tint[3]);
-                    let t = state.display_transform(cur_layer, f);
-                    let lc =
-                        layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
-                    image_quad(&painter, tex.id(), lc, c);
-                }
-            }
+            };
+            let a = state.onion.alpha_for(step.k, dir);
+            let t = state.display_transform(cur_layer, step.frame);
+            let lc = layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
+            image_quad(
+                &painter,
+                tex.id(),
+                lc,
+                Color32::from_rgba_unmultiplied(255, 255, 255, a),
+            );
         }
     };
 
@@ -2107,7 +2116,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         // behind its current cell, next frames just in front.
         let active = li == cur_layer;
         if active {
-            draw_onion_prev();
+            draw_onion(OnionDirection::Prev);
         }
         if let Some(id) = layer.resolve(cur_frame) {
             if let (Some(tex), Some(lc)) = (state.cell_textures.get(&id), cell_corners(li, id)) {
@@ -2121,7 +2130,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             }
         }
         if active {
-            draw_onion_next();
+            draw_onion(OnionDirection::Next);
         }
     }
 

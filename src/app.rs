@@ -1,6 +1,6 @@
 //! Top-level application state. Wires project (timeline + layers), tools, UI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -18,7 +18,7 @@ use crate::doc::transform::Transform;
 use crate::input::pointer::PointerSample;
 use crate::input::shortcuts::{self, Action, ShortcutMap};
 use crate::input::tablet::PenInput;
-use crate::timeline::onion::OnionConfig;
+use crate::timeline::onion::{OnionConfig, OnionDirection, OnionStep};
 use crate::timeline::playback::Playback;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
 use crate::tools::stroke::StrokeBuilder;
@@ -113,6 +113,11 @@ struct UiPrefs {
     dim_outside_camera: bool,
     show_layer_bounds: bool,
     lock_brush_to_view: bool,
+    /// Onion skin is a workspace preference, not project data — tints and
+    /// counts a user dialled in should still be there next launch.
+    onion: OnionConfig,
+    auto_key_transform: bool,
+    auto_key_draw: bool,
 }
 
 impl Default for UiPrefs {
@@ -125,6 +130,9 @@ impl Default for UiPrefs {
             dim_outside_camera: true,
             show_layer_bounds: true,
             lock_brush_to_view: false,
+            onion: OnionConfig::default(),
+            auto_key_transform: false,
+            auto_key_draw: false,
         }
     }
 }
@@ -215,6 +223,24 @@ pub struct AppState {
     pub cell_textures: HashMap<CellId, TextureHandle>,
     /// Per-CellId dirty flag — re-upload on next sync.
     pub cell_dirty: HashMap<CellId, bool>,
+    /// Colorized onion ghosts: one silhouette texture per ghosted cell, with
+    /// the tint it was built from so a tint change in the panel rebuilds it.
+    /// Separate from `cell_textures` because the ghost replaces the artwork's
+    /// RGB wholesale — a vertex-color tint only multiplies, which leaves black
+    /// line art black.
+    pub ghost_textures: HashMap<CellId, ([u8; 3], TextureHandle)>,
+    /// Ghosted cells whose pixels changed: the silhouette is re-uploaded into
+    /// the existing handle rather than dropped, so an edit never frees a
+    /// texture the canvas may already have queued a mesh against.
+    ghost_stale: HashSet<CellId>,
+    /// Texture handles that are no longer wanted, parked until the next sync.
+    /// Dropping a `TextureHandle` frees the GPU texture, and a free that lands
+    /// after the canvas has queued a mesh referencing it makes wgpu submit
+    /// against a destroyed texture — which File → New and File → Open would
+    /// otherwise do, since they run from menu handling *after* the canvas has
+    /// painted. Nothing painted last frame is released before this frame's own
+    /// paint, so a one-frame delay is enough.
+    retired_textures: Vec<TextureHandle>,
 
     pub tool: ActiveTool,
     pub brush: BrushSettings,
@@ -249,6 +275,12 @@ pub struct AppState {
 
     pub playback: Playback,
     pub onion: OnionConfig,
+    /// Editing the active layer's transform writes a key on the current frame
+    /// instead of moving the whole layer.
+    pub auto_key_transform: bool,
+    /// Drawing on a held frame breaks the hold into its own drawing first,
+    /// instead of editing the cell shared with the rest of the hold.
+    pub auto_key_draw: bool,
 
     /// Frames moved per FramePrev / FrameNext press, and per ◀ / ▶ click.
     /// Read through [`AppState::frame_step_delta`], which clamps it to >= 1 —
@@ -425,6 +457,9 @@ impl AppState {
             save_toast: None,
             save_error: None,
             cell_textures: HashMap::new(),
+            ghost_textures: HashMap::new(),
+            ghost_stale: HashSet::new(),
+            retired_textures: Vec::new(),
             cell_dirty,
             tool: ActiveTool::Pencil,
             brush: BrushSettings::default_pencil(),
@@ -448,7 +483,9 @@ impl AppState {
             lock_brush_to_view: prefs.lock_brush_to_view,
             nav_drag: None,
             playback: Playback::default(),
-            onion: OnionConfig::default(),
+            onion: prefs.onion,
+            auto_key_transform: prefs.auto_key_transform,
+            auto_key_draw: prefs.auto_key_draw,
             frame_step: prefs.frame_step,
             bg_opacity: 1.0,
             bg_color: [0.12, 0.12, 0.13],
@@ -517,7 +554,8 @@ impl AppState {
         self.project_path = None;
         self.save_toast = None;
         self.save_error = None;
-        self.cell_textures.clear();
+        self.retire_cell_textures();
+        self.retire_all_ghosts();
         self.cell_dirty.clear();
         for id in 0..self.project.cells.len() {
             self.cell_dirty.insert(id, true);
@@ -543,7 +581,9 @@ impl AppState {
         self.view_scale = 1.0;
         self.nav_drag = None;
         self.playback = Playback::default();
-        self.onion = OnionConfig::default();
+        // `onion` is deliberately not reset: like `show_panels` it is a
+        // workspace preference, and resetting it here is what made tuned
+        // settings feel like they never stuck.
         self.bg_opacity = 1.0;
         self.bg_color = [0.12, 0.12, 0.13];
         self.show_checker = false;
@@ -615,6 +655,34 @@ impl AppState {
 
     pub fn mark_dirty(&mut self, id: CellId) {
         self.cell_dirty.insert(id, true);
+        // The ghost is baked from these pixels, so it needs rebuilding — but
+        // re-uploaded in place, never freed. See `ghost_stale`.
+        if self.ghost_textures.contains_key(&id) {
+            self.ghost_stale.insert(id);
+        }
+    }
+
+    /// Park one ghost for release on the next sync. See `retired_textures`.
+    fn retire_ghost(&mut self, id: CellId) {
+        self.ghost_stale.remove(&id);
+        if let Some((_, tex)) = self.ghost_textures.remove(&id) {
+            self.retired_textures.push(tex);
+        }
+    }
+
+    /// Park every cell texture for release on the next sync. Used by File →
+    /// New and File → Open, which discard the whole cell pool mid-frame.
+    /// See `retired_textures`.
+    fn retire_cell_textures(&mut self) {
+        self.retired_textures
+            .extend(self.cell_textures.drain().map(|(_, tex)| tex));
+    }
+
+    /// Park every ghost for release on the next sync. See `retired_textures`.
+    fn retire_all_ghosts(&mut self) {
+        self.ghost_stale.clear();
+        self.retired_textures
+            .extend(self.ghost_textures.drain().map(|(_, (_, tex))| tex));
     }
 
     /// Mark every cell for re-upload (used after structural undo/redo, where
@@ -623,6 +691,7 @@ impl AppState {
         for id in 0..self.project.cells.len() {
             self.cell_dirty.insert(id, true);
         }
+        self.retire_all_ghosts();
     }
 
     /// Frames moved or inserted by one step action, from the user's step size.
@@ -1055,6 +1124,16 @@ impl AppState {
     /// Push a single undo entry for a completed layer-transform drag.
     pub fn commit_layer_xform(&mut self) {
         if let Some(before) = self.layer_xform_before.take() {
+            // Auto-key writes the pose before the `after` snapshot, so the drag
+            // and its key land in one undo entry rather than two.
+            if self.auto_key_transform && !self.active_layer_locked() {
+                let f = self.project.current_frame;
+                let li = self.project.current_layer;
+                if let Some(l) = self.project.layers.get_mut(li) {
+                    let t = l.transform;
+                    l.set_transform_key(f, t);
+                }
+            }
             let after = undo::TimelineState::capture(&self.project);
             self.history.push(undo::Command::Structural {
                 before,
@@ -1646,6 +1725,10 @@ impl AppState {
     /// via egui shape overlay in `paint_canvas`. The texture is refreshed on
     /// the first frame after the stroke ends.
     pub fn sync_textures(&mut self, ctx: &egui::Context) {
+        // Release last frame's discarded ghosts here, before anything paints
+        // this frame: the meshes that referenced them were submitted a frame
+        // ago, so freeing now can't invalidate a texture mid-submit.
+        self.retired_textures.clear();
         self.ensure_cell_tracking();
 
         // During an active stroke, stream only the flushed sub-rect to the
@@ -1687,29 +1770,33 @@ impl AppState {
 
         let mut needed: Vec<CellId> = Vec::new();
         let cur = self.project.current_frame;
-        let prev_n = if self.onion.enabled {
-            self.onion.prev as usize
-        } else {
-            0
-        };
-        let next_n = if self.onion.enabled {
-            self.onion.next as usize
-        } else {
-            0
-        };
-        let lo = cur.saturating_sub(prev_n);
-        let hi = (cur + next_n + 1).min(self.project.frame_count);
 
         for layer in &self.project.layers {
             if !layer.visible {
                 continue;
             }
-            for f in lo..hi {
-                if let Some(id) = layer.resolve(f) {
-                    if !needed.contains(&id) {
-                        needed.push(id);
-                    }
+            if let Some(id) = layer.resolve(cur) {
+                if !needed.contains(&id) {
+                    needed.push(id);
                 }
+            }
+        }
+
+        // Onion ghosts come from the same walker the canvas draws with, so the
+        // uploaded set can never drift from what gets painted — with drawing
+        // stepping the ghosts can sit well outside `cur ± prev/next`.
+        let ghosts: Vec<(CellId, [u8; 3])> = [OnionDirection::Prev, OnionDirection::Next]
+            .into_iter()
+            .flat_map(|dir| {
+                let tint = self.onion.tint_rgb(dir);
+                self.onion_steps(dir)
+                    .into_iter()
+                    .map(move |s| (s.cell, tint))
+            })
+            .collect();
+        for (id, _) in &ghosts {
+            if !needed.contains(id) {
+                needed.push(*id);
             }
         }
 
@@ -1741,6 +1828,75 @@ impl AppState {
             }
             self.cell_dirty.insert(id, false);
         }
+
+        // Ghost silhouettes for the onion cells. Bounded to the ghosted cells:
+        // each one is a second full-size texture, which matters on 4K canvases.
+        let stale: Vec<CellId> = self
+            .ghost_textures
+            .keys()
+            .copied()
+            .filter(|id| !ghosts.iter().any(|(g, _)| g == id))
+            .collect();
+        for id in stale {
+            self.retire_ghost(id);
+        }
+        for (id, tint) in ghosts {
+            let dims = match self.project.cell(id) {
+                Some(c) => [c.width as usize, c.height as usize],
+                None => continue,
+            };
+            let fresh = !self.ghost_stale.contains(&id)
+                && self
+                    .ghost_textures
+                    .get(&id)
+                    .is_some_and(|(t, tex)| *t == tint && tex.size() == dims);
+            if fresh {
+                continue;
+            }
+            let Some(c) = self.project.cell(id) else {
+                continue;
+            };
+            let image = ghost_image(dims, &c.pixels, tint);
+            // Same reuse rule as the cell textures: keep the handle when the
+            // dimensions still match — re-uploading into it avoids freeing a
+            // texture the last frame may still have queued a mesh against.
+            let reusable = self
+                .ghost_textures
+                .get(&id)
+                .is_some_and(|(_, tex)| tex.size() == dims);
+            if reusable {
+                if let Some((t, tex)) = self.ghost_textures.get_mut(&id) {
+                    tex.set(image, TextureOptions::LINEAR);
+                    *t = tint;
+                }
+                self.ghost_stale.remove(&id);
+            } else {
+                self.retire_ghost(id);
+                let tex = ctx.load_texture(format!("ghost{id}"), image, TextureOptions::LINEAR);
+                self.ghost_textures.insert(id, (tint, tex));
+                self.ghost_stale.remove(&id);
+            }
+        }
+    }
+
+    /// Onion ghosts for the active layer at the current frame. Shared by the
+    /// texture sync and the canvas so both agree on which cells are ghosted.
+    pub fn onion_steps(&self, dir: OnionDirection) -> Vec<OnionStep> {
+        // Ghosts are for judging a pose against its neighbours, which playback
+        // already shows; skipping them here also keeps the per-frame silhouette
+        // rebuild out of the playback loop.
+        if self.playback.playing {
+            return Vec::new();
+        }
+        let Some(layer) = self.project.layers.get(self.project.current_layer) else {
+            return Vec::new();
+        };
+        self.onion.steps(
+            layer,
+            self.project.current_frame,
+            self.project.frame_count,
+            dir,
+        )
     }
 
     pub fn pointer_down(&mut self, sample: PointerSample) {
@@ -1748,6 +1904,25 @@ impl AppState {
         if let Some(layer) = self.project.layers.get(self.project.current_layer) {
             if layer.locked || layer.reference {
                 return;
+            }
+        }
+        // Auto-key: break the hold first, so the stroke starts a drawing of
+        // this frame's own instead of editing the cell every frame in the hold
+        // shares. Blank, not a duplicate: the point is to draw the next
+        // drawing without reaching for the X-sheet, and a duplicate would put
+        // the previous drawing's strokes on the new frame. Seeing the previous
+        // drawing is what onion skin is for.
+        if self.auto_key_draw {
+            let f = self.project.current_frame;
+            let holding = self
+                .project
+                .layers
+                .get(self.project.current_layer)
+                .is_some_and(|l| l.resolve(f).is_some() && !l.is_key(f));
+            if holding {
+                self.structural_edit(false, |p| {
+                    p.insert_blank_key_here();
+                });
             }
         }
         let target = self.project.ensure_active_cell();
@@ -2320,7 +2495,8 @@ impl AppState {
         self.project_path = path;
         self.save_toast = None;
         self.save_error = None;
-        self.cell_textures.clear();
+        self.retire_cell_textures();
+        self.retire_all_ghosts();
         self.cell_dirty.clear();
         for id in 0..self.project.cells.len() {
             self.cell_dirty.insert(id, true);
@@ -2379,6 +2555,9 @@ impl eframe::App for AppState {
                 dim_outside_camera: self.dim_outside_camera,
                 show_layer_bounds: self.show_layer_bounds,
                 lock_brush_to_view: self.lock_brush_to_view,
+                onion: self.onion,
+                auto_key_transform: self.auto_key_transform,
+                auto_key_draw: self.auto_key_draw,
             },
         );
     }
@@ -2599,6 +2778,28 @@ pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
             a => {
                 let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
                 Color32::from_rgba_premultiplied(m(p[0]), m(p[1]), m(p[2]), a)
+            }
+        })
+        .collect();
+    ColorImage { size, pixels }
+}
+
+/// Build a `ColorImage` of a cell as a flat silhouette in `tint`: the source
+/// alpha is kept as the shape and the RGB is replaced wholesale.
+///
+/// This is what makes onion skins actually read as blue-past / red-future.
+/// Painting the cell texture with a tinted vertex color only *multiplies*, and
+/// black line art times any tint is still black.
+pub(crate) fn ghost_image(size: [usize; 2], rgba: &[u8], tint: [u8; 3]) -> ColorImage {
+    // Premultiplied in gamma space, matching `premultiplied_image`.
+    let pixels = rgba
+        .chunks_exact(4)
+        .map(|p| match p[3] {
+            0 => Color32::TRANSPARENT,
+            255 => Color32::from_rgb(tint[0], tint[1], tint[2]),
+            a => {
+                let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
+                Color32::from_rgba_premultiplied(m(tint[0]), m(tint[1]), m(tint[2]), a)
             }
         })
         .collect();

@@ -18,8 +18,8 @@ threads except export.
   for tracing / rotoscoping.
 - **Layers** with opacity, visibility, lock, and a *Reference* (light-table)
   flag that dims the layer and excludes it from export.
-- **Onion skin** with separately tinted previous / next frames, configurable
-  count, falloff, and max alpha.
+- **Onion skin** drawn as colored silhouettes — blue past, red future — that
+  step by *drawing* rather than by frame, so holds don't waste ghosts.
 - **X-sheet (exposure sheet)** — frames × layers grid. Click any slot to
   navigate. *Insert key* duplicates the resolved cell so you can break a hold;
   *Hold* deletes a key so the previous one persists ("on 2s/3s" workflow).
@@ -152,14 +152,39 @@ keyed at that slot, or `·` for a hold.
 
 Open the **Onion skin** window:
 
-- **Enabled** — master toggle.
-- **Prev / Next** — how many frames in each direction (0..=8).
-- **Max α** — alpha of the nearest ghost frame.
-- **Falloff** — exponent on the distance-to-current weight.
-- **Prev tint / Next tint** — multiplicative tints. Default: blue past, red
+- **Enabled** — master toggle (`O`).
+- **Step by drawings** — count distinct drawings instead of frames, so on 2s
+  and 3s `Prev = 2` reaches the two previous *drawings* rather than two frames
+  of the same held one. Off: literal frame stepping, which simply shows fewer
+  ghosts across a hold.
+- **Prev / Next** — how many in each direction (0..=8).
+- **Max α** — alpha of the nearest ghost.
+- **Falloff** — exponent on the distance-to-current weight. The farthest ghost
+  keeps a floor of the max alpha, so it never fades to nothing.
+- **Prev tint / Next tint** — silhouette colors. Default: blue past, red
   future, which matches Krita / TVPaint convention.
 
+Ghosts are drawn from silhouette textures baked in the tint color, not by
+multiplying a tint over the artwork — a multiply leaves black line art black,
+which is what made ghosts read as a grey smudge.
+
+A drawing already showing on the current frame is never ghosted (on a hold it
+would land exactly on top), and ghosts are hidden during playback.
+
 Onion skin only applies to the *active layer*. Other layers stay solid.
+Settings persist across runs and survive **File → New**.
+
+## Auto-key
+
+Two opt-in toggles, both off by default and both remembered across runs:
+
+- **Auto-key transform** (Layers panel) — moving, scaling or rotating the
+  active layer writes a transform key on the current frame instead of shifting
+  the layer on every frame. Drag and key land in one undo entry.
+- **Auto-key drawing** (X-sheet panel) — drawing on a held frame starts a new
+  *blank* key on that frame first, so you can draw frame after frame without
+  inserting keys by hand. The previous drawing stays visible through onion
+  skin. Undoing such a stroke takes two undos: the stroke, then the key.
 
 ## Tablet pressure (Windows)
 
