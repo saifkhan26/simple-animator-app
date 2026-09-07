@@ -20,15 +20,52 @@ use crate::doc::canvas::Canvas;
 /// cheap enough to run in one shot on pointer-up.
 const SUB: i32 = 4;
 
-/// Erase everything inside the closed polygon `pts`, given in the cell's own
-/// pixel space. Returns `false` when the path is degenerate (under 3 points, or
-/// entirely off-canvas) or nothing changed.
-pub fn erase(canvas: &mut Canvas, pts: &[(f32, f32)]) -> bool {
-    if pts.len() < 3 {
-        return false;
+/// Per-pixel coverage of a closed polygon, as a bounding box plus one byte per
+/// pixel inside it (0 = outside, 255 = fully inside).
+///
+/// This is the shape of a selection: `erase` weights alpha by it, a lift copies
+/// pixels through it, and a stamp composites with it.
+#[derive(Clone, Debug)]
+pub struct Mask {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    /// Row-major, `w * h` bytes.
+    pub cov: Vec<u8>,
+}
+
+impl Mask {
+    /// Coverage at a canvas pixel, or 0 outside the bounding box.
+    pub fn at(&self, x: u32, y: u32) -> u8 {
+        if x < self.x || y < self.y || x >= self.x + self.w || y >= self.y + self.h {
+            return 0;
+        }
+        self.cov[((y - self.y) * self.w + (x - self.x)) as usize]
     }
-    let w = canvas.width as i32;
-    let h = canvas.height as i32;
+
+    /// True where the mask actually covers something — the hit test for
+    /// "did the user press inside the selection".
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 {
+            return false;
+        }
+        self.at(x as u32, y as u32) > 0
+    }
+}
+
+/// Rasterise the closed polygon `pts` (in the cell's own pixel space) into a
+/// coverage mask. `None` when the path is degenerate — under 3 points, or
+/// entirely off-canvas.
+///
+/// Scanline with `SUB` sample rows per pixel row and nonzero winding, so a path
+/// that crosses itself stays solid instead of punching an even-odd hole.
+pub fn coverage(pts: &[(f32, f32)], cw: u32, ch: u32) -> Option<Mask> {
+    if pts.len() < 3 {
+        return None;
+    }
+    let w = cw as i32;
+    let h = ch as i32;
 
     let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
     let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
@@ -43,14 +80,15 @@ pub fn erase(canvas: &mut Canvas, pts: &[(f32, f32)]) -> bool {
     let x1 = (max_x.ceil() as i32 + 1).clamp(0, w);
     let y1 = (max_y.ceil() as i32 + 1).clamp(0, h);
     if x1 <= x0 || y1 <= y0 {
-        return false;
+        return None;
     }
 
+    let (mw, mh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let mut out = vec![0u8; mw * mh];
     // One row of coverage at a time — element 0 is canvas column `x0`.
-    let mut cov = vec![0f32; (x1 - x0) as usize];
+    let mut cov = vec![0f32; mw];
     let mut xs: Vec<(f32, i32)> = Vec::new();
     let weight = 1.0 / SUB as f32;
-    let mut touched = false;
 
     for py in y0..y1 {
         cov.iter_mut().for_each(|c| *c = 0.0);
@@ -92,16 +130,50 @@ pub fn erase(canvas: &mut Canvas, pts: &[(f32, f32)]) -> bool {
             }
         }
 
+        let row = (py - y0) as usize * mw;
         for (i, &c) in cov.iter().enumerate() {
             if c <= 0.0 {
                 continue;
             }
-            let idx = ((py * w + x0 + i as i32) * 4) as usize;
+            out[row + i] = (c.min(1.0) * 255.0).round() as u8;
+        }
+    }
+
+    Some(Mask {
+        x: x0 as u32,
+        y: y0 as u32,
+        w: mw as u32,
+        h: mh as u32,
+        cov: out,
+    })
+}
+
+/// Erase through an existing mask: alpha scales by `1 - coverage`, RGB is left
+/// alone, and a fully erased pixel is zeroed so it carries no stale colour.
+pub fn erase_masked(canvas: &mut Canvas, mask: &Mask) -> bool {
+    let w = canvas.width;
+    let mut touched = false;
+    for my in 0..mask.h {
+        let py = mask.y + my;
+        if py >= canvas.height {
+            break;
+        }
+        for mx in 0..mask.w {
+            let px = mask.x + mx;
+            if px >= w {
+                break;
+            }
+            let c = mask.cov[(my * mask.w + mx) as usize];
+            if c == 0 {
+                continue;
+            }
+            let idx = ((py * w + px) * 4) as usize;
             let a_pre = canvas.pixels[idx + 3];
             if a_pre == 0 {
                 continue;
             }
-            let a_out = ((a_pre as f32 / 255.0) * (1.0 - c.min(1.0)) * 255.0).round() as u8;
+            let a_out =
+                ((a_pre as f32 / 255.0) * (1.0 - c as f32 / 255.0) * 255.0).round() as u8;
             if a_out == a_pre {
                 continue;
             }
@@ -113,9 +185,8 @@ pub fn erase(canvas: &mut Canvas, pts: &[(f32, f32)]) -> bool {
             touched = true;
         }
     }
-
     if touched {
-        canvas.mark_dirty(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32);
+        canvas.mark_dirty(mask.x, mask.y, mask.w, mask.h);
     }
     touched
 }
@@ -141,6 +212,16 @@ fn add_span(cov: &mut [f32], x0: i32, xa: f32, xb: f32, weight: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-selection entry point: rasterise a path and erase through it.
+    /// The tool now splits these two steps so the mask can outlive the erase,
+    /// but the composed behaviour is still what these tests pin down.
+    fn erase(canvas: &mut Canvas, pts: &[(f32, f32)]) -> bool {
+        match coverage(pts, canvas.width, canvas.height) {
+            Some(mask) => erase_masked(canvas, &mask),
+            None => false,
+        }
+    }
 
     /// 16x16 fully opaque white.
     fn solid() -> Canvas {
@@ -231,5 +312,27 @@ mod tests {
         erase(&mut c, &rect(-8.0, -8.0, 4.0, 4.0));
         assert_eq!(alpha(&c, 0, 0), 0, "clipped region still erased");
         assert_eq!(alpha(&c, 15, 0), 255, "no wrap to the far end of the row");
+    }
+
+    #[test]
+    fn coverage_bounds_the_path_and_anti_aliases_its_edge() {
+        // A 4x4 square from (2,2) to (6,6) inside an 8x8 cell.
+        let sq = [(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0)];
+        let m = coverage(&sq, 8, 8).expect("mask");
+        assert!(m.x <= 2 && m.y <= 2);
+        assert!(m.x + m.w >= 6 && m.y + m.h >= 6);
+        // Solid in the middle, empty outside.
+        assert_eq!(m.at(3, 3), 255);
+        assert_eq!(m.at(0, 0), 0);
+        assert_eq!(m.at(7, 7), 0);
+        assert!(m.contains(3, 3));
+        assert!(!m.contains(0, 0));
+        assert!(!m.contains(-1, 3));
+    }
+
+    #[test]
+    fn coverage_rejects_degenerate_and_offscreen_paths() {
+        assert!(coverage(&[(0.0, 0.0), (1.0, 1.0)], 8, 8).is_none());
+        assert!(coverage(&[(20.0, 20.0), (30.0, 20.0), (30.0, 30.0)], 8, 8).is_none());
     }
 }

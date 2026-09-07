@@ -4,13 +4,13 @@
 use egui::{Align, Color32, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as ic;
 
-use crate::app::{AppState, NavKind, PanelId, MP4_PRESETS};
+use crate::app::{AppState, ExportKind, NavKind, PanelId, MP4_PRESETS};
 use crate::doc::camera::Ease;
 use crate::input::shortcuts::{Action, KeyCombo};
-use crate::io::{composite, gif_export, png_import, png_save, png_seq, project_file};
+use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::OnionDirection;
 use crate::tools::{ActiveTool, ShapeKind};
-use crate::ui::theme;
+use crate::ui::{expr, theme};
 
 /// Tooltip text including the currently-bound shortcut (e.g. "Pencil  (Q)").
 fn tip(state: &AppState, action: Action, base: &str) -> String {
@@ -65,7 +65,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         mini_timeline_window(state, ctx);
     }
     new_project_dialog(state, ctx);
-    mp4_export_dialog(state, ctx);
+    export_dialog(state, ctx);
     import_range_dialog(state, ctx);
     if let Some(label) = state.bg_label {
         busy_overlay(ctx, label);
@@ -568,7 +568,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 ui.add_space(6.0);
                 let f = tip(state, Action::ToolFill, "Fill");
                 let g = tip(state, Action::ToolShape, "Shape");
-                let l = tip(state, Action::ToolLasso, "Lasso erase");
+                let l = tip(state, Action::ToolLasso, "Lasso select");
                 tool_toggle(ui, state, ActiveTool::Fill, ic::PAINT_BUCKET, &f);
                 tool_toggle(ui, state, ActiveTool::Shape, ic::SHAPES, &g);
                 tool_toggle(ui, state, ActiveTool::Lasso, ic::LASSO, &l);
@@ -671,9 +671,24 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
             } else if state.tool == ActiveTool::Lasso {
                 ui.label(
                     egui::RichText::new(
-                        "Draw a loop — everything inside it is erased from the active layer. \
-                         The path closes itself on release.",
+                        "Draw a loop to select — the path closes itself on release. \
+                         Drag inside it to move the pixels, or nudge with the arrow \
+                         keys.",
                     )
+                    .color(theme::TEXT_MUTED)
+                    .size(11.0),
+                );
+                let del = combo_text(state, Action::SelectionDelete);
+                let cut = combo_text(state, Action::SelectionCut);
+                let copy = combo_text(state, Action::SelectionCopy);
+                let paste = combo_text(state, Action::SelectionPaste);
+                let off = combo_text(state, Action::SelectionDeselect);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{del} erases it - {cut} / {copy} / {paste} move it between \
+                         frames and layers - {off} drops it in place. Changing frame \
+                         or tool commits it.",
+                    ))
                     .color(theme::TEXT_MUTED)
                     .size(11.0),
                 );
@@ -702,6 +717,66 @@ fn brush_size_lock(state: &mut AppState, ui: &mut egui::Ui) {
         );
 }
 
+/// Pinned colour swatches: click to use, `+` to pin the current colour,
+/// right-click a swatch to remove it. Wraps, so a full palette costs two rows.
+fn swatch_strip(state: &mut AppState, ui: &mut egui::Ui) {
+    const SIZE: f32 = 16.0;
+    let cur = {
+        let c = state.brush.color;
+        [c[0], c[1], c[2]]
+    };
+    let mut pick: Option<[u8; 3]> = None;
+    let mut remove: Option<usize> = None;
+
+    ui.horizontal_wrapped(|ui| {
+        for (i, rgb) in state.palette.iter().copied().enumerate() {
+            let (rect, resp) =
+                ui.allocate_exact_size(Vec2::splat(SIZE), Sense::click());
+            let fill = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            ui.painter().rect_filled(rect, 3.0, fill);
+            // The active colour is called out with an accent ring, so a palette
+            // of near-identical greys still tells you where you are.
+            let stroke = if rgb == cur {
+                Stroke::new(2.0, theme::ACCENT)
+            } else {
+                Stroke::new(1.0, theme::STROKE_THIN)
+            };
+            ui.painter().rect_stroke(rect, 3.0, stroke);
+            if resp.clicked() {
+                pick = Some(rgb);
+            }
+            resp.context_menu(|ui| {
+                if ui.button("Remove swatch").clicked() {
+                    remove = Some(i);
+                    ui.close_menu();
+                }
+            });
+            resp.on_hover_text(format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]));
+        }
+        let full = state.palette.len() >= AppState::MAX_SWATCHES;
+        let held = state.palette.contains(&cur);
+        if ui
+            .add_enabled(!held, egui::Button::new("+").min_size(Vec2::splat(SIZE)))
+            .on_hover_text(if full {
+                "Pin this colour (the oldest swatch drops)"
+            } else {
+                "Pin this colour"
+            })
+            .on_disabled_hover_text("Already pinned")
+            .clicked()
+        {
+            state.pin_swatch();
+        }
+    });
+
+    if let Some(rgb) = pick {
+        state.set_brush_color(rgb);
+    }
+    if let Some(i) = remove {
+        state.palette.remove(i);
+    }
+}
+
 fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
             theme::section_header(ui, ic::PALETTE, "Color");
@@ -728,12 +803,13 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
                     if let Ok(mut cb) = arboard::Clipboard::new() {
                         if let Ok(s) = cb.get_text() {
                             if let Some([r, g, b, _]) = parse_rgb(&s) {
-                                state.brush.color = [r, g, b, 255];
+                                state.set_brush_color([r, g, b]);
                             }
                         }
                     }
                 }
             });
+            swatch_strip(state, ui);
 
             ui.add_space(6.0);
             theme::section_header(ui, ic::SLIDERS, "Dynamics");
@@ -881,19 +957,40 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
 
             let n = state.project.frame_count.max(1);
             let mut cur = state.project.current_frame;
+            // Frozen before the widgets are built: a relative expression must
+            // measure from where the edit started, not from a value the edit
+            // has already moved.
+            let base = cur as f64;
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(ic::CLOCK)
                         .color(theme::TEXT_MUTED)
                         .size(13.0),
                 );
-                let resp = ui.add(
+                // Its own DragValue rather than the slider's built-in value:
+                // `Slider` hard-codes update-while-editing, which would apply
+                // the half-typed "+1" of "+12" and shift the base underfoot.
+                let field = ui
+                    .add(
+                        egui::DragValue::new(&mut cur)
+                            .range(0..=n.saturating_sub(1))
+                            .speed(1)
+                            .update_while_editing(false)
+                            .custom_parser(move |s| expr::eval(s, base).map(f64::round)),
+                    )
+                    .on_hover_text(
+                        "Frame number. Takes arithmetic: 22/2, 8+12, (4+8)*2.\n\n\
+                         Start with an operator to go relative to this frame: \
+                         +12 jumps 12 ahead, -3 back, /2 to the halfway frame. \
+                         Enter applies it.",
+                    );
+                let track = ui.add(
                     egui::Slider::new(&mut cur, 0..=n.saturating_sub(1))
                         .integer()
-                        .show_value(true)
+                        .show_value(false)
                         .text("frame"),
                 );
-                if resp.changed() {
+                if field.changed() || track.changed() {
                     state.project.goto(cur);
                 }
                 ui.label(egui::RichText::new(format!("/ {n}")).color(theme::TEXT_MUTED));
@@ -994,7 +1091,7 @@ fn tool_name(tool: ActiveTool) -> &'static str {
         ActiveTool::Fill => "Fill",
         ActiveTool::Shape => "Shape",
         ActiveTool::Tracker => "Tracker",
-        ActiveTool::Lasso => "Lasso erase",
+        ActiveTool::Lasso => "Lasso select",
     }
 }
 
@@ -1713,6 +1810,30 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                 if theme::icon_button(ui, ic::PUSH_PIN, "Hold (delete key)").clicked() {
                     state.structural_edit(false, |p| p.hold_here());
                 }
+                ui.separator();
+                // Drawing clipboard: moves one cell between frames or layers.
+                // Cut-then-paste is how a drawing gets retimed.
+                if theme::icon_button(ui, ic::SCISSORS, &tip(state, Action::CellCut, "Cut drawing"))
+                    .clicked()
+                {
+                    state.cut_cell();
+                }
+                if theme::icon_button(
+                    ui,
+                    ic::CLIPBOARD_TEXT,
+                    &tip(state, Action::CellCopy, "Copy drawing"),
+                )
+                .clicked()
+                {
+                    state.cell_clip = state.project.copy_active_cell();
+                }
+                let has_clip = state.cell_clip.is_some();
+                let paste_tip = tip(state, Action::CellPaste, "Paste drawing");
+                ui.add_enabled_ui(has_clip, |ui| {
+                    if theme::icon_button(ui, ic::CLIPBOARD, &paste_tip).clicked() {
+                        state.paste_cell();
+                    }
+                });
             });
             ui.checkbox(&mut state.auto_key_draw, "Auto-key drawing")
                 .on_hover_text(
@@ -1997,6 +2118,8 @@ fn tool_toggle(
 ) {
     let selected = state.tool == target;
     if theme::icon_toggle(ui, icon, label, selected).clicked() && !selected {
+        // Leaving the lasso puts a floating selection down first.
+        state.commit_selection();
         state.tool_brushes[state.tool.idx()] = state.brush.clone();
         state.tool = target;
         state.brush = state.tool_brushes[target.idx()].clone();
@@ -2278,6 +2401,51 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // Lasso preview: the path so far plus a dashed-looking closing chord back
     // to the start, so it's obvious the loop seals itself on release. Drawn in
     // cell space like the other previews, since that is what gets rasterised.
+    // Floating selection: the lifted pixels as a quad at their offset, plus
+    // marching ants around the path so it reads as "selected", not "drawn".
+    if let Some(sel) = &state.selection {
+        if let Some(tex) = &state.selection_tex {
+            let (ox, oy) = sel.origin();
+            let (mw, mh) = (sel.mask.w as f32, sel.mask.h as f32);
+            let (ox, oy) = (ox as f32, oy as f32);
+            let quad = [
+                cell_to_screen(ox, oy),
+                cell_to_screen(ox + mw, oy),
+                cell_to_screen(ox + mw, oy + mh),
+                cell_to_screen(ox, oy + mh),
+            ];
+            image_quad(&painter, tex.id(), quad, Color32::WHITE);
+        }
+        if sel.path.len() >= 2 {
+            let (dx, dy) = (sel.offset.0 as f32, sel.offset.1 as f32);
+            let pts: Vec<egui::Pos2> = sel
+                .path
+                .iter()
+                .map(|&(x, y)| cell_to_screen(x + dx, y + dy))
+                .collect();
+            let mut closed = pts.clone();
+            closed.push(pts[0]);
+            // Animated dash offset — the classic marching ants, which is what
+            // tells a selection outline apart from an inked line.
+            let phase = (ui.input(|i| i.time) * 24.0) as f32 % 12.0;
+            painter.add(egui::Shape::dashed_line_with_offset(
+                &closed,
+                Stroke::new(1.6, Color32::from_black_alpha(190)),
+                &[6.0],
+                &[6.0],
+                phase,
+            ));
+            painter.add(egui::Shape::dashed_line_with_offset(
+                &closed,
+                Stroke::new(1.6, Color32::WHITE),
+                &[6.0],
+                &[6.0],
+                phase + 6.0,
+            ));
+            ui.ctx().request_repaint();
+        }
+    }
+
     if let Some(path) = &state.lasso {
         if path.len() >= 2 {
             let pts: Vec<egui::Pos2> = path.iter().map(|&(x, y)| cell_to_screen(x, y)).collect();
@@ -2342,6 +2510,26 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 ));
             }
         }
+    }
+
+    // A mirrored view is easy to forget and expensive to forget: you can draw a
+    // whole scene backwards. Say so, always, in the corner of the canvas.
+    if state.view.flip_x || state.view.flip_y {
+        let axes = match (state.view.flip_x, state.view.flip_y) {
+            (true, true) => "FLIPPED H+V",
+            (true, false) => "FLIPPED H",
+            _ => "FLIPPED V",
+        };
+        let at = rect.left_top() + Vec2::new(10.0, 8.0);
+        let galley = painter.layout_no_wrap(
+            axes.to_owned(),
+            egui::FontId::proportional(11.0),
+            Color32::from_rgb(20, 20, 24),
+        );
+        let pad = Vec2::new(6.0, 3.0);
+        let chip = Rect::from_min_size(at, galley.size() + pad * 2.0);
+        painter.rect_filled(chip, 3.0, Color32::from_rgb(255, 190, 90));
+        painter.galley(at + pad, galley, Color32::PLACEHOLDER);
     }
 
     if state.show_camera_guide {
@@ -2466,6 +2654,12 @@ struct Xform {
     center: egui::Pos2,
     pan: Vec2,
     scale: f32,
+    /// Mirror signs (±1), applied *before* the rotation. Kept out of `scale`
+    /// deliberately: `scale` is clamped positive and is republished as
+    /// `view_scale`, which sizes the brush — a negative there would be clamped
+    /// away in one place and taken literally in another.
+    fx: f32,
+    fy: f32,
     rot_sin: f32,
     rot_cos: f32,
     dcx: f32,
@@ -2500,11 +2694,41 @@ impl Xform {
                 state.view.pan,
             )
         };
-        let (rot_sin, rot_cos) = rotation.sin_cos();
-        Self {
-            center: rect.center(),
+        let sign = |on: bool| if on { -1.0 } else { 1.0 };
+        Self::from_parts(
+            rect.center(),
             pan,
             scale,
+            sign(state.view.flip_x),
+            sign(state.view.flip_y),
+            rotation,
+            cw,
+            ch,
+        )
+    }
+
+    /// The maths half of [`Xform::new`], without an `AppState` — so the
+    /// screen/doc round trip can be unit-tested across flips and rotations.
+    // The argument list *is* the transform: bundling it into a struct would
+    // just be `Xform` with extra steps.
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        center: egui::Pos2,
+        pan: Vec2,
+        scale: f32,
+        fx: f32,
+        fy: f32,
+        rotation: f32,
+        cw: f32,
+        ch: f32,
+    ) -> Self {
+        let (rot_sin, rot_cos) = rotation.sin_cos();
+        Self {
+            center,
+            pan,
+            scale,
+            fx,
+            fy,
             rot_sin,
             rot_cos,
             dcx: cw * 0.5,
@@ -2515,19 +2739,19 @@ impl Xform {
     }
 
     fn doc_to_screen(&self, x: f32, y: f32) -> egui::Pos2 {
-        let ox = (x - self.dcx) * self.scale;
-        let oy = (y - self.dcy) * self.scale;
+        let ox = (x - self.dcx) * self.scale * self.fx;
+        let oy = (y - self.dcy) * self.scale * self.fy;
         let rx = ox * self.rot_cos - oy * self.rot_sin;
         let ry = ox * self.rot_sin + oy * self.rot_cos;
         self.center + self.pan + Vec2::new(rx, ry)
     }
 
-    /// A screen-space drag delta expressed in document pixels — the rotation
-    /// and scale part of `screen_to_doc`, without the translation.
+    /// A screen-space drag delta expressed in document pixels — the rotation,
+    /// mirror and scale part of `screen_to_doc`, without the translation.
     fn screen_delta_to_doc(&self, d: Vec2) -> (f32, f32) {
         (
-            (d.x * self.rot_cos + d.y * self.rot_sin) / self.scale,
-            (-d.x * self.rot_sin + d.y * self.rot_cos) / self.scale,
+            (d.x * self.rot_cos + d.y * self.rot_sin) / (self.scale * self.fx),
+            (-d.x * self.rot_sin + d.y * self.rot_cos) / (self.scale * self.fy),
         )
     }
 
@@ -2535,7 +2759,10 @@ impl Xform {
         let v = p - self.center - self.pan;
         let rx = v.x * self.rot_cos + v.y * self.rot_sin;
         let ry = -v.x * self.rot_sin + v.y * self.rot_cos;
-        (rx / self.scale + self.dcx, ry / self.scale + self.dcy)
+        (
+            rx / (self.scale * self.fx) + self.dcx,
+            ry / (self.scale * self.fy) + self.dcy,
+        )
     }
 
     fn corners(&self) -> [egui::Pos2; 4] {
@@ -2927,30 +3154,16 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             }
             ui.close_menu();
         }
-        if ui
-            .button(theme::icon_text(ic::IMAGES, "Export PNG sequence…"))
-            .clicked()
-        {
-            if let Err(e) = png_seq::export_dialog(&state.project) {
-                log::error!("PNG sequence export failed: {e:#}");
+        for (icon, label, kind) in [
+            (ic::IMAGES, "Export PNG sequence…", ExportKind::PngSequence),
+            (ic::FILM_REEL, "Export animated GIF…", ExportKind::Gif),
+            (ic::FILM_STRIP, "Export MP4…", ExportKind::Mp4),
+            (ic::GRID_FOUR, "Export sprite sheet…", ExportKind::SpriteSheet),
+        ] {
+            if ui.button(theme::icon_text(icon, label)).clicked() {
+                open_export(state, kind);
+                ui.close_menu();
             }
-            ui.close_menu();
-        }
-        if ui
-            .button(theme::icon_text(ic::FILM_REEL, "Export animated GIF…"))
-            .clicked()
-        {
-            if let Err(e) = gif_export::export_dialog(&state.project) {
-                log::error!("GIF export failed: {e:#}");
-            }
-            ui.close_menu();
-        }
-        if ui
-            .button(theme::icon_text(ic::FILM_STRIP, "Export MP4…"))
-            .clicked()
-        {
-            state.show_mp4_export = true;
-            ui.close_menu();
         }
         ui.separator();
         if ui
@@ -3046,6 +3259,31 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
+                // Orientation is read back out of the numbers rather than
+                // stored, so the toggle can never disagree with a size the
+                // user typed by hand. A square canvas reads as landscape.
+                let cfg = &mut state.new_project_cfg;
+                let landscape = cfg.width >= cfg.height;
+                let mut want = landscape;
+                if ui
+                    .selectable_label(landscape, theme::icon_text(ic::MONITOR, "Landscape"))
+                    .clicked()
+                {
+                    want = true;
+                }
+                if ui
+                    .selectable_label(!landscape, theme::icon_text(ic::DEVICE_MOBILE, "Portrait"))
+                    .clicked()
+                {
+                    want = false;
+                }
+                if want != landscape {
+                    std::mem::swap(&mut cfg.width, &mut cfg.height);
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
                 ui.label("FPS:");
                 ui.add(
                     egui::DragValue::new(&mut state.new_project_cfg.fps)
@@ -3057,6 +3295,10 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
             ui.add_space(8.0);
             theme::section_header(ui, ic::RECTANGLE, "Presets");
             ui.horizontal(|ui| {
+                // The table is written landscape; a preset is flipped to
+                // whichever orientation is currently selected, so picking one
+                // doesn't quietly undo the choice.
+                let landscape = state.new_project_cfg.width >= state.new_project_cfg.height;
                 for &(label, w, h) in &[
                     ("HD 720p", 1280, 720),
                     ("Full HD", 1920, 1080),
@@ -3066,6 +3308,7 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
                     ("8K", 7680, 4320),
                 ] {
                     if ui.button(label).clicked() {
+                        let (w, h) = if landscape { (w, h) } else { (h, w) };
                         state.new_project_cfg.width = w;
                         state.new_project_cfg.height = h;
                     }
@@ -3098,22 +3341,61 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
-fn mp4_export_dialog(state: &mut AppState, ctx: &egui::Context) {
-    if !state.show_mp4_export {
+/// Open the shared export dialog for `kind`, defaulting the range to the whole
+/// timeline the first time it is used on this project.
+fn open_export(state: &mut AppState, kind: ExportKind) {
+    let last = state.project.frame_count.saturating_sub(1);
+    state.export_cfg.kind = kind;
+    state.export_cfg.start = state.export_cfg.start.min(last);
+    state.export_cfg.end = state.export_cfg.end.clamp(state.export_cfg.start, last);
+    if state.export_cfg.end == 0 {
+        state.export_cfg.end = last;
+    }
+    state.show_export = true;
+}
+
+/// Inclusive start/end frame picker: dual-knob slider plus exact inputs.
+/// Shared by the export dialog and the import range dialog so the two cannot
+/// drift apart.
+fn frame_range_ui(ui: &mut egui::Ui, start: &mut usize, end: &mut usize, last: usize) {
+    crate::ui::widgets::range_slider(ui, start, end, 0, last);
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Start:");
+        ui.add(egui::DragValue::new(start).range(0..=last).speed(1));
+        ui.add_space(12.0);
+        ui.label("End:");
+        ui.add(egui::DragValue::new(end).range(0..=last).speed(1));
+    });
+    if start > end {
+        *end = *start;
+    }
+}
+
+/// One modal for every export format: the frame range applies to all of them,
+/// and the format-specific controls are only a few widgets each.
+fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
+    if !state.show_export {
         return;
     }
+    let kind = state.export_cfg.kind;
+    let last = state.project.frame_count.saturating_sub(1);
+    let loop_start = state.project.loop_start.min(last);
+    let loop_end = state.project.loop_end.saturating_sub(1).min(last);
+
     let mut open = true;
     let mut export = false;
     let mut cancel = false;
-    egui::Window::new(theme::icon_text(ic::FILM_STRIP, "Export MP4"))
+    egui::Window::new(theme::icon_text(ic::FILM_STRIP, kind.title()))
         .open(&mut open)
-        .default_pos([400.0, 200.0])
+        .default_pos([380.0, 180.0])
+        .default_width(400.0)
         .resizable(false)
         .collapsible(false)
         .frame(floating_frame())
         .show(ctx, |ui| {
             ui.label(format!(
-                "{} × {} @ {:.0} fps · {} frames",
+                "{} x {} @ {:.0} fps - {} frames",
                 state.project.width,
                 state.project.height,
                 state.project.fps,
@@ -3121,27 +3403,113 @@ fn mp4_export_dialog(state: &mut AppState, ctx: &egui::Context) {
             ));
             ui.add_space(8.0);
 
-            ui.add(
-                egui::Slider::new(&mut state.mp4_cfg.crf, 0..=51).text("Quality (CRF)"),
+            theme::section_header(ui, ic::FILM_REEL, "Frames");
+            frame_range_ui(
+                ui,
+                &mut state.export_cfg.start,
+                &mut state.export_cfg.end,
+                last,
             );
-            ui.label(
-                egui::RichText::new("Lower = better quality, larger file. 18 ≈ visually lossless.")
-                    .small()
-                    .color(theme::TEXT_MUTED),
-            );
-            ui.add_space(6.0);
+            if ui
+                .button("Use loop range")
+                .on_hover_text("Match the loop bars shown on the frame strip")
+                .clicked()
+            {
+                state.export_cfg.start = loop_start;
+                state.export_cfg.end = loop_end.max(loop_start);
+            }
 
-            egui::ComboBox::from_label("Preset")
-                .selected_text(MP4_PRESETS[state.mp4_cfg.preset_idx.min(MP4_PRESETS.len() - 1)])
-                .show_ui(ui, |ui| {
-                    for (i, p) in MP4_PRESETS.iter().enumerate() {
-                        ui.selectable_value(&mut state.mp4_cfg.preset_idx, i, *p);
-                    }
-                });
+            let count = state.export_cfg.end.saturating_sub(state.export_cfg.start) + 1;
+
+            match kind {
+                ExportKind::Mp4 => {
+                    ui.add_space(6.0);
+                    theme::section_header(ui, ic::SLIDERS, "Encoding");
+                    ui.add(
+                        egui::Slider::new(&mut state.export_cfg.mp4.crf, 0..=51)
+                            .text("Quality (CRF)"),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Lower = better quality, larger file. 18 is visually lossless.",
+                        )
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                    );
+                    ui.add_space(6.0);
+                    egui::ComboBox::from_label("Preset")
+                        .selected_text(
+                            MP4_PRESETS[state.export_cfg.mp4.preset_idx.min(MP4_PRESETS.len() - 1)],
+                        )
+                        .show_ui(ui, |ui| {
+                            for (i, preset) in MP4_PRESETS.iter().enumerate() {
+                                ui.selectable_value(
+                                    &mut state.export_cfg.mp4.preset_idx,
+                                    i,
+                                    *preset,
+                                );
+                            }
+                        });
+                    ui.label(
+                        egui::RichText::new("Slower preset = smaller file, longer encode.")
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
+                }
+                ExportKind::SpriteSheet => {
+                    ui.add_space(6.0);
+                    theme::section_header(ui, ic::GRID_FOUR, "Grid");
+                    ui.horizontal(|ui| {
+                        ui.label("Columns:");
+                        ui.add(
+                            egui::DragValue::new(&mut state.export_cfg.sheet_columns)
+                                .range(0..=64)
+                                .speed(1),
+                        )
+                        .on_hover_text("0 = auto (near-square)");
+                        ui.add_space(12.0);
+                        ui.label("Padding:");
+                        ui.add(
+                            egui::DragValue::new(&mut state.export_cfg.sheet_padding)
+                                .range(0..=64)
+                                .speed(1),
+                        )
+                        .on_hover_text("Transparent gutter between cells");
+                    });
+                }
+                _ => {}
+            }
+
+            ui.add_space(6.0);
+            // Say how big this gets *before* the user waits for it: a long range
+            // at 4K makes a sheet tens of thousands of pixels wide.
+            let summary = match kind {
+                ExportKind::SpriteSheet => {
+                    let (cols, rows) =
+                        crate::io::sprite_sheet::grid(count, state.export_cfg.sheet_columns);
+                    let (sw, sh) = crate::io::sprite_sheet::sheet_size(
+                        state.project.width,
+                        state.project.height,
+                        cols,
+                        rows,
+                        state.export_cfg.sheet_padding,
+                    );
+                    format!("{count} frames - {cols}x{rows} grid - {sw} x {sh} px")
+                }
+                ExportKind::PngSequence => format!(
+                    "{count} files, frame_{:04}.png to frame_{:04}.png",
+                    state.export_cfg.start, state.export_cfg.end
+                ),
+                _ => format!(
+                    "{count} frames - {:.1}s at {:.0} fps",
+                    count as f32 / state.project.fps.max(1.0),
+                    state.project.fps
+                ),
+            };
             ui.label(
-                egui::RichText::new("Slower preset = smaller file, longer encode.")
-                    .small()
-                    .color(theme::TEXT_MUTED),
+                egui::RichText::new(summary)
+                    .color(theme::TEXT_MUTED)
+                    .size(11.0),
             );
 
             ui.add_space(8.0);
@@ -3158,10 +3526,10 @@ fn mp4_export_dialog(state: &mut AppState, ctx: &egui::Context) {
 
     // Handle the result outside the closure to avoid borrowing `state` twice.
     if export {
-        state.show_mp4_export = false;
-        state.start_mp4_export();
+        state.show_export = false;
+        state.start_export();
     } else if cancel || !open {
-        state.show_mp4_export = false;
+        state.show_export = false;
     }
 }
 
@@ -3215,19 +3583,7 @@ fn import_range_dialog(state: &mut AppState, ctx: &egui::Context) {
             });
             ui.add_space(10.0);
 
-            crate::ui::widgets::range_slider(ui, &mut start, &mut end, 0, last);
-            ui.add_space(6.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Start:");
-                ui.add(egui::DragValue::new(&mut start).range(0..=last).speed(1));
-                ui.add_space(12.0);
-                ui.label("End:");
-                ui.add(egui::DragValue::new(&mut end).range(0..=last).speed(1));
-            });
-            if start > end {
-                end = start;
-            }
+            frame_range_ui(ui, &mut start, &mut end, last);
             let count = end - start + 1;
             ui.add_space(4.0);
             ui.label(
@@ -3381,6 +3737,59 @@ fn busy_overlay(ctx: &egui::Context, label: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::Xform;
+
+    /// `screen_to_doc` is a hand-written inverse of `doc_to_screen`, so the two
+    /// can silently disagree — and a mirror is exactly the kind of term that
+    /// gets applied on the wrong side of the rotation. Round-trip every flip
+    /// combination through a rotated, zoomed, panned view.
+    #[test]
+    fn xform_round_trips_under_every_flip() {
+        for (fx, fy) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
+            let xf = Xform::from_parts(
+                egui::pos2(640.0, 360.0),
+                egui::vec2(37.0, -19.0),
+                2.5,
+                fx,
+                fy,
+                0.7,
+                1280.0,
+                720.0,
+            );
+            for (x, y) in [(0.0, 0.0), (1280.0, 720.0), (100.0, 640.0), (933.0, 12.0)] {
+                let (rx, ry) = xf.screen_to_doc(xf.doc_to_screen(x, y));
+                assert!(
+                    (rx - x).abs() < 0.01 && (ry - y).abs() < 0.01,
+                    "flip ({fx},{fy}): ({x},{y}) -> ({rx},{ry})"
+                );
+            }
+        }
+    }
+
+    /// A drag delta must map to document space with the same handedness as a
+    /// position, or panning a layer under a mirrored view runs backwards.
+    #[test]
+    fn screen_delta_matches_position_mapping_under_flip() {
+        for (fx, fy) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
+            let xf = Xform::from_parts(
+                egui::pos2(300.0, 200.0),
+                egui::Vec2::ZERO,
+                3.0,
+                fx,
+                fy,
+                -0.4,
+                800.0,
+                600.0,
+            );
+            let d = egui::vec2(21.0, -13.0);
+            let a = xf.screen_to_doc(egui::pos2(100.0, 100.0));
+            let b = xf.screen_to_doc(egui::pos2(100.0, 100.0) + d);
+            let (dx, dy) = xf.screen_delta_to_doc(d);
+            assert!((dx - (b.0 - a.0)).abs() < 0.01, "flip ({fx},{fy}) dx");
+            assert!((dy - (b.1 - a.1)).abs() < 0.01, "flip ({fx},{fy}) dy");
+        }
+    }
+
     use super::restick_axis;
 
     /// The un-maximized default layout, and the maximized window it grows into.

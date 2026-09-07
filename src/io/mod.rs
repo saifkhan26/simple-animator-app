@@ -12,4 +12,5 @@ pub mod png_import;
 pub mod png_save;
 pub mod png_seq;
 pub mod project_file;
+pub mod sprite_sheet;
 pub mod video_import;

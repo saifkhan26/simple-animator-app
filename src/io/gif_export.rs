@@ -16,18 +16,8 @@ use crate::io::composite;
 
 const NQ_SAMPLE_FACTOR: i32 = 10; // 1..=30; 10 = quality/speed sweet spot.
 
-pub fn export_dialog(project: &Project) -> Result<()> {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("GIF", &["gif"])
-        .set_file_name("animation.gif")
-        .save_file()
-    else {
-        return Ok(());
-    };
-    export_to(project, &path)
-}
-
-pub fn export_to(project: &Project, path: &PathBuf) -> Result<()> {
+/// Write frames `range.0..=range.1` as one looping GIF.
+pub fn export_to(project: &Project, path: &PathBuf, range: (usize, usize)) -> Result<()> {
     let file = File::create(path).with_context(|| format!("creating {path:?}"))?;
     let w = project.width as u16;
     let h = project.height as u16;
@@ -36,7 +26,9 @@ pub fn export_to(project: &Project, path: &PathBuf) -> Result<()> {
 
     let delay = (100.0 / project.fps.max(1.0)).round().max(1.0) as u16; // centiseconds
 
-    for f in 0..project.frame_count {
+    let last = project.frame_count.saturating_sub(1);
+    let (start, end) = (range.0.min(last), range.1.min(last));
+    for f in start..=end {
         let flat = composite::flatten_frame(project, f);
         let frame = encode_frame(&flat.pixels, w, h, delay);
         encoder.write_frame(&frame).context("write_frame")?;

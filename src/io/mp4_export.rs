@@ -40,7 +40,12 @@ fn cmd(program: &str) -> Command {
 
 /// Encode every frame of `project` to an MP4 at `path`. Blocking — run on a
 /// worker thread (see `AppState::start_mp4_export`).
-pub fn export_to(project: &Project, path: &Path, settings: &Mp4Settings) -> Result<()> {
+pub fn export_to(
+    project: &Project,
+    path: &Path,
+    settings: &Mp4Settings,
+    range: (usize, usize),
+) -> Result<()> {
     let w = project.width;
     let h = project.height;
     // Even dimensions are required by yuv420p; pad odd sizes up by a pixel.
@@ -83,7 +88,9 @@ pub fn export_to(project: &Project, path: &Path, settings: &Mp4Settings) -> Resu
     // Stream frames. Feed rgb24 (3 bytes/px) composited over black.
     let mut rgb = vec![0u8; (w as usize) * (h as usize) * 3];
     let write_result = (|| -> Result<()> {
-        for f in 0..project.frame_count {
+        let last = project.frame_count.saturating_sub(1);
+        let (start, end) = (range.0.min(last), range.1.min(last));
+        for f in start..=end {
             let flat = composite::flatten_frame(project, f);
             rgba_over_black(&flat.pixels, &mut rgb);
             stdin

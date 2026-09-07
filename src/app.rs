@@ -20,7 +20,9 @@ use crate::input::shortcuts::{self, Action, ShortcutMap};
 use crate::input::tablet::PenInput;
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionStep};
 use crate::timeline::playback::Playback;
+use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
+use crate::tools::selection::Selection;
 use crate::tools::stroke::StrokeBuilder;
 use crate::tools::{ActiveTool, BrushSettings, ShapeKind};
 use crate::ui;
@@ -55,6 +57,63 @@ impl Default for Mp4ExportConfig {
     }
 }
 
+/// What the export dialog is about to write.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    PngSequence,
+    Gif,
+    Mp4,
+    SpriteSheet,
+}
+
+impl ExportKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            ExportKind::PngSequence => "Export PNG sequence",
+            ExportKind::Gif => "Export animated GIF",
+            ExportKind::Mp4 => "Export MP4",
+            ExportKind::SpriteSheet => "Export sprite sheet",
+        }
+    }
+
+    /// Present-tense label for the busy overlay.
+    fn busy(self) -> &'static str {
+        match self {
+            ExportKind::PngSequence => "Exporting PNG sequence…",
+            ExportKind::Gif => "Exporting GIF…",
+            ExportKind::Mp4 => "Exporting MP4…",
+            ExportKind::SpriteSheet => "Exporting sprite sheet…",
+        }
+    }
+}
+
+/// Everything the shared export dialog edits. One struct for all four formats:
+/// the range applies to every one of them, and the format-specific parts are
+/// small enough that separate configs would cost more than they save.
+pub struct ExportConfig {
+    pub kind: ExportKind,
+    /// Inclusive frame range, like `ImportRangeState`.
+    pub start: usize,
+    pub end: usize,
+    pub mp4: Mp4ExportConfig,
+    /// Sprite-sheet columns; `0` = near-square.
+    pub sheet_columns: usize,
+    pub sheet_padding: u32,
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            kind: ExportKind::PngSequence,
+            start: 0,
+            end: 0,
+            mp4: Mp4ExportConfig::default(),
+            sheet_columns: 0,
+            sheet_padding: 0,
+        }
+    }
+}
+
 /// In-progress shape drag (Shape tool). Anchored at `start`, dragged to `end`;
 /// rasterised into the target cell on pointer-up.
 #[derive(Clone, Copy)]
@@ -67,11 +126,17 @@ pub struct ShapeDrag {
 /// Canvas view transform applied on top of the fit-to-window base scale.
 /// `zoom` multiplies the base scale, `pan` shifts in screen pixels, `rotation`
 /// is in radians about the canvas centre. Each can be reset independently.
+///
+/// `flip_x` / `flip_y` mirror the *view* only — the drawing check animators
+/// reach for constantly. Export never reads `View`, so a flipped view can never
+/// reach a file.
 #[derive(Clone, Copy)]
 pub struct View {
     pub zoom: f32,
     pub pan: egui::Vec2,
     pub rotation: f32,
+    pub flip_x: bool,
+    pub flip_y: bool,
 }
 
 impl Default for View {
@@ -80,6 +145,8 @@ impl Default for View {
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             rotation: 0.0,
+            flip_x: false,
+            flip_y: false,
         }
     }
 }
@@ -118,6 +185,9 @@ struct UiPrefs {
     onion: OnionConfig,
     auto_key_transform: bool,
     auto_key_draw: bool,
+    /// Pinned colour swatches. A workspace preference, not project data: a
+    /// palette follows the artist between files.
+    palette: Vec<[u8; 3]>,
 }
 
 impl Default for UiPrefs {
@@ -133,6 +203,7 @@ impl Default for UiPrefs {
             onion: OnionConfig::default(),
             auto_key_transform: false,
             auto_key_draw: false,
+            palette: Vec::new(),
         }
     }
 }
@@ -190,13 +261,13 @@ pub enum BgJob {
         rx: Receiver<Result<(usize, f64)>>,
         path: PathBuf,
     },
+    /// Writing an export. `Ok` carries the file name for the success toast.
+    Export(Receiver<Result<String>>),
     /// Extracting the chosen video range, to be dropped on a new layer.
     VideoExtract {
         rx: Receiver<Result<Vec<Canvas>>>,
         name: String,
     },
-    /// Encoding the project to an MP4 via ffmpeg.
-    Mp4Export(Receiver<Result<()>>),
 }
 
 /// In-progress inline layer rename: which layer, the edit buffer, and
@@ -244,6 +315,26 @@ pub struct AppState {
 
     pub tool: ActiveTool,
     pub brush: BrushSettings,
+    /// Pinned swatches, most recently added last. Capped at
+    /// [`AppState::MAX_SWATCHES`].
+    pub palette: Vec<[u8; 3]>,
+    /// Drawing clipboard: one cell's pixels, cut or copied from a slot. Held
+    /// as a `Canvas` rather than a `CellId` so it survives the undo of the cut
+    /// that produced it.
+    pub cell_clip: Option<Canvas>,
+    /// Floating lasso selection, if any. Bound to one cell: changing frame or
+    /// layer commits it first.
+    pub selection: Option<Selection>,
+    /// Pointer position (cell space) of the last selection-move sample, or
+    /// `None` when no move drag is in flight.
+    sel_drag: Option<(f32, f32)>,
+    /// Selection clipboard: mask plus lifted pixels.
+    pixel_clip: Option<(Mask, Vec<u8>)>,
+    /// Set when the floating pixels changed and their texture must be rebuilt.
+    /// Moving does *not* set it — the offset moves the quad, not the texture.
+    sel_tex_stale: bool,
+    /// GPU texture for the floating pixels.
+    pub selection_tex: Option<TextureHandle>,
     /// Per-tool brush settings preserved across tool switches.
     pub tool_brushes: [BrushSettings; 7],
     pub stroke: Option<StrokeBuilder>,
@@ -322,8 +413,8 @@ pub struct AppState {
     pub new_project_cfg: NewProjectConfig,
 
     /// MP4 export settings dialog visibility + backing config.
-    pub show_mp4_export: bool,
-    pub mp4_cfg: Mp4ExportConfig,
+    pub show_export: bool,
+    pub export_cfg: ExportConfig,
 
     /// Frame-range import dialog (video / GIF) visibility + backing state.
     pub show_import_range: bool,
@@ -463,6 +554,13 @@ impl AppState {
             cell_dirty,
             tool: ActiveTool::Pencil,
             brush: BrushSettings::default_pencil(),
+            palette: prefs.palette,
+            cell_clip: None,
+            selection: None,
+            sel_drag: None,
+            pixel_clip: None,
+            sel_tex_stale: false,
+            selection_tex: None,
             tool_brushes: [
                 BrushSettings::default_pencil(),
                 BrushSettings::default_ink(),
@@ -503,8 +601,8 @@ impl AppState {
             show_mini_timeline: prefs.show_mini_timeline,
             show_new_project: false,
             new_project_cfg: NewProjectConfig::default(),
-            show_mp4_export: false,
-            mp4_cfg: Mp4ExportConfig::default(),
+            show_export: false,
+            export_cfg: ExportConfig::default(),
             show_import_range: false,
             import_range: None,
             layer_xform: false,
@@ -597,7 +695,7 @@ impl AppState {
         // They're preferences that persist across runs, like `shortcuts` — a new
         // project shouldn't shove hidden panels back on screen.
         self.new_project_cfg = NewProjectConfig { width, height, fps };
-        self.show_mp4_export = false;
+        self.show_export = false;
         self.show_import_range = false;
         self.import_range = None;
         self.layer_xform = false;
@@ -996,26 +1094,73 @@ impl AppState {
 
     /// File → Export MP4…: pick an output path, then encode the whole project on
     /// a worker thread via ffmpeg. Called when the settings dialog is confirmed.
-    pub fn start_mp4_export(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("MP4 video", &["mp4"])
-            .set_file_name("animation.mp4")
-            .set_title("Export MP4")
-            .save_file()
-        else {
+    /// Ask for a destination and run the configured export on a worker thread.
+    ///
+    /// Every format goes through here, not just MP4: flattening a long range is
+    /// far too slow to hold the UI thread, and one path means one place where
+    /// success and failure reach the user.
+    pub fn start_export(&mut self) {
+        let kind = self.export_cfg.kind;
+        let dialog = rfd::FileDialog::new().set_title(kind.title());
+        let target = match kind {
+            ExportKind::PngSequence => dialog.pick_folder(),
+            ExportKind::Gif => dialog
+                .add_filter("GIF", &["gif"])
+                .set_file_name("animation.gif")
+                .save_file(),
+            ExportKind::Mp4 => dialog
+                .add_filter("MP4 video", &["mp4"])
+                .set_file_name("animation.mp4")
+                .save_file(),
+            ExportKind::SpriteSheet => dialog
+                .add_filter("PNG image", &["png"])
+                .set_file_name("sheet.png")
+                .save_file(),
+        };
+        let Some(path) = target else {
             return;
         };
-        let project = self.project.clone();
-        let settings = crate::io::mp4_export::Mp4Settings {
-            crf: self.mp4_cfg.crf,
-            preset: MP4_PRESETS[self.mp4_cfg.preset_idx.min(MP4_PRESETS.len() - 1)],
+
+        let last = self.project.frame_count.saturating_sub(1);
+        let range = (
+            self.export_cfg.start.min(last),
+            self.export_cfg.end.min(last),
+        );
+        let sheet = crate::io::sprite_sheet::SheetOptions {
+            columns: self.export_cfg.sheet_columns,
+            padding: self.export_cfg.sheet_padding,
         };
+        let settings = crate::io::mp4_export::Mp4Settings {
+            crf: self.export_cfg.mp4.crf,
+            preset: MP4_PRESETS[self
+                .export_cfg
+                .mp4
+                .preset_idx
+                .min(MP4_PRESETS.len() - 1)],
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let project = self.project.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = tx.send(crate::io::mp4_export::export_to(&project, &path, &settings));
+            let res = match kind {
+                ExportKind::PngSequence => {
+                    crate::io::png_seq::export_to(&project, &path, range)
+                }
+                ExportKind::Gif => crate::io::gif_export::export_to(&project, &path, range),
+                ExportKind::Mp4 => {
+                    crate::io::mp4_export::export_to(&project, &path, &settings, range)
+                }
+                ExportKind::SpriteSheet => {
+                    crate::io::sprite_sheet::export_to(&project, &path, range, &sheet)
+                }
+            };
+            let _ = tx.send(res.map(|()| name));
         });
-        self.bg_job = Some(BgJob::Mp4Export(rx));
-        self.bg_label = Some("Exporting MP4…");
+        self.bg_job = Some(BgJob::Export(rx));
+        self.bg_label = Some(kind.busy());
     }
 
     /// Confirm the frame-range dialog: slice (GIF, instant) or extract (video,
@@ -1590,18 +1735,30 @@ impl AppState {
                     None
                 }
             },
-            BgJob::Mp4Export(rx) => match rx.try_recv() {
+            BgJob::Export(rx) => match rx.try_recv() {
                 Ok(res) => {
                     self.bg_label = None;
-                    if let Err(e) = res {
-                        log::error!("MP4 export failed: {e:#}");
+                    // Exports used to fail into the log only, where nobody saw
+                    // them. Route both outcomes to the same toast / modal the
+                    // project save uses.
+                    match res {
+                        Ok(name) => {
+                            self.save_toast = Some((format!("Exported {name}"), Instant::now() + Self::TOAST_TTL));
+                            self.save_error = None;
+                        }
+                        Err(e) => {
+                            log::error!("Export failed: {e:#}");
+                            self.save_error = Some(format!("{e:#}"));
+                        }
                     }
                     None
                 }
-                Err(TryRecvError::Empty) => Some(BgJob::Mp4Export(rx)),
+                Err(TryRecvError::Empty) => Some(BgJob::Export(rx)),
                 Err(TryRecvError::Disconnected) => {
                     self.bg_label = None;
-                    log::error!("MP4 export worker died");
+                    let msg = "Export worker died".to_string();
+                    log::error!("{msg}");
+                    self.save_error = Some(msg);
                     None
                 }
             },
@@ -1829,6 +1986,35 @@ impl AppState {
             self.cell_dirty.insert(id, false);
         }
 
+        // The floating selection's own texture. Rebuilt only when the pixels
+        // change: a move shifts the quad, not the texture.
+        match &self.selection {
+            Some(sel) if self.sel_tex_stale || self.selection_tex.is_none() => {
+                let dims = [sel.mask.w as usize, sel.mask.h as usize];
+                let image = premultiplied_image(dims, &sel.pixels);
+                match self.selection_tex.as_mut() {
+                    Some(tex) if tex.size() == dims => tex.set(image, TextureOptions::LINEAR),
+                    _ => {
+                        if let Some(old) = self.selection_tex.take() {
+                            self.retired_textures.push(old);
+                        }
+                        self.selection_tex = Some(ctx.load_texture(
+                            "selection",
+                            image,
+                            TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+                self.sel_tex_stale = false;
+            }
+            None if self.selection_tex.is_some() => {
+                if let Some(old) = self.selection_tex.take() {
+                    self.retired_textures.push(old);
+                }
+            }
+            _ => {}
+        }
+
         // Ghost silhouettes for the onion cells. Bounded to the ghosted cells:
         // each one is a second full-size texture, which matters on 4K canvases.
         let stale: Vec<CellId> = self
@@ -1961,10 +2147,24 @@ impl AppState {
         }
 
         if self.tool == ActiveTool::Lasso {
-            // Collect the path; the enclosed pixels are erased on pointer-up.
-            // Preview is drawn by egui shapes in `paint_canvas` until then.
+            // Pressing inside an existing selection moves it; anywhere else
+            // commits it and starts a new lasso.
+            if self
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.hit(sample.x, sample.y))
+            {
+                self.sel_drag = Some((sample.x, sample.y));
+                self.stroke = None;
+                self.stroke_pre_pixels = None;
+                return;
+            }
+            self.commit_selection();
+            // Collect the path; the enclosed pixels become a selection on
+            // pointer-up. Preview is drawn by egui shapes in `paint_canvas`.
             self.lasso = Some(vec![(sample.x, sample.y)]);
             self.stroke = None;
+            self.stroke_pre_pixels = None;
             return;
         }
 
@@ -2013,6 +2213,17 @@ impl AppState {
             drag.end = (sample.x, sample.y);
             return;
         }
+        if let Some(last) = self.sel_drag {
+            let (dx, dy) = (
+                (sample.x - last.0).round() as i32,
+                (sample.y - last.1).round() as i32,
+            );
+            if dx != 0 || dy != 0 {
+                self.sel_drag = Some((sample.x, sample.y));
+                self.nudge_selection(dx, dy);
+            }
+            return;
+        }
         if let Some(path) = &mut self.lasso {
             // Decimate: a pen emits far more samples than the polygon needs,
             // and every extra vertex costs an edge test on every scanline.
@@ -2050,12 +2261,11 @@ impl AppState {
             return;
         };
         if let Some(path) = self.lasso.take() {
-            if let Some(c) = self.project.cell_mut(target) {
-                crate::tools::lasso::erase(c, &path);
-            }
-            self.mark_dirty(target);
+            // The lasso now *selects* rather than erasing outright — Delete on
+            // the selection is the erase.
+            self.stroke_pre_pixels = None;
             self.preview_upload_rect = None;
-            self.commit_undo(target);
+            self.begin_selection(target, path);
             return;
         }
         if let Some(drag) = self.shape_drag.take() {
@@ -2155,6 +2365,7 @@ impl AppState {
         self.shape_drag = None;
         self.lasso = None;
         self.preview_upload_rect = None;
+        self.commit_selection();
     }
 
     /// Leave screen-pick mode. Does not change the colour, tool or backdrop —
@@ -2170,6 +2381,228 @@ impl AppState {
         // this frame; dropping the handle now makes wgpu submit a render pass
         // referencing a destroyed texture → validation panic. The handle is
         // tiny (≈25×25) and reused via `.set()` on the next pick, so keep it.
+    }
+
+    /// Take the active slot's drawing into the clipboard, blanking the frame.
+    /// Refuses on a locked or reference layer, like every other edit.
+    pub fn cut_cell(&mut self) {
+        if self.active_layer_locked() || self.active_layer_is_reference() {
+            return;
+        }
+        // Read before the edit: `structural_edit` borrows the project mutably.
+        let taken = self.project.copy_active_cell();
+        if taken.is_none() {
+            return;
+        }
+        self.cell_clip = taken;
+        self.structural_edit(false, |p| {
+            p.cut_active_cell();
+        });
+    }
+
+    /// Key the clipboard drawing at the active slot.
+    pub fn paste_cell(&mut self) {
+        if self.active_layer_locked() || self.active_layer_is_reference() {
+            return;
+        }
+        let Some(src) = self.cell_clip.clone() else {
+            return;
+        };
+        // Only ever allocates a cell, never mutates an existing one, so the
+        // cheap `TimelineState` snapshot is a correct undo (same contract as
+        // `merge_layer_down`).
+        self.structural_edit(false, |p| {
+            p.paste_cell_here(&src);
+        });
+    }
+
+    fn active_layer_is_reference(&self) -> bool {
+        self.project
+            .layers
+            .get(self.project.current_layer)
+            .map(|l| l.reference)
+            .unwrap_or(false)
+    }
+
+    // --- Lasso selection ---
+
+    /// Write a floating selection back into its cell and drop it. Safe to call
+    /// when there is nothing selected.
+    ///
+    /// One undo entry: the stamp is snapshotted and committed on its own, so an
+    /// undo of a move puts the pixels back where the lift left them, and a
+    /// second undo restores the lift.
+    pub fn commit_selection(&mut self) {
+        let Some(sel) = self.selection.take() else {
+            return;
+        };
+        self.sel_drag = None;
+        if let Some(old) = self.selection_tex.take() {
+            self.retired_textures.push(old);
+        }
+        // Never lifted means never moved: the cell was left untouched, so there
+        // is nothing to write back and nothing to record.
+        if !sel.lifted {
+            return;
+        }
+        let cell = sel.cell;
+        let Some(canvas) = self.project.cell(cell) else {
+            return;
+        };
+        self.stroke_pre_pixels = Some(canvas.pixels.clone());
+        if let Some(c) = self.project.cell_mut(cell) {
+            c.dirty = None;
+            sel.stamp(c);
+        }
+        self.mark_dirty(cell);
+        self.commit_undo(cell);
+    }
+
+    /// Start a selection from a finished lasso path on `cell`.
+    fn begin_selection(&mut self, cell: CellId, path: Vec<(f32, f32)>) {
+        let Some(canvas) = self.project.cell(cell) else {
+            return;
+        };
+        let Some(mask) = crate::tools::lasso::coverage(&path, canvas.width, canvas.height) else {
+            return;
+        };
+        self.selection = Some(Selection::new(cell, canvas, mask, path));
+        self.sel_tex_stale = true;
+    }
+
+    /// Erase the selected pixels and drop the selection.
+    pub fn delete_selection(&mut self) {
+        let Some(sel) = self.selection.take() else {
+            return;
+        };
+        self.sel_drag = None;
+        if let Some(old) = self.selection_tex.take() {
+            self.retired_textures.push(old);
+        }
+        // Already lifted: the pixels left the cell when the move started, so
+        // dropping the float *is* the delete, and the lift's own undo entry
+        // covers it.
+        if sel.lifted {
+            return;
+        }
+        let cell = sel.cell;
+        let Some(canvas) = self.project.cell(cell) else {
+            return;
+        };
+        self.stroke_pre_pixels = Some(canvas.pixels.clone());
+        if let Some(c) = self.project.cell_mut(cell) {
+            c.dirty = None;
+            crate::tools::lasso::erase_masked(c, &sel.mask);
+        }
+        self.mark_dirty(cell);
+        self.commit_undo(cell);
+    }
+
+    /// Copy the floating pixels to the selection clipboard.
+    pub fn copy_selection(&mut self) {
+        if let Some(sel) = &self.selection {
+            self.pixel_clip = Some((sel.mask.clone(), sel.pixels.clone()));
+        }
+    }
+
+    /// Drop the clipboard pixels onto the current cell as a new floating
+    /// selection, so it can be positioned before it commits. Works across
+    /// frames and layers, since it targets whatever cell is active now.
+    pub fn paste_selection(&mut self) {
+        let Some((mask, pixels)) = self.pixel_clip.clone() else {
+            return;
+        };
+        if self.active_layer_locked() || self.active_layer_is_reference() {
+            return;
+        }
+        self.commit_selection();
+        let cell = self.project.ensure_active_cell();
+        let path = crate::tools::selection::outline_rect(&mask);
+        // Already lifted: these pixels came from the clipboard, not from this
+        // cell, so there is no source region to erase.
+        self.selection = Some(Selection {
+            cell,
+            mask,
+            pixels,
+            offset: (0, 0),
+            path,
+            lifted: true,
+        });
+        self.sel_tex_stale = true;
+    }
+
+    /// Nudge a floating selection by whole pixels (arrow keys).
+    pub fn nudge_selection(&mut self, dx: i32, dy: i32) {
+        let Some(sel) = self.selection.as_mut() else {
+            return;
+        };
+        let cell = sel.cell;
+        let lift = !sel.lifted;
+        sel.offset.0 += dx;
+        sel.offset.1 += dy;
+        if lift {
+            self.lift_selection_source(cell);
+        }
+    }
+
+    /// Erase the source region behind a selection and record it, once.
+    fn lift_selection_source(&mut self, cell: CellId) {
+        let Some(canvas) = self.project.cell(cell) else {
+            return;
+        };
+        self.stroke_pre_pixels = Some(canvas.pixels.clone());
+        let mut sel = match self.selection.take() {
+            Some(s) => s,
+            None => return,
+        };
+        if let Some(c) = self.project.cell_mut(cell) {
+            c.dirty = None;
+            sel.lift_source(c);
+        }
+        self.selection = Some(sel);
+        self.mark_dirty(cell);
+        self.commit_undo(cell);
+    }
+
+    /// Commit a floating selection whose cell is no longer the active one —
+    /// scrubbing to another frame must not leave pixels hovering over a
+    /// drawing they do not belong to.
+    fn commit_selection_if_orphaned(&mut self) {
+        let Some(sel) = &self.selection else {
+            return;
+        };
+        if self.project.resolved_current() != Some(sel.cell) {
+            self.commit_selection();
+        }
+    }
+
+    /// Most swatches kept. Past this the oldest is dropped, so the strip stays
+    /// one or two rows and never eats the Brush panel.
+    pub const MAX_SWATCHES: usize = 32;
+
+    /// Set the brush colour everywhere it is mirrored. `brush` alone is not
+    /// enough: the per-tool copy in `tool_brushes` is what a tool switch
+    /// restores from, so writing only one of them loses the colour on the next
+    /// tool change. Same reasoning as `commit_screen_pick`.
+    pub fn set_brush_color(&mut self, rgb: [u8; 3]) {
+        let c = [rgb[0], rgb[1], rgb[2], 255];
+        self.brush.color = c;
+        let idx = self.tool.idx();
+        self.tool_brushes[idx].color = c;
+    }
+
+    /// Pin the current brush colour. Re-pinning a colour already held is a
+    /// no-op rather than a duplicate.
+    pub fn pin_swatch(&mut self) {
+        let c = self.brush.color;
+        let rgb = [c[0], c[1], c[2]];
+        if self.palette.contains(&rgb) {
+            return;
+        }
+        self.palette.push(rgb);
+        if self.palette.len() > Self::MAX_SWATCHES {
+            self.palette.remove(0);
+        }
     }
 
     /// Commit a sampled colour: apply it to every tool, restore the drawing tool
@@ -2298,6 +2731,7 @@ impl AppState {
     pub fn dispatch(&mut self, action: Action) {
         match action {
             Action::ToolPencil => {
+                self.commit_selection();
                 self.tool_brushes[self.tool.idx()] = self.brush.clone();
                 self.tool = ActiveTool::Pencil;
                 self.brush = self.tool_brushes[ActiveTool::Pencil.idx()].clone();
@@ -2414,7 +2848,27 @@ impl AppState {
             Action::ToggleMiniTimeline => self.show_mini_timeline = !self.show_mini_timeline,
             Action::ZoomReset => self.view.zoom = 1.0,
             Action::PanReset => self.view.pan = egui::Vec2::ZERO,
-            Action::RotateReset => self.view.rotation = 0.0,
+            Action::RotateReset => {
+                self.view.rotation = 0.0;
+                // Un-mirror too: rotation and flip are the two ways the view
+                // stops matching the document, and one reset for both means a
+                // forgotten flip can't survive a "straighten up".
+                self.view.flip_x = false;
+                self.view.flip_y = false;
+            }
+            Action::FlipHorizontal => self.view.flip_x = !self.view.flip_x,
+            Action::FlipVertical => self.view.flip_y = !self.view.flip_y,
+            Action::CellCopy => self.cell_clip = self.project.copy_active_cell(),
+            Action::CellCut => self.cut_cell(),
+            Action::CellPaste => self.paste_cell(),
+            Action::SelectionCopy => self.copy_selection(),
+            Action::SelectionCut => {
+                self.copy_selection();
+                self.delete_selection();
+            }
+            Action::SelectionPaste => self.paste_selection(),
+            Action::SelectionDelete => self.delete_selection(),
+            Action::SelectionDeselect => self.commit_selection(),
             Action::SaveProject => self.save_project(),
             Action::SaveProjectAs => self.save_project_as(),
             Action::OpenProject => match crate::io::project_file::load_dialog() {
@@ -2558,6 +3012,7 @@ impl eframe::App for AppState {
                 onion: self.onion,
                 auto_key_transform: self.auto_key_transform,
                 auto_key_draw: self.auto_key_draw,
+                palette: self.palette.clone(),
             },
         );
     }
@@ -2719,6 +3174,21 @@ impl eframe::App for AppState {
                 for a in actions {
                     self.dispatch(a);
                 }
+                // Arrow keys nudge a floating selection by a pixel. Not bound
+                // actions: they only mean anything while something is selected,
+                // and stealing the arrows outright would be worse.
+                if self.selection.is_some() {
+                    let (mut dx, mut dy) = (0, 0);
+                    ctx.input(|i| {
+                        dx += i.key_pressed(egui::Key::ArrowRight) as i32;
+                        dx -= i.key_pressed(egui::Key::ArrowLeft) as i32;
+                        dy += i.key_pressed(egui::Key::ArrowDown) as i32;
+                        dy -= i.key_pressed(egui::Key::ArrowUp) as i32;
+                    });
+                    if dx != 0 || dy != 0 {
+                        self.nudge_selection(dx, dy);
+                    }
+                }
             } else {
                 if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
                     self.dispatch(Action::TogglePanels);
@@ -2741,6 +3211,7 @@ impl eframe::App for AppState {
 
         // Keep the active layer's transform edit buffer synced while scrubbing.
         self.sync_active_transform_buffer();
+        self.commit_selection_if_orphaned();
         self.sync_camera_buffer();
 
         // Advance background import jobs / preview fetches without blocking.

@@ -52,6 +52,18 @@ pub enum Action {
     ZoomReset,
     PanReset,
     RotateReset,
+    FlipHorizontal,
+    FlipVertical,
+    // Drawing (cell) clipboard — one layer's drawing at one frame.
+    CellCut,
+    CellCopy,
+    CellPaste,
+    // Pixel selection (lasso).
+    SelectionCut,
+    SelectionCopy,
+    SelectionPaste,
+    SelectionDelete,
+    SelectionDeselect,
     SaveProject,
     SaveProjectAs,
     OpenProject,
@@ -106,6 +118,16 @@ impl Action {
         Action::ZoomReset,
         Action::PanReset,
         Action::RotateReset,
+        Action::FlipHorizontal,
+        Action::FlipVertical,
+        Action::CellCut,
+        Action::CellCopy,
+        Action::CellPaste,
+        Action::SelectionCut,
+        Action::SelectionCopy,
+        Action::SelectionPaste,
+        Action::SelectionDelete,
+        Action::SelectionDeselect,
         Action::SaveProject,
         Action::SaveProjectAs,
         Action::OpenProject,
@@ -131,7 +153,7 @@ impl Action {
             Action::PickScreenColor => "Tool: Color picker",
             Action::ToolShape => "Tool: Shape",
             Action::ToolTracker => "Tool: Tracker",
-            Action::ToolLasso => "Tool: Lasso erase",
+            Action::ToolLasso => "Tool: Lasso select",
             Action::PlayPause => "Play / Pause",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
@@ -158,6 +180,16 @@ impl Action {
             Action::ZoomReset => "Reset zoom",
             Action::PanReset => "Reset pan",
             Action::RotateReset => "Reset rotation",
+            Action::FlipHorizontal => "Flip view horizontally",
+            Action::FlipVertical => "Flip view vertically",
+            Action::CellCut => "Drawing: cut",
+            Action::CellCopy => "Drawing: copy",
+            Action::CellPaste => "Drawing: paste",
+            Action::SelectionCut => "Selection: cut",
+            Action::SelectionCopy => "Selection: copy",
+            Action::SelectionPaste => "Selection: paste",
+            Action::SelectionDelete => "Selection: delete",
+            Action::SelectionDeselect => "Selection: deselect",
             Action::SaveProject => "Save project",
             Action::SaveProjectAs => "Save project as…",
             Action::OpenProject => "Open project",
@@ -209,6 +241,15 @@ impl KeyCombo {
             alt: false,
         }
     }
+    pub fn alt(key: egui::Key) -> Self {
+        Self {
+            key: Some(key),
+            ctrl: false,
+            shift: false,
+            alt: true,
+        }
+    }
+
     pub fn ctrl_shift(key: egui::Key) -> Self {
         Self {
             key: Some(key),
@@ -372,8 +413,10 @@ impl Default for ShortcutMap {
         b.insert(Action::Redo, KeyCombo::ctrl(K::Y));
         // Cell clear.
         b.insert(Action::ClearCell, KeyCombo::plain(K::Backspace));
-        // Paste clipboard image as a background layer.
-        b.insert(Action::PasteImage, KeyCombo::ctrl(K::V));
+        // Paste clipboard image as a background layer. Moved off Ctrl+V when
+        // the pixel selection took the standard clipboard keys; `load` migrates
+        // an existing binding (see below).
+        b.insert(Action::PasteImage, KeyCombo::ctrl_shift(K::V));
         // Backdrop toggle.
         b.insert(Action::ToggleCheckerBg, KeyCombo::plain(K::Backtick));
         // Hide / show all floating panels.
@@ -384,6 +427,20 @@ impl Default for ShortcutMap {
         b.insert(Action::ZoomReset, KeyCombo::plain(K::Num0));
         b.insert(Action::PanReset, KeyCombo::plain(K::H));
         b.insert(Action::RotateReset, KeyCombo::plain(K::J));
+        // Mirror the view — a drawing check, never applied to the document.
+        b.insert(Action::FlipHorizontal, KeyCombo::plain(K::F));
+        b.insert(Action::FlipVertical, KeyCombo::shift(K::F));
+        // Pixel selection takes the standard clipboard keys.
+        b.insert(Action::SelectionCut, KeyCombo::ctrl(K::X));
+        b.insert(Action::SelectionCopy, KeyCombo::ctrl(K::C));
+        b.insert(Action::SelectionPaste, KeyCombo::ctrl(K::V));
+        b.insert(Action::SelectionDelete, KeyCombo::plain(K::Delete));
+        b.insert(Action::SelectionDeselect, KeyCombo::ctrl(K::D));
+        // The drawing clipboard moves a whole cell between frames or layers;
+        // Alt keeps it clear of the pixel selection above.
+        b.insert(Action::CellCut, KeyCombo::alt(K::X));
+        b.insert(Action::CellCopy, KeyCombo::alt(K::C));
+        b.insert(Action::CellPaste, KeyCombo::alt(K::V));
         // Project file. Save overwrites the current file once there is one;
         // Save As always prompts. `matches` compares modifiers exactly, so
         // Ctrl+Shift+S never also fires Save.
@@ -476,6 +533,13 @@ pub fn load() -> ShortcutMap {
                 if picker.is_none() || picker == Some(KeyCombo::shift(egui::Key::C)) {
                     map.bindings.insert(Action::PickScreenColor, old);
                 }
+            }
+            // Migration: Ctrl+V now pastes a pixel selection. Move an existing
+            // PasteImage binding off it so the two don't both fire, unless the
+            // user had already rebound PasteImage themselves.
+            if map.bindings.get(&Action::PasteImage) == Some(&KeyCombo::ctrl(egui::Key::V)) {
+                map.bindings
+                    .insert(Action::PasteImage, KeyCombo::ctrl_shift(egui::Key::V));
             }
             // Merge in any missing defaults so newly added actions are bound.
             let mut full = ShortcutMap::default();

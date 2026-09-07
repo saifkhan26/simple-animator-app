@@ -6,6 +6,7 @@
 pub mod fill;
 pub mod lasso;
 pub mod ribbon;
+pub mod selection;
 pub mod shape;
 pub mod stroke;
 

@@ -159,6 +159,47 @@ impl Project {
         }
     }
 
+    /// The drawing showing at the active slot, deep-copied.
+    ///
+    /// A copy, not a `CellId`: cells are never shared between slots (see
+    /// [`Project::layer_cell_ids`]), so handing out an id would let two frames
+    /// alias one buffer the moment it was pasted.
+    pub fn copy_active_cell(&self) -> Option<Canvas> {
+        self.resolved_current().and_then(|id| self.cell(id)).cloned()
+    }
+
+    /// Take the drawing at the active slot, leaving the frame blank.
+    ///
+    /// The slot is keyed to a *fresh empty* cell rather than un-keyed: dropping
+    /// the key would make the previous drawing hold through this frame, which
+    /// looks like the cut went to the wrong frame. Neighbouring frames, other
+    /// layers and `frame_count` are untouched, so the layers x frames grid stays
+    /// rectangular.
+    pub fn cut_active_cell(&mut self) -> Option<Canvas> {
+        let taken = self.copy_active_cell()?;
+        self.insert_blank_key_here();
+        Some(taken)
+    }
+
+    /// Key a copy of `src` at the active slot, overwriting whatever was there.
+    ///
+    /// A drawing pasted into a layer whose cells are a different size is
+    /// re-centred rather than stretched — [`recenter`] crops or pads, so line
+    /// weight never changes on a paste.
+    pub fn paste_cell_here(&mut self, src: &Canvas) -> CellId {
+        let (w, h) = self.draw_cell_size(self.current_layer, self.current_frame);
+        let cell = if (src.width, src.height) == (w, h) {
+            src.clone()
+        } else {
+            recenter(src, w, h)
+        };
+        self.cells.push(cell);
+        let id = self.cells.len() - 1;
+        let (layer, frame) = (self.current_layer, self.current_frame);
+        self.layers[layer].set_key(frame, id);
+        id
+    }
+
     /// Force a new *empty* key at (current_layer, current_frame).
     /// Breaks any hold and starts with a blank cell.
     pub fn insert_blank_key_here(&mut self) -> CellId {
@@ -506,5 +547,61 @@ mod tests {
         assert_eq!(p.cells[0].width, 16);
         let id = p.insert_blank_key_here();
         assert_eq!((p.cells[id].width, p.cells[id].height), (16, 12));
+    }
+
+    /// Cut must not shorten this layer or touch any other: every layer's
+    /// `exposures` stays `frame_count` long, which the whole timeline assumes.
+    #[test]
+    fn cut_blanks_the_slot_without_disturbing_the_grid() {
+        let mut p = Project::new(4, 4, 12.0);
+        p.add_layer();
+        p.ensure_frame_count(3);
+        p.current_layer = 0;
+        p.current_frame = 1;
+        p.insert_blank_key_here();
+        let id = p.resolved_current().unwrap();
+        p.cells[id].pixels[0] = 200;
+
+        let taken = p.cut_active_cell().expect("something to cut");
+        assert_eq!(taken.pixels[0], 200);
+        assert_eq!(p.frame_count, 3);
+        for l in &p.layers {
+            assert_eq!(l.exposures.len(), 3);
+        }
+        // The slot is blank, not holding the previous drawing.
+        let now = p.resolved_current().unwrap();
+        assert!(p.cells[now].pixels.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn pasted_drawings_are_independent_copies() {
+        let mut p = Project::new(4, 4, 12.0);
+        p.ensure_frame_count(3);
+        p.current_frame = 0;
+        let src = p.insert_blank_key_here();
+        p.cells[src].pixels[0] = 111;
+
+        let copied = p.copy_active_cell().unwrap();
+        p.current_frame = 2;
+        let pasted = p.paste_cell_here(&copied);
+        assert_eq!(p.cells[pasted].pixels[0], 111);
+
+        // Editing the paste must not reach back to the original.
+        p.cells[pasted].pixels[0] = 222;
+        assert_eq!(p.cells[src].pixels[0], 111);
+    }
+
+    #[test]
+    fn pasting_into_a_differently_sized_layer_recentres() {
+        let mut p = Project::new(4, 4, 12.0);
+        p.ensure_frame_count(2);
+        p.expand_layer_canvas(0, 8, 8);
+        let mut src = Canvas::new(4, 4);
+        src.pixels[0] = 90; // top-left of the small drawing
+        let id = p.paste_cell_here(&src);
+        assert_eq!((p.cells[id].width, p.cells[id].height), (8, 8));
+        // Centred: the old origin lands at (2,2) in the bigger buffer.
+        let at = ((2 * 8 + 2) * 4) as usize;
+        assert_eq!(p.cells[id].pixels[at], 90);
     }
 }
