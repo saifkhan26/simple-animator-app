@@ -29,6 +29,8 @@ pub enum Action {
     PlayPause,
     FramePrev,
     FrameNext,
+    KeyJumpPrev,
+    KeyJumpNext,
     FrameAdd,
     FrameDuplicate,
     FrameDelete,
@@ -95,6 +97,8 @@ impl Action {
         Action::PlayPause,
         Action::FramePrev,
         Action::FrameNext,
+        Action::KeyJumpPrev,
+        Action::KeyJumpNext,
         Action::FrameAdd,
         Action::FrameDuplicate,
         Action::FrameDelete,
@@ -157,6 +161,8 @@ impl Action {
             Action::PlayPause => "Play / Pause",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
+            Action::KeyJumpPrev => "Previous drawing key",
+            Action::KeyJumpNext => "Next drawing key",
             Action::FrameAdd => "Add frame (hold)",
             Action::FrameDuplicate => "Duplicate frame",
             Action::FrameDelete => "Delete frame",
@@ -389,6 +395,10 @@ impl Default for ShortcutMap {
         // Frame navigation: A / S.
         b.insert(Action::FramePrev, KeyCombo::plain(K::A));
         b.insert(Action::FrameNext, KeyCombo::plain(K::S));
+        // Jump drawing-to-drawing, skipping holds: the shifted siblings of the
+        // plain frame step above.
+        b.insert(Action::KeyJumpPrev, KeyCombo::shift(K::A));
+        b.insert(Action::KeyJumpNext, KeyCombo::shift(K::S));
         // Frame mutate: D / F / Shift+F.
         b.insert(Action::FrameAdd, KeyCombo::plain(K::D));
         b.insert(Action::FrameDuplicate, KeyCombo::plain(K::F));

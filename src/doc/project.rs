@@ -343,6 +343,28 @@ impl Project {
         self.current_frame = next as usize;
     }
 
+    /// Frame of the nearest drawing key on the active layer strictly *before*
+    /// the current frame, or `None` when there is none.
+    ///
+    /// Holds are skipped: on a scene animated on 2s or 3s most frames repeat an
+    /// earlier drawing, so stepping by one lands on the same picture. This is
+    /// what the timeline's jump-to-key buttons navigate by. `None` is the
+    /// clamp — the caller greys its button out rather than wrapping.
+    pub fn prev_key_frame(&self) -> Option<usize> {
+        let layer = self.layers.get(self.current_layer)?;
+        (0..self.current_frame.min(self.frame_count))
+            .rev()
+            .find(|&f| layer.is_key(f))
+    }
+
+    /// Frame of the nearest drawing key on the active layer strictly *after*
+    /// the current frame, or `None` when there is none. See
+    /// [`Project::prev_key_frame`].
+    pub fn next_key_frame(&self) -> Option<usize> {
+        let layer = self.layers.get(self.current_layer)?;
+        (self.current_frame.saturating_add(1)..self.frame_count).find(|&f| layer.is_key(f))
+    }
+
     // --- Layer edits ---
 
     /// Keep `lines_from` links valid after a layer is inserted at `at`:
@@ -603,5 +625,66 @@ mod tests {
         // Centred: the old origin lands at (2,2) in the bigger buffer.
         let at = ((2 * 8 + 2) * 4) as usize;
         assert_eq!(p.cells[id].pixels[at], 90);
+    }
+
+    /// Keys on 0 / 4 / 8 of an 11-frame layer — the shape the jump buttons
+    /// navigate.
+    fn keyed_on_fours() -> Project {
+        let mut p = Project::new(4, 4, 12.0);
+        p.ensure_frame_count(11);
+        for f in [0, 4, 8] {
+            p.current_frame = f;
+            p.insert_blank_key_here();
+        }
+        p
+    }
+
+    /// The point of the feature: from a held frame the jump reaches the
+    /// bracketing drawings, not the neighbouring repeats.
+    #[test]
+    fn key_jump_skips_holds() {
+        let mut p = keyed_on_fours();
+        p.current_frame = 6;
+        assert_eq!(p.prev_key_frame(), Some(4));
+        assert_eq!(p.next_key_frame(), Some(8));
+    }
+
+    /// Strictly before / after: sitting on a key must still move off it,
+    /// otherwise the button would be a no-op wherever it matters most.
+    #[test]
+    fn key_jump_is_strict_about_the_current_frame() {
+        let mut p = keyed_on_fours();
+        p.current_frame = 4;
+        assert_eq!(p.prev_key_frame(), Some(0));
+        assert_eq!(p.next_key_frame(), Some(8));
+    }
+
+    /// Clamping, not wrapping — `None` is what greys the button out.
+    #[test]
+    fn key_jump_clamps_at_both_ends() {
+        let mut p = keyed_on_fours();
+        p.current_frame = 0;
+        assert_eq!(p.prev_key_frame(), None, "nothing before the first key");
+        p.current_frame = 8;
+        assert_eq!(p.next_key_frame(), None, "nothing after the last key");
+        p.current_frame = 10;
+        assert_eq!(p.next_key_frame(), None, "past the last key either");
+        assert_eq!(p.prev_key_frame(), Some(8));
+    }
+
+    /// The jump reads the *active* layer only. A fresh `Project` keys its
+    /// first layer on frame 0, so this needs a second, untouched one.
+    #[test]
+    fn key_jump_on_an_untouched_layer_finds_nothing() {
+        let mut p = Project::new(4, 4, 12.0);
+        p.ensure_frame_count(5);
+        p.add_layer();
+        assert_eq!(p.current_layer, 1);
+        p.current_frame = 2;
+        assert_eq!(p.prev_key_frame(), None);
+        assert_eq!(p.next_key_frame(), None);
+        // …while layer 0 still has its seed key.
+        p.current_layer = 0;
+        assert_eq!(p.prev_key_frame(), Some(0));
     }
 }

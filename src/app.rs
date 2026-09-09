@@ -185,6 +185,10 @@ struct UiPrefs {
     onion: OnionConfig,
     auto_key_transform: bool,
     auto_key_draw: bool,
+    /// Which way the mouse wheel scrubs the timeline. Off (default): wheel
+    /// down advances. A workspace preference — wheel direction is muscle
+    /// memory carried from whatever editor the artist came from.
+    invert_timeline_scroll: bool,
     /// Pinned colour swatches. A workspace preference, not project data: a
     /// palette follows the artist between files.
     palette: Vec<[u8; 3]>,
@@ -203,6 +207,7 @@ impl Default for UiPrefs {
             onion: OnionConfig::default(),
             auto_key_transform: false,
             auto_key_draw: false,
+            invert_timeline_scroll: false,
             palette: Vec::new(),
         }
     }
@@ -377,6 +382,12 @@ pub struct AppState {
     /// Read through [`AppState::frame_step_delta`], which clamps it to >= 1 —
     /// a zero would turn frame navigation into a no-op.
     pub frame_step: usize,
+    /// Invert the mouse-wheel scrub direction. Off: wheel down advances.
+    pub invert_timeline_scroll: bool,
+    /// Leftover trackpad scroll (in points) not yet worth a whole frame step.
+    /// Session-only: a wheel gesture never spans a run. Mice report whole
+    /// lines and bypass this entirely — see `ui::shell::timeline_wheel_scrub`.
+    pub wheel_scrub_accum: f32,
 
     pub bg_opacity: f32,
     /// Background clear color (RGB, 0..1).
@@ -585,6 +596,8 @@ impl AppState {
             auto_key_transform: prefs.auto_key_transform,
             auto_key_draw: prefs.auto_key_draw,
             frame_step: prefs.frame_step,
+            invert_timeline_scroll: prefs.invert_timeline_scroll,
+            wheel_scrub_accum: 0.0,
             bg_opacity: 1.0,
             bg_color: [0.12, 0.12, 0.13],
             show_checker: false,
@@ -2784,6 +2797,18 @@ impl AppState {
             }
             Action::FramePrev => self.project.step(-self.frame_step_delta()),
             Action::FrameNext => self.project.step(self.frame_step_delta()),
+            // Unlike the plain step above these clamp: no key ahead means stay
+            // put, so holding the key never wraps back to the top of the scene.
+            Action::KeyJumpPrev => {
+                if let Some(f) = self.project.prev_key_frame() {
+                    self.project.goto(f);
+                }
+            }
+            Action::KeyJumpNext => {
+                if let Some(f) = self.project.next_key_frame() {
+                    self.project.goto(f);
+                }
+            }
             // Insert the user's step size worth of frames. One `structural_edit`
             // wraps the whole loop, so N frames cost one undo entry, not N.
             Action::FrameAdd => {
@@ -3012,6 +3037,7 @@ impl eframe::App for AppState {
                 onion: self.onion,
                 auto_key_transform: self.auto_key_transform,
                 auto_key_draw: self.auto_key_draw,
+                invert_timeline_scroll: self.invert_timeline_scroll,
                 palette: self.palette.clone(),
             },
         );

@@ -72,6 +72,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     }
     save_error_dialog(state, ctx);
     save_toast(state, ctx);
+    timeline_wheel_scrub(state, ctx);
 
     egui::CentralPanel::default()
         .frame(Frame::none().fill(Color32::TRANSPARENT))
@@ -443,6 +444,89 @@ fn panel_meta(id: PanelId) -> (&'static str, &'static str) {
         PanelId::Camera => (ic::VIDEO_CAMERA, "Camera"),
     }
 }
+
+/// Mouse wheel over the canvas or the timeline scrubs the frame.
+///
+/// Reads the raw `MouseWheel` events rather than `smooth_scroll_delta`: a mouse
+/// reports whole `Line`s (one per notch), which maps to one step with no
+/// threshold guessing, while `smooth_scroll_delta` has already been eaten by
+/// whichever `ScrollArea` the pointer sits over. The raw events survive that
+/// consumption, so the layer test below is what stops us double-handling a
+/// scroll meant for a panel's own list.
+fn timeline_wheel_scrub(state: &mut AppState, ctx: &egui::Context) {
+    // Mid-stroke or mid-nav-drag the frame must not move: the stroke is writing
+    // into the cell resolved for the frame it started on.
+    if state.stroke.is_some() || state.nav_drag.is_some() {
+        return;
+    }
+
+    // Which surface is under the pointer? Same trick as the colour-pick guard
+    // above: the canvas is `Order::Background`, floating panels are `Middle`,
+    // so a layer id identifies the window. Only the canvas and the two timeline
+    // windows scrub — everything else keeps scrolling normally.
+    let Some(layer) = ctx
+        .input(|i| i.pointer.hover_pos())
+        .and_then(|p| ctx.layer_id_at(p))
+    else {
+        return;
+    };
+    let scrubs = layer.order == egui::Order::Background
+        || layer.id == egui::Id::new(panel_key(PanelId::Timeline))
+        || layer.id == egui::Id::new("mini_timeline");
+    if !scrubs {
+        return;
+    }
+
+    // Only the vertical axis. Horizontal (shift+wheel, trackpad-X) is left for
+    // the frame strip's own `ScrollArea` to pan with.
+    let (lines, points) = ctx.input(|i| {
+        let mut lines = 0.0_f32;
+        let mut points = 0.0_f32;
+        for e in &i.events {
+            if let egui::Event::MouseWheel { unit, delta, .. } = e {
+                match unit {
+                    egui::MouseWheelUnit::Line => lines += delta.y,
+                    egui::MouseWheelUnit::Point => points += delta.y,
+                    egui::MouseWheelUnit::Page => lines += delta.y,
+                }
+            }
+        }
+        (lines, points)
+    });
+
+    // Trackpads report points, and one flick is many tiny events — bank them
+    // until they add up to a notch. A direction change drops the bank so the
+    // reversal is felt immediately instead of paying off the old debt first.
+    let mut notches = lines;
+    if points != 0.0 {
+        if state.wheel_scrub_accum != 0.0 && points.signum() != state.wheel_scrub_accum.signum() {
+            state.wheel_scrub_accum = 0.0;
+        }
+        state.wheel_scrub_accum += points;
+        let whole = (state.wheel_scrub_accum / POINTS_PER_SCRUB_NOTCH).trunc();
+        state.wheel_scrub_accum -= whole * POINTS_PER_SCRUB_NOTCH;
+        notches += whole;
+    }
+    if notches == 0.0 {
+        return;
+    }
+
+    // Wheel *down* gives a negative y, and down advances the timeline by
+    // default — hence the negation.
+    let mut dir = -notches.signum() as isize;
+    if state.invert_timeline_scroll {
+        dir = -dir;
+    }
+    // Playback rewrites `current_frame` every tick, so a scrub during playback
+    // would be invisible. Stop it, as a pointer-down on the canvas already does.
+    state.playback.stop();
+    state
+        .project
+        .step(dir * notches.abs() as isize * state.frame_step_delta());
+}
+
+/// Trackpad scroll (in points) that counts as one wheel notch.
+const POINTS_PER_SCRUB_NOTCH: f32 = 24.0;
 
 /// Stable egui Id for a panel window. Without this the Id is hashed from the
 /// window's title — which embeds a phosphor glyph — so bumping the icon font or
@@ -900,6 +984,23 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
                 if theme::icon_button(ui, ic::CARET_RIGHT, &next_tip).clicked() {
                     state.project.step(state.frame_step_delta());
                 }
+                // Jump drawing-to-drawing, skipping holds. Resolved before
+                // the closures: `add_enabled_ui` borrows `state` for the
+                // duration, so the target frame has to be in hand first.
+                let key_prev = state.project.prev_key_frame();
+                let key_next = state.project.next_key_frame();
+                let key_prev_tip = tip(state, Action::KeyJumpPrev, "Previous drawing key");
+                ui.add_enabled_ui(key_prev.is_some(), |ui| {
+                    if theme::icon_button(ui, ic::CARET_LINE_LEFT, &key_prev_tip).clicked() {
+                        state.project.goto(key_prev.unwrap_or_default());
+                    }
+                });
+                let key_next_tip = tip(state, Action::KeyJumpNext, "Next drawing key");
+                ui.add_enabled_ui(key_next.is_some(), |ui| {
+                    if theme::icon_button(ui, ic::CARET_LINE_RIGHT, &key_next_tip).clicked() {
+                        state.project.goto(key_next.unwrap_or_default());
+                    }
+                });
                 // One value for both halves of the toolbar: how far the arrows
                 // move, and how many frames the + / copy buttons insert.
                 let step_tip = format!(
@@ -1031,6 +1132,23 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 if theme::icon_button(ui, ic::CARET_RIGHT, &next_tip).clicked() {
                     state.project.step(state.frame_step_delta());
                 }
+                // Jump drawing-to-drawing, skipping holds. Resolved before
+                // the closures: `add_enabled_ui` borrows `state` for the
+                // duration, so the target frame has to be in hand first.
+                let key_prev = state.project.prev_key_frame();
+                let key_next = state.project.next_key_frame();
+                let key_prev_tip = tip(state, Action::KeyJumpPrev, "Previous drawing key");
+                ui.add_enabled_ui(key_prev.is_some(), |ui| {
+                    if theme::icon_button(ui, ic::CARET_LINE_LEFT, &key_prev_tip).clicked() {
+                        state.project.goto(key_prev.unwrap_or_default());
+                    }
+                });
+                let key_next_tip = tip(state, Action::KeyJumpNext, "Next drawing key");
+                ui.add_enabled_ui(key_next.is_some(), |ui| {
+                    if theme::icon_button(ui, ic::CARET_LINE_RIGHT, &key_next_tip).clicked() {
+                        state.project.goto(key_next.unwrap_or_default());
+                    }
+                });
                 // Same step size as the timeline panel. Drag-only here: the
                 // panels-hidden path surrenders keyboard focus every frame.
                 ui.add(
@@ -1927,7 +2045,10 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
         return;
     }
     let mut open = state.show_settings;
-    egui::Window::new(theme::icon_text(ic::GEAR, "Settings — Shortcuts"))
+    egui::Window::new(theme::icon_text(ic::GEAR, "Settings"))
+        // Pinned: without it the window's persisted position is derived from
+        // its title, so renaming it would strand the window off-screen.
+        .id(egui::Id::new("window_settings"))
         .open(&mut open)
         .default_pos([360.0, 80.0])
         .default_width(420.0)
@@ -1935,6 +2056,15 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
         .collapsible(true)
         .frame(floating_frame())
         .show(ctx, |ui| {
+            ui.checkbox(&mut state.invert_timeline_scroll, "Invert timeline scroll")
+                .on_hover_text(
+                    "Mouse wheel over the canvas or the timeline scrubs frames.\n\n\
+                     Off (default): wheel down advances.  On: wheel up advances.\n\n\
+                     Each notch moves by the timeline's step size (×N).",
+                );
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(
