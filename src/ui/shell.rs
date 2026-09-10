@@ -1305,8 +1305,8 @@ fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
         ui,
         "rejected",
         format!(
-            "{} batches, {} stray packets",
-            state.pen_batches_rejected, state.pen_packets_dropped
+            "{} batches, {} stray packets, {} full drains",
+            state.pen_batches_rejected, state.pen_packets_dropped, d.drained_full
         ),
     );
     diag_row(ui, "pressure", format!("{:.3}", d.pressure));

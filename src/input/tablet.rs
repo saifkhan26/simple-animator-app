@@ -176,6 +176,8 @@ pub struct PenDiagnostics {
     /// Most packets seen in a single frame. A stride error only shows itself
     /// when this is above one, so it says whether the case was even exercised.
     pub max_packets_per_frame: usize,
+    /// Polls that filled the read buffer, meaning the queue had backed up.
+    pub drained_full: u32,
     /// The packet layout the driver granted. `size` is the giveaway: a device
     /// that grants every field gives 76 bytes on a 64-bit build.
     pub layout: PacketLayout,
@@ -278,6 +280,7 @@ impl PenInput {
             d.queue_overflowed = w.queue_err_logged;
             d.layout = w.layout;
             d.max_packets_per_frame = w.max_packets_per_frame;
+            d.drained_full = w.drained_full;
         }
         // Mapped from the retained raw value rather than from this frame's
         // packets, which are empty whenever the pen holds still — the readout
@@ -391,6 +394,9 @@ mod windows_backend {
         pub total_packets: u64,
         /// Most packets delivered in one poll.
         pub max_packets_per_frame: usize,
+        /// Polls that came back with a completely full buffer, meaning the
+        /// queue had backed up past what one call can take.
+        pub drained_full: u32,
         /// Affine packet → virtual-desktop mapping, per axis: the desktop
         /// origin, the packet-space origin, and desktop units per packet unit.
         pub map_x: (f32, f32, f32),
@@ -443,23 +449,32 @@ mod windows_backend {
                 return Err(anyhow!("WTInfo(DEFSYSCTX) failed"));
             }
 
-            // The driver's own output mapping, which is the *only* thing
-            // here that knows how the tablet's axes relate to the screen's.
-            // A tablet's native Y points up and a screen's points down, and
-            // this is where that flip lives. So it may be scaled, to ask for
-            // finer resolution, and it may be restored — but it must never be
-            // rebuilt out of lcSys*, which carries the screen rectangle
-            // without the axis directions. Doing that mirrors Y about the
-            // middle of the screen.
             let base_out_org = log_context.lcOutOrgXYZ;
             let base_out_ext = log_context.lcOutExtXYZ;
-            if base_out_ext.x == 0 || base_out_ext.y == 0 {
-                return Err(anyhow!("DEFSYSCTX has an empty output area"));
-            }
-            // Read only to be logged: every problem in this file has come down
-            // to what the driver granted versus what it was asked for.
             let sys_org = log_context.lcSysOrgXY;
             let sys_ext = log_context.lcSysExtXY;
+            if sys_ext.x == 0 || sys_ext.y == 0 || base_out_ext.x == 0 || base_out_ext.y == 0 {
+                return Err(anyhow!("DEFSYSCTX has an empty mapping"));
+            }
+
+            // The output area we want packets reported in: screen coordinates.
+            //
+            // Wintab maps the tablet linearly onto this area, and a tablet's Y
+            // axis increases *upward* where the screen's increases downward.
+            // So the Y extent has to be negative — the top of the tablet has
+            // to land on the smallest screen y. The default area has a
+            // positive extent, which is why packets arrived mirrored about the
+            // middle of the screen: exactly right along that line and wrong by
+            // twice the distance from it everywhere else.
+            //
+            // This is what Qt's `lcOutExtY = -lcInExtY` does. The flip does
+            // not live in the default output area, and the cursor's own
+            // correctness says nothing about it: the driver moves the cursor
+            // through lcSys*, which is a separate path.
+            let want_org_x = sys_org.x;
+            let want_ext_x = sys_ext.x;
+            let want_org_y = sys_org.y + sys_ext.y;
+            let want_ext_y = -sys_ext.y;
 
             log_context.lcName.write_str("animator-app");
             // Stay a system context. Qt only *adds* flags to the default
@@ -483,21 +498,10 @@ mod windows_backend {
             log_context.lcPktMode = WTPKT::empty();
             log_context.lcMoveMask = WTPKT::X | WTPKT::Y | WTPKT::NORMAL_PRESSURE;
 
-            // The output area is deliberately left exactly as the driver
-            // defines it. Asking for a finer one, to get sub-pixel positions,
-            // inverted the Y axis twice — scaling lcOut* is evidently not the
-            // whole story for a system context, and where the axis direction
-            // actually lives is not something to keep guessing at against a
-            // device that cannot be tested here. Packets therefore arrive in
-            // the driver's own screen convention, agreeing with the cursor by
-            // construction.
-            //
-            // Little is lost. The wave this module set out to fix came mostly
-            // from taking one position per redraw instead of every packet; the
-            // sub-pixel grid was the smaller half, and it can come back
-            // through the route Qt actually uses — a non-system context on a
-            // window of its own, scaled against the device axes — once there
-            // is a tablet to verify it against.
+            log_context.lcOutOrgXYZ.x = want_org_x;
+            log_context.lcOutExtXYZ.x = want_ext_x;
+            log_context.lcOutOrgXYZ.y = want_org_y;
+            log_context.lcOutExtXYZ.y = want_ext_y;
 
             let mut pressure_axis = AXIS::default();
             let pr =
@@ -531,23 +535,20 @@ mod windows_backend {
                 return Err(anyhow!("WTOpen returned null"));
             }
 
-            // WTOpen rewrites the struct with what the driver settled on.
-            // Nothing here asked it to change the output area, so this is
-            // normally the identity — but it is derived rather than assumed,
-            // because a driver is free to adjust it and the failure mode of
-            // guessing wrong is a stroke drawn confidently in the wrong place.
+            // WTOpen rewrites the struct with the area the driver settled
+            // on, which need not be the one asked for.
             let out_org = log_context.lcOutOrgXYZ;
             let out_ext = log_context.lcOutExtXYZ;
             if out_ext.x == 0 || out_ext.y == 0 {
                 let _ = unsafe { wt_close(ctx_handle) };
                 return Err(anyhow!("Wintab granted an empty output area"));
             }
-            // Packet space back to the driver's own output space, which is
-            // screen coordinates. Identity when the scale request was ignored,
-            // a plain divide when it was granted, and correct either way
-            // without this code needing to know which happened.
-            let map_x = super::axis_map(base_out_org.x, base_out_ext.x, out_org.x, out_ext.x);
-            let map_y = super::axis_map(base_out_org.y, base_out_ext.y, out_org.y, out_ext.y);
+            // Built from what we *want* against what was *granted*, so it
+            // corrects the difference — including a refused Y flip, which
+            // simply comes back as a negative scale here instead. Getting the
+            // mapping right must not depend on the request being honoured.
+            let map_x = super::axis_map(want_org_x, want_ext_x, out_org.x, out_ext.x);
+            let map_y = super::axis_map(want_org_y, want_ext_y, out_org.y, out_ext.y);
 
             // Deepen the packet queue. Qt restores the old size on failure and
             // treats a failed restore as fatal; a shallow queue silently drops
@@ -627,6 +628,7 @@ mod windows_backend {
                 last_raw: None,
                 total_packets: 0,
                 max_packets_per_frame: 0,
+                drained_full: 0,
                 client_origin: None,
                 queue_err_logged: false,
                 polls: 0,
@@ -664,8 +666,26 @@ mod windows_backend {
 
         /// Drain the whole packet queue into `out`, oldest first, and refresh
         /// the cached client origin.
+        ///
+        /// One call to `WTPacketsGet` takes at most a bufferful, so a queue
+        /// that has backed up past that — which happens whenever a frame runs
+        /// long, or the window goes without redrawing — would otherwise never
+        /// catch up, and would keep handing back positions from further and
+        /// further in the past.
         pub fn poll(&mut self, out: &mut Vec<PenPacket>) {
             self.client_origin = client_origin(self.hwnd);
+            // Bounded: a pen that could outrun this is not one we can draw
+            // with anyway, and an unbounded loop here would stall a frame.
+            for _ in 0..8 {
+                let before = out.len();
+                self.poll_once(out);
+                if out.len() - before < QUEUE_SIZE as usize {
+                    break;
+                }
+            }
+        }
+
+        fn poll_once(&mut self, out: &mut Vec<PenPacket>) {
 
             self.polls = self.polls.saturating_add(1);
             if self.polls == SILENCE_WARN_POLLS && !self.seen_packets {
@@ -689,6 +709,12 @@ mod windows_backend {
             let removed = (copied.max(0) as usize).min(MAX);
             if removed == 0 {
                 return;
+            }
+            if removed == MAX {
+                // A full buffer means more is queued behind it. Counted, so a
+                // backlog is visible rather than merely suspected; `poll` is
+                // called again below until the queue is actually empty.
+                self.drained_full = self.drained_full.saturating_add(1);
             }
 
             self.max_packets_per_frame = self.max_packets_per_frame.max(removed);
