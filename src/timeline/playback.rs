@@ -30,7 +30,10 @@ impl Playback {
     /// Advance the project's `current` frame based on elapsed wall-clock time.
     /// Returns true if the current frame changed (so the texture mirror needs
     /// updating).
-    pub fn tick(&mut self, project: &mut Project, now: f64) -> bool {
+    ///
+    /// With `looping` off the playhead stops on the last frame of the loop
+    /// range and playback ends, rather than repeating.
+    pub fn tick(&mut self, project: &mut Project, now: f64, looping: bool) -> bool {
         if !self.playing || project.fps <= 0.0 || project.frame_count == 0 {
             return false;
         }
@@ -49,8 +52,67 @@ impl Playback {
             return false;
         }
 
-        let rel = (project.current_frame as isize - lo as isize + advance).rem_euclid(span);
-        project.current_frame = lo + rel as usize;
-        true
+        let raw = project.current_frame as isize - lo as isize + advance;
+        let rel = if looping {
+            raw.rem_euclid(span)
+        } else {
+            // Land on the last frame of the range and stop there. Clamping
+            // without stopping would keep the clock running against a wall.
+            if raw >= span {
+                self.playing = false;
+            }
+            raw.clamp(0, span - 1)
+        };
+        let next = lo + rel as usize;
+        let changed = next != project.current_frame;
+        project.current_frame = next;
+        changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scene(frames: usize) -> Project {
+        let mut p = Project::new(32, 32, 10.0);
+        while p.frame_count < frames {
+            p.add_frame();
+        }
+        p
+    }
+
+    /// One frame's worth of wall clock, so `tick` advances exactly once.
+    fn advance(pb: &mut Playback, p: &mut Project, looping: bool) -> bool {
+        let now = pb.last_advance_t + 1.0 / p.fps as f64;
+        pb.tick(p, now, looping)
+    }
+
+    #[test]
+    fn looping_playback_wraps_to_the_loop_start() {
+        let mut p = scene(3);
+        p.goto(2);
+        let mut pb = Playback::default();
+        pb.toggle(0.0);
+        assert!(advance(&mut pb, &mut p, true));
+        assert_eq!(p.current_frame, 0);
+        assert!(pb.playing, "looping playback keeps running");
+    }
+
+    #[test]
+    fn playback_stops_on_the_last_frame_when_not_looping() {
+        let mut p = scene(3);
+        p.goto(1);
+        let mut pb = Playback::default();
+        pb.toggle(0.0);
+
+        assert!(advance(&mut pb, &mut p, false));
+        assert_eq!(p.current_frame, 2);
+        assert!(pb.playing, "the end has not been passed yet");
+
+        // The next tick would run off the end: hold there and stop instead.
+        assert!(!advance(&mut pb, &mut p, false));
+        assert_eq!(p.current_frame, 2);
+        assert!(!pb.playing);
     }
 }

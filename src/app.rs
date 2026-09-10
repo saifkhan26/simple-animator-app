@@ -189,6 +189,10 @@ struct UiPrefs {
     /// down advances. A workspace preference — wheel direction is muscle
     /// memory carried from whatever editor the artist came from.
     invert_timeline_scroll: bool,
+    /// Whether the timeline wraps. On (default): playback repeats the loop
+    /// range and frame stepping wraps at both ends. Off: playback runs once
+    /// and stops, and stepping clamps.
+    loop_timeline: bool,
     /// Pinned colour swatches. A workspace preference, not project data: a
     /// palette follows the artist between files.
     palette: Vec<[u8; 3]>,
@@ -208,6 +212,7 @@ impl Default for UiPrefs {
             auto_key_transform: false,
             auto_key_draw: false,
             invert_timeline_scroll: false,
+            loop_timeline: true,
             palette: Vec::new(),
         }
     }
@@ -384,6 +389,9 @@ pub struct AppState {
     pub frame_step: usize,
     /// Invert the mouse-wheel scrub direction. Off: wheel down advances.
     pub invert_timeline_scroll: bool,
+    /// Whether the timeline wraps. Gates playback, wheel scrub and the frame
+    /// step actions alike, so one toggle means one behaviour everywhere.
+    pub loop_timeline: bool,
     /// Leftover trackpad scroll (in points) not yet worth a whole frame step.
     /// Session-only: a wheel gesture never spans a run. Mice report whole
     /// lines and bypass this entirely — see `ui::shell::timeline_wheel_scrub`.
@@ -597,6 +605,7 @@ impl AppState {
             auto_key_draw: prefs.auto_key_draw,
             frame_step: prefs.frame_step,
             invert_timeline_scroll: prefs.invert_timeline_scroll,
+            loop_timeline: prefs.loop_timeline,
             wheel_scrub_accum: 0.0,
             bg_opacity: 1.0,
             bg_color: [0.12, 0.12, 0.13],
@@ -2818,8 +2827,12 @@ impl AppState {
                 let _ = now;
                 self.playback.playing = !self.playback.playing;
             }
-            Action::FramePrev => self.project.step(-self.frame_step_delta()),
-            Action::FrameNext => self.project.step(self.frame_step_delta()),
+            Action::FramePrev => self
+                .project
+                .step(-self.frame_step_delta(), self.loop_timeline),
+            Action::FrameNext => self
+                .project
+                .step(self.frame_step_delta(), self.loop_timeline),
             // Unlike the plain step above these clamp: no key ahead means stay
             // put, so holding the key never wraps back to the top of the scene.
             Action::KeyJumpPrev => {
@@ -3061,6 +3074,7 @@ impl eframe::App for AppState {
                 auto_key_transform: self.auto_key_transform,
                 auto_key_draw: self.auto_key_draw,
                 invert_timeline_scroll: self.invert_timeline_scroll,
+                loop_timeline: self.loop_timeline,
                 palette: self.palette.clone(),
             },
         );
@@ -3249,7 +3263,10 @@ impl eframe::App for AppState {
         }
 
         let now = ctx.input(|i| i.time);
-        if self.playback.tick(&mut self.project, now) {
+        if self
+            .playback
+            .tick(&mut self.project, now, self.loop_timeline)
+        {
             ctx.request_repaint();
         }
         if self.playback.playing {

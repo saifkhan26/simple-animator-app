@@ -334,12 +334,21 @@ impl Project {
         }
     }
 
-    pub fn step(&mut self, delta: isize) {
+    /// Move `delta` frames. With `wrap` the timeline is a ring, as it has
+    /// always been; without it the ends are walls, so holding a step key or
+    /// spinning the wheel past the last drawing stays there instead of
+    /// reappearing at the top of the scene.
+    pub fn step(&mut self, delta: isize, wrap: bool) {
         if self.frame_count == 0 {
             return;
         }
         let n = self.frame_count as isize;
-        let next = (self.current_frame as isize + delta).rem_euclid(n);
+        let raw = self.current_frame as isize + delta;
+        let next = if wrap {
+            raw.rem_euclid(n)
+        } else {
+            raw.clamp(0, n - 1)
+        };
         self.current_frame = next as usize;
     }
 
@@ -506,6 +515,33 @@ pub fn recenter(src: &Canvas, new_w: u32, new_h: u32) -> Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_wraps_at_both_ends_when_looping() {
+        let mut p = Project::new(64, 64, 12.0);
+        while p.frame_count < 4 {
+            p.add_frame();
+        }
+        p.goto(3);
+        p.step(1, true);
+        assert_eq!(p.current_frame, 0, "past the end comes back to the start");
+        p.step(-1, true);
+        assert_eq!(p.current_frame, 3, "and back the other way");
+    }
+
+    #[test]
+    fn step_clamps_at_both_ends_when_not_looping() {
+        let mut p = Project::new(64, 64, 12.0);
+        while p.frame_count < 4 {
+            p.add_frame();
+        }
+        p.goto(3);
+        p.step(1, false);
+        assert_eq!(p.current_frame, 3, "the last frame is a wall");
+        p.goto(0);
+        p.step(-5, false);
+        assert_eq!(p.current_frame, 0, "so is the first, however big the step");
+    }
 
     /// A symmetric grow leaves the old pixels centered, which is what keeps a
     /// layer visually still (its transform is defined about the cell center).

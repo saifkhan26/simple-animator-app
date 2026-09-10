@@ -550,9 +550,9 @@ fn timeline_wheel_scrub(state: &mut AppState, ctx: &egui::Context) {
     // Playback rewrites `current_frame` every tick, so a scrub during playback
     // would be invisible. Stop it, as a pointer-down on the canvas already does.
     state.playback.stop();
-    state
-        .project
-        .step(dir * notches.abs() as isize * state.frame_step_delta());
+    let delta = dir * notches.abs() as isize * state.frame_step_delta();
+    let wrap = state.loop_timeline;
+    state.project.step(delta, wrap);
 }
 
 /// Trackpad scroll (in points) that counts as one wheel notch.
@@ -1003,16 +1003,19 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
                     let now = ctx.input(|i| i.time);
                     state.playback.toggle(now);
                 }
+                if loop_toggle(ui, state).clicked() {
+                    state.loop_timeline = !state.loop_timeline;
+                }
                 if theme::icon_button(ui, ic::SKIP_BACK, "Go to loop start").clicked() {
                     state.project.goto(state.project.loop_start);
                 }
                 let prev_tip = tip(state, Action::FramePrev, "Step back");
                 if theme::icon_button(ui, ic::CARET_LEFT, &prev_tip).clicked() {
-                    state.project.step(-state.frame_step_delta());
+                    state.project.step(-state.frame_step_delta(), state.loop_timeline);
                 }
                 let next_tip = tip(state, Action::FrameNext, "Step forward");
                 if theme::icon_button(ui, ic::CARET_RIGHT, &next_tip).clicked() {
-                    state.project.step(state.frame_step_delta());
+                    state.project.step(state.frame_step_delta(), state.loop_timeline);
                 }
                 // Jump drawing-to-drawing, skipping holds. Resolved before
                 // the closures: `add_enabled_ui` borrows `state` for the
@@ -1133,6 +1136,18 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
 
 /// Compact playback HUD shown when the floating panels are hidden (Tab).
 /// Pinned bottom-centre: play/pause, step, frame counter, scrub strip.
+/// The Loop toggle shared by both timeline windows. One flag covers playback,
+/// wheel scrub and the frame step actions, so "loop off" means the same thing
+/// however the playhead is being moved.
+fn loop_toggle(ui: &mut egui::Ui, state: &AppState) -> egui::Response {
+    let tip = if state.loop_timeline {
+        "Loop on — playback repeats, and stepping wraps at both ends"
+    } else {
+        "Loop off — playback stops at the end, and stepping clamps"
+    };
+    theme::icon_toggle(ui, ic::REPEAT, tip, state.loop_timeline)
+}
+
 fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
     egui::Window::new("mini_timeline")
         .title_bar(false)
@@ -1154,13 +1169,16 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                     let now = ctx.input(|i| i.time);
                     state.playback.toggle(now);
                 }
+                if loop_toggle(ui, state).clicked() {
+                    state.loop_timeline = !state.loop_timeline;
+                }
                 let prev_tip = tip(state, Action::FramePrev, "Step back");
                 if theme::icon_button(ui, ic::CARET_LEFT, &prev_tip).clicked() {
-                    state.project.step(-state.frame_step_delta());
+                    state.project.step(-state.frame_step_delta(), state.loop_timeline);
                 }
                 let next_tip = tip(state, Action::FrameNext, "Step forward");
                 if theme::icon_button(ui, ic::CARET_RIGHT, &next_tip).clicked() {
-                    state.project.step(state.frame_step_delta());
+                    state.project.step(state.frame_step_delta(), state.loop_timeline);
                 }
                 // Jump drawing-to-drawing, skipping holds. Resolved before
                 // the closures: `add_enabled_ui` borrows `state` for the
