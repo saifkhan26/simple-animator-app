@@ -10,7 +10,7 @@ use crate::input::shortcuts::{Action, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::OnionDirection;
-use crate::tools::{ActiveTool, ShapeKind};
+use crate::tools::{ActiveTool, ShapeKind, Smoothing};
 use crate::ui::{expr, theme};
 
 /// Tooltip text including the currently-bound shortcut (e.g. "Pencil  (Q)").
@@ -936,6 +936,10 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
                 egui::Slider::new(&mut state.brush.pressure_opacity, 0.0..=1.0).text("Pres → flow"),
             );
 
+            ui.add_space(6.0);
+            theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
+            smoothing_controls(state, ui);
+
             // Canvas backdrop + input status — collapsed by default so the panel
             // stays compact, expandable when needed.
             ui.add_space(6.0);
@@ -1136,6 +1140,63 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
 
 /// Compact playback HUD shown when the floating panels are hidden (Tab).
 /// Pinned bottom-centre: play/pause, step, frame counter, scrub strip.
+/// Line smoothing controls, mirroring Krita's freehand tool options.
+///
+/// Basic is the default in both apps, and it does no positional filtering at
+/// all — a clean line comes from sub-pixel tablet input and the Bezier fit
+/// through it, not from averaging the hand away. Weighted is there for people
+/// who want the extra help and can live with the lag it costs.
+fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
+    let label = match state.smoothing.kind {
+        Smoothing::None => "None",
+        Smoothing::Basic => "Basic",
+        Smoothing::Weighted => "Weighted",
+    };
+    egui::ComboBox::from_id_salt("smoothing_kind")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut state.smoothing.kind, Smoothing::None, "None")
+                .on_hover_text("Straight lines between raw samples.");
+            ui.selectable_value(&mut state.smoothing.kind, Smoothing::Basic, "Basic")
+                .on_hover_text(
+                    "Krita's default. No averaging — samples are joined by a cubic                      Bezier fitted to the local tangents.",
+                );
+            ui.selectable_value(&mut state.smoothing.kind, Smoothing::Weighted, "Weighted")
+                .on_hover_text(
+                    "A gaussian average over the recent samples, then the same                      Bezier fit. Steadier, at the cost of the stroke trailing                      the pen.",
+                );
+        });
+
+    ui.add_enabled_ui(state.smoothing.kind == Smoothing::Weighted, |ui| {
+        // Krita keeps a separate width for fast strokes. Dragging the main
+        // slider carries the other with it unless the artist has deliberately
+        // split them, which is the same thing Krita's linked-ratio button does.
+        let linked = (state.smoothing.distance_min - state.smoothing.distance_max).abs() < 0.01;
+        let resp = ui.add(
+            egui::Slider::new(&mut state.smoothing.distance_max, 3.0..=200.0).text("Distance"),
+        );
+        if linked && resp.changed() {
+            state.smoothing.distance_min = state.smoothing.distance_max;
+        }
+        ui.add(
+            egui::Slider::new(&mut state.smoothing.distance_min, 3.0..=200.0)
+                .text("Distance (fast)"),
+        )
+        .on_hover_text("Filter width once the pen is moving quickly.");
+        ui.add(
+            egui::Slider::new(&mut state.smoothing.tail_aggressiveness, 0.0..=1.0)
+                .text("Tail aggressiveness"),
+        )
+        .on_hover_text("How hard the filter resists the thinning at a stroke's start.");
+        ui.checkbox(&mut state.smoothing.smooth_pressure, "Smooth pressure")
+            .on_hover_text("Run pressure through the same filter as position.");
+        ui.checkbox(&mut state.smoothing.scalable_distance, "Scale distance with zoom")
+            .on_hover_text(
+                "Measure the distance above in screen pixels rather than canvas                  pixels, so smoothing feels the same at every zoom. Off, a                  zoomed-out stroke is barely smoothed at all.",
+            );
+    });
+}
+
 /// The Loop toggle shared by both timeline windows. One flag covers playback,
 /// wheel scrub and the frame step actions, so "loop off" means the same thing
 /// however the playhead is being moved.

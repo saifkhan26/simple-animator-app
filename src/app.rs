@@ -24,7 +24,7 @@ use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
 use crate::tools::selection::Selection;
 use crate::tools::stroke::StrokeBuilder;
-use crate::tools::{ActiveTool, BrushSettings, ShapeKind};
+use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
 use crate::ui;
 use crate::undo::{self, History};
 
@@ -193,6 +193,9 @@ struct UiPrefs {
     /// range and frame stepping wraps at both ends. Off: playback runs once
     /// and stops, and stepping clamps.
     loop_timeline: bool,
+    /// Line smoothing. A workspace preference: how much the app fights the
+    /// hand is a matter of taste, and of what the artist is used to.
+    smoothing: SmoothingOptions,
     /// Pinned colour swatches. A workspace preference, not project data: a
     /// palette follows the artist between files.
     palette: Vec<[u8; 3]>,
@@ -213,6 +216,7 @@ impl Default for UiPrefs {
             auto_key_draw: false,
             invert_timeline_scroll: false,
             loop_timeline: true,
+            smoothing: SmoothingOptions::default(),
             palette: Vec::new(),
         }
     }
@@ -389,6 +393,8 @@ pub struct AppState {
     pub frame_step: usize,
     /// Invert the mouse-wheel scrub direction. Off: wheel down advances.
     pub invert_timeline_scroll: bool,
+    /// Line smoothing, latched into every new stroke. See `tools::Smoothing`.
+    pub smoothing: SmoothingOptions,
     /// Whether the timeline wraps. Gates playback, wheel scrub and the frame
     /// step actions alike, so one toggle means one behaviour everywhere.
     pub loop_timeline: bool,
@@ -606,6 +612,7 @@ impl AppState {
             frame_step: prefs.frame_step,
             invert_timeline_scroll: prefs.invert_timeline_scroll,
             loop_timeline: prefs.loop_timeline,
+            smoothing: prefs.smoothing,
             wheel_scrub_accum: 0.0,
             bg_opacity: 1.0,
             bg_color: [0.12, 0.12, 0.13],
@@ -2236,7 +2243,8 @@ impl AppState {
         // change width or smoothing behaviour partway through if the view moves.
         let mut brush = self.brush.clone();
         brush.radius = self.effective_radius();
-        let mut builder = StrokeBuilder::new(brush, self.tool, self.cell_view_scale());
+        let mut builder =
+            StrokeBuilder::new(brush, self.tool, self.cell_view_scale(), self.smoothing);
         builder.push(sample);
         if let (Some(pre), Some(c)) = (
             self.stroke_pre_pixels.as_deref(),
@@ -3075,6 +3083,7 @@ impl eframe::App for AppState {
                 auto_key_draw: self.auto_key_draw,
                 invert_timeline_scroll: self.invert_timeline_scroll,
                 loop_timeline: self.loop_timeline,
+                smoothing: self.smoothing,
                 palette: self.palette.clone(),
             },
         );

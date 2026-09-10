@@ -46,6 +46,60 @@ pub enum ShapeKind {
     Ellipse,
 }
 
+/// Line smoothing, following Krita's `KisSmoothingOptions`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Smoothing {
+    /// Straight lines between raw samples.
+    None,
+    /// Krita's "Basic": no positional filtering at all, but consecutive
+    /// samples are joined by a cubic Bezier fitted to the local tangents.
+    /// This is Krita's own default, and most of what makes its lines clean —
+    /// its straight lines come from input fidelity and curve fitting rather
+    /// than from averaging the hand's tremor away.
+    Basic,
+    /// Krita's "Weighted": a gaussian average over the recent samples, keyed
+    /// to distance travelled rather than to time (timings are too unstable to
+    /// key a filter on), then the same Bezier fit.
+    Weighted,
+}
+
+/// Smoothing parameters. Defaults are Krita's own, read from
+/// `kis_config.cc`: Basic smoothing, a 50-pixel filter width, 0.15 tail
+/// aggressiveness, pressure unsmoothed, distances scaled by zoom.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SmoothingOptions {
+    pub kind: Smoothing,
+    /// Filter width at low speed, in screen pixels. Krita's
+    /// `LineSmoothingDistanceMax`.
+    pub distance_max: f32,
+    /// Filter width at high speed. Krita's `LineSmoothingDistanceMin`.
+    /// Equal to `distance_max` by default, which makes speed irrelevant.
+    pub distance_min: f32,
+    /// How hard the filter resists the position drift caused by pressure
+    /// rising at the start of a stroke. Krita's `LineSmoothingTailAggressiveness`.
+    pub tail_aggressiveness: f32,
+    /// Run pressure through the same filter as position.
+    pub smooth_pressure: bool,
+    /// Interpret the distances above in *screen* pixels rather than canvas
+    /// pixels, so the filter feels identical at every zoom. This is what
+    /// keeps a zoomed-out line as clean as a zoomed-in one.
+    pub scalable_distance: bool,
+}
+
+impl Default for SmoothingOptions {
+    fn default() -> Self {
+        Self {
+            kind: Smoothing::Basic,
+            distance_max: 50.0,
+            distance_min: 50.0,
+            tail_aggressiveness: 0.15,
+            smooth_pressure: false,
+            scalable_distance: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BrushSettings {
     /// Brush radius in pixels at pressure = 1.0.
