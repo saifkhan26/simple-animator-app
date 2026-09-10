@@ -979,16 +979,42 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
                 });
 
             ui.add_space(2.0);
-            let pen_label = if state.pen.is_active() {
-                egui::RichText::new(format!("{}  Tablet active", ic::PEN))
-                    .color(theme::ACCENT)
-                    .size(11.0)
-            } else {
-                egui::RichText::new(format!("{}  Mouse mode", ic::CURSOR))
-                    .color(theme::TEXT_MUTED)
-                    .size(11.0)
+            // Three states, not two. A driver whose context opens but never
+            // reports is the failure worth being able to see at a glance —
+            // it draws exactly like a mouse, and "Tablet active" would be a
+            // lie about the interesting case.
+            let (icon, text, color, tip): (&str, &str, _, &str) = match (
+                state.pen.is_active(),
+                state.pen.pen_active(),
+            ) {
+                (_, true) => (
+                    ic::PEN,
+                    "Tablet active",
+                    theme::ACCENT,
+                    "Pen packets are arriving: pressure, tilt and sub-pixel positions are live.",
+                ),
+                (true, false) => (
+                    ic::WARNING,
+                    "Tablet idle",
+                    theme::TEXT_MUTED,
+                    "A tablet context is open but no packets have arrived recently. \
+                     Normal while the pen is away from the tablet; if it persists \
+                     while drawing, the driver is not sending Wintab data and \
+                     strokes fall back to the mouse.",
+                ),
+                (false, _) => (
+                    ic::CURSOR,
+                    "Mouse mode",
+                    theme::TEXT_MUTED,
+                    "No tablet driver was found, so pressure is fixed and tilt reports none.",
+                ),
             };
-            ui.label(pen_label);
+            ui.label(
+                egui::RichText::new(format!("{icon}  {text}"))
+                    .color(color)
+                    .size(11.0),
+            )
+            .on_hover_text(tip);
     }
 }
 
@@ -1210,7 +1236,7 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
         .on_hover_text("Leaning the pen flattens the dab across the lean.");
         ui.add(egui::Slider::new(&mut state.brush.tilt_size, 0.0..=1.0).text("Tilt → size"));
     });
-    if dab && !state.pen.is_active() {
+    if dab && !state.pen.pen_active() {
         ui.label(
             egui::RichText::new("Tilt needs a tablet — mouse input reports none.")
                 .small()
