@@ -360,6 +360,11 @@ mod windows_backend {
     /// called out. Roughly a few seconds of drawing.
     const SILENCE_WARN_POLLS: u32 = 300;
 
+    /// How much finer than a screen pixel to ask for. Past the tablet's own
+    /// resolution on any desktop-sized mapping, deliberately: the quantization
+    /// that remains should be the hardware's, not ours.
+    const SUBPIXEL: i32 = 32;
+
     /// Upper bound on one packet, for sizing the read buffer. The documented
     /// fields come to 76 bytes; this leaves room for a driver that reports
     /// more than was asked for.
@@ -498,10 +503,25 @@ mod windows_backend {
             log_context.lcPktMode = WTPKT::empty();
             log_context.lcMoveMask = WTPKT::X | WTPKT::Y | WTPKT::NORMAL_PRESSURE;
 
-            log_context.lcOutOrgXYZ.x = want_org_x;
-            log_context.lcOutExtXYZ.x = want_ext_x;
-            log_context.lcOutOrgXYZ.y = want_org_y;
-            log_context.lcOutExtXYZ.y = want_ext_y;
+            // The same area, scaled up, so positions arrive on a fraction
+            // of a screen pixel instead of on whole ones.
+            //
+            // A tablet resolves far finer than a screen pixel — roughly five
+            // device counts to one on a desktop-sized mapping — and whole-pixel
+            // positions turn a shallow line into a staircase, which is what a
+            // zoomed-out or high-resolution canvas magnifies into visible
+            // wobble. Asking for a bigger output area is how that resolution
+            // is kept.
+            //
+            // Safe to ask for because the map below is built from what was
+            // wanted against what was granted: a driver that refuses this, or
+            // grants something else entirely, is corrected rather than
+            // believed. An earlier version of this scaled the *wrong* rectangle
+            // and had no such correction, which is how it inverted Y.
+            log_context.lcOutOrgXYZ.x = want_org_x * SUBPIXEL;
+            log_context.lcOutExtXYZ.x = want_ext_x * SUBPIXEL;
+            log_context.lcOutOrgXYZ.y = want_org_y * SUBPIXEL;
+            log_context.lcOutExtXYZ.y = want_ext_y * SUBPIXEL;
 
             let mut pressure_axis = AXIS::default();
             let pr =
@@ -530,7 +550,17 @@ mod windows_backend {
                 && azimuth_res != 0.0
                 && altitude_res != 0.0;
 
-            let ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
+            let mut ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
+            if ctx_handle.is_null() {
+                // Finer positions are worth asking for, not worth losing the
+                // tablet over.
+                log::warn!("Wintab refused a {SUBPIXEL}x output area; retrying at screen scale");
+                log_context.lcOutOrgXYZ.x = want_org_x;
+                log_context.lcOutExtXYZ.x = want_ext_x;
+                log_context.lcOutOrgXYZ.y = want_org_y;
+                log_context.lcOutExtXYZ.y = want_ext_y;
+                ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
+            }
             if ctx_handle.is_null() {
                 return Err(anyhow!("WTOpen returned null"));
             }
@@ -905,6 +935,33 @@ mod tests {
 
         assert!(!PacketLayout::from_mask(0).usable());
         assert!(!PacketLayout::from_mask(1 << 7).usable(), "x without y");
+    }
+
+    /// The live configuration: a Y axis that must come out top-down, on an
+    /// output area scaled up for sub-pixel resolution. Both at once, because
+    /// each was got wrong in the presence of the other.
+    #[test]
+    fn a_flipped_axis_scaled_up_lands_on_screen_coordinates() {
+        // Screen y runs 0..1440, so the tablet's upward axis is asked for as
+        // origin 1440, extent -1440, times 32.
+        let map = axis_map(1440, -1440, 1440 * 32, -1440 * 32);
+        assert_eq!(apply(map, 1440 * 32), 1440.0, "device bottom -> screen bottom");
+        assert_eq!(apply(map, 0), 0.0, "device top -> screen top");
+        assert_eq!(apply(map, 720 * 32), 720.0, "and the middle stays put");
+        // The point of the exercise: positions between whole pixels.
+        assert!((apply(map, 720 * 32 - 16) - 719.5).abs() < 1e-3);
+    }
+
+    /// A driver that ignores both the scale and the flip hands back its own
+    /// bottom-up, screen-scaled area. The map has to correct both, or every
+    /// position comes out mirrored about the middle of the screen — which is
+    /// the failure this whole arrangement exists to make impossible.
+    #[test]
+    fn a_refused_flip_is_corrected_rather_than_believed() {
+        let map = axis_map(1440, -1440, 0, 1440);
+        assert_eq!(apply(map, 0), 1440.0, "packet 0 is the bottom of the screen");
+        assert_eq!(apply(map, 1440), 0.0, "packet 1440 is the top");
+        assert_eq!(apply(map, 720), 720.0);
     }
 
     /// A driver free to grant a different origin as well as a different extent
