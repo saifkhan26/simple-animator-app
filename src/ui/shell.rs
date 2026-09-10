@@ -139,6 +139,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 } else if state.nav_to_camera {
                     state.begin_camera_drag();
                 } else if state.nav_drag.is_none() {
+                    // A fresh stroke re-decides whether to believe the
+                    // tablet's positions: the window may have moved to
+                    // another monitor, or the driver's mode may have
+                    // changed, since the last one.
+                    state.pen_mapping = None;
                     if let Some(pos) = resp.interact_pointer_pos() {
                         if state.tool == ActiveTool::Tracker {
                             // Tracker takes the raw doc-space point — no cell
@@ -249,7 +254,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             // not the live device or when its mapping does not
                             // agree with the OS pointer, and the single egui
                             // position is used instead.
-                            match pen_stroke_points(state, ui.ctx(), pointer) {
+                            let ctx = ui.ctx().clone();
+                            match pen_stroke_points(state, &ctx, pointer) {
                                 Some(points) => {
                                     for (pos, packet) in points {
                                         let (cx, cy) =
@@ -3321,27 +3327,47 @@ const PEN_MOUSE_AGREEMENT: f32 = 20.0;
 /// the one whole-pixel position egui reports — which is the entire reason this
 /// path exists.
 fn pen_stroke_points(
-    state: &AppState,
+    state: &mut AppState,
     ctx: &egui::Context,
     pointer: Option<egui::Pos2>,
 ) -> Option<Vec<(egui::Pos2, PenPacket)>> {
     if !state.pen.pen_active() {
         return None;
     }
-    let packets = state.pen.packets();
-    let last = packets.last()?;
     let (ox, oy) = state.pen.client_origin()?;
     let ppp = ctx.pixels_per_point();
     // Virtual-desktop physical pixels -> client physical pixels -> points.
     let to_points = |p: &PenPacket| egui::pos2((p.x - ox) / ppp, (p.y - oy) / ppp);
+    let points: Vec<(egui::Pos2, PenPacket)> = state
+        .pen
+        .packets()
+        .iter()
+        .map(|p| (to_points(p), *p))
+        .collect();
+    let end = points.last()?.0;
 
-    if let Some(pointer) = pointer {
-        let end = to_points(last);
-        if (end.x - pointer.x).abs() + (end.y - pointer.y).abs() > PEN_MOUSE_AGREEMENT {
-            return None;
+    // Decided once per stroke and held, which is what Qt does. Re-checking
+    // every frame would throw the batch away during fast motion, where a
+    // 200 Hz pen legitimately runs tens of pixels ahead of the 60 Hz
+    // cursor — exactly when the extra samples are worth the most.
+    let trusted = match state.pen_mapping {
+        Some(trusted) => trusted,
+        None => {
+            // Wait for a frame that can be judged rather than guessing.
+            let pointer = pointer?;
+            let agrees = (end.x - pointer.x).abs() + (end.y - pointer.y).abs()
+                <= PEN_MOUSE_AGREEMENT;
+            if !agrees {
+                log::warn!(
+                    "tablet reports {end:?} but the cursor is at {pointer:?}; \
+                     drawing from the cursor for this stroke"
+                );
+            }
+            state.pen_mapping = Some(agrees);
+            agrees
         }
-    }
-    Some(packets.iter().map(|p| (to_points(p), *p)).collect())
+    };
+    trusted.then_some(points)
 }
 
 /// Small floating menu strip: File / Edit menus + a panel-visibility toggle.

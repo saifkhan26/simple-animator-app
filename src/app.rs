@@ -430,6 +430,11 @@ pub struct AppState {
     /// Whether the timeline wraps. Gates playback, wheel scrub and the frame
     /// step actions alike, so one toggle means one behaviour everywhere.
     pub loop_timeline: bool,
+    /// Whether this stroke trusts the tablet's own positions over the OS
+    /// cursor's. Decided once, on the first packet of a stroke, and held
+    /// for its duration — see `ui::shell::pen_stroke_points`. `None` until
+    /// a stroke has had a chance to decide.
+    pub pen_mapping: Option<bool>,
     /// Leftover trackpad scroll (in points) not yet worth a whole frame step.
     /// Session-only: a wheel gesture never spans a run. Mice report whole
     /// lines and bypass this entirely — see `ui::shell::timeline_wheel_scrub`.
@@ -636,6 +641,7 @@ impl AppState {
             invert_timeline_scroll: prefs.invert_timeline_scroll,
             loop_timeline: prefs.loop_timeline,
             smoothing: prefs.smoothing,
+            pen_mapping: None,
             wheel_scrub_accum: 0.0,
             bg_opacity: 1.0,
             bg_color: [0.12, 0.12, 0.13],
