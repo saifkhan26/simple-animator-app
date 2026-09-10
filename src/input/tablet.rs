@@ -5,12 +5,14 @@
 //! release, but stroke *positions* come from the Wintab packet queue rather
 //! than from the OS mouse.
 //!
-//! That distinction is the whole point. The mouse reports whole screen pixels
-//! at the redraw rate; the pen reports thousands of counts per inch at
-//! 133-266 Hz. Zoomed out, one screen pixel is several document pixels, so
-//! mouse quantization turns a slow straight line into a visible staircase that
-//! any interpolator then faithfully traces. Reading `pkXYZ` from *every*
-//! queued packet is what removes it.
+//! That distinction is the whole point. The mouse gives one position per
+//! redraw, so most of what a 133-266 Hz pen reports is thrown away and what
+//! survives is spaced two to four device samples apart. Zoomed out, the gaps
+//! are several document pixels wide and any interpolator traces the resulting
+//! staircase faithfully. Reading *every* queued packet is what removes it.
+//!
+//! Positions arrive in the driver's own screen convention rather than at a
+//! finer scale of our asking; see the note at the output area in `try_init`.
 //!
 //! Windows: Wintab via `wintab_lite`, dynamic-loaded so the app still runs
 //! without a tablet driver. Linux/macOS: not yet implemented — no packets are
@@ -31,6 +33,93 @@ pub struct PenPacket {
     /// screen-down. Zero when the device reports no orientation.
     pub tilt_x: f32,
     pub tilt_y: f32,
+}
+
+/// Byte offsets of the packet fields this module reads, and the packet's
+/// stride, derived from the field mask the driver actually granted.
+///
+/// `WTOpen` rewrites `lcPktData` with what it is willing to report, which need
+/// not be what was asked for — most pens have no rotation, for instance. Every
+/// granted field is present, in the fixed order of the `WTPKT` bits, and
+/// nothing else is. So a packet's size depends on the device.
+///
+/// Reading a device's packets through a fixed-size struct is therefore only
+/// correct when every field happened to be granted. Otherwise the first packet
+/// of a batch reads fine and every one after it is picked up at the wrong
+/// offset — which is why the symptom was a stroke that looked perfect while
+/// the pen hovered, one packet to a frame, and fell apart the moment it was
+/// moved fast enough to deliver several.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PacketLayout {
+    /// Stride between packets, in bytes.
+    pub size: usize,
+    pub status: Option<usize>,
+    pub x: Option<usize>,
+    pub y: Option<usize>,
+    pub pressure: Option<usize>,
+    /// Offset of the ORIENTATION triple; azimuth first, then altitude.
+    pub orientation: Option<usize>,
+}
+
+/// The packet fields, in `WTPKT` bit order with their sizes. The order is the
+/// layout: Wintab emits exactly the granted fields, in this sequence.
+///
+/// `CONTEXT` is a handle, so it is pointer-sized; the rest are 32-bit, and the
+/// two triples are three of those each.
+const PACKET_FIELDS: [(u32, usize); 14] = [
+    (1 << 0, std::mem::size_of::<usize>()), // CONTEXT
+    (1 << 1, 4),                            // STATUS
+    (1 << 2, 4),                            // TIME
+    (1 << 3, 4),                            // CHANGED
+    (1 << 4, 4),                            // SERIAL_NUMBER
+    (1 << 5, 4),                            // CURSOR
+    (1 << 6, 4),                            // BUTTONS
+    (1 << 7, 4),                            // X
+    (1 << 8, 4),                            // Y
+    (1 << 9, 4),                            // Z
+    (1 << 10, 4),                           // NORMAL_PRESSURE
+    (1 << 11, 4),                           // TANGENT_PRESSURE
+    (1 << 12, 12),                          // ORIENTATION
+    (1 << 13, 12),                          // ROTATION
+];
+
+impl PacketLayout {
+    /// Walk the granted mask, accumulating offsets.
+    pub fn from_mask(granted: u32) -> Self {
+        let mut out = Self::default();
+        let mut at = 0usize;
+        for (bit, size) in PACKET_FIELDS {
+            if granted & bit == 0 {
+                continue;
+            }
+            match bit {
+                b if b == 1 << 1 => out.status = Some(at),
+                b if b == 1 << 7 => out.x = Some(at),
+                b if b == 1 << 8 => out.y = Some(at),
+                b if b == 1 << 10 => out.pressure = Some(at),
+                b if b == 1 << 12 => out.orientation = Some(at),
+                _ => {}
+            }
+            at += size;
+        }
+        out.size = at;
+        out
+    }
+
+    /// Whether the granted fields are enough to place a stroke at all.
+    pub fn usable(&self) -> bool {
+        self.size > 0 && self.x.is_some() && self.y.is_some()
+    }
+}
+
+#[inline]
+fn read_i32(buf: &[u8], at: usize) -> i32 {
+    i32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
+}
+
+#[inline]
+fn read_u32(buf: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
 }
 
 /// One axis of the packet -> screen mapping: `(origin, packet_origin, scale)`,
@@ -79,6 +168,9 @@ pub struct PenDiagnostics {
     pub pressure: f32,
     pub tilt: (f32, f32),
     pub queue_overflowed: bool,
+    /// The packet layout the driver granted. `size` is the giveaway: a device
+    /// that grants every field gives 76 bytes on a 64-bit build.
+    pub layout: PacketLayout,
 }
 
 /// Frames without a packet after which the pen is considered gone and pressure
@@ -176,6 +268,7 @@ impl PenInput {
             d.map_x = w.map_x;
             d.map_y = w.map_y;
             d.queue_overflowed = w.queue_err_logged;
+            d.layout = w.layout;
         }
         // Mapped from the retained raw value rather than from this frame's
         // packets, which are empty whenever the pen holds still — the readout
@@ -245,17 +338,11 @@ mod windows_backend {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::Graphics::Gdi::ClientToScreen;
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, GetClientRect};
+    use super::{read_i32, read_u32, PacketLayout};
     use wintab_lite::{
-        cast_void, Packet, WTClose, WTInfo, WTOpen, WTPacketsGet, AXIS, CXO, DVC, HCTX, LOGCONTEXT,
-        WTI, WTPKT,
+        cast_void, WTClose, WTInfo, WTOpen, WTPacketsGet, AXIS, CXO, DVC, HCTX, LOGCONTEXT, WTI,
+        WTPKT,
     };
-
-    /// Sub-pixel factor applied to the context's output extents. Packet
-    /// coordinates come back scaled by this, so a 1/32-pixel grid replaces the
-    /// mouse's whole-pixel one. Well past the tablet's own resolution on any
-    /// desktop-sized mapping, which is the point — the quantization that
-    /// remains is the hardware's, not ours.
-    const SUBPIXEL: i32 = 32;
 
     /// Polls after which a context that has never produced a packet is
     /// called out. Roughly a few seconds of drawing.
@@ -278,6 +365,12 @@ mod windows_backend {
         hwnd: HWND,
         pressure_min: f32,
         pressure_span: f32,
+        /// Where each field sits in a packet, and how long one is. Derived
+        /// from what the driver granted, not from what was asked for.
+        pub layout: PacketLayout,
+        /// Scratch for one poll's worth of packets. Held rather than allocated
+        /// per frame; this runs on every frame of every stroke.
+        buf: Vec<u8>,
         /// Raw coordinates of the most recent packet, for diagnostics.
         pub last_raw: Option<(i32, i32)>,
         /// Packets delivered since the context opened.
@@ -364,13 +457,21 @@ mod windows_backend {
             log_context.lcPktMode = WTPKT::empty();
             log_context.lcMoveMask = WTPKT::X | WTPKT::Y | WTPKT::NORMAL_PRESSURE;
 
-            // A pure scale of the driver's own area about the origin, so
-            // the mapping is unchanged in every respect but resolution — signs
-            // and all.
-            log_context.lcOutOrgXYZ.x = base_out_org.x * SUBPIXEL;
-            log_context.lcOutOrgXYZ.y = base_out_org.y * SUBPIXEL;
-            log_context.lcOutExtXYZ.x = base_out_ext.x * SUBPIXEL;
-            log_context.lcOutExtXYZ.y = base_out_ext.y * SUBPIXEL;
+            // The output area is deliberately left exactly as the driver
+            // defines it. Asking for a finer one, to get sub-pixel positions,
+            // inverted the Y axis twice — scaling lcOut* is evidently not the
+            // whole story for a system context, and where the axis direction
+            // actually lives is not something to keep guessing at against a
+            // device that cannot be tested here. Packets therefore arrive in
+            // the driver's own screen convention, agreeing with the cursor by
+            // construction.
+            //
+            // Little is lost. The wave this module set out to fix came mostly
+            // from taking one position per redraw instead of every packet; the
+            // sub-pixel grid was the smaller half, and it can come back
+            // through the route Qt actually uses — a non-system context on a
+            // window of its own, scaled against the device axes — once there
+            // is a tablet to verify it against.
 
             let mut pressure_axis = AXIS::default();
             let pr =
@@ -399,25 +500,16 @@ mod windows_backend {
                 && azimuth_res != 0.0
                 && altitude_res != 0.0;
 
-            let mut ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
-            if ctx_handle.is_null() {
-                // Sub-pixel precision is worth asking for, but not worth
-                // losing the tablet over if a driver dislikes an output area
-                // that large.
-                log::warn!(
-                    "Wintab refused a {SUBPIXEL}x output area; retrying at the driver's own scale"
-                );
-                log_context.lcOutOrgXYZ = base_out_org;
-                log_context.lcOutExtXYZ = base_out_ext;
-                ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
-            }
+            let ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
             if ctx_handle.is_null() {
                 return Err(anyhow!("WTOpen returned null"));
             }
 
-            // WTOpen rewrites the struct with what the driver actually granted,
-            // which may not be what we asked for. Build the mapping from the
-            // granted values so a clamped output area still lands correctly.
+            // WTOpen rewrites the struct with what the driver settled on.
+            // Nothing here asked it to change the output area, so this is
+            // normally the identity — but it is derived rather than assumed,
+            // because a driver is free to adjust it and the failure mode of
+            // guessing wrong is a stroke drawn confidently in the wrong place.
             let out_org = log_context.lcOutOrgXYZ;
             let out_ext = log_context.lcOutExtXYZ;
             if out_ext.x == 0 || out_ext.y == 0 {
@@ -450,11 +542,24 @@ mod windows_backend {
 
             // Logged in full because every past tablet problem here has come
             // down to what the driver actually granted, not what was asked for.
+            // What the driver will actually report, which WTOpen has just
+            // rewritten. Never assume this matches the request.
+            let layout = PacketLayout::from_mask(log_context.lcPktData.bits());
+            if !layout.usable() {
+                let _ = unsafe { wt_close(ctx_handle) };
+                return Err(anyhow!(
+                    "Wintab granted no position fields (packet mask {:#x})",
+                    log_context.lcPktData.bits()
+                ));
+            }
+
             log::info!(
                 "Wintab opened: screen org ({}, {}) ext ({}, {}); default output org \
                  ({}, {}) ext ({}, {}); granted output org ({}, {}) ext ({}, {}) \
                  = {:.4} x {:.4} screen px per packet unit; \
-                 pressure {pressure_min}..{pressure_max}; tilt {tilt_support}",
+                 packet mask {:#x} = {} bytes, offsets x {:?} y {:?} pressure {:?} \
+                 orientation {:?}; pressure {pressure_min}..{pressure_max}; \
+                 tilt {tilt_support}",
                 sys_org.x,
                 sys_org.y,
                 sys_ext.x,
@@ -469,12 +574,20 @@ mod windows_backend {
                 out_ext.y,
                 map_x.2,
                 map_y.2,
+                log_context.lcPktData.bits(),
+                layout.size,
+                layout.x,
+                layout.y,
+                layout.pressure,
+                layout.orientation,
             );
 
             Ok(Self {
                 wt_close,
                 wt_packets_get,
                 ctx_handle,
+                layout,
+                buf: vec![0u8; QUEUE_SIZE as usize * layout.size],
                 hwnd,
                 pressure_min,
                 pressure_span,
@@ -533,63 +646,71 @@ mod windows_backend {
             }
 
             const MAX: usize = QUEUE_SIZE as usize;
-            let mut packets: [Packet; MAX] = core::array::from_fn(|_| Packet::default());
-            // The buffer starts as default packets, whose pkXYZ is the tablet
-            // origin. Trusting a count that overstates what was written
-            // therefore does not produce noise, it produces a stream of
-            // *identical* points at one spot on the canvas — and a stroke
-            // stretched between the real path and a fixed point rasterizes as
-            // a cone. Hence a count that comes straight back from the call.
+            // Bytes, walked at the driver's own stride. A fixed-size struct
+            // would only be right for a device that granted every field.
             let copied = unsafe {
-                (self.wt_packets_get)(self.ctx_handle, MAX as i32, cast_void!(packets))
+                (self.wt_packets_get)(
+                    self.ctx_handle,
+                    MAX as i32,
+                    self.buf.as_mut_ptr() as *mut std::ffi::c_void,
+                )
             };
             let removed = (copied.max(0) as usize).min(MAX);
             if removed == 0 {
                 return;
             }
 
-            if removed > 0 && !self.seen_packets {
-                self.seen_packets = true;
-                let xy = packets[0].pkXYZ;
-                let mapped = self.map_point(xy.x, xy.y);
-                log::info!(
-                    "Wintab first packet: raw ({}, {}) -> desktop ({:.2}, {:.2})",
-                    xy.x,
-                    xy.y,
-                    mapped.0,
-                    mapped.1
-                );
-            }
+            let layout = self.layout;
+            let (Some(x_at), Some(y_at)) = (layout.x, layout.y) else {
+                return;
+            };
 
             out.reserve(removed);
-            for p in packets.iter().take(removed) {
-                // Fields are read through locals: `Packet` is `packed(4)`, so
-                // taking a reference to a field is unaligned.
-                // `TPS` is not re-exported by `wintab_lite`, so the flag is
-                // matched by value: TPS_QUEUE_ERR == 0b10. TPS_PROXIMITY is
-                // deliberately not filtered on: the spec calls it "cursor is
-                // out of the context", but Qt never tests it in its packet
-                // loop, and getting the sense backwards would silently discard
-                // every packet. A stale coordinate that lands far from the
-                // cursor is caught downstream by the distance guard in
+            for i in 0..removed {
+                let p = &self.buf[i * layout.size..(i + 1) * layout.size];
+
+                // TPS_QUEUE_ERR == 0b10. TPS_PROXIMITY is deliberately not
+                // filtered on: the spec calls it "cursor is out of the
+                // context", but Qt never tests it in its packet loop, and
+                // getting the sense backwards would silently discard every
+                // packet. A stale coordinate that lands far from the cursor is
+                // caught downstream by the distance guard in
                 // `ui::shell::pen_stroke_points` instead.
-                let status = p.pkStatus.bits();
-                if status & 0b10 != 0 && !self.queue_err_logged {
-                    self.queue_err_logged = true;
-                    log::warn!("Wintab packet queue overflowed — pen samples were dropped");
+                if let Some(at) = layout.status {
+                    if read_u32(p, at) & 0b10 != 0 && !self.queue_err_logged {
+                        self.queue_err_logged = true;
+                        log::warn!("Wintab packet queue overflowed — pen samples were dropped");
+                    }
                 }
-                let xy = p.pkXYZ;
-                self.last_raw = Some((xy.x, xy.y));
+
+                let (rx, ry) = (read_i32(p, x_at), read_i32(p, y_at));
+                let (x, y) = self.map_point(rx, ry);
+                let pressure = match layout.pressure {
+                    Some(at) => ((read_u32(p, at) as f32 - self.pressure_min)
+                        / self.pressure_span)
+                        .clamp(0.0, 1.0),
+                    // Nothing to go on, so draw at full strength rather than
+                    // at nothing.
+                    None => 1.0,
+                };
+                let (tilt_x, tilt_y) = match layout.orientation {
+                    Some(at) => self.map_tilt(read_i32(p, at), read_i32(p, at + 4)),
+                    None => (0.0, 0.0),
+                };
+
+                if !self.seen_packets {
+                    self.seen_packets = true;
+                    log::info!(
+                        "Wintab first packet: raw ({rx}, {ry}) -> desktop ({x:.2}, {y:.2})"
+                    );
+                }
+                self.last_raw = Some((rx, ry));
                 self.total_packets = self.total_packets.saturating_add(1);
-                let (x, y) = self.map_point(xy.x, xy.y);
-                let orientation = p.pkOrientation;
-                let (tilt_x, tilt_y) = self.map_tilt(orientation.orAzimuth, orientation.orAltitude);
-                let raw_pressure = p.pkNormalPressure as f32;
+
                 out.push(PenPacket {
                     x,
                     y,
-                    pressure: ((raw_pressure - self.pressure_min) / self.pressure_span)
-                        .clamp(0.0, 1.0),
+                    pressure,
                     tilt_x,
                     tilt_y,
                 });
@@ -668,6 +789,62 @@ mod tests {
         assert_eq!(apply(map, 540 * 32), 540.0);
         // A quarter of the way along must not come back three quarters.
         assert!((apply(map, 270 * 32) - 270.0).abs() < 1e-3);
+    }
+
+    /// The field table has to agree with the layout `wintab_lite`'s own
+    /// `Packet` struct describes, or the offsets computed from it are fiction.
+    /// Checking the full mask against that struct's size is what pins the two
+    /// together.
+    #[test]
+    fn the_full_mask_matches_the_reference_packet_struct() {
+        let full = PacketLayout::from_mask(0x3FFF);
+        assert_eq!(
+            full.size,
+            std::mem::size_of::<wintab_lite::Packet>(),
+            "field table disagrees with wintab_lite::Packet"
+        );
+        assert!(full.usable());
+    }
+
+    /// The case that was breaking: a pen with no rotation. Every field before
+    /// the missing one keeps its offset, and the packet is shorter — so a
+    /// fixed-stride read finds the first packet and loses every one after it.
+    #[test]
+    fn a_missing_trailing_field_only_shortens_the_packet() {
+        let full = PacketLayout::from_mask(0x3FFF);
+        let no_rotation = PacketLayout::from_mask(0x3FFF & !(1 << 13));
+        assert_eq!(no_rotation.size, full.size - 12);
+        assert_eq!(no_rotation.x, full.x);
+        assert_eq!(no_rotation.y, full.y);
+        assert_eq!(no_rotation.pressure, full.pressure);
+        assert_eq!(no_rotation.orientation, full.orientation);
+    }
+
+    /// A field dropped from the middle shifts everything after it, which is
+    /// the case a size check alone would not catch.
+    #[test]
+    fn a_missing_middle_field_shifts_what_follows() {
+        let full = PacketLayout::from_mask(0x3FFF);
+        let no_z = PacketLayout::from_mask(0x3FFF & !(1 << 9));
+        assert_eq!(no_z.x, full.x, "x is before z");
+        assert_eq!(
+            no_z.pressure.unwrap(),
+            full.pressure.unwrap() - 4,
+            "pressure is after z"
+        );
+    }
+
+    /// The minimum a tablet has to give us to be worth listening to.
+    #[test]
+    fn position_alone_is_usable_and_nothing_is_not() {
+        let xy = PacketLayout::from_mask((1 << 7) | (1 << 8));
+        assert!(xy.usable());
+        assert_eq!(xy.size, 8);
+        assert_eq!((xy.x, xy.y), (Some(0), Some(4)));
+        assert_eq!(xy.pressure, None);
+
+        assert!(!PacketLayout::from_mask(0).usable());
+        assert!(!PacketLayout::from_mask(1 << 7).usable(), "x without y");
     }
 
     /// A driver free to grant a different origin as well as a different extent

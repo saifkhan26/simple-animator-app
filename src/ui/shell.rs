@@ -143,11 +143,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 } else if state.nav_to_camera {
                     state.begin_camera_drag();
                 } else if state.nav_drag.is_none() {
-                    // A fresh stroke re-decides whether to believe the
-                    // tablet's positions: the window may have moved to
-                    // another monitor, or the driver's mode may have
-                    // changed, since the last one.
-                    state.pen_mapping = None;
+                    // One complaint per stroke, not one per frame.
                     state.pen_outlier_logged = false;
                     if let Some(pos) = resp.interact_pointer_pos() {
                         if state.tool == ActiveTool::Tracker {
@@ -3477,22 +3473,23 @@ fn doc_to_active_cell(state: &AppState, doc: (f32, f32)) -> (f32, f32) {
     t.doc_to_cell(doc.0, doc.1, cw as f32, ch as f32, pw, ph)
 }
 
-/// How far, in points, a packet-derived position may sit from the OS pointer
-/// before the tablet mapping is disbelieved. Qt uses the same 20-pixel
-/// manhattan check to spot a driver running in relative mode.
+/// How far, in points, the newest packet may sit from the OS cursor before
+/// the batch is disbelieved.
+///
+/// Both are read at the same moment — packets are drained at the top of the
+/// frame, the cursor position comes from that frame's input — and the driver
+/// moves the cursor from the very same packets. So they agree closely however
+/// fast the stroke is: it is the *oldest* packet in a batch that trails the
+/// cursor, never the newest. Disagreement here means the mapping is wrong, not
+/// that the hand moved, which makes this a cheap check on a class of bug whose
+/// symptom is otherwise a stroke drawn confidently in the wrong place.
 const PEN_MOUSE_AGREEMENT: f32 = 20.0;
 
-/// How far, in points, a single packet may sit from the OS cursor before it is
-/// discarded as impossible.
+/// How far, in points, a packet may sit from the newest one in its own batch.
 ///
-/// This is a much looser bound than `PEN_MOUSE_AGREEMENT`, and it is per
-/// packet rather than per stroke: the oldest packet in a frame's batch is a
-/// frame of travel behind the cursor, so the bound has to allow that. 400
-/// points inside one 60 Hz frame is 24,000 points per second, which no hand
-/// produces. What it does catch is a packet that is not a position at all —
-/// the failure mode being guarded against had them all land on one fixed spot,
-/// and a stroke stretched between the real path and a fixed point rasterizes
-/// as a solid cone.
+/// A batch is one frame's worth, so this bounds a frame of travel: 400 points
+/// inside one 60 Hz frame is 24,000 points per second, which no hand produces.
+/// What it catches is a packet that is not a position at all.
 const MAX_PACKET_JUMP: f32 = 400.0;
 
 /// This frame's tablet packets as egui screen positions, paired with the
@@ -3516,50 +3513,42 @@ fn pen_stroke_points(
     // Virtual-desktop physical pixels -> client physical pixels -> points.
     let to_points = |p: &PenPacket| egui::pos2((p.x - ox) / ppp, (p.y - oy) / ppp);
     let raw = state.pen.packets();
-    let points: Vec<(egui::Pos2, PenPacket)> = match pointer {
-        Some(pointer) => raw
-            .iter()
-            .map(|p| (to_points(p), *p))
-            .filter(|(at, _)| at.distance(pointer) <= MAX_PACKET_JUMP)
-            .collect(),
-        None => raw.iter().map(|p| (to_points(p), *p)).collect(),
-    };
+    let newest = to_points(raw.last()?);
+    let pointer = pointer?;
+
+    // Checked every frame rather than latched once per stroke. An earlier
+    // version decided at pen-down and held, on the theory that the newest
+    // packet outruns the cursor during fast motion — it does not, and holding
+    // the decision meant a mapping that only looked right at the moment of
+    // contact stayed trusted for the whole stroke.
+    if (newest.x - pointer.x).abs() + (newest.y - pointer.y).abs() > PEN_MOUSE_AGREEMENT {
+        if !state.pen_outlier_logged {
+            state.pen_outlier_logged = true;
+            log::warn!(
+                "tablet reports {newest:?} but the cursor is at {pointer:?}; \
+                 drawing from the cursor instead"
+            );
+        }
+        return None;
+    }
+
+    // Everything else in the batch is measured against the newest, not against
+    // the cursor: the oldest is legitimately a frame of travel behind.
+    let points: Vec<(egui::Pos2, PenPacket)> = raw
+        .iter()
+        .map(|p| (to_points(p), *p))
+        .filter(|(at, _)| at.distance(newest) <= MAX_PACKET_JUMP)
+        .collect();
     if points.len() < raw.len() && !state.pen_outlier_logged {
         state.pen_outlier_logged = true;
         log::warn!(
             "dropped {} of {} tablet packets more than {MAX_PACKET_JUMP} points from the \
-             cursor; first was {:?}",
+             newest in their own batch",
             raw.len() - points.len(),
             raw.len(),
-            raw.iter().map(to_points).find(|at| pointer
-                .map(|p| at.distance(p) > MAX_PACKET_JUMP)
-                .unwrap_or(false)),
         );
     }
-    let end = points.last()?.0;
-
-    // Decided once per stroke and held, which is what Qt does. Re-checking
-    // every frame would throw the batch away during fast motion, where a
-    // 200 Hz pen legitimately runs tens of pixels ahead of the 60 Hz
-    // cursor — exactly when the extra samples are worth the most.
-    let trusted = match state.pen_mapping {
-        Some(trusted) => trusted,
-        None => {
-            // Wait for a frame that can be judged rather than guessing.
-            let pointer = pointer?;
-            let agrees = (end.x - pointer.x).abs() + (end.y - pointer.y).abs()
-                <= PEN_MOUSE_AGREEMENT;
-            if !agrees {
-                log::warn!(
-                    "tablet reports {end:?} but the cursor is at {pointer:?}; \
-                     drawing from the cursor for this stroke"
-                );
-            }
-            state.pen_mapping = Some(agrees);
-            agrees
-        }
-    };
-    trusted.then_some(points)
+    (!points.is_empty()).then_some(points)
 }
 
 /// Small floating menu strip: File / Edit menus + a panel-visibility toggle.

@@ -430,11 +430,6 @@ pub struct AppState {
     /// Whether the timeline wraps. Gates playback, wheel scrub and the frame
     /// step actions alike, so one toggle means one behaviour everywhere.
     pub loop_timeline: bool,
-    /// Whether this stroke trusts the tablet's own positions over the OS
-    /// cursor's. Decided once, on the first packet of a stroke, and held
-    /// for its duration — see `ui::shell::pen_stroke_points`. `None` until
-    /// a stroke has had a chance to decide.
-    pub pen_mapping: Option<bool>,
     /// Whether this stroke has already complained about a stray packet.
     /// One line per stroke is a report; one per packet is a flood.
     pub pen_outlier_logged: bool,
@@ -648,7 +643,6 @@ impl AppState {
             invert_timeline_scroll: prefs.invert_timeline_scroll,
             loop_timeline: prefs.loop_timeline,
             smoothing: prefs.smoothing,
-            pen_mapping: None,
             pen_outlier_logged: false,
             wheel_scrub_accum: 0.0,
             bg_opacity: 1.0,

@@ -925,6 +925,44 @@ mod tests {
         }
     }
 
+    /// A tablet delivers several packets per frame, a fraction of a pixel
+    /// apart. Consecutive tangents are then nearly collinear, and the meeting
+    /// point of two nearly-parallel lines runs off towards infinity — so a
+    /// control point placed at that meeting point drags the curve with it.
+    ///
+    /// The stroke must stay where it was drawn no matter how densely it is
+    /// sampled.
+    #[test]
+    fn dense_nearly_collinear_samples_do_not_bulge() {
+        let mut b = builder(1.0, SmoothingOptions::default());
+        // 0.3 px apart, with a third of a pixel of tremor: a real pen.
+        let mut input: Vec<(f32, f32)> = Vec::new();
+        for i in 0..120 {
+            let t = i as f32;
+            let x = 100.0 + t * 0.3;
+            let y = 100.0 + t * 0.12 + ((i % 5) as f32 - 2.0) * 0.06;
+            input.push((x, y));
+            b.push(sample(x, y));
+        }
+
+        let (x0, y0) = input[0];
+        let (x1, y1) = *input.last().unwrap();
+        assert!(
+            b.spine.iter().all(|n| n.x.is_finite() && n.y.is_finite()),
+            "spine went non-finite"
+        );
+        assert!(b.spine.len() > 5, "vacuous: {} nodes", b.spine.len());
+        let worst = b
+            .spine
+            .iter()
+            .map(|n| line_distance((n.x, n.y), (x0, y0), (x1, y1)))
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 2.0,
+            "curve bulged {worst} px off a path drawn within half a pixel of straight"
+        );
+    }
+
     /// Basic smoothing does not touch positions — that is the point of it,
     /// and of Krita choosing it as the default. Clean lines come from the
     /// curve fit and from the sample fidelity underneath it.
