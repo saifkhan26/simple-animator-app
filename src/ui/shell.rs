@@ -1280,7 +1280,35 @@ fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
         return;
     }
 
-    diag_row(ui, "packets", format!("{} this frame, {} total", d.packets_this_frame, d.total_packets));
+    diag_row(
+        ui,
+        "packets",
+        format!(
+            "{} this frame, {} peak, {} total",
+            d.packets_this_frame, d.max_packets_per_frame, d.total_packets
+        ),
+    );
+    // The stride question, answered. 76 bytes on a 64-bit build means the
+    // driver granted every field; anything less means the packet is shorter
+    // than the reference struct, which is the case that used to misread every
+    // packet after the first in a batch.
+    diag_row(
+        ui,
+        "packet",
+        format!(
+            "{} bytes, mask {:#06x}, x {:?} y {:?} pressure {:?} tilt {:?}",
+            d.layout.size, d.layout.mask, d.layout.x, d.layout.y, d.layout.pressure,
+            d.layout.orientation
+        ),
+    );
+    diag_row(
+        ui,
+        "rejected",
+        format!(
+            "{} batches, {} stray packets",
+            state.pen_batches_rejected, state.pen_packets_dropped
+        ),
+    );
     diag_row(ui, "pressure", format!("{:.3}", d.pressure));
     diag_row(ui, "tilt", format!("{:.1}, {:.1} deg", d.tilt.0, d.tilt.1));
     diag_row(
@@ -3522,6 +3550,7 @@ fn pen_stroke_points(
     // the decision meant a mapping that only looked right at the moment of
     // contact stayed trusted for the whole stroke.
     if (newest.x - pointer.x).abs() + (newest.y - pointer.y).abs() > PEN_MOUSE_AGREEMENT {
+        state.pen_batches_rejected = state.pen_batches_rejected.saturating_add(1);
         if !state.pen_outlier_logged {
             state.pen_outlier_logged = true;
             log::warn!(
@@ -3539,7 +3568,9 @@ fn pen_stroke_points(
         .map(|p| (to_points(p), *p))
         .filter(|(at, _)| at.distance(newest) <= MAX_PACKET_JUMP)
         .collect();
-    if points.len() < raw.len() && !state.pen_outlier_logged {
+    let dropped = raw.len() - points.len();
+    state.pen_packets_dropped = state.pen_packets_dropped.saturating_add(dropped as u32);
+    if dropped > 0 && !state.pen_outlier_logged {
         state.pen_outlier_logged = true;
         log::warn!(
             "dropped {} of {} tablet packets more than {MAX_PACKET_JUMP} points from the \

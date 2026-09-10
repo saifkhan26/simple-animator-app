@@ -51,6 +51,8 @@ pub struct PenPacket {
 /// moved fast enough to deliver several.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PacketLayout {
+    /// The granted field mask this was derived from.
+    pub mask: u32,
     /// Stride between packets, in bytes.
     pub size: usize,
     pub status: Option<usize>,
@@ -86,7 +88,10 @@ const PACKET_FIELDS: [(u32, usize); 14] = [
 impl PacketLayout {
     /// Walk the granted mask, accumulating offsets.
     pub fn from_mask(granted: u32) -> Self {
-        let mut out = Self::default();
+        let mut out = Self {
+            mask: granted,
+            ..Self::default()
+        };
         let mut at = 0usize;
         for (bit, size) in PACKET_FIELDS {
             if granted & bit == 0 {
@@ -168,6 +173,9 @@ pub struct PenDiagnostics {
     pub pressure: f32,
     pub tilt: (f32, f32),
     pub queue_overflowed: bool,
+    /// Most packets seen in a single frame. A stride error only shows itself
+    /// when this is above one, so it says whether the case was even exercised.
+    pub max_packets_per_frame: usize,
     /// The packet layout the driver granted. `size` is the giveaway: a device
     /// that grants every field gives 76 bytes on a 64-bit build.
     pub layout: PacketLayout,
@@ -269,6 +277,7 @@ impl PenInput {
             d.map_y = w.map_y;
             d.queue_overflowed = w.queue_err_logged;
             d.layout = w.layout;
+            d.max_packets_per_frame = w.max_packets_per_frame;
         }
         // Mapped from the retained raw value rather than from this frame's
         // packets, which are empty whenever the pen holds still — the readout
@@ -348,6 +357,11 @@ mod windows_backend {
     /// called out. Roughly a few seconds of drawing.
     const SILENCE_WARN_POLLS: u32 = 300;
 
+    /// Upper bound on one packet, for sizing the read buffer. The documented
+    /// fields come to 76 bytes; this leaves room for a driver that reports
+    /// more than was asked for.
+    const MAX_PACKET_BYTES: usize = 256;
+
     /// Packet queue depth, matching Qt's `TabletPacketQSize`. The driver
     /// default is often 8, which a 200 Hz pen overflows in 40 ms — well inside
     /// one frame at 60 fps.
@@ -375,6 +389,8 @@ mod windows_backend {
         pub last_raw: Option<(i32, i32)>,
         /// Packets delivered since the context opened.
         pub total_packets: u64,
+        /// Most packets delivered in one poll.
+        pub max_packets_per_frame: usize,
         /// Affine packet → virtual-desktop mapping, per axis: the desktop
         /// origin, the packet-space origin, and desktop units per packet unit.
         pub map_x: (f32, f32, f32),
@@ -453,7 +469,17 @@ mod windows_backend {
             // at all, which is worth a comment because the fix looks like a
             // no-op otherwise.
             log_context.lcOptions |= CXO::SYSTEM;
-            log_context.lcPktData = WTPKT::all();
+            // Only the fields actually read. Asking for everything invites a
+            // packet whose length depends on what the device happens to
+            // support, and the length is the one thing that must be right:
+            // every packet after the first in a batch is found by it. Five
+            // documented fields, none of them optional extensions, is a packet
+            // this code can size exactly.
+            log_context.lcPktData = WTPKT::STATUS
+                | WTPKT::X
+                | WTPKT::Y
+                | WTPKT::NORMAL_PRESSURE
+                | WTPKT::ORIENTATION;
             log_context.lcPktMode = WTPKT::empty();
             log_context.lcMoveMask = WTPKT::X | WTPKT::Y | WTPKT::NORMAL_PRESSURE;
 
@@ -587,7 +613,11 @@ mod windows_backend {
                 wt_packets_get,
                 ctx_handle,
                 layout,
-                buf: vec![0u8; QUEUE_SIZE as usize * layout.size],
+                // Deliberately far larger than the layout says it needs to be.
+                // If this code ever *under*-estimates a packet, the driver
+                // writes past the end of the buffer, and a wrong stroke is a
+                // much better failure than a corrupted heap.
+                buf: vec![0u8; QUEUE_SIZE as usize * MAX_PACKET_BYTES],
                 hwnd,
                 pressure_min,
                 pressure_span,
@@ -596,6 +626,7 @@ mod windows_backend {
                 tilt_support,
                 last_raw: None,
                 total_packets: 0,
+                max_packets_per_frame: 0,
                 client_origin: None,
                 queue_err_logged: false,
                 polls: 0,
@@ -660,10 +691,13 @@ mod windows_backend {
                 return;
             }
 
+            self.max_packets_per_frame = self.max_packets_per_frame.max(removed);
+
             let layout = self.layout;
             let (Some(x_at), Some(y_at)) = (layout.x, layout.y) else {
                 return;
             };
+            debug_assert!(layout.size <= MAX_PACKET_BYTES);
 
             out.reserve(removed);
             for i in 0..removed {

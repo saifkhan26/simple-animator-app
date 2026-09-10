@@ -433,6 +433,12 @@ pub struct AppState {
     /// Whether this stroke has already complained about a stray packet.
     /// One line per stroke is a report; one per packet is a flood.
     pub pen_outlier_logged: bool,
+    /// Frames whose packet batch was thrown away because the newest packet
+    /// disagreed with the cursor, and packets dropped as outliers within an
+    /// accepted batch. Counted for the whole session and shown in the tablet
+    /// readout: neither is visible while drawing, which is when they happen.
+    pub pen_batches_rejected: u32,
+    pub pen_packets_dropped: u32,
     /// Leftover trackpad scroll (in points) not yet worth a whole frame step.
     /// Session-only: a wheel gesture never spans a run. Mice report whole
     /// lines and bypass this entirely — see `ui::shell::timeline_wheel_scrub`.
@@ -644,6 +650,8 @@ impl AppState {
             loop_timeline: prefs.loop_timeline,
             smoothing: prefs.smoothing,
             pen_outlier_logged: false,
+            pen_batches_rejected: 0,
+            pen_packets_dropped: 0,
             wheel_scrub_accum: 0.0,
             bg_opacity: 1.0,
             bg_color: [0.12, 0.12, 0.13],
