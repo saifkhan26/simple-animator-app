@@ -22,8 +22,9 @@
 
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::input::pointer::PointerSample;
+use crate::tools::dab::Dab;
 use crate::tools::ribbon::{union_rect, SpineNode, StrokeWorkspace};
-use crate::tools::{ActiveTool, BrushSettings, Smoothing, SmoothingOptions};
+use crate::tools::{ActiveTool, BrushMode, BrushSettings, Smoothing, SmoothingOptions};
 
 /// A control point closer than this to the chord means the Bezier is flat
 /// enough to draw as a line. Krita's `BEZIER_FLATNESS_THRESHOLD`.
@@ -56,7 +57,10 @@ pub struct StrokeBuilder {
     /// already-rasterized geometry can never be retracted, so nodes are only
     /// emitted for curve segments whose shape is final.
     spine: Vec<SpineNode>,
-    /// First spine index whose incoming segment is not yet rasterized.
+    /// Stamps, in `Dab` mode. Parallel to `spine`, which that mode keeps
+    /// only so the live-tail overlay has something to draw.
+    dabs: Vec<Dab>,
+    /// First spine (or dab) index not yet rasterized.
     raster_from: usize,
     /// The sample before the current one, and the one before that. Krita's
     /// `previousPaintInformation` / `olderPaintInformation`: the curve fit
@@ -69,7 +73,9 @@ pub struct StrokeBuilder {
     /// Distance walked since the last spine node, carried across curve
     /// segments so spacing is uniform along the whole stroke.
     spacing_accum: f32,
-    /// Node spacing in canvas pixels, latched from the brush at stroke start.
+    /// Distance between emitted points, in canvas pixels. Fixed for a
+    /// ribbon; in `Dab` mode it is recomputed after every stamp, because
+    /// spacing is a fraction of a dab whose size follows pressure and tilt.
     spacing: f32,
     /// The pen-down node is in `spine` but has not been rasterized yet.
     dot_pending: bool,
@@ -90,7 +96,12 @@ impl StrokeBuilder {
         view_scale: f32,
         opts: SmoothingOptions,
     ) -> Self {
-        let spacing = (brush.radius * 0.3).max(1.0);
+        let spacing = match brush.mode {
+            // Fine enough that the capsule polyline reads as a curve.
+            BrushMode::Ribbon => (brush.radius * 0.3).max(1.0),
+            // A starting guess at full size; the first stamp replaces it.
+            BrushMode::Dab => (brush.radius * 2.0 * brush.spacing).max(0.5),
+        };
         Self {
             brush,
             tool,
@@ -99,6 +110,7 @@ impl StrokeBuilder {
             samples: Vec::with_capacity(256),
             distance_history: Vec::with_capacity(256),
             spine: Vec::with_capacity(256),
+            dabs: Vec::new(),
             raster_from: 0,
             previous: None,
             older: None,
@@ -134,8 +146,7 @@ impl StrokeBuilder {
 
         let Some(previous) = self.previous else {
             // Pen-down: ink immediately, exactly where the user pressed.
-            let n = self.node_at(&info);
-            self.spine.push(n);
+            self.emit(&info);
             self.dot_pending = true;
             self.previous = Some(info);
             return;
@@ -180,15 +191,17 @@ impl StrokeBuilder {
     ) -> Option<DirtyRect> {
         let mut acc: Option<DirtyRect> = None;
 
-        // Pen-down dot: instant ink with zero latency. It is a disc, not a
-        // capsule, so it is rasterized here rather than by `drain`.
+        // Pen-down dot: instant ink with zero latency. A lone disc rather
+        // than a capsule, so it is rasterized here rather than by `drain`.
         if self.dot_pending {
             self.dot_pending = false;
-            if let Some(&n) = self.spine.first() {
-                self.raster_from = 1;
-                if let Some(r) = ws.raster_dot(n) {
-                    acc = Some(union_rect(acc, r));
-                }
+            let first = match self.brush.mode {
+                BrushMode::Dab => self.dabs.first().and_then(|&d| ws.raster_dab(d)),
+                BrushMode::Ribbon => self.spine.first().and_then(|&n| ws.raster_dot(n)),
+            };
+            self.raster_from = 1;
+            if let Some(r) = first {
+                acc = Some(union_rect(acc, r));
             }
         }
 
@@ -228,8 +241,7 @@ impl StrokeBuilder {
                 .map(|n| (n.x - end.x).abs() > 0.01 || (n.y - end.y).abs() > 0.01)
                 .unwrap_or(false);
             if needs_end_node {
-                let n = self.node_at(&end);
-                self.spine.push(n);
+                self.emit(&end);
                 self.spacing_accum = 0.0;
             }
         }
@@ -511,8 +523,7 @@ impl StrokeBuilder {
                 return;
             }
             cur = mix(cur, to, t);
-            let n = self.node_at(&cur);
-            self.spine.push(n);
+            self.emit(&cur);
         }
     }
 
@@ -541,14 +552,39 @@ impl StrokeBuilder {
 
     // --- Rasterization -----------------------------------------------------
 
-    /// Rasterize spine segments appended since the last drain.
+    /// Emit one point of the walked curve: a spine node always, plus a dab
+    /// when the brush stamps. The dab also sets the next spacing, since
+    /// spacing is a fraction of a dab whose size follows pressure and tilt.
+    fn emit(&mut self, s: &PointerSample) {
+        let n = self.node_at(s);
+        self.spine.push(n);
+        if self.brush.mode == BrushMode::Dab {
+            let d = Dab::from_sample(&self.brush, s);
+            self.spacing = d.spacing(&self.brush);
+            self.dabs.push(d);
+        }
+    }
+
+    /// Rasterize geometry appended since the last drain.
     fn drain(&mut self, ws: &mut StrokeWorkspace, mut acc: Option<DirtyRect>) -> Option<DirtyRect> {
-        for j in self.raster_from.max(1)..self.spine.len() {
-            if let Some(r) = ws.raster_capsule(self.spine[j - 1], self.spine[j]) {
-                acc = Some(union_rect(acc, r));
+        match self.brush.mode {
+            BrushMode::Dab => {
+                for i in self.raster_from..self.dabs.len() {
+                    if let Some(r) = ws.raster_dab(self.dabs[i]) {
+                        acc = Some(union_rect(acc, r));
+                    }
+                }
+                self.raster_from = self.dabs.len().max(self.raster_from);
+            }
+            BrushMode::Ribbon => {
+                for j in self.raster_from.max(1)..self.spine.len() {
+                    if let Some(r) = ws.raster_capsule(self.spine[j - 1], self.spine[j]) {
+                        acc = Some(union_rect(acc, r));
+                    }
+                }
+                self.raster_from = self.spine.len().max(self.raster_from);
             }
         }
-        self.raster_from = self.spine.len().max(self.raster_from);
         acc
     }
 
@@ -580,8 +616,8 @@ impl StrokeBuilder {
         SpineNode {
             x: s.x,
             y: s.y,
-            radius: (self.brush.radius * lerp(1.0 - self.brush.pressure_size, 1.0, p)).max(0.1),
-            flow: lerp(1.0 - self.brush.pressure_opacity, 1.0, p),
+            radius: (self.brush.radius * self.brush.size.apply(p)).max(0.1),
+            flow: self.brush.flow * self.brush.flow_dyn.apply(p),
         }
     }
 }
@@ -745,7 +781,7 @@ mod tests {
         let mut canvas = Canvas::new(512, 512);
         let pre = canvas.pixels.clone();
         let mut ws = StrokeWorkspace::new();
-        ws.begin(512, 512, brush.hardness, brush.grain);
+        ws.begin(512, 512, &brush);
 
         let mut b = StrokeBuilder::new(brush, ActiveTool::Ink, view_scale, opts);
         for &(x, y) in screen_path {

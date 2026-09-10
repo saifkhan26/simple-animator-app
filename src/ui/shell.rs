@@ -10,7 +10,7 @@ use crate::input::shortcuts::{Action, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::OnionDirection;
-use crate::tools::{ActiveTool, ShapeKind, Smoothing};
+use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing};
 use crate::ui::{expr, theme};
 
 /// Tooltip text including the currently-bound shortcut (e.g. "Pencil  (Q)").
@@ -814,7 +814,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                     "Size"
                 };
                 ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=128.0).text(label));
-                ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Flow"));
+                ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Opacity"));
             }
     }
 }
@@ -926,15 +926,12 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
             swatch_strip(state, ui);
 
             ui.add_space(6.0);
+            theme::section_header(ui, ic::PEN_NIB, "Preset");
+            brush_presets(state, ui);
+
+            ui.add_space(6.0);
             theme::section_header(ui, ic::SLIDERS, "Dynamics");
-            ui.add(egui::Slider::new(&mut state.brush.hardness, 0.0..=1.0).text("Hardness"));
-            ui.add(egui::Slider::new(&mut state.brush.grain, 0.0..=1.0).text("Grain"));
-            ui.add(
-                egui::Slider::new(&mut state.brush.pressure_size, 0.0..=1.0).text("Pres → size"),
-            );
-            ui.add(
-                egui::Slider::new(&mut state.brush.pressure_opacity, 0.0..=1.0).text("Pres → flow"),
-            );
+            brush_dynamics(state, ui);
 
             ui.add_space(6.0);
             theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
@@ -1140,6 +1137,82 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
 
 /// Compact playback HUD shown when the floating panels are hidden (Tab).
 /// Pinned bottom-centre: play/pause, step, frame counter, scrub strip.
+/// One-click brush presets, matched to the Krita brushes they are named
+/// after. Colour is deliberately kept: swapping preset should not change
+/// what you are drawing with.
+fn brush_presets(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        for (label, tip, build) in BrushSettings::PRESETS {
+            if ui.button(*label).on_hover_text(*tip).clicked() {
+                let color = state.brush.color;
+                state.brush = build();
+                state.brush.color = color;
+            }
+        }
+    });
+}
+
+/// Brush shape and response. Which controls appear depends on the brush's
+/// rasterization model: flow, spacing and tilt only mean anything to a
+/// brush that stamps dabs.
+fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
+    let dab = state.brush.mode == BrushMode::Dab;
+    ui.horizontal(|ui| {
+        ui.label("Model");
+        ui.selectable_value(&mut state.brush.mode, BrushMode::Ribbon, "Ribbon")
+            .on_hover_text(
+                "One continuous band. Even density however slowly you draw, \
+                 and no darkening where the stroke crosses itself — ink.",
+            );
+        ui.selectable_value(&mut state.brush.mode, BrushMode::Dab, "Dabs")
+            .on_hover_text(
+                "Stamps that build up where they overlap. Density comes from \
+                 how much you go over the same ground — graphite.",
+            );
+    });
+
+    ui.add(egui::Slider::new(&mut state.brush.hardness, 0.0..=1.0).text("Hardness"))
+        .on_hover_text("Fraction of the radius that stays fully solid.");
+    ui.add(egui::Slider::new(&mut state.brush.softness, 0.2..=4.0).text("Softness"))
+        .on_hover_text("Bends the edge falloff inwards. 1.0 is a plain taper.");
+    ui.add(egui::Slider::new(&mut state.brush.grain, 0.0..=1.0).text("Grain"))
+        .on_hover_text("How deeply the paper tooth eats into the stroke.");
+    ui.add(egui::Slider::new(&mut state.brush.grain_scale, 0.5..=6.0).text("Grain scale"))
+        .on_hover_text("Canvas pixels per grain texel — coarser paper as it rises.");
+
+    ui.add_enabled_ui(dab, |ui| {
+        ui.add(egui::Slider::new(&mut state.brush.flow, 0.02..=1.0).text("Flow"))
+            .on_hover_text("Alpha of a single stamp. Low values build density slowly.");
+        ui.add(egui::Slider::new(&mut state.brush.spacing, 0.02..=1.0).text("Spacing"))
+            .on_hover_text("Gap between stamps, as a fraction of the dab.");
+    });
+
+    ui.add(egui::Slider::new(&mut state.brush.size.amount, 0.0..=1.0).text("Pres → size"));
+    ui.add(egui::Slider::new(&mut state.brush.size.gamma, 0.3..=3.0).text("Size curve"))
+        .on_hover_text(
+            "Below 1 the brush reaches full width the moment it touches; \
+             above 1 it holds thin until you lean on it, which is what \
+             gives a long taper.",
+        );
+    ui.add(egui::Slider::new(&mut state.brush.flow_dyn.amount, 0.0..=1.0).text("Pres → flow"));
+    ui.add(egui::Slider::new(&mut state.brush.flow_dyn.gamma, 0.3..=3.0).text("Flow curve"));
+
+    ui.add_enabled_ui(dab, |ui| {
+        ui.add(
+            egui::Slider::new(&mut state.brush.tilt_elongation, 0.0..=1.0).text("Tilt → shape"),
+        )
+        .on_hover_text("Leaning the pen flattens the dab across the lean.");
+        ui.add(egui::Slider::new(&mut state.brush.tilt_size, 0.0..=1.0).text("Tilt → size"));
+    });
+    if dab && !state.pen.is_active() {
+        ui.label(
+            egui::RichText::new("Tilt needs a tablet — mouse input reports none.")
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+    }
+}
+
 /// Line smoothing controls, mirroring Krita's freehand tool options.
 ///
 /// Basic is the default in both apps, and it does no positional filtering at
@@ -3071,9 +3144,7 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
         ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser => {
             // Effective radius scales with pressure (mouse = 1.0 always).
             let pressure = state.pen.current_pressure().unwrap_or(1.0);
-            let p_size = state.brush.pressure_size.clamp(0.0, 1.0);
-            let pressure_mul = (1.0 - p_size) + p_size * pressure;
-            let r_cell = (state.effective_radius() * pressure_mul).max(0.5);
+            let r_cell = (state.effective_radius() * state.brush.size.apply(pressure)).max(0.5);
             // `effective_radius` is in *cell* pixels, so the layer's own scale
             // belongs here too — otherwise the ring misreports the stroke width
             // on a scaled layer, and misses the point entirely under the

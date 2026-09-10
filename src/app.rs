@@ -196,9 +196,40 @@ struct UiPrefs {
     /// Line smoothing. A workspace preference: how much the app fights the
     /// hand is a matter of taste, and of what the artist is used to.
     smoothing: SmoothingOptions,
+    /// Per-tool brush settings. A tuned brush is worth as much as a tuned
+    /// palette and was previously thrown away on exit. `None` from an
+    /// older prefs blob, or from one whose tool list has since changed,
+    /// falls back to the built-in defaults.
+    tool_brushes: Option<Vec<BrushSettings>>,
     /// Pinned colour swatches. A workspace preference, not project data: a
     /// palette follows the artist between files.
     palette: Vec<[u8; 3]>,
+}
+
+/// The built-in per-tool brushes.
+fn default_tool_brushes() -> [BrushSettings; 7] {
+    [
+        BrushSettings::default_pencil(),
+        BrushSettings::default_ink(),
+        BrushSettings::default_eraser(),
+        BrushSettings::default_fill(),
+        BrushSettings::default_shape(),
+        // Tracker and Lasso draw nothing; the slots only keep tool indexing
+        // into this array safe.
+        BrushSettings::default_shape(),
+        BrushSettings::default_shape(),
+    ]
+}
+
+/// Saved brushes, or the defaults. A blob from a build with a different
+/// number of tools is discarded rather than padded: the array is indexed by
+/// `ActiveTool::idx`, so a short one would silently reassign brushes to the
+/// wrong tools.
+fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; 7] {
+    match saved {
+        Some(v) => <[BrushSettings; 7]>::try_from(v).unwrap_or_else(|_| default_tool_brushes()),
+        None => default_tool_brushes(),
+    }
 }
 
 impl Default for UiPrefs {
@@ -217,6 +248,7 @@ impl Default for UiPrefs {
             invert_timeline_scroll: false,
             loop_timeline: true,
             smoothing: SmoothingOptions::default(),
+            tool_brushes: None,
             palette: Vec::new(),
         }
     }
@@ -578,7 +610,8 @@ impl AppState {
             retired_textures: Vec::new(),
             cell_dirty,
             tool: ActiveTool::Pencil,
-            brush: BrushSettings::default_pencil(),
+            brush: restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()]
+                .clone(),
             palette: prefs.palette,
             cell_clip: None,
             selection: None,
@@ -586,17 +619,7 @@ impl AppState {
             pixel_clip: None,
             sel_tex_stale: false,
             selection_tex: None,
-            tool_brushes: [
-                BrushSettings::default_pencil(),
-                BrushSettings::default_ink(),
-                BrushSettings::default_eraser(),
-                BrushSettings::default_fill(),
-                BrushSettings::default_shape(),
-                // Tracker and Lasso draw nothing; the slots only keep tool
-                // indexing into this array safe.
-                BrushSettings::default_shape(),
-                BrushSettings::default_shape(),
-            ],
+            tool_brushes: restore_tool_brushes(prefs.tool_brushes.clone()),
             stroke: None,
             stroke_target: None,
             shape_drag: None,
@@ -2237,7 +2260,7 @@ impl AppState {
             (c.width, c.height)
         };
         self.stroke_ws
-            .begin(cw, ch, self.brush.hardness, self.brush.grain);
+            .begin(cw, ch, &self.brush);
 
         // Resolve the radius and the view scale once, here: a stroke must not
         // change width or smoothing behaviour partway through if the view moves.
@@ -2329,7 +2352,7 @@ impl AppState {
                 let c = &self.project.cells[target];
                 (c.width, c.height)
             };
-            self.stroke_ws.begin(cw, ch, brush.hardness, brush.grain);
+            self.stroke_ws.begin(cw, ch, &brush);
             if let (Some(pre), Some(c)) = (
                 self.stroke_pre_pixels.as_deref(),
                 self.project.cell_mut(target),
@@ -3084,6 +3107,7 @@ impl eframe::App for AppState {
                 invert_timeline_scroll: self.invert_timeline_scroll,
                 loop_timeline: self.loop_timeline,
                 smoothing: self.smoothing,
+                tool_brushes: Some(self.tool_brushes.to_vec()),
                 palette: self.palette.clone(),
             },
         );
