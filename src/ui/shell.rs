@@ -144,6 +144,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     // another monitor, or the driver's mode may have
                     // changed, since the last one.
                     state.pen_mapping = None;
+                    state.pen_outlier_logged = false;
                     if let Some(pos) = resp.interact_pointer_pos() {
                         if state.tool == ActiveTool::Tracker {
                             // Tracker takes the raw doc-space point — no cell
@@ -3344,6 +3345,19 @@ fn doc_to_active_cell(state: &AppState, doc: (f32, f32)) -> (f32, f32) {
 /// manhattan check to spot a driver running in relative mode.
 const PEN_MOUSE_AGREEMENT: f32 = 20.0;
 
+/// How far, in points, a single packet may sit from the OS cursor before it is
+/// discarded as impossible.
+///
+/// This is a much looser bound than `PEN_MOUSE_AGREEMENT`, and it is per
+/// packet rather than per stroke: the oldest packet in a frame's batch is a
+/// frame of travel behind the cursor, so the bound has to allow that. 400
+/// points inside one 60 Hz frame is 24,000 points per second, which no hand
+/// produces. What it does catch is a packet that is not a position at all —
+/// the failure mode being guarded against had them all land on one fixed spot,
+/// and a stroke stretched between the real path and a fixed point rasterizes
+/// as a solid cone.
+const MAX_PACKET_JUMP: f32 = 400.0;
+
 /// This frame's tablet packets as egui screen positions, paired with the
 /// packet they came from.
 ///
@@ -3364,12 +3378,27 @@ fn pen_stroke_points(
     let ppp = ctx.pixels_per_point();
     // Virtual-desktop physical pixels -> client physical pixels -> points.
     let to_points = |p: &PenPacket| egui::pos2((p.x - ox) / ppp, (p.y - oy) / ppp);
-    let points: Vec<(egui::Pos2, PenPacket)> = state
-        .pen
-        .packets()
-        .iter()
-        .map(|p| (to_points(p), *p))
-        .collect();
+    let raw = state.pen.packets();
+    let points: Vec<(egui::Pos2, PenPacket)> = match pointer {
+        Some(pointer) => raw
+            .iter()
+            .map(|p| (to_points(p), *p))
+            .filter(|(at, _)| at.distance(pointer) <= MAX_PACKET_JUMP)
+            .collect(),
+        None => raw.iter().map(|p| (to_points(p), *p)).collect(),
+    };
+    if points.len() < raw.len() && !state.pen_outlier_logged {
+        state.pen_outlier_logged = true;
+        log::warn!(
+            "dropped {} of {} tablet packets more than {MAX_PACKET_JUMP} points from the \
+             cursor; first was {:?}",
+            raw.len() - points.len(),
+            raw.len(),
+            raw.iter().map(to_points).find(|at| pointer
+                .map(|p| at.distance(p) > MAX_PACKET_JUMP)
+                .unwrap_or(false)),
+        );
+    }
     let end = points.last()?.0;
 
     // Decided once per stroke and held, which is what Qt does. Re-checking

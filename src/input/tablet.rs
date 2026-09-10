@@ -166,8 +166,8 @@ mod windows_backend {
     use windows::Win32::Graphics::Gdi::ClientToScreen;
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, GetClientRect};
     use wintab_lite::{
-        cast_void, Packet, WTClose, WTDataGet, WTInfo, WTOpen, WTQueuePacketsEx, AXIS, CXO, DVC,
-        HCTX, LOGCONTEXT, WTI, WTPKT,
+        cast_void, Packet, WTClose, WTInfo, WTOpen, WTPacketsGet, AXIS, CXO, DVC, HCTX, LOGCONTEXT,
+        WTI, WTPKT,
     };
 
     /// Sub-pixel factor applied to the context's output extents. Packet
@@ -193,8 +193,7 @@ mod windows_backend {
 
     pub struct Wintab {
         wt_close: WTClose<'static>,
-        wt_queue: WTQueuePacketsEx<'static>,
-        wt_data_get: WTDataGet<'static>,
+        wt_packets_get: WTPacketsGet,
         ctx_handle: *mut HCTX,
         hwnd: HWND,
         pressure_min: f32,
@@ -236,12 +235,14 @@ mod windows_backend {
                 unsafe { lib.get(c"WTInfoA".to_bytes()).context("WTInfoA")? };
             let wt_close: WTClose<'static> =
                 unsafe { lib.get(c"WTClose".to_bytes()).context("WTClose")? };
-            let wt_queue: WTQueuePacketsEx<'static> = unsafe {
-                lib.get(c"WTQueuePacketsEx".to_bytes())
-                    .context("WTQueuePacketsEx")?
-            };
-            let wt_data_get: WTDataGet<'static> =
-                unsafe { lib.get(c"WTDataGet".to_bytes()).context("WTDataGet")? };
+            // WTPacketsGet rather than WTQueuePacketsEx + WTDataGet, which is
+            // what Qt uses. Its *return value* is the number of packets copied,
+            // where WTDataGet reports that through an out-parameter alongside a
+            // separate return value, and needs a serial-number range that has to
+            // stay valid across a 32-bit wrap. One number that cannot
+            // disagree with itself is worth having here — see `poll`.
+            let wt_packets_get: WTPacketsGet =
+                unsafe { lib.get(c"WTPacketsGet".to_bytes()).context("WTPacketsGet")? };
 
             let mut log_context = LOGCONTEXT::default();
             let r = unsafe { wt_info(WTI::DEFSYSCTX, 0, cast_void!(log_context)) };
@@ -381,8 +382,7 @@ mod windows_backend {
 
             Ok(Self {
                 wt_close,
-                wt_queue,
-                wt_data_get,
+                wt_packets_get,
                 ctx_handle,
                 hwnd,
                 pressure_min,
@@ -439,26 +439,21 @@ mod windows_backend {
                 );
             }
 
-            let mut from = 0u32;
-            let mut to = 0u32;
-            let any = unsafe { (self.wt_queue)(self.ctx_handle, &mut from, &mut to) };
-            if any == 0 {
-                return;
-            }
             const MAX: usize = QUEUE_SIZE as usize;
             let mut packets: [Packet; MAX] = core::array::from_fn(|_| Packet::default());
-            let mut removed: i32 = 0;
-            let _ = unsafe {
-                (self.wt_data_get)(
-                    self.ctx_handle,
-                    from,
-                    to,
-                    MAX as i32,
-                    cast_void!(packets),
-                    &mut removed,
-                )
+            // The buffer starts as default packets, whose pkXYZ is the tablet
+            // origin. Trusting a count that overstates what was written
+            // therefore does not produce noise, it produces a stream of
+            // *identical* points at one spot on the canvas — and a stroke
+            // stretched between the real path and a fixed point rasterizes as
+            // a cone. Hence a count that comes straight back from the call.
+            let copied = unsafe {
+                (self.wt_packets_get)(self.ctx_handle, MAX as i32, cast_void!(packets))
             };
-            let removed = (removed.max(0) as usize).min(MAX);
+            let removed = (copied.max(0) as usize).min(MAX);
+            if removed == 0 {
+                return;
+            }
 
             if removed > 0 && !self.seen_packets {
                 self.seen_packets = true;
@@ -478,7 +473,13 @@ mod windows_backend {
                 // Fields are read through locals: `Packet` is `packed(4)`, so
                 // taking a reference to a field is unaligned.
                 // `TPS` is not re-exported by `wintab_lite`, so the flag is
-                // matched by value: TPS_QUEUE_ERR == 0b10.
+                // matched by value: TPS_QUEUE_ERR == 0b10. TPS_PROXIMITY is
+                // deliberately not filtered on: the spec calls it "cursor is
+                // out of the context", but Qt never tests it in its packet
+                // loop, and getting the sense backwards would silently discard
+                // every packet. A stale coordinate that lands far from the
+                // cursor is caught downstream by the distance guard in
+                // `ui::shell::pen_stroke_points` instead.
                 let status = p.pkStatus.bits();
                 if status & 0b10 != 0 && !self.queue_err_logged {
                     self.queue_err_logged = true;
