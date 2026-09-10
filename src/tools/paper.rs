@@ -55,7 +55,12 @@ impl Paper {
         }
         let span = (hi - lo).max(1e-6);
         for v in &mut tile {
-            *v = (*v - lo) / span;
+            let t = (*v - lo) / span;
+            // Push the histogram towards its ends. Summed octaves land in a
+            // bell, and a bell reads as a smudge: paper tooth is closer to
+            // "peak or valley" than to an even spread of greys, and the peaks
+            // are what a pencil actually catches on.
+            *v = smoothstep(smoothstep(t));
         }
 
         Self { tile }

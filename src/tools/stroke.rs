@@ -1026,5 +1026,78 @@ mod tests {
             "spine deviates from the arc by {worst}px — the curve is faceted"
         );
     }
-}
 
+    /// Render every preset as a stroke on a grey ground, for eyeballing brush
+    /// feel against a reference. Ignored by default — it writes a file:
+    ///
+    /// ```text
+    /// PREVIEW_OUT=sheet.png cargo test brush_sheet -- --ignored --nocapture
+    /// ```
+    ///
+    /// Tuning a brush by slider means a round trip through the GUI and a
+    /// tablet. This is the short loop for the part you can judge from a
+    /// picture — density, tooth, taper, how far tilt opens the dab up.
+    #[test]
+    #[ignore]
+    fn brush_sheet() {
+        let Ok(path) = std::env::var("PREVIEW_OUT") else {
+            panic!("set PREVIEW_OUT to the .png to write");
+        };
+        let (w, h) = (900u32, 560u32);
+        let mut canvas = Canvas::new(w, h);
+        for px in canvas.pixels.chunks_mut(4) {
+            px.copy_from_slice(&[205, 205, 205, 255]);
+        }
+
+        // (brush, tilt in degrees, peak pressure)
+        let rows: [(BrushSettings, (f32, f32), f32); 6] = [
+            (BrushSettings::default_pencil(), (0.0, 0.0), 1.0),
+            (BrushSettings::default_pencil(), (0.0, 0.0), 0.45),
+            (BrushSettings::pencil_4b(), (0.0, 0.0), 1.0),
+            (BrushSettings::pencil_tilted(), (0.0, 0.0), 1.0),
+            (BrushSettings::pencil_tilted(), (55.0, 20.0), 1.0),
+            (BrushSettings::default_ink(), (0.0, 0.0), 1.0),
+        ];
+        for (i, (brush, tilt, peak)) in rows.into_iter().enumerate() {
+            sheet_stroke(&mut canvas, brush, 60.0 + i as f32 * 85.0, tilt, peak);
+        }
+
+        image::RgbaImage::from_raw(w, h, canvas.pixels.clone())
+            .expect("canvas is RGBA8")
+            .save(&path)
+            .expect("write preview");
+        println!("wrote {path}");
+    }
+
+    /// One stroke for `brush_sheet`: a shallow S with pressure ramping in and
+    /// out, plus a little tremor so grain and smoothing both have something to
+    /// work on.
+    fn sheet_stroke(
+        canvas: &mut Canvas,
+        brush: BrushSettings,
+        y0: f32,
+        tilt: (f32, f32),
+        peak: f32,
+    ) {
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(canvas.width, canvas.height, &brush);
+        let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+
+        let n = 90;
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            let p = (peak * (t * std::f32::consts::PI).sin().powf(0.6)).clamp(0.02, 1.0);
+            b.push(PointerSample {
+                x: 40.0 + t * 800.0,
+                y: y0 + (t * 6.0).sin() * 10.0 + ((i % 3) as f32 - 1.0) * 0.4,
+                pressure: p,
+                tilt_x: tilt.0,
+                tilt_y: tilt.1,
+                t: 0.0,
+            });
+            b.flush(canvas, &mut ws, &pre);
+        }
+        b.finish(canvas, &mut ws, &pre);
+    }
+}
