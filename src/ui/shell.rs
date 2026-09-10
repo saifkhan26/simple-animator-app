@@ -7,6 +7,7 @@ use egui_phosphor::regular as ic;
 use crate::app::{AppState, ExportKind, NavKind, PanelId, MP4_PRESETS};
 use crate::doc::camera::Ease;
 use crate::input::shortcuts::{Action, KeyCombo};
+use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::OnionDirection;
 use crate::tools::{ActiveTool, ShapeKind};
@@ -84,6 +85,15 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             // only the canvas knows the fit-to-window base scale.
             state.view_scale = Xform::new(state, canvas_rect).scale;
             paint_canvas(state, ui, canvas_rect);
+
+            // A live stroke is fed from the tablet packet queue, which is only
+            // drained when a frame runs. eframe is reactive by default, so
+            // without this the redraw cadence follows the OS mouse and the
+            // queue backs up between events — dropping exactly the samples the
+            // Wintab path exists to collect.
+            if state.stroke.is_some() {
+                ctx.request_repaint();
+            }
 
             // While live screen-pick is active the canvas swallows all drawing
             // input — a tap commits a sampled colour instead (see
@@ -231,11 +241,31 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             }
                         }
                         None => {
-                            if let Some(pos) = resp.interact_pointer_pos() {
-                                let (cx, cy) = doc_to_active_cell(state, canvas_to_doc(pos));
-                                let t = ui.input(|i| i.time as f32);
-                                let s = state.make_sample(cx, cy, t);
-                                state.pointer_move(s);
+                            let t = ui.input(|i| i.time as f32);
+                            let pointer = resp.interact_pointer_pos();
+                            // Tablet packets first: several per frame, each
+                            // with its own sub-pixel position and pressure.
+                            // `pen_stroke_points` returns None when the pen is
+                            // not the live device or when its mapping does not
+                            // agree with the OS pointer, and the single egui
+                            // position is used instead.
+                            match pen_stroke_points(state, ui.ctx(), pointer) {
+                                Some(points) => {
+                                    for (pos, packet) in points {
+                                        let (cx, cy) =
+                                            doc_to_active_cell(state, canvas_to_doc(pos));
+                                        let s = state.make_pen_sample(cx, cy, t, &packet);
+                                        state.pointer_move(s);
+                                    }
+                                }
+                                None => {
+                                    if let Some(pos) = pointer {
+                                        let (cx, cy) =
+                                            doc_to_active_cell(state, canvas_to_doc(pos));
+                                        let s = state.make_sample(cx, cy, t);
+                                        state.pointer_move(s);
+                                    }
+                                }
                             }
                         }
                     }
@@ -3125,6 +3155,43 @@ fn doc_to_active_cell(state: &AppState, doc: (f32, f32)) -> (f32, f32) {
     let (cw, ch) = state.project.draw_cell_size(li, f);
     let (pw, ph) = (state.project.width as f32, state.project.height as f32);
     t.doc_to_cell(doc.0, doc.1, cw as f32, ch as f32, pw, ph)
+}
+
+/// How far, in points, a packet-derived position may sit from the OS pointer
+/// before the tablet mapping is disbelieved. Qt uses the same 20-pixel
+/// manhattan check to spot a driver running in relative mode.
+const PEN_MOUSE_AGREEMENT: f32 = 20.0;
+
+/// This frame's tablet packets as egui screen positions, paired with the
+/// packet they came from.
+///
+/// `None` means "use the egui pointer instead": no tablet, no packets this
+/// frame, or a mapping that disagrees with the OS cursor. Positions are
+/// sub-pixel and there are typically two to four per frame at 60 fps, against
+/// the one whole-pixel position egui reports — which is the entire reason this
+/// path exists.
+fn pen_stroke_points(
+    state: &AppState,
+    ctx: &egui::Context,
+    pointer: Option<egui::Pos2>,
+) -> Option<Vec<(egui::Pos2, PenPacket)>> {
+    if !state.pen.pen_active() {
+        return None;
+    }
+    let packets = state.pen.packets();
+    let last = packets.last()?;
+    let (ox, oy) = state.pen.client_origin()?;
+    let ppp = ctx.pixels_per_point();
+    // Virtual-desktop physical pixels -> client physical pixels -> points.
+    let to_points = |p: &PenPacket| egui::pos2((p.x - ox) / ppp, (p.y - oy) / ppp);
+
+    if let Some(pointer) = pointer {
+        let end = to_points(last);
+        if (end.x - pointer.x).abs() + (end.y - pointer.y).abs() > PEN_MOUSE_AGREEMENT {
+            return None;
+        }
+    }
+    Some(packets.iter().map(|p| (to_points(p), *p)).collect())
 }
 
 /// Small floating menu strip: File / Edit menus + a panel-visibility toggle.

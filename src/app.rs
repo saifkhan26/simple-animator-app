@@ -17,7 +17,7 @@ use crate::doc::project::Project;
 use crate::doc::transform::Transform;
 use crate::input::pointer::PointerSample;
 use crate::input::shortcuts::{self, Action, ShortcutMap};
-use crate::input::tablet::PenInput;
+use crate::input::tablet::{PenInput, PenPacket};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionStep};
 use crate::timeline::playback::Playback;
 use crate::tools::lasso::Mask;
@@ -732,14 +732,37 @@ impl AppState {
         self.preview_rx = None;
     }
 
+    /// A sample at a cell-space position, taking pressure and tilt from the
+    /// most recent tablet packet. Used for the mouse path and for stroke
+    /// start; the tablet's own packets carry their own dynamics and go through
+    /// [`AppState::make_pen_sample`] instead.
     pub fn make_sample(&self, x: f32, y: f32, t: f32) -> PointerSample {
-        let pressure = self.pen.current_pressure().unwrap_or(1.0);
+        let (pressure, tilt_x, tilt_y) = match self.pen.packets().last() {
+            Some(p) => (p.pressure, p.tilt_x, p.tilt_y),
+            // No packet this frame: the last known pressure, or 1.0 once the
+            // pen has gone idle and the mouse has taken over.
+            None => (self.pen.current_pressure().unwrap_or(1.0), 0.0, 0.0),
+        };
         PointerSample {
             x,
             y,
             pressure,
-            tilt_x: 0.0,
-            tilt_y: 0.0,
+            tilt_x,
+            tilt_y,
+            t,
+        }
+    }
+
+    /// A sample built from one tablet packet, at an already-mapped cell-space
+    /// position. Every packet carries its own pressure and tilt, which is the
+    /// point of walking the queue instead of sampling it once per frame.
+    pub fn make_pen_sample(&self, x: f32, y: f32, t: f32, p: &PenPacket) -> PointerSample {
+        PointerSample {
+            x,
+            y,
+            pressure: p.pressure,
+            tilt_x: p.tilt_x,
+            tilt_y: p.tilt_y,
             t,
         }
     }
@@ -3095,7 +3118,7 @@ impl eframe::App for AppState {
         #[cfg(not(target_os = "windows"))]
         let _ = (&frame, self.window_styled);
 
-        self.pen.poll();
+        self.pen.poll(ctx.input(|i| i.pointer.any_down()));
 
         // Shortcut rebind capture: when an Action is "rebinding", the next
         // key press becomes its new combo and rebind mode ends.

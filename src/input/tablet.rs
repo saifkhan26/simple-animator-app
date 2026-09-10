@@ -1,20 +1,52 @@
-//! Pen pressure input.
+//! Pen tablet input.
 //!
-//! Strategy: egui drives pointer XY (it already accepts pen events as mouse
-//! on every desktop OS we care about). We use the platform tablet API only to
-//! read the *latest* normalised pressure value, then inject it into the
-//! PointerSample seen by the brush engine.
+//! Strategy mirrors Krita, which is really Qt's `qwindowstabletsupport.cpp`:
+//! the tablet driver's own cursor emulation keeps driving egui's press and
+//! release, but stroke *positions* come from the Wintab packet queue rather
+//! than from the OS mouse.
+//!
+//! That distinction is the whole point. The mouse reports whole screen pixels
+//! at the redraw rate; the pen reports thousands of counts per inch at
+//! 133-266 Hz. Zoomed out, one screen pixel is several document pixels, so
+//! mouse quantization turns a slow straight line into a visible staircase that
+//! any interpolator then faithfully traces. Reading `pkXYZ` from *every*
+//! queued packet is what removes it.
 //!
 //! Windows: Wintab via `wintab_lite`, dynamic-loaded so the app still runs
-//! without a tablet driver. Linux/macOS: not yet implemented — `current()`
-//! returns `None` and the brush falls back to pressure = 1.0 from the mouse
-//! synth.
+//! without a tablet driver. Linux/macOS: not yet implemented — no packets are
+//! produced and the brush falls back to the egui pointer at pressure 1.0.
+
+/// One tablet sample.
+///
+/// Position is in *virtual-desktop pixels* with sub-pixel precision, in the
+/// same coordinate space as the OS cursor — see `Wintab::map_point` for why
+/// the two agree by construction.
+#[derive(Clone, Copy, Debug)]
+pub struct PenPacket {
+    pub x: f32,
+    pub y: f32,
+    /// Normalised 0..=1.
+    pub pressure: f32,
+    /// Tilt in degrees, -90..=90, x toward screen-right and y toward
+    /// screen-down. Zero when the device reports no orientation.
+    pub tilt_x: f32,
+    pub tilt_y: f32,
+}
+
+/// Frames without a packet after which the pen is considered gone and pressure
+/// falls back to 1.0. Only consulted while no pointer button is down, so a
+/// stroke that pauses mid-line never loses its pressure.
+const PEN_IDLE_FRAMES: u32 = 12;
 
 pub struct PenInput {
     #[cfg(target_os = "windows")]
     backend: Option<windows_backend::Wintab>,
     #[cfg(not(target_os = "windows"))]
     backend: (),
+    /// This frame's packets, oldest first. Cleared by every `poll`.
+    packets: Vec<PenPacket>,
+    last_pressure: f32,
+    idle_frames: u32,
 }
 
 impl PenInput {
@@ -24,12 +56,20 @@ impl PenInput {
             backend: None,
             #[cfg(not(target_os = "windows"))]
             backend: (),
+            packets: Vec::new(),
+            last_pressure: 1.0,
+            idle_frames: u32::MAX,
         }
     }
 
     /// Called once per frame. Initialises the backend lazily (once the window
-    /// exists) and drains any pending packets.
-    pub fn poll(&mut self) {
+    /// exists) and drains the whole packet queue into `packets`.
+    ///
+    /// `pointer_down` gates the idle reset only: a pen held still mid-stroke
+    /// produces no packets, and dropping its pressure back to 1.0 there would
+    /// swell the line.
+    pub fn poll(&mut self, pointer_down: bool) {
+        self.packets.clear();
         #[cfg(target_os = "windows")]
         {
             if self.backend.is_none() {
@@ -46,16 +86,52 @@ impl PenInput {
                 }
             }
             if let Some(w) = &mut self.backend {
-                w.poll();
+                w.poll(&mut self.packets);
+            }
+        }
+
+        if let Some(last) = self.packets.last() {
+            self.last_pressure = last.pressure;
+            self.idle_frames = 0;
+        } else {
+            self.idle_frames = self.idle_frames.saturating_add(1);
+            // Idle with nothing pressed: assume the mouse took over. Without
+            // this the pressure left behind by a pen lift (~0.0) would make
+            // every subsequent mouse stroke a hairline.
+            if !pointer_down && self.idle_frames > PEN_IDLE_FRAMES {
+                self.last_pressure = 1.0;
             }
         }
     }
 
+    /// This frame's tablet packets, oldest first.
+    pub fn packets(&self) -> &[PenPacket] {
+        &self.packets
+    }
+
+    /// True while the pen is the live input device: a backend exists and it
+    /// has produced packets recently. False for mouse input, so callers know
+    /// to ignore `current_pressure` and the packet positions.
+    pub fn pen_active(&self) -> bool {
+        self.is_active() && self.idle_frames <= PEN_IDLE_FRAMES
+    }
+
     /// Returns latest reported pen pressure (0..=1) if available.
     pub fn current_pressure(&self) -> Option<f32> {
+        if self.pen_active() {
+            Some(self.last_pressure)
+        } else {
+            None
+        }
+    }
+
+    /// Top-left of the window's client area in virtual-desktop pixels, for
+    /// turning packet positions into window-local ones. `None` without a
+    /// backend.
+    pub fn client_origin(&self) -> Option<(f32, f32)> {
         #[cfg(target_os = "windows")]
         {
-            return self.backend.as_ref().map(|w| w.last_pressure);
+            return self.backend.as_ref().and_then(|w| w.client_origin);
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -63,6 +139,8 @@ impl PenInput {
         }
     }
 
+    /// Whether a tablet backend is present at all — drives the UI's
+    /// pen/mouse status label, independent of recent activity.
     pub fn is_active(&self) -> bool {
         #[cfg(target_os = "windows")]
         {
@@ -80,22 +158,52 @@ mod windows_backend {
     //! Wintab backend. We find our HWND by window title to avoid plumbing a
     //! raw window handle through eframe's CreationContext.
 
+    use super::PenPacket;
     use anyhow::{anyhow, Context, Result};
-    use libloading::Library;
+    use libloading::{Library, Symbol};
     use windows::core::PCSTR;
-    use windows::Win32::UI::WindowsAndMessaging::FindWindowA;
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, GetClientRect};
     use wintab_lite::{
         cast_void, Packet, WTClose, WTDataGet, WTInfo, WTOpen, WTQueuePacketsEx, AXIS, CXO, DVC,
-        LOGCONTEXT, WTI, WTPKT,
+        HCTX, LOGCONTEXT, WTI, WTPKT,
     };
+
+    /// Sub-pixel factor applied to the context's output extents. Packet
+    /// coordinates come back scaled by this, so a 1/32-pixel grid replaces the
+    /// mouse's whole-pixel one. Well past the tablet's own resolution on any
+    /// desktop-sized mapping, which is the point — the quantization that
+    /// remains is the hardware's, not ours.
+    const SUBPIXEL: i32 = 32;
+
+    /// Packet queue depth, matching Qt's `TabletPacketQSize`. The driver
+    /// default is often 8, which a 200 Hz pen overflows in 40 ms — well inside
+    /// one frame at 60 fps.
+    const QUEUE_SIZE: i32 = 128;
+
+    /// `WTQueueSizeGet` / `WTQueueSizeSet` have no `wintab_lite` binding, so
+    /// they are resolved by name like the rest.
+    type WtQueueSizeGet<'a> = Symbol<'a, unsafe extern "C" fn(*mut HCTX) -> i32>;
+    type WtQueueSizeSet<'a> = Symbol<'a, unsafe extern "C" fn(*mut HCTX, i32) -> i32>;
 
     pub struct Wintab {
         wt_close: WTClose<'static>,
         wt_queue: WTQueuePacketsEx<'static>,
         wt_data_get: WTDataGet<'static>,
-        ctx_handle: *mut wintab_lite::HCTX,
-        pressure_max: f32,
-        pub last_pressure: f32,
+        ctx_handle: *mut HCTX,
+        hwnd: HWND,
+        pressure_min: f32,
+        pressure_span: f32,
+        /// Affine packet → virtual-desktop mapping, per axis: the desktop
+        /// origin, the packet-space origin, and desktop units per packet unit.
+        map_x: (f32, f32, f32),
+        map_y: (f32, f32, f32),
+        /// Whether the device reports azimuth/altitude.
+        tilt_support: bool,
+        /// Refreshed every poll; see `PenInput::client_origin`.
+        pub client_origin: Option<(f32, f32)>,
+        queue_err_logged: bool,
     }
 
     impl Wintab {
@@ -132,50 +240,165 @@ mod windows_backend {
                 return Err(anyhow!("WTInfo(DEFSYSCTX) failed"));
             }
 
+            // The default *system* context carries the screen mapping the
+            // driver uses to move the cursor. Capture it before we change
+            // anything: expressing our output area as a multiple of it is what
+            // makes packet positions land on the same spot as the OS pointer,
+            // without having to re-derive the driver's axis orientation.
+            let sys_org = log_context.lcSysOrgXY;
+            let sys_ext = log_context.lcSysExtXY;
+            if sys_ext.x == 0 || sys_ext.y == 0 {
+                return Err(anyhow!("DEFSYSCTX has an empty screen mapping"));
+            }
+
             log_context.lcName.write_str("animator-app");
-            log_context.lcOptions |= CXO::SYSTEM;
+            // Not a system context: we do not want to fight the driver for the
+            // cursor, and a system context would have its output area pinned
+            // to whole screen pixels — exactly the quantization being removed
+            // here. The driver's own cursor emulation keeps feeding egui the
+            // mouse events that begin and end a stroke. This is Qt's
+            // arrangement, and so Krita's.
+            log_context.lcOptions &= !CXO::SYSTEM;
+            log_context.lcOptions |= CXO::MESSAGES;
             log_context.lcPktData = WTPKT::all();
             log_context.lcPktMode = WTPKT::empty();
             log_context.lcMoveMask = WTPKT::X | WTPKT::Y | WTPKT::NORMAL_PRESSURE;
+            log_context.lcOutOrgXYZ.x = sys_org.x * SUBPIXEL;
+            log_context.lcOutOrgXYZ.y = sys_org.y * SUBPIXEL;
+            log_context.lcOutExtXYZ.x = sys_ext.x * SUBPIXEL;
+            log_context.lcOutExtXYZ.y = sys_ext.y * SUBPIXEL;
 
             let mut pressure_axis = AXIS::default();
-            let pr = unsafe {
-                wt_info(WTI::DEVICES, DVC::NPRESSURE as u32, cast_void!(pressure_axis))
-            };
-            let pressure_max = if pr as usize == std::mem::size_of::<AXIS>() {
-                pressure_axis.axMax as f32
+            let pr =
+                unsafe { wt_info(WTI::DEVICES, DVC::NPRESSURE as u32, cast_void!(pressure_axis)) };
+            let (pressure_min, pressure_max) = if pr as usize == std::mem::size_of::<AXIS>() {
+                (pressure_axis.axMin as f32, pressure_axis.axMax as f32)
             } else {
-                1023.0
+                (0.0, 1023.0)
             };
-            if pressure_max < 1.0 {
-                return Err(anyhow!("invalid pressure_max: {pressure_max}"));
+            let pressure_span = pressure_max - pressure_min;
+            if pressure_span < 1.0 {
+                return Err(anyhow!(
+                    "invalid pressure range: {pressure_min}..{pressure_max}"
+                ));
             }
+
+            // Azimuth/altitude/twist. A device without tilt reports zero
+            // resolution on the first two axes; asking anyway and checking is
+            // cheaper than maintaining a device table.
+            let mut orientation = [AXIS::default(); 3];
+            let or =
+                unsafe { wt_info(WTI::DEVICES, DVC::ORIENTATION as u32, cast_void!(orientation)) };
+            let azimuth_res: f64 = orientation[0].axResolution.into();
+            let altitude_res: f64 = orientation[1].axResolution.into();
+            let tilt_support = or as usize == std::mem::size_of::<[AXIS; 3]>()
+                && azimuth_res != 0.0
+                && altitude_res != 0.0;
 
             let ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
             if ctx_handle.is_null() {
                 return Err(anyhow!("WTOpen returned null"));
             }
 
-            log::info!("Wintab opened: pressure_max = {pressure_max}");
+            // WTOpen rewrites the struct with what the driver actually granted,
+            // which may not be what we asked for. Build the mapping from the
+            // granted values so a clamped output area still lands correctly.
+            let out_org = log_context.lcOutOrgXYZ;
+            let out_ext = log_context.lcOutExtXYZ;
+            if out_ext.x == 0 || out_ext.y == 0 {
+                let _ = unsafe { wt_close(ctx_handle) };
+                return Err(anyhow!("Wintab granted an empty output area"));
+            }
+            let map_x = (
+                sys_org.x as f32,
+                out_org.x as f32,
+                sys_ext.x as f32 / out_ext.x as f32,
+            );
+            let map_y = (
+                sys_org.y as f32,
+                out_org.y as f32,
+                sys_ext.y as f32 / out_ext.y as f32,
+            );
+
+            // Deepen the packet queue. Qt restores the old size on failure and
+            // treats a failed restore as fatal; a shallow queue silently drops
+            // exactly the samples this module exists to collect.
+            unsafe {
+                let get: Result<WtQueueSizeGet<'static>, _> = lib.get(c"WTQueueSizeGet".to_bytes());
+                let set: Result<WtQueueSizeSet<'static>, _> = lib.get(c"WTQueueSizeSet".to_bytes());
+                if let (Ok(get), Ok(set)) = (get, set) {
+                    let current = get(ctx_handle);
+                    if current != QUEUE_SIZE && set(ctx_handle, QUEUE_SIZE) == 0 {
+                        log::warn!("Wintab refused queue size {QUEUE_SIZE}, keeping {current}");
+                        let _ = set(ctx_handle, current);
+                    }
+                } else {
+                    log::warn!("WTQueueSize{{Get,Set}} unavailable; using the driver's queue depth");
+                }
+            }
+
+            log::info!(
+                "Wintab opened: pressure {pressure_min}..{pressure_max}, tilt {tilt_support}, \
+                 sub-pixel 1/{}",
+                (1.0 / map_x.2).round() as i32
+            );
 
             Ok(Self {
                 wt_close,
                 wt_queue,
                 wt_data_get,
                 ctx_handle,
-                pressure_max,
-                last_pressure: 1.0,
+                hwnd,
+                pressure_min,
+                pressure_span,
+                map_x,
+                map_y,
+                tilt_support,
+                client_origin: None,
+                queue_err_logged: false,
             })
         }
 
-        pub fn poll(&mut self) {
+        /// Packet coordinate → virtual-desktop pixels.
+        #[inline]
+        fn map_point(&self, x: i32, y: i32) -> (f32, f32) {
+            let (sx, ox, kx) = self.map_x;
+            let (sy, oy, ky) = self.map_y;
+            (sx + (x as f32 - ox) * kx, sy + (y as f32 - oy) * ky)
+        }
+
+        /// Azimuth/altitude → x/y tilt in degrees. Straight from Qt's
+        /// `qwindowstabletsupport.cpp`, which derives it from
+        /// `X = sin(azimuth) * cos(altitude)`, `Z = sin(altitude)`,
+        /// `xTilt = atan(X / Z)`. Both angles arrive in tenths of a degree.
+        #[inline]
+        fn map_tilt(&self, azimuth: i32, altitude: i32) -> (f32, f32) {
+            if !self.tilt_support {
+                return (0.0, 0.0);
+            }
+            let rad_azim = (azimuth as f32 / 10.0).to_radians();
+            let tan_alt = (altitude as f32 / 10.0).abs().to_radians().tan();
+            if tan_alt.abs() < 1e-6 {
+                // Pen dead upright: no tilt, and the ratio below would blow up.
+                return (0.0, 0.0);
+            }
+            let x = (rad_azim.sin() / tan_alt).atan().to_degrees();
+            let y = (rad_azim.cos() / tan_alt).atan().to_degrees();
+            (x, -y)
+        }
+
+        /// Drain the whole packet queue into `out`, oldest first, and refresh
+        /// the cached client origin.
+        pub fn poll(&mut self, out: &mut Vec<PenPacket>) {
+            self.client_origin = client_origin(self.hwnd);
+
             let mut from = 0u32;
             let mut to = 0u32;
             let any = unsafe { (self.wt_queue)(self.ctx_handle, &mut from, &mut to) };
             if any == 0 {
                 return;
             }
-            const MAX: usize = 64;
+            const MAX: usize = QUEUE_SIZE as usize;
             let mut packets: [Packet; MAX] = core::array::from_fn(|_| Packet::default());
             let mut removed: i32 = 0;
             let _ = unsafe {
@@ -188,14 +411,49 @@ mod windows_backend {
                     &mut removed,
                 )
             };
-            let removed = removed as usize;
-            if removed == 0 {
-                return;
+            let removed = (removed.max(0) as usize).min(MAX);
+
+            out.reserve(removed);
+            for p in packets.iter().take(removed) {
+                // Fields are read through locals: `Packet` is `packed(4)`, so
+                // taking a reference to a field is unaligned.
+                // `TPS` is not re-exported by `wintab_lite`, so the flag is
+                // matched by value: TPS_QUEUE_ERR == 0b10.
+                let status = p.pkStatus.bits();
+                if status & 0b10 != 0 && !self.queue_err_logged {
+                    self.queue_err_logged = true;
+                    log::warn!("Wintab packet queue overflowed — pen samples were dropped");
+                }
+                let xy = p.pkXYZ;
+                let (x, y) = self.map_point(xy.x, xy.y);
+                let orientation = p.pkOrientation;
+                let (tilt_x, tilt_y) = self.map_tilt(orientation.orAzimuth, orientation.orAltitude);
+                let raw_pressure = p.pkNormalPressure as f32;
+                out.push(PenPacket {
+                    x,
+                    y,
+                    pressure: ((raw_pressure - self.pressure_min) / self.pressure_span)
+                        .clamp(0.0, 1.0),
+                    tilt_x,
+                    tilt_y,
+                });
             }
-            // Use the most recent packet's pressure as the "current" value.
-            let last = &packets[removed - 1];
-            self.last_pressure =
-                (last.pkNormalPressure as f32 / self.pressure_max).clamp(0.0, 1.0);
+        }
+    }
+
+    /// Top-left of the window's client area, in virtual-desktop pixels.
+    fn client_origin(hwnd: HWND) -> Option<(f32, f32)> {
+        unsafe {
+            let mut rect = RECT::default();
+            GetClientRect(hwnd, &mut rect).ok()?;
+            let mut origin = POINT {
+                x: rect.left,
+                y: rect.top,
+            };
+            if !ClientToScreen(hwnd, &mut origin).as_bool() {
+                return None;
+            }
+            Some((origin.x as f32, origin.y as f32))
         }
     }
 
