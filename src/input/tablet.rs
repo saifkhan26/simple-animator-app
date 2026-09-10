@@ -33,6 +33,29 @@ pub struct PenPacket {
     pub tilt_y: f32,
 }
 
+/// One axis of the packet -> screen mapping: `(origin, packet_origin, scale)`,
+/// applied as `origin + (v - packet_origin) * scale`.
+///
+/// `base_*` is the output area the driver defines for itself, `granted_*` the
+/// one it actually gave us after we asked for a finer scale. Deriving the map
+/// from the ratio of the two means neither this code nor its caller has to
+/// know whether the request was honoured.
+///
+/// Crucially it also carries the *sign* through. A tablet's native Y axis
+/// points up and a screen's points down, and the driver's own output extent is
+/// where that flip is expressed — so an extent must only ever be scaled, never
+/// substituted for the screen rectangle, which does not carry axis direction.
+/// Getting that wrong mirrors every reported position about the middle of the
+/// screen.
+#[inline]
+fn axis_map(base_org: i32, base_ext: i32, granted_org: i32, granted_ext: i32) -> (f32, f32, f32) {
+    (
+        base_org as f32,
+        granted_org as f32,
+        base_ext as f32 / granted_ext as f32,
+    )
+}
+
 /// Frames without a packet after which the pen is considered gone and pressure
 /// falls back to 1.0. Only consulted while no pointer button is down, so a
 /// stroke that pauses mid-line never loses its pressure.
@@ -250,16 +273,23 @@ mod windows_backend {
                 return Err(anyhow!("WTInfo(DEFSYSCTX) failed"));
             }
 
-            // The default *system* context carries the screen mapping the
-            // driver uses to move the cursor. Capture it before we change
-            // anything: expressing our output area as a multiple of it is what
-            // makes packet positions land on the same spot as the OS pointer,
-            // without having to re-derive the driver's axis orientation.
+            // The driver's own output mapping, which is the *only* thing
+            // here that knows how the tablet's axes relate to the screen's.
+            // A tablet's native Y points up and a screen's points down, and
+            // this is where that flip lives. So it may be scaled, to ask for
+            // finer resolution, and it may be restored — but it must never be
+            // rebuilt out of lcSys*, which carries the screen rectangle
+            // without the axis directions. Doing that mirrors Y about the
+            // middle of the screen.
+            let base_out_org = log_context.lcOutOrgXYZ;
+            let base_out_ext = log_context.lcOutExtXYZ;
+            if base_out_ext.x == 0 || base_out_ext.y == 0 {
+                return Err(anyhow!("DEFSYSCTX has an empty output area"));
+            }
+            // Read only to be logged: every problem in this file has come down
+            // to what the driver granted versus what it was asked for.
             let sys_org = log_context.lcSysOrgXY;
             let sys_ext = log_context.lcSysExtXY;
-            if sys_ext.x == 0 || sys_ext.y == 0 {
-                return Err(anyhow!("DEFSYSCTX has an empty screen mapping"));
-            }
 
             log_context.lcName.write_str("animator-app");
             // Stay a system context. Qt only *adds* flags to the default
@@ -273,14 +303,13 @@ mod windows_backend {
             log_context.lcPktMode = WTPKT::empty();
             log_context.lcMoveMask = WTPKT::X | WTPKT::Y | WTPKT::NORMAL_PRESSURE;
 
-            // Kept so the fallback below can put the driver's own scale back.
-            let default_out_org = log_context.lcOutOrgXYZ;
-            let default_out_ext = log_context.lcOutExtXYZ;
-
-            log_context.lcOutOrgXYZ.x = sys_org.x * SUBPIXEL;
-            log_context.lcOutOrgXYZ.y = sys_org.y * SUBPIXEL;
-            log_context.lcOutExtXYZ.x = sys_ext.x * SUBPIXEL;
-            log_context.lcOutExtXYZ.y = sys_ext.y * SUBPIXEL;
+            // A pure scale of the driver's own area about the origin, so
+            // the mapping is unchanged in every respect but resolution — signs
+            // and all.
+            log_context.lcOutOrgXYZ.x = base_out_org.x * SUBPIXEL;
+            log_context.lcOutOrgXYZ.y = base_out_org.y * SUBPIXEL;
+            log_context.lcOutExtXYZ.x = base_out_ext.x * SUBPIXEL;
+            log_context.lcOutExtXYZ.y = base_out_ext.y * SUBPIXEL;
 
             let mut pressure_axis = AXIS::default();
             let pr =
@@ -317,8 +346,8 @@ mod windows_backend {
                 log::warn!(
                     "Wintab refused a {SUBPIXEL}x output area; retrying at the driver's own scale"
                 );
-                log_context.lcOutOrgXYZ = default_out_org;
-                log_context.lcOutExtXYZ = default_out_ext;
+                log_context.lcOutOrgXYZ = base_out_org;
+                log_context.lcOutExtXYZ = base_out_ext;
                 ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
             }
             if ctx_handle.is_null() {
@@ -334,16 +363,12 @@ mod windows_backend {
                 let _ = unsafe { wt_close(ctx_handle) };
                 return Err(anyhow!("Wintab granted an empty output area"));
             }
-            let map_x = (
-                sys_org.x as f32,
-                out_org.x as f32,
-                sys_ext.x as f32 / out_ext.x as f32,
-            );
-            let map_y = (
-                sys_org.y as f32,
-                out_org.y as f32,
-                sys_ext.y as f32 / out_ext.y as f32,
-            );
+            // Packet space back to the driver's own output space, which is
+            // screen coordinates. Identity when the scale request was ignored,
+            // a plain divide when it was granted, and correct either way
+            // without this code needing to know which happened.
+            let map_x = super::axis_map(base_out_org.x, base_out_ext.x, out_org.x, out_ext.x);
+            let map_y = super::axis_map(base_out_org.y, base_out_ext.y, out_org.y, out_ext.y);
 
             // Deepen the packet queue. Qt restores the old size on failure and
             // treats a failed restore as fatal; a shallow queue silently drops
@@ -365,13 +390,18 @@ mod windows_backend {
             // Logged in full because every past tablet problem here has come
             // down to what the driver actually granted, not what was asked for.
             log::info!(
-                "Wintab opened: screen org ({}, {}) ext ({}, {}); granted output org ({}, {}) \
-                 ext ({}, {}) = {:.4} x {:.4} desktop px per packet unit; \
+                "Wintab opened: screen org ({}, {}) ext ({}, {}); default output org \
+                 ({}, {}) ext ({}, {}); granted output org ({}, {}) ext ({}, {}) \
+                 = {:.4} x {:.4} screen px per packet unit; \
                  pressure {pressure_min}..{pressure_max}; tilt {tilt_support}",
                 sys_org.x,
                 sys_org.y,
                 sys_ext.x,
                 sys_ext.y,
+                base_out_org.x,
+                base_out_org.y,
+                base_out_ext.x,
+                base_out_ext.y,
                 out_org.x,
                 out_org.y,
                 out_ext.x,
@@ -522,5 +552,65 @@ mod windows_backend {
         fn drop(&mut self) {
             let _ = unsafe { (self.wt_close)(self.ctx_handle) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Apply what `axis_map` returns, the way `Wintab::map_point` does.
+    fn apply(map: (f32, f32, f32), v: i32) -> f32 {
+        map.0 + (v as f32 - map.1) * map.2
+    }
+
+    /// A driver that ignores the finer-scale request leaves packets in its own
+    /// output space, and the mapping has to be the identity.
+    #[test]
+    fn an_ignored_scale_request_maps_one_to_one() {
+        let map = axis_map(0, 1920, 0, 1920);
+        assert_eq!(apply(map, 0), 0.0);
+        assert_eq!(apply(map, 1920), 1920.0);
+        assert_eq!(apply(map, 733), 733.0);
+    }
+
+    /// A granted request divides back down, and lands between whole pixels.
+    #[test]
+    fn a_granted_scale_request_divides_back_down() {
+        let map = axis_map(0, 1920, 0, 1920 * 32);
+        assert_eq!(apply(map, 0), 0.0);
+        assert_eq!(apply(map, 1920 * 32), 1920.0);
+        assert!((apply(map, 733 * 32 + 16) - 733.5).abs() < 1e-3);
+    }
+
+    /// The regression this function exists for.
+    ///
+    /// A tablet's Y axis points up, so the driver's output extent for it is
+    /// negative. Rebuilding the map from the screen rectangle instead — which
+    /// is positive — mirrored every position about the middle of the screen.
+    /// Near that line the mirrored point is close enough to the real one to
+    /// pass a sanity check and be drawn, which is why the artefact appeared as
+    /// a band across the middle of the window rather than as everything being
+    /// upside down.
+    #[test]
+    fn a_flipped_axis_stays_flipped() {
+        // Driver maps the tablet onto y = 0..1080 with an inverted axis.
+        let map = axis_map(1080, -1080, 1080 * 32, -1080 * 32);
+        assert_eq!(apply(map, 1080 * 32), 1080.0, "origin end");
+        assert_eq!(apply(map, 0), 0.0, "far end");
+        // The midpoint is the mirror line: the one place a lost flip looks
+        // correct, and the reason the bug hid there.
+        assert_eq!(apply(map, 540 * 32), 540.0);
+        // A quarter of the way along must not come back three quarters.
+        assert!((apply(map, 270 * 32) - 270.0).abs() < 1e-3);
+    }
+
+    /// A driver free to grant a different origin as well as a different extent
+    /// must still land correctly.
+    #[test]
+    fn an_offset_output_origin_is_carried_through() {
+        let map = axis_map(-1920, 1920, -1920 * 8, 1920 * 8);
+        assert_eq!(apply(map, -1920 * 8), -1920.0);
+        assert_eq!(apply(map, 0), 0.0);
     }
 }
