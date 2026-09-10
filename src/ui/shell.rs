@@ -1250,6 +1250,95 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// One `key   value` line of the tablet readout.
+fn diag_row(ui: &mut egui::Ui, key: &str, value: String) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(key).color(theme::TEXT_MUTED).size(11.0));
+        ui.label(egui::RichText::new(value).monospace().size(11.0));
+    });
+}
+
+/// Colour for a diagnostic reading that is out of range. Local because the
+/// theme has no warning colour and one readout does not justify adding to it.
+const DIAG_BAD: Color32 = Color32::from_rgb(232, 138, 96);
+
+/// What the tablet driver is actually reporting.
+///
+/// A release build has no console, so nothing this module logs is reachable
+/// when it matters. And a tablet whose axis mapping is wrong does not fail —
+/// it draws, confidently, somewhere else. The number that settles it is the
+/// last line: the gap between where the pen says it is and where the cursor
+/// is. If that grows the further you get from the middle of the screen, an
+/// axis is inverted.
+fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
+    let d = state.pen.diagnostics();
+    let cursor = ui.input(|i| i.pointer.latest_pos());
+
+
+    if !d.backend {
+        ui.label(
+            egui::RichText::new("No Wintab driver loaded.")
+                .color(theme::TEXT_MUTED)
+                .size(11.0),
+        );
+        return;
+    }
+
+    diag_row(ui, "packets", format!("{} this frame, {} total", d.packets_this_frame, d.total_packets));
+    diag_row(ui, "pressure", format!("{:.3}", d.pressure));
+    diag_row(ui, "tilt", format!("{:.1}, {:.1} deg", d.tilt.0, d.tilt.1));
+    diag_row(
+        ui,
+        "map x",
+        format!("origin {:.0}, packet origin {:.0}, {:.5} px/unit", d.map_x.0, d.map_x.1, d.map_x.2),
+    );
+    diag_row(
+        ui,
+        "map y",
+        format!("origin {:.0}, packet origin {:.0}, {:.5} px/unit", d.map_y.0, d.map_y.1, d.map_y.2),
+    );
+    if let Some((rx, ry)) = d.last_raw {
+        diag_row(ui, "raw", format!("{rx}, {ry}"));
+    }
+    if let Some((mx, my)) = d.last_mapped {
+        diag_row(ui, "mapped", format!("{mx:.1}, {my:.1} desktop px"));
+    }
+    if let Some((ox, oy)) = d.client_origin {
+        diag_row(ui, "client origin", format!("{ox:.0}, {oy:.0}"));
+    }
+    if d.queue_overflowed {
+        ui.label(
+            egui::RichText::new("packet queue has overflowed")
+                .color(DIAG_BAD)
+                .size(11.0),
+        );
+    }
+
+    // The one that matters.
+    let ppp = ui.ctx().pixels_per_point();
+    match (d.last_mapped, d.client_origin, cursor) {
+        (Some((mx, my)), Some((ox, oy)), Some(c)) => {
+            let pen = egui::pos2((mx - ox) / ppp, (my - oy) / ppp);
+            let (dx, dy) = (pen.x - c.x, pen.y - c.y);
+            let bad = dx.abs() > 4.0 || dy.abs() > 4.0;
+            ui.label(
+                egui::RichText::new(format!("pen - cursor: {dx:+.1}, {dy:+.1} pt"))
+                    .monospace()
+                    .size(11.0)
+                    .color(if bad { DIAG_BAD } else { theme::ACCENT }),
+            )
+            .on_hover_text(
+                "Move the pen around the screen with this open. Both numbers should \
+                 stay near zero. One that is near zero across the middle of the \
+                 screen and grows towards the edges means that axis is inverted.",
+            );
+        }
+        _ => {
+            diag_row(ui, "pen - cursor", "hover the pen over the window".into());
+        }
+    }
+}
+
 /// Line smoothing controls, mirroring Krita's freehand tool options.
 ///
 /// Basic is the default in both apps, and it does no positional filtering at
@@ -2293,6 +2382,11 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
                 ui.add_space(6.0);
                 theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
                 smoothing_controls(state, ui);
+
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new(theme::icon_text(ic::PEN, "Tablet"))
+                    .default_open(false)
+                    .show(ui, |ui| tablet_diagnostics(state, ui));
             });
         });
     state.show_brush_settings = open;

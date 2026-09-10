@@ -56,6 +56,31 @@ fn axis_map(base_org: i32, base_ext: i32, granted_org: i32, granted_ext: i32) ->
     )
 }
 
+/// What the tablet backend is currently seeing.
+///
+/// This exists because the interesting failures here are invisible: a release
+/// build is a GUI subsystem binary with no console, so `log::info!` goes
+/// nowhere, and a mis-mapped axis draws confidently in the wrong place rather
+/// than reporting an error. Everything below is read off the last poll; none
+/// of it is computed on the drawing path.
+#[derive(Clone, Debug, Default)]
+pub struct PenDiagnostics {
+    pub backend: bool,
+    pub packets_this_frame: usize,
+    pub total_packets: u64,
+    /// Raw packet coordinates, exactly as the driver reported them.
+    pub last_raw: Option<(i32, i32)>,
+    /// The same point after mapping, in virtual-desktop pixels.
+    pub last_mapped: Option<(f32, f32)>,
+    pub client_origin: Option<(f32, f32)>,
+    /// `(origin, packet_origin, scale)` per axis — see `axis_map`.
+    pub map_x: (f32, f32, f32),
+    pub map_y: (f32, f32, f32),
+    pub pressure: f32,
+    pub tilt: (f32, f32),
+    pub queue_overflowed: bool,
+}
+
 /// Frames without a packet after which the pen is considered gone and pressure
 /// falls back to 1.0. Only consulted while no pointer button is down, so a
 /// stroke that pauses mid-line never loses its pressure.
@@ -130,6 +155,38 @@ impl PenInput {
     /// This frame's tablet packets, oldest first.
     pub fn packets(&self) -> &[PenPacket] {
         &self.packets
+    }
+
+    /// A snapshot for the diagnostics readout. See [`PenDiagnostics`].
+    pub fn diagnostics(&self) -> PenDiagnostics {
+        let mut d = PenDiagnostics {
+            backend: self.is_active(),
+            packets_this_frame: self.packets.len(),
+            pressure: self.last_pressure,
+            ..Default::default()
+        };
+        if let Some(p) = self.packets.last() {
+            d.tilt = (p.tilt_x, p.tilt_y);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(w) = self.backend.as_ref() {
+            d.total_packets = w.total_packets;
+            d.last_raw = w.last_raw;
+            d.client_origin = w.client_origin;
+            d.map_x = w.map_x;
+            d.map_y = w.map_y;
+            d.queue_overflowed = w.queue_err_logged;
+        }
+        // Mapped from the retained raw value rather than from this frame's
+        // packets, which are empty whenever the pen holds still — the readout
+        // would otherwise blink out exactly while being read.
+        d.last_mapped = d.last_raw.map(|(x, y)| {
+            (
+                d.map_x.0 + (x as f32 - d.map_x.1) * d.map_x.2,
+                d.map_y.0 + (y as f32 - d.map_y.1) * d.map_y.2,
+            )
+        });
+        d
     }
 
     /// True while the pen is the live input device: a backend exists and it
@@ -221,15 +278,19 @@ mod windows_backend {
         hwnd: HWND,
         pressure_min: f32,
         pressure_span: f32,
+        /// Raw coordinates of the most recent packet, for diagnostics.
+        pub last_raw: Option<(i32, i32)>,
+        /// Packets delivered since the context opened.
+        pub total_packets: u64,
         /// Affine packet → virtual-desktop mapping, per axis: the desktop
         /// origin, the packet-space origin, and desktop units per packet unit.
-        map_x: (f32, f32, f32),
-        map_y: (f32, f32, f32),
+        pub map_x: (f32, f32, f32),
+        pub map_y: (f32, f32, f32),
         /// Whether the device reports azimuth/altitude.
         tilt_support: bool,
         /// Refreshed every poll; see `PenInput::client_origin`.
         pub client_origin: Option<(f32, f32)>,
-        queue_err_logged: bool,
+        pub queue_err_logged: bool,
         /// Polls since the context opened, and whether any packet has ever
         /// arrived. A context that opens but never delivers looks exactly like
         /// having no tablet at all, so say so rather than fail silently.
@@ -420,6 +481,8 @@ mod windows_backend {
                 map_x,
                 map_y,
                 tilt_support,
+                last_raw: None,
+                total_packets: 0,
                 client_origin: None,
                 queue_err_logged: false,
                 polls: 0,
@@ -516,6 +579,8 @@ mod windows_backend {
                     log::warn!("Wintab packet queue overflowed — pen samples were dropped");
                 }
                 let xy = p.pkXYZ;
+                self.last_raw = Some((xy.x, xy.y));
+                self.total_packets = self.total_packets.saturating_add(1);
                 let (x, y) = self.map_point(xy.x, xy.y);
                 let orientation = p.pkOrientation;
                 let (tilt_x, tilt_y) = self.map_tilt(orientation.orAzimuth, orientation.orAltitude);
