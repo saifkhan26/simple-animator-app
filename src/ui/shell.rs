@@ -65,6 +65,10 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     } else if state.show_mini_timeline {
         mini_timeline_window(state, ctx);
     }
+    // Deliberately outside the `show_panels` branch that holds
+    // `settings_window`: hiding the panels is what you do to draw, and
+    // drawing is when brush feel wants adjusting.
+    brush_settings_window(state, ctx);
     new_project_dialog(state, ctx);
     export_dialog(state, ctx);
     import_range_dialog(state, ctx);
@@ -933,16 +937,16 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
             swatch_strip(state, ui);
 
             ui.add_space(6.0);
-            theme::section_header(ui, ic::PEN_NIB, "Preset");
-            brush_presets(state, ui);
-
-            ui.add_space(6.0);
-            theme::section_header(ui, ic::SLIDERS, "Dynamics");
-            brush_dynamics(state, ui);
-
-            ui.add_space(6.0);
-            theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
-            smoothing_controls(state, ui);
+            if ui
+                .add_sized(
+                    [ui.available_width(), 24.0],
+                    egui::Button::new(theme::icon_text(ic::SLIDERS, "Brush settings…")),
+                )
+                .on_hover_text("Presets, dab shape, paper grain, pressure and tilt, smoothing.")
+                .clicked()
+            {
+                state.show_brush_settings = true;
+            }
 
             // Canvas backdrop + input status — collapsed by default so the panel
             // stays compact, expandable when needed.
@@ -2253,6 +2257,45 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                         });
                 });
     }
+}
+
+/// Brush shape, response and smoothing.
+///
+/// Split out of the brush panel because it outgrew it: the panel is a docked
+/// 232-pixel column holding the handful of controls reached mid-drawing —
+/// colour, size, opacity — and a dozen sliders below them pushed those off the
+/// top. These are the ones set once and left alone.
+fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
+    if !state.show_brush_settings {
+        return;
+    }
+    let mut open = state.show_brush_settings;
+    egui::Window::new(theme::icon_text(ic::PAINT_BRUSH, "Brush settings"))
+        // Pinned, for the same reason as the Settings window: egui derives a
+        // window's persisted position from its title, so a rename would strand
+        // it off-screen.
+        .id(egui::Id::new("window_brush_settings"))
+        .open(&mut open)
+        .default_pos([260.0, 120.0])
+        .default_width(300.0)
+        .resizable(true)
+        .collapsible(true)
+        .frame(floating_frame())
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                theme::section_header(ui, ic::PEN_NIB, "Preset");
+                brush_presets(state, ui);
+
+                ui.add_space(6.0);
+                theme::section_header(ui, ic::SLIDERS, "Dynamics");
+                brush_dynamics(state, ui);
+
+                ui.add_space(6.0);
+                theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
+                smoothing_controls(state, ui);
+            });
+        });
+    state.show_brush_settings = open;
 }
 
 fn settings_window(state: &mut AppState, ctx: &egui::Context) {

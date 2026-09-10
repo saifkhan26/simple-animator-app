@@ -468,6 +468,10 @@ pub struct AppState {
     /// In-progress inline layer rename in the layers panel.
     pub layer_rename: Option<LayerRename>,
     pub show_settings: bool,
+    /// The brush settings window. Session-only, like `show_settings`:
+    /// where a window sits persists through egui's own memory, but
+    /// whether it is open should not outlive the session that opened it.
+    pub show_brush_settings: bool,
     /// Master visibility of all floating panel windows. Tab toggles it.
     pub show_panels: bool,
     /// Minimal timeline bar shown when `show_panels` is false. Has its own
@@ -659,6 +663,7 @@ impl AppState {
             rebinding: None,
             layer_rename: None,
             show_settings: false,
+            show_brush_settings: false,
             show_panels: prefs.show_panels,
             show_mini_timeline: prefs.show_mini_timeline,
             show_new_project: false,
@@ -753,6 +758,7 @@ impl AppState {
         self.rebinding = None;
         self.layer_rename = None;
         self.show_settings = false;
+        self.show_brush_settings = false;
         // `show_panels` / `show_mini_timeline` are deliberately not reset here.
         // They're preferences that persist across runs, like `shortcuts` — a new
         // project shouldn't shove hidden panels back on screen.
