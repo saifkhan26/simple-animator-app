@@ -177,6 +177,10 @@ mod windows_backend {
     /// remains is the hardware's, not ours.
     const SUBPIXEL: i32 = 32;
 
+    /// Polls after which a context that has never produced a packet is
+    /// called out. Roughly a few seconds of drawing.
+    const SILENCE_WARN_POLLS: u32 = 300;
+
     /// Packet queue depth, matching Qt's `TabletPacketQSize`. The driver
     /// default is often 8, which a 200 Hz pen overflows in 40 ms — well inside
     /// one frame at 60 fps.
@@ -204,6 +208,11 @@ mod windows_backend {
         /// Refreshed every poll; see `PenInput::client_origin`.
         pub client_origin: Option<(f32, f32)>,
         queue_err_logged: bool,
+        /// Polls since the context opened, and whether any packet has ever
+        /// arrived. A context that opens but never delivers looks exactly like
+        /// having no tablet at all, so say so rather than fail silently.
+        polls: u32,
+        seen_packets: bool,
     }
 
     impl Wintab {
@@ -252,17 +261,21 @@ mod windows_backend {
             }
 
             log_context.lcName.write_str("animator-app");
-            // Not a system context: we do not want to fight the driver for the
-            // cursor, and a system context would have its output area pinned
-            // to whole screen pixels — exactly the quantization being removed
-            // here. The driver's own cursor emulation keeps feeding egui the
-            // mouse events that begin and end a stroke. This is Qt's
-            // arrangement, and so Krita's.
-            log_context.lcOptions &= !CXO::SYSTEM;
-            log_context.lcOptions |= CXO::MESSAGES;
+            // Stay a system context. Qt only *adds* flags to the default
+            // system context, and a system context still honours lcOut* for
+            // the coordinates it reports — lcSys* is what drives the cursor,
+            // separately. Clearing CXO_SYSTEM here stopped packets arriving
+            // at all, which is worth a comment because the fix looks like a
+            // no-op otherwise.
+            log_context.lcOptions |= CXO::SYSTEM;
             log_context.lcPktData = WTPKT::all();
             log_context.lcPktMode = WTPKT::empty();
             log_context.lcMoveMask = WTPKT::X | WTPKT::Y | WTPKT::NORMAL_PRESSURE;
+
+            // Kept so the fallback below can put the driver's own scale back.
+            let default_out_org = log_context.lcOutOrgXYZ;
+            let default_out_ext = log_context.lcOutExtXYZ;
+
             log_context.lcOutOrgXYZ.x = sys_org.x * SUBPIXEL;
             log_context.lcOutOrgXYZ.y = sys_org.y * SUBPIXEL;
             log_context.lcOutExtXYZ.x = sys_ext.x * SUBPIXEL;
@@ -295,7 +308,18 @@ mod windows_backend {
                 && azimuth_res != 0.0
                 && altitude_res != 0.0;
 
-            let ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
+            let mut ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
+            if ctx_handle.is_null() {
+                // Sub-pixel precision is worth asking for, but not worth
+                // losing the tablet over if a driver dislikes an output area
+                // that large.
+                log::warn!(
+                    "Wintab refused a {SUBPIXEL}x output area; retrying at the driver's own scale"
+                );
+                log_context.lcOutOrgXYZ = default_out_org;
+                log_context.lcOutExtXYZ = default_out_ext;
+                ctx_handle = unsafe { wt_open(hwnd, &mut log_context, 1) };
+            }
             if ctx_handle.is_null() {
                 return Err(anyhow!("WTOpen returned null"));
             }
@@ -337,10 +361,22 @@ mod windows_backend {
                 }
             }
 
+            // Logged in full because every past tablet problem here has come
+            // down to what the driver actually granted, not what was asked for.
             log::info!(
-                "Wintab opened: pressure {pressure_min}..{pressure_max}, tilt {tilt_support}, \
-                 sub-pixel 1/{}",
-                (1.0 / map_x.2).round() as i32
+                "Wintab opened: screen org ({}, {}) ext ({}, {}); granted output org ({}, {}) \
+                 ext ({}, {}) = {:.4} x {:.4} desktop px per packet unit; \
+                 pressure {pressure_min}..{pressure_max}; tilt {tilt_support}",
+                sys_org.x,
+                sys_org.y,
+                sys_ext.x,
+                sys_ext.y,
+                out_org.x,
+                out_org.y,
+                out_ext.x,
+                out_ext.y,
+                map_x.2,
+                map_y.2,
             );
 
             Ok(Self {
@@ -356,6 +392,8 @@ mod windows_backend {
                 tilt_support,
                 client_origin: None,
                 queue_err_logged: false,
+                polls: 0,
+                seen_packets: false,
             })
         }
 
@@ -392,6 +430,15 @@ mod windows_backend {
         pub fn poll(&mut self, out: &mut Vec<PenPacket>) {
             self.client_origin = client_origin(self.hwnd);
 
+            self.polls = self.polls.saturating_add(1);
+            if self.polls == SILENCE_WARN_POLLS && !self.seen_packets {
+                log::warn!(
+                    "Wintab context is open but has never delivered a packet — \
+                     drawing will fall back to the mouse. Check that the tablet \
+                     driver has Wintab support enabled."
+                );
+            }
+
             let mut from = 0u32;
             let mut to = 0u32;
             let any = unsafe { (self.wt_queue)(self.ctx_handle, &mut from, &mut to) };
@@ -412,6 +459,19 @@ mod windows_backend {
                 )
             };
             let removed = (removed.max(0) as usize).min(MAX);
+
+            if removed > 0 && !self.seen_packets {
+                self.seen_packets = true;
+                let xy = packets[0].pkXYZ;
+                let mapped = self.map_point(xy.x, xy.y);
+                log::info!(
+                    "Wintab first packet: raw ({}, {}) -> desktop ({:.2}, {:.2})",
+                    xy.x,
+                    xy.y,
+                    mapped.0,
+                    mapped.1
+                );
+            }
 
             out.reserve(removed);
             for p in packets.iter().take(removed) {
