@@ -1881,6 +1881,12 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// How tall the layer list may grow before it starts scrolling, in points.
+/// Each row is three lines — name, opacity, fill-boundary link — so this is
+/// roughly four layers, which is enough to reorder against without the panel
+/// running off the bottom of a laptop screen.
+const LAYER_LIST_MAX_H: f32 = 320.0;
+
 fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
             ui.horizontal(|ui| {
@@ -1922,122 +1928,137 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             // Split borrow: rows need &mut layer while the rename edit buffer
             // lives on AppState next to it.
             let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);
-            for i in (0..n).rev() {
-                let layer = &mut layers[i];
-                let selected = i == cur;
+            // The rows scroll rather than growing the window: each one is three
+            // lines tall, so a stack of them would otherwise push the Transform
+            // section below the bottom of the screen. Only the list scrolls —
+            // the toolbar above and Transform below stay put, which is what
+            // makes reordering a layer while looking at its transform possible.
+            //
+            // `auto_shrink` vertically so one or two layers do not reserve the
+            // full height as blank space, but never horizontally: the rows
+            // should keep the panel's width.
+            egui::ScrollArea::vertical()
+                .id_salt("layer_rows")
+                .max_height(LAYER_LIST_MAX_H)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for i in (0..n).rev() {
+                        let layer = &mut layers[i];
+                        let selected = i == cur;
 
-                Frame::none()
-                    .fill(if selected {
-                        theme::ACCENT_DIM
-                    } else {
-                        Color32::TRANSPARENT
-                    })
-                    .rounding(egui::Rounding::same(6.0))
-                    .inner_margin(Margin::symmetric(6.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // Eye toggle.
-                            let eye_icon = if layer.visible {
-                                ic::EYE
+                        Frame::none()
+                            .fill(if selected {
+                                theme::ACCENT_DIM
                             } else {
-                                ic::EYE_SLASH
-                            };
-                            if theme::icon_button(ui, eye_icon, "Toggle visibility").clicked() {
-                                layer.visible = !layer.visible;
-                            }
-                            // Lock toggle.
-                            let lock_icon = if layer.locked {
-                                ic::LOCK_SIMPLE
-                            } else {
-                                ic::LOCK_SIMPLE_OPEN
-                            };
-                            if theme::icon_button(ui, lock_icon, "Toggle lock").clicked() {
-                                layer.locked = !layer.locked;
-                            }
-                            // Reference / light-table toggle.
-                            let ref_color = if layer.reference {
-                                theme::ACCENT
-                            } else {
-                                theme::TEXT_MUTED
-                            };
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new(ic::LIGHTBULB)
-                                            .size(16.0)
-                                            .color(ref_color),
-                                    )
-                                    .min_size(egui::vec2(30.0, 24.0)),
-                                )
-                                .on_hover_text("Light-table reference layer")
-                                .clicked()
-                            {
-                                layer.reference = !layer.reference;
-                            }
-                            // Name: click selects, double-click renames inline.
-                            let editing = matches!(rename.as_ref(), Some(r) if r.index == i);
-                            if editing {
-                                let r = rename.as_mut().unwrap();
-                                let te = ui.add(
-                                    egui::TextEdit::singleline(&mut r.buf).desired_width(110.0),
-                                );
-                                if !r.focused {
-                                    te.request_focus();
-                                    r.focused = true;
-                                }
-                                if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
-                                    rename_cancel = true;
-                                } else if te.lost_focus() {
-                                    // Covers Enter and clicking away.
-                                    rename_commit = true;
-                                }
-                            } else {
-                                let resp = ui
-                                    .add(egui::SelectableLabel::new(
-                                        selected,
-                                        egui::RichText::new(&layer.name).strong(),
-                                    ))
-                                    .on_hover_text("Double-click to rename");
-                                if resp.double_clicked() {
-                                    start_rename = Some(i);
-                                } else if resp.clicked() {
-                                    select = Some(i);
-                                }
-                            }
-                        });
-                        ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
-                        // Flood fill on this layer reads its boundaries from
-                        // the linked layer — line art above, colour below.
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("lines from")
-                                    .color(theme::TEXT_MUTED)
-                                    .size(11.0),
-                            );
-                            let current = match layer.lines_from {
-                                Some(s) => names.get(s).map(String::as_str).unwrap_or("—"),
-                                None => "— none —",
-                            };
-                            egui::ComboBox::from_id_salt(("lines_from", i))
-                                .selected_text(egui::RichText::new(current).size(11.0))
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut layer.lines_from, None, "— none —");
-                                    for (j, name) in names.iter().enumerate() {
-                                        if j == i {
-                                            continue;
+                                Color32::TRANSPARENT
+                            })
+                            .rounding(egui::Rounding::same(6.0))
+                            .inner_margin(Margin::symmetric(6.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    // Eye toggle.
+                                    let eye_icon = if layer.visible {
+                                        ic::EYE
+                                    } else {
+                                        ic::EYE_SLASH
+                                    };
+                                    if theme::icon_button(ui, eye_icon, "Toggle visibility").clicked() {
+                                        layer.visible = !layer.visible;
+                                    }
+                                    // Lock toggle.
+                                    let lock_icon = if layer.locked {
+                                        ic::LOCK_SIMPLE
+                                    } else {
+                                        ic::LOCK_SIMPLE_OPEN
+                                    };
+                                    if theme::icon_button(ui, lock_icon, "Toggle lock").clicked() {
+                                        layer.locked = !layer.locked;
+                                    }
+                                    // Reference / light-table toggle.
+                                    let ref_color = if layer.reference {
+                                        theme::ACCENT
+                                    } else {
+                                        theme::TEXT_MUTED
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(ic::LIGHTBULB)
+                                                    .size(16.0)
+                                                    .color(ref_color),
+                                            )
+                                            .min_size(egui::vec2(30.0, 24.0)),
+                                        )
+                                        .on_hover_text("Light-table reference layer")
+                                        .clicked()
+                                    {
+                                        layer.reference = !layer.reference;
+                                    }
+                                    // Name: click selects, double-click renames inline.
+                                    let editing = matches!(rename.as_ref(), Some(r) if r.index == i);
+                                    if editing {
+                                        let r = rename.as_mut().unwrap();
+                                        let te = ui.add(
+                                            egui::TextEdit::singleline(&mut r.buf).desired_width(110.0),
+                                        );
+                                        if !r.focused {
+                                            te.request_focus();
+                                            r.focused = true;
                                         }
-                                        ui.selectable_value(&mut layer.lines_from, Some(j), name);
+                                        if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
+                                            rename_cancel = true;
+                                        } else if te.lost_focus() {
+                                            // Covers Enter and clicking away.
+                                            rename_commit = true;
+                                        }
+                                    } else {
+                                        let resp = ui
+                                            .add(egui::SelectableLabel::new(
+                                                selected,
+                                                egui::RichText::new(&layer.name).strong(),
+                                            ))
+                                            .on_hover_text("Double-click to rename");
+                                        if resp.double_clicked() {
+                                            start_rename = Some(i);
+                                        } else if resp.clicked() {
+                                            select = Some(i);
+                                        }
                                     }
                                 });
-                        })
-                        .response
-                        .on_hover_text(
-                            "Flood fill on this layer stops at the linked layer's strokes, \
-                             so colour can be painted under line art.",
-                        );
-                    });
-                ui.add_space(2.0);
-            }
+                                ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
+                                // Flood fill on this layer reads its boundaries from
+                                // the linked layer — line art above, colour below.
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("lines from")
+                                            .color(theme::TEXT_MUTED)
+                                            .size(11.0),
+                                    );
+                                    let current = match layer.lines_from {
+                                        Some(s) => names.get(s).map(String::as_str).unwrap_or("—"),
+                                        None => "— none —",
+                                    };
+                                    egui::ComboBox::from_id_salt(("lines_from", i))
+                                        .selected_text(egui::RichText::new(current).size(11.0))
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut layer.lines_from, None, "— none —");
+                                            for (j, name) in names.iter().enumerate() {
+                                                if j == i {
+                                                    continue;
+                                                }
+                                                ui.selectable_value(&mut layer.lines_from, Some(j), name);
+                                            }
+                                        });
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Flood fill on this layer stops at the linked layer's strokes, \
+                                     so colour can be painted under line art.",
+                                );
+                            });
+                        ui.add_space(2.0);
+                    }
+            });
             if rename_cancel {
                 state.layer_rename = None;
             } else if rename_commit {
