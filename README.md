@@ -131,7 +131,14 @@ Draw a loop with the Lasso tool (`Y`) to select; the path closes itself on
 release. Then:
 
 - **Drag inside it** to move the pixels, or nudge a pixel at a time with the
-  arrow keys. Moves are pixel-snapped, so nothing is ever resampled.
+  arrow keys. Moves are pixel-snapped, so a move alone never resamples.
+- **Drag a handle** on the box around the selection to scale it — corners take
+  both axes, edges take one, and `Shift` keeps it uniform. **Drag just outside
+  a corner** to rotate, with `Shift` snapping to 15°.
+- The lifted pixels are only resampled once, when the selection commits.
+  Scaling out and back, or rotating twice, is no softer than doing it once,
+  because every pose is resolved from the pixels as they were lifted. A
+  selection left square and on whole pixels still takes the exact blit.
 - **`Delete`** erases the selected pixels.
 - **`Ctrl+X` / `Ctrl+C` / `Ctrl+V`** cut, copy and paste — a paste lands on
   whatever cell is active, so it crosses frames and layers.

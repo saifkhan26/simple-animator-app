@@ -10,6 +10,7 @@ use crate::input::shortcuts::{Action, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::OnionDirection;
+use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing};
 use crate::ui::{expr, theme};
 
@@ -2817,11 +2818,18 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // document space before going to screen, so previews line up with the
     // committed pixels on moved / scaled / rotated layers.
     let preview_xf = state.display_transform(cur_layer, cur_frame);
+    // Falls back to the active layer's cell size, not the project size: a
+    // floating selection has no `stroke_target` between drags, and a layer with
+    // an expanded canvas would then have its float and outline mapped through
+    // the wrong dimensions.
     let (preview_cw, preview_ch) = state
         .stroke_target
         .and_then(|id| state.project.cell(id))
         .map(|c| (c.width as f32, c.height as f32))
-        .unwrap_or((pw, ph));
+        .unwrap_or_else(|| {
+            let (w, h) = state.project.draw_cell_size(cur_layer, cur_frame);
+            (w as f32, h as f32)
+        });
     let cell_to_screen = |u: f32, v: f32| -> egui::Pos2 {
         let (dx, dy) = preview_xf.cell_to_doc(u, v, preview_cw, preview_ch, pw, ph);
         xf.doc_to_screen(dx, dy)
@@ -2907,27 +2915,34 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // Lasso preview: the path so far plus a dashed-looking closing chord back
     // to the start, so it's obvious the loop seals itself on release. Drawn in
     // cell space like the other previews, since that is what gets rasterised.
-    // Floating selection: the lifted pixels as a quad at their offset, plus
-    // marching ants around the path so it reads as "selected", not "drawn".
+    // Floating selection: the lifted pixels as a quad under their pose, plus
+    // marching ants around the path so it reads as "selected", not "drawn", and
+    // the transform box that scales and rotates it.
     if let Some(sel) = &state.selection {
+        // The pose is applied to the quad's corners rather than baked into the
+        // texture, so the GPU does the scaling and rotation for free and the
+        // lifted pixels are never resampled until the selection commits.
+        let corners = sel.corners();
+        let box_pts: Vec<egui::Pos2> = corners
+            .iter()
+            .map(|&(x, y)| cell_to_screen(x, y))
+            .collect();
         if let Some(tex) = &state.selection_tex {
-            let (ox, oy) = sel.origin();
-            let (mw, mh) = (sel.mask.w as f32, sel.mask.h as f32);
-            let (ox, oy) = (ox as f32, oy as f32);
-            let quad = [
-                cell_to_screen(ox, oy),
-                cell_to_screen(ox + mw, oy),
-                cell_to_screen(ox + mw, oy + mh),
-                cell_to_screen(ox, oy + mh),
-            ];
-            image_quad(&painter, tex.id(), quad, Color32::WHITE);
+            image_quad(
+                &painter,
+                tex.id(),
+                [box_pts[0], box_pts[1], box_pts[2], box_pts[3]],
+                Color32::WHITE,
+            );
         }
         if sel.path.len() >= 2 {
-            let (dx, dy) = (sel.offset.0 as f32, sel.offset.1 as f32);
             let pts: Vec<egui::Pos2> = sel
                 .path
                 .iter()
-                .map(|&(x, y)| cell_to_screen(x + dx, y + dy))
+                .map(|&(x, y)| {
+                    let (cx, cy) = sel.path_point(x, y);
+                    cell_to_screen(cx, cy)
+                })
                 .collect();
             let mut closed = pts.clone();
             closed.push(pts[0]);
@@ -2948,8 +2963,26 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 &[6.0],
                 phase + 6.0,
             ));
-            ui.ctx().request_repaint();
         }
+
+        // Transform box: a thin outline plus the eight handles, drawn at a
+        // fixed *screen* size so they stay grabbable however far out the view
+        // is zoomed — which is the same size `grab_at` tests against.
+        painter.add(egui::Shape::closed_line(
+            box_pts,
+            Stroke::new(1.0, Color32::from_black_alpha(120)),
+        ));
+        let r = crate::tools::selection::HANDLE_PX;
+        for (hu, hv) in SelGrab::handle_positions(sel.mask.w as f32, sel.mask.h as f32) {
+            let (cx, cy) = sel.buf_to_cell(hu, hv);
+            let rect = egui::Rect::from_center_size(
+                cell_to_screen(cx, cy),
+                egui::vec2(r * 2.0, r * 2.0),
+            );
+            painter.rect_filled(rect, 1.0, Color32::WHITE);
+            painter.rect_stroke(rect, 1.0, Stroke::new(1.0, Color32::from_black_alpha(200)));
+        }
+        ui.ctx().request_repaint();
     }
 
     if let Some(path) = &state.lasso {

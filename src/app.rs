@@ -22,7 +22,7 @@ use crate::timeline::onion::{OnionConfig, OnionDirection, OnionStep};
 use crate::timeline::playback::Playback;
 use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
-use crate::tools::selection::Selection;
+use crate::tools::selection::{Grab, Pose, Selection};
 use crate::tools::stroke::StrokeBuilder;
 use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
 use crate::ui;
@@ -121,6 +121,22 @@ pub struct ShapeDrag {
     pub kind: ShapeKind,
     pub start: (f32, f32),
     pub end: (f32, f32),
+}
+
+/// An in-progress drag on the floating selection's transform box.
+///
+/// `pose` is the selection's pose at the moment the handle was pressed, and a
+/// scale or rotation is re-solved against it every frame rather than
+/// accumulated — so a slow drag and a fast one ending in the same place give
+/// the same result, and float error cannot creep in over a long drag.
+#[derive(Clone, Copy)]
+pub struct SelDrag {
+    grab: Grab,
+    /// Where the pointer was, in cell space. A move updates this as it goes,
+    /// because a move accumulates in whole pixels; a scale or rotation leaves
+    /// it at the press.
+    start: (f32, f32),
+    pose: Pose,
 }
 
 /// Canvas view transform applied on top of the fit-to-window base scale.
@@ -371,13 +387,13 @@ pub struct AppState {
     /// Floating lasso selection, if any. Bound to one cell: changing frame or
     /// layer commits it first.
     pub selection: Option<Selection>,
-    /// Pointer position (cell space) of the last selection-move sample, or
-    /// `None` when no move drag is in flight.
-    sel_drag: Option<(f32, f32)>,
+    /// In-flight drag on the selection's transform box, or `None`.
+    sel_drag: Option<SelDrag>,
     /// Selection clipboard: mask plus lifted pixels.
     pixel_clip: Option<(Mask, Vec<u8>)>,
     /// Set when the floating pixels changed and their texture must be rebuilt.
-    /// Moving does *not* set it — the offset moves the quad, not the texture.
+    /// Posing does *not* set it — the pose moves the quad, and the GPU samples
+    /// the same texture through it.
     sel_tex_stale: bool,
     /// GPU texture for the floating pixels.
     pub selection_tex: Option<TextureHandle>,
@@ -391,6 +407,10 @@ pub struct AppState {
     /// In-progress Lasso path in active-cell pixel space. Preview only; the
     /// enclosed pixels are erased on pointer-up.
     pub lasso: Option<Vec<(f32, f32)>>,
+    /// Shift state, sampled once a frame. Pointer handlers run off tablet
+    /// packets rather than egui events, so they have no `InputState` of their
+    /// own to ask; a selection scale reads this for its uniform constraint.
+    shift_held: bool,
 
     /// Canvas view transform (zoom / pan / rotate).
     pub view: View,
@@ -637,6 +657,7 @@ impl AppState {
             stroke_target: None,
             shape_drag: None,
             lasso: None,
+            shift_held: false,
             view: View::default(),
             view_scale: 1.0,
             lock_brush_to_view: prefs.lock_brush_to_view,
@@ -2240,14 +2261,21 @@ impl AppState {
         }
 
         if self.tool == ActiveTool::Lasso {
-            // Pressing inside an existing selection moves it; anywhere else
-            // commits it and starts a new lasso.
-            if self
+            // Pressing on the transform box scales or rotates, inside it moves,
+            // anywhere else commits it and starts a new lasso. The handle
+            // tolerance is a fixed screen size divided back out by the view, so
+            // handles stay the same size to grab at any zoom.
+            let tol = crate::tools::selection::HANDLE_PX / self.cell_view_scale();
+            let grabbed = self
                 .selection
                 .as_ref()
-                .is_some_and(|s| s.hit(sample.x, sample.y))
-            {
-                self.sel_drag = Some((sample.x, sample.y));
+                .and_then(|s| s.grab_at(sample.x, sample.y, tol).map(|g| (g, s.pose)));
+            if let Some((grab, pose)) = grabbed {
+                self.sel_drag = Some(SelDrag {
+                    grab,
+                    start: (sample.x, sample.y),
+                    pose,
+                });
                 self.stroke = None;
                 self.stroke_pre_pixels = None;
                 return;
@@ -2307,15 +2335,8 @@ impl AppState {
             drag.end = (sample.x, sample.y);
             return;
         }
-        if let Some(last) = self.sel_drag {
-            let (dx, dy) = (
-                (sample.x - last.0).round() as i32,
-                (sample.y - last.1).round() as i32,
-            );
-            if dx != 0 || dy != 0 {
-                self.sel_drag = Some((sample.x, sample.y));
-                self.nudge_selection(dx, dy);
-            }
+        if let Some(drag) = self.sel_drag {
+            self.drag_selection(drag, sample.x, sample.y);
             return;
         }
         if let Some(path) = &mut self.lasso {
@@ -2346,6 +2367,10 @@ impl AppState {
     }
 
     pub fn pointer_up(&mut self) {
+        // The transform-box drag ends with the press that started it. Leaving
+        // it set would let the next drag — with any tool — keep posing the
+        // selection that is still floating.
+        self.sel_drag = None;
         let Some(target) = self.stroke_target.take() else {
             self.stroke = None;
             self.shape_drag = None;
@@ -2593,9 +2618,16 @@ impl AppState {
     }
 
     /// Copy the floating pixels to the selection clipboard.
+    ///
+    /// A scaled or rotated selection is baked first: what the user is looking
+    /// at is what they expect to paste. A pixel-aligned one keeps its pristine
+    /// buffer, so an ordinary copy still costs nothing and loses nothing.
     pub fn copy_selection(&mut self) {
         if let Some(sel) = &self.selection {
-            self.pixel_clip = Some((sel.mask.clone(), sel.pixels.clone()));
+            self.pixel_clip = Some(
+                sel.bake()
+                    .unwrap_or_else(|| (sel.mask.clone(), sel.pixels.clone())),
+            );
         }
     }
 
@@ -2618,25 +2650,72 @@ impl AppState {
             cell,
             mask,
             pixels,
-            offset: (0, 0),
+            pose: Pose::default(),
             path,
             lifted: true,
         });
         self.sel_tex_stale = true;
     }
 
-    /// Nudge a floating selection by whole pixels (arrow keys).
+    /// Nudge a floating selection by whole pixels (arrow keys, and the plain
+    /// drag). Stays integral, so a move alone never reaches the resampler.
     pub fn nudge_selection(&mut self, dx: i32, dy: i32) {
         let Some(sel) = self.selection.as_mut() else {
             return;
         };
-        let cell = sel.cell;
-        let lift = !sel.lifted;
-        sel.offset.0 += dx;
-        sel.offset.1 += dy;
-        if lift {
-            self.lift_selection_source(cell);
+        sel.pose.offset.0 += dx as f32;
+        sel.pose.offset.1 += dy as f32;
+        self.touch_selection();
+    }
+
+    /// Apply a transform-box drag to the floating selection.
+    ///
+    /// A move accumulates in whole pixels, exactly as it always has — the drag
+    /// anchor walks with the pointer and sub-pixel remainders are dropped, so
+    /// dragging a selection around is still lossless. A scale or rotation is
+    /// re-solved from the pose recorded at the press, so it depends only on
+    /// where the pointer is now.
+    fn drag_selection(&mut self, drag: SelDrag, x: f32, y: f32) {
+        if let Grab::Move = drag.grab {
+            let (dx, dy) = (
+                (x - drag.start.0).round() as i32,
+                (y - drag.start.1).round() as i32,
+            );
+            if dx == 0 && dy == 0 {
+                return;
+            }
+            if let Some(d) = self.sel_drag.as_mut() {
+                d.start = (x, y);
+            }
+            self.nudge_selection(dx, dy);
+            return;
         }
+        let uniform = self.shift_held;
+        let Some(sel) = self.selection.as_mut() else {
+            return;
+        };
+        let pose = drag
+            .pose
+            .dragged(&sel.mask, drag.grab, drag.start, (x, y), uniform);
+        if pose == sel.pose {
+            return;
+        }
+        sel.pose = pose;
+        self.touch_selection();
+    }
+
+    /// Note that the floating selection has been posed, erasing the source
+    /// behind it the first time that happens. Shared by every gesture, so a
+    /// first *rotate* lifts exactly like a first move does.
+    fn touch_selection(&mut self) {
+        let Some(sel) = self.selection.as_ref() else {
+            return;
+        };
+        if sel.lifted {
+            return;
+        }
+        let cell = sel.cell;
+        self.lift_selection_source(cell);
     }
 
     /// Erase the source region behind a selection and record it, once.
@@ -3184,6 +3263,9 @@ impl eframe::App for AppState {
         let _ = (&frame, self.window_styled);
 
         self.pen.poll(ctx.input(|i| i.pointer.any_down()));
+        // Sampled here rather than in the pointer handlers: those run off
+        // tablet packets and never see an `InputState`.
+        self.shift_held = ctx.input(|i| i.modifiers.shift);
 
         // Shortcut rebind capture: when an Action is "rebinding", the next
         // key press becomes its new combo and rebind mode ends.
