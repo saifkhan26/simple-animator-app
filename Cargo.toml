@@ -30,6 +30,11 @@ rfd    = "0.14"
 gif         = "0.13"
 color_quant = "1"
 
+# Project files are mostly transparent pixels — four zero bytes each — so the
+# `.anim` payload deflates by one to two orders of magnitude. Already in the
+# tree via `png`, on the miniz_oxide backend, so this costs no new code.
+flate2 = "1"
+
 bytemuck = { version = "1", features = ["derive"] }
 glam     = { version = "0.29", features = ["bytemuck"] }
 

@@ -4282,6 +4282,25 @@ fn preview_box(ui: &mut egui::Ui, label: &str, idx: usize, tex: &Option<egui::Te
 /// Transient "saved" confirmation. Ctrl+S no longer opens a dialog, so this is
 /// the only sign the write happened at all.
 fn save_toast(state: &mut AppState, ctx: &egui::Context) {
+    // A write runs on a worker thread, so without this there would be no sign
+    // at all between pressing Save and the toast arriving.
+    if state.save_job.is_some() {
+        egui::Area::new(egui::Id::new("save_toast"))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(theme::BG_PANEL)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            ui.label(egui::RichText::new("Saving…").color(theme::TEXT));
+                        });
+                    });
+            });
+        return;
+    }
     let Some((name, deadline)) = state.save_toast.clone() else {
         return;
     };

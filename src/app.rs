@@ -332,6 +332,19 @@ pub enum BgJob {
     },
 }
 
+/// A project write running on a worker thread.
+///
+/// Deliberately *not* a [`BgJob`]: that raises the modal busy overlay, and a
+/// save that blocks the window is the thing this exists to avoid. Saving has to
+/// leave you free to keep drawing.
+pub struct SaveJob {
+    rx: Receiver<Result<()>>,
+    /// Committed to `project_path` only once the write actually succeeds.
+    path: PathBuf,
+    /// File name, for the success toast.
+    name: String,
+}
+
 /// In-progress inline layer rename: which layer, the edit buffer, and
 /// whether the TextEdit has been given focus yet (first frame only).
 pub struct LayerRename {
@@ -351,6 +364,9 @@ pub struct AppState {
     /// Failed write, shown as a modal until dismissed. Never merely logged — a
     /// silent save that silently failed is how work gets lost.
     pub save_error: Option<String>,
+    /// Write in flight on a worker thread. Serialising and compressing a few
+    /// hundred MB would otherwise stall the window.
+    pub save_job: Option<SaveJob>,
 
     /// GPU texture handle per CellId, lazily created.
     pub cell_textures: HashMap<CellId, TextureHandle>,
@@ -637,6 +653,7 @@ impl AppState {
             project_path: None,
             save_toast: None,
             save_error: None,
+            save_job: None,
             cell_textures: HashMap::new(),
             ghost_textures: HashMap::new(),
             ghost_stale: HashSet::new(),
@@ -736,6 +753,10 @@ impl AppState {
     }
 
     pub fn reset_with(&mut self, width: u32, height: u32, fps: f32) {
+        // Let any write of the outgoing project land first. Otherwise it would
+        // report success *after* the swap and set `project_path` back to the
+        // old file — the exact overwrite the reset below is guarding against.
+        self.finish_pending_save();
         self.project = Project::new(width, height, fps);
         // Forget the old file, or the next Save silently overwrites the project
         // the user just navigated away from.
@@ -3108,21 +3129,68 @@ impl AppState {
     /// failure as a modal. `project_path` is left alone on failure so a retry
     /// still targets the same file.
     fn write_project(&mut self, path: PathBuf) {
-        match crate::io::project_file::save_to(&self.project, &path) {
-            Ok(()) => {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("project")
-                    .to_string();
-                self.project_path = Some(path);
-                self.save_toast = Some((name, Instant::now() + Self::TOAST_TTL));
+        // One writer at a time. Two threads racing the same path could
+        // interleave into a corrupt file, and the second save would be of a
+        // project the user has barely changed since the first.
+        if self.save_job.is_some() {
+            return;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string();
+        // Snapshot so drawing can continue while the write runs. The same
+        // clone-and-move `start_export` already does, and the same cost.
+        let project = self.project.clone();
+        let dest = path.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(crate::io::project_file::save_to(&project, &dest));
+        });
+        self.save_job = Some(SaveJob { rx, path, name });
+    }
+
+    /// Collect a finished background write. `project_path` moves only on
+    /// success, so a failed save leaves a retry pointing at the same file.
+    fn poll_save_job(&mut self) {
+        let Some(job) = self.save_job.take() else {
+            return;
+        };
+        match job.rx.try_recv() {
+            Err(TryRecvError::Empty) => self.save_job = Some(job),
+            Ok(Ok(())) => {
+                self.project_path = Some(job.path);
+                self.save_toast = Some((job.name, Instant::now() + Self::TOAST_TTL));
                 self.save_error = None;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 log::error!("Save project failed: {e:#}");
                 self.save_error = Some(format!("{e:#}"));
             }
+            // The worker died without reporting. Treat it as a failure rather
+            // than as a save that quietly never happened.
+            Err(TryRecvError::Disconnected) => {
+                log::error!("Save project worker vanished");
+                self.save_error = Some("the save worker stopped unexpectedly".into());
+            }
+        }
+    }
+
+    /// Block until any in-flight write finishes.
+    ///
+    /// Called wherever the project is about to be replaced or the process is
+    /// about to end — a backgrounded save cut short by either would lose work
+    /// with no warning at all.
+    fn finish_pending_save(&mut self) {
+        let Some(job) = self.save_job.take() else {
+            return;
+        };
+        log::info!("Waiting for the in-flight save to finish");
+        match job.rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => log::error!("Save project failed: {e:#}"),
+            Err(e) => log::error!("Save project worker vanished: {e}"),
         }
     }
 
@@ -3134,6 +3202,10 @@ impl AppState {
     /// assignment at the call site means a caller can't forget to update it and
     /// leave Save pointing at the previous file.
     pub fn load_project(&mut self, project: Project, path: Option<PathBuf>) {
+        // Same reason as `reset_with`: a write still in flight would report
+        // back after the swap and point the freshly opened project at the file
+        // the previous one was being saved to.
+        self.finish_pending_save();
         self.project = project;
         self.project_path = path;
         self.save_toast = None;
@@ -3186,6 +3258,13 @@ impl eframe::App for AppState {
     /// Called by eframe on exit and every `auto_save_interval` (30s). Panel
     /// geometry and collapse state are saved separately via
     /// `persist_egui_memory`, which defaults to true.
+    /// Last call before the process goes away. A save runs on a worker thread
+    /// now, so closing the window mid-write would drop it silently — wait for
+    /// it instead.
+    fn on_exit(&mut self) {
+        self.finish_pending_save();
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(
             storage,
@@ -3415,8 +3494,11 @@ impl eframe::App for AppState {
 
         // Advance background import jobs / preview fetches without blocking.
         self.poll_bg_jobs();
+        self.poll_save_job();
         self.poll_preview(ctx);
-        if self.bg_job.is_some() || self.preview_rx.is_some() {
+        // A save reports back on a channel, not an input event, so without this
+        // the toast would wait for the next mouse move to appear.
+        if self.bg_job.is_some() || self.preview_rx.is_some() || self.save_job.is_some() {
             ctx.request_repaint();
         }
 
