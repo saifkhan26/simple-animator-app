@@ -118,6 +118,7 @@ dependencies = [
  "serde",
  "toml",
  "windows 0.56.0",
+ "winit",
  "wintab_lite",
 ]
 

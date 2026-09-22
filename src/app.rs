@@ -3265,6 +3265,12 @@ impl eframe::App for AppState {
         self.finish_pending_save();
     }
 
+    /// Put back the Ctrl+C / X / V presses egui-winit turned into clipboard
+    /// events, so the selection shortcuts can see them.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::input::clipboard_keys::inject(raw_input);
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(
             storage,

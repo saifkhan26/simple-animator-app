@@ -59,8 +59,12 @@ windows     = { version = "0.56", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 raw-window-handle = "0.6"
+# Already in the tree via eframe; named here for the Windows message hook that
+# recovers the Ctrl+C / X / V presses egui-winit swallows.
+winit = { version = "0.30", default-features = false }
 
 [profile.release]
 opt-level     = 3
