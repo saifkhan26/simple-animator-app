@@ -15,7 +15,7 @@ pub struct Canvas {
     pub dirty: Option<DirtyRect>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirtyRect {
     pub min_x: u32,
     pub min_y: u32,

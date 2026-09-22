@@ -6,9 +6,11 @@
 //!   * `frame_count` — total timeline length; every layer.exposures matches.
 //!   * `current_frame`, `current_layer` — the editing cursor.
 
+use std::ops::Range;
+
 use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
-use crate::doc::layer::{CellId, Layer};
+use crate::doc::layer::{CellId, Layer, TrackSample};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Project {
@@ -487,6 +489,484 @@ impl Project {
             self.current_layer = i - 1;
         }
     }
+
+    // --- Drawing blocks (the timeline tracks) ---
+    //
+    // Everything here only ever *allocates* cells — clones, blanks — and never
+    // writes an existing cell's pixels, so the `TimelineState` snapshot that
+    // `structural_edit` takes is a complete undo. Same contract as
+    // `paste_cell_here`.
+    //
+    // The timeline's length is fixed unless a key would be pushed off its end;
+    // only then does it grow, padding every other layer with holds. A layer's
+    // last drawing holds to the end, so a ripple in front of it shortens or
+    // lengthens that hold rather than moving the end.
+
+    /// The drawing showing on `frame` and the frames it holds for. `None` before
+    /// the layer's first key, where nothing shows.
+    pub fn block_at(&self, layer: usize, frame: usize) -> Option<Block> {
+        let l = self.layers.get(layer)?;
+        let f = frame.min(self.frame_count.checked_sub(1)?);
+        let start = (0..=f).rev().find(|&i| l.is_key(i))?;
+        let next = (start + 1..self.frame_count).find(|&i| l.is_key(i));
+        Some(Block {
+            layer,
+            start,
+            len: next.map(|n| n - start),
+        })
+    }
+
+    /// Every drawing on `layer`, in timeline order.
+    pub fn blocks(&self, layer: usize) -> Vec<Block> {
+        let Some(l) = self.layers.get(layer) else {
+            return Vec::new();
+        };
+        let keys: Vec<usize> = (0..self.frame_count).filter(|&f| l.is_key(f)).collect();
+        keys.iter()
+            .enumerate()
+            .map(|(i, &start)| Block {
+                layer,
+                start,
+                len: keys.get(i + 1).map(|&n| n - start),
+            })
+            .collect()
+    }
+
+    /// Grow the timeline to `need` frames, padding every layer shorter than
+    /// that with holds. Unlike [`Project::ensure_frame_count`] it leaves a
+    /// layer that a ripple already lengthened alone.
+    fn settle_length(&mut self, need: usize) {
+        if need <= self.frame_count {
+            return;
+        }
+        for l in &mut self.layers {
+            while l.exposures.len() < need {
+                l.exposures.push(None);
+                l.track_insert_frame(l.exposures.len() - 1);
+            }
+        }
+        self.frame_count = need;
+        self.loop_end = need;
+    }
+
+    /// Insert `n` held frames on one layer right after `after`: the drawing
+    /// showing there holds `n` frames longer, and later drawings slide.
+    pub fn insert_layer_frames(&mut self, layer: usize, after: usize, n: usize) {
+        let fc = self.frame_count;
+        let Some(l) = self.layers.get_mut(layer) else {
+            return;
+        };
+        layer_insert(l, after, n);
+        let need = layer_fit(l, fc);
+        self.settle_length(need);
+    }
+
+    /// Remove `n` frames from one layer starting at `at`; later drawings slide
+    /// up and the layer's last drawing holds longer to fill the end. Whatever
+    /// was showing right after the removed frames still shows there.
+    pub fn remove_layer_frames(&mut self, layer: usize, at: usize, n: usize) {
+        if let Some(l) = self.layers.get_mut(layer) {
+            layer_remove(l, at, n);
+        }
+    }
+
+    /// Hold `b` for `new_len` frames (at least one), sliding later drawings.
+    pub fn retime_block(&mut self, b: Block, new_len: usize) {
+        let Some(l) = self.layers.get(b.layer) else {
+            return;
+        };
+        let (w, h) = l.cell_size(self.width, self.height);
+        let fc = self.frame_count;
+        let cells = &mut self.cells;
+        let need = layer_retime(&mut self.layers[b.layer], fc, b, new_len, || {
+            cells.push(Canvas::new(w, h));
+            cells.len() - 1
+        });
+        self.settle_length(need);
+    }
+
+    /// Give every drawing keyed at `starts` (layer, frame) a hold of `n`
+    /// frames. Returns where those drawings start afterwards.
+    ///
+    /// Left to right with a running shift: retiming a drawing moves every
+    /// later one on its layer, so each start is re-found at its shifted spot.
+    /// Going right to left instead would let a later insert truncate the
+    /// already-retimed last drawing against the end of the timeline.
+    pub fn set_timing(&mut self, starts: &[(usize, usize)], n: usize) -> Vec<(usize, usize)> {
+        let n = n.max(1);
+        let mut out = Vec::new();
+        for layer in distinct_layers(starts) {
+            let mut frames: Vec<usize> = starts
+                .iter()
+                .filter(|s| s.0 == layer)
+                .map(|s| s.1)
+                .collect();
+            frames.sort_unstable();
+            let mut shift: isize = 0;
+            for f in frames {
+                let at = (f as isize + shift).max(0) as usize;
+                let Some(b) = self.block_at(layer, at).filter(|b| b.start == at) else {
+                    continue;
+                };
+                let old = b.len.unwrap_or(self.frame_count - b.start);
+                self.retime_block(b, n);
+                shift += n as isize - old as isize;
+                out.push((layer, at));
+            }
+        }
+        out
+    }
+
+    /// Delete the drawings keyed at `starts`, leaving blank frames: each run
+    /// of adjacent ones becomes one fresh blank key, and nothing else moves.
+    /// Returns the blank runs' starts.
+    ///
+    /// One blank per run, never one shared by several runs: painting into a
+    /// shared blank would paint every place it shows.
+    pub fn clear_blocks(&mut self, starts: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for layer in distinct_layers(starts) {
+            let mut blocks: Vec<Block> = starts
+                .iter()
+                .filter(|s| s.0 == layer)
+                .filter_map(|&(_, f)| self.block_at(layer, f).filter(|b| b.start == f))
+                .collect();
+            blocks.sort_by_key(|b| b.start);
+            blocks.dedup();
+            let fc = self.frame_count;
+            let mut i = 0;
+            while i < blocks.len() {
+                let run_start = blocks[i].start;
+                let mut end = blocks[i].span(fc).end;
+                let mut j = i + 1;
+                while j < blocks.len() && blocks[j].start == end {
+                    end = blocks[j].span(fc).end;
+                    j += 1;
+                }
+                let blank = self.alloc_cell_for(layer);
+                let l = &mut self.layers[layer];
+                l.exposures[run_start] = Some(blank);
+                for f in run_start + 1..end {
+                    l.exposures[f] = None;
+                }
+                out.push((layer, run_start));
+                i = j;
+            }
+        }
+        out
+    }
+
+    /// Delete the drawings keyed at `starts` and close the gap: later
+    /// drawings on each layer slide up, and its last drawing holds longer.
+    pub fn close_blocks(&mut self, starts: &[(usize, usize)]) {
+        for layer in distinct_layers(starts) {
+            let mut frames: Vec<usize> = starts
+                .iter()
+                .filter(|s| s.0 == layer)
+                .map(|s| s.1)
+                .collect();
+            // Rightmost first, so the starts still to come stay where they were.
+            frames.sort_unstable_by(|a, b| b.cmp(a));
+            frames.dedup();
+            for f in frames {
+                // Re-found each time rather than taken up front: closing the
+                // drawing after this one can leave this one the layer's last,
+                // holding to the end, and its old length would then cut it
+                // short and re-key what was left.
+                let Some(b) = self.block_at(layer, f).filter(|b| b.start == f) else {
+                    continue;
+                };
+                let span = b.span(self.frame_count);
+                self.remove_layer_frames(layer, span.start, span.len());
+            }
+        }
+    }
+
+    /// Frames block `b` dropped at `start` on `layer` would cover: as many as
+    /// it covers now, clipped at the end of the timeline.
+    ///
+    /// A layer's last drawing also stops at the next drawing already on the
+    /// target. Its length is only what was left of the timeline, not a timing
+    /// anyone chose, so it must not wipe out every key after it — but it keeps
+    /// that length when there is room, rather than flooding the rest of an
+    /// emptier layer. Its own key doesn't count: a move is vacating it.
+    ///
+    /// Moving the source first never changes this: it swaps the source's
+    /// cell for a blank but leaves every key where it was.
+    pub fn landing_span(&self, layer: usize, start: usize, b: Block) -> Range<usize> {
+        let fc = self.frame_count;
+        let start = start.min(fc.saturating_sub(1));
+        let mut end = (start + b.span(fc).len().max(1)).min(fc);
+        if b.len.is_none() {
+            let own_key = |f: usize| layer == b.layer && f == b.start;
+            if let Some(next) = self
+                .layers
+                .get(layer)
+                .and_then(|l| (start + 1..end).find(|&f| l.is_key(f) && !own_key(f)))
+            {
+                end = next;
+            }
+        }
+        start..end
+    }
+
+    /// Whether a drag from `src` to `dst` may land. Nothing ever edits a
+    /// locked or reference layer, and only a move edits its source.
+    pub fn drop_allowed(&self, src: usize, dst: usize, copy: bool) -> bool {
+        let editable = |i: usize| self.layers.get(i).is_some_and(|l| !l.locked && !l.reference);
+        editable(dst) && (copy || editable(src))
+    }
+
+    /// A deep copy of `id` sized for `layer`, recentred rather than stretched
+    /// when that layer's cells are a different size.
+    fn clone_cell_for(&mut self, id: CellId, layer: usize) -> CellId {
+        let (w, h) = self.layers[layer].cell_size(self.width, self.height);
+        let src = &self.cells[id];
+        let cell = if (src.width, src.height) == (w, h) {
+            src.clone()
+        } else {
+            recenter(src, w, h)
+        };
+        self.cells.push(cell);
+        self.cells.len() - 1
+    }
+
+    /// Drop block `b` at `dst_start` on `dst_layer`, overwriting what is
+    /// there. The drawing that was showing just after the landing span keeps
+    /// showing, so nothing further along moves. A move leaves a blank key
+    /// where the drawing was; a copy leaves the source alone. Returns where the
+    /// drawing landed, or `None` when there was nothing to do.
+    pub fn drop_block(
+        &mut self,
+        b: Block,
+        dst_layer: usize,
+        dst_start: usize,
+        copy: bool,
+    ) -> Option<usize> {
+        if dst_layer >= self.layers.len() || dst_start >= self.frame_count {
+            return None;
+        }
+        if !copy && b.layer == dst_layer && b.start == dst_start {
+            return None;
+        }
+        let id = *self.layers.get(b.layer)?.exposures.get(b.start)?;
+        let id = id?;
+        if !copy {
+            let blank = self.alloc_cell_for(b.layer);
+            self.layers[b.layer].exposures[b.start] = Some(blank);
+        }
+        let cell = if copy {
+            self.clone_cell_for(id, dst_layer)
+        } else if b.layer == dst_layer {
+            id
+        } else {
+            // Hand the buffer over when nothing on the source layer still
+            // shows it and it already fits; cells are never shared between
+            // layers, so an alias left behind has to be a copy instead.
+            let size = self.layers[dst_layer].cell_size(self.width, self.height);
+            let unshared = !self.layers[b.layer].exposures.contains(&Some(id));
+            let fits = (self.cells[id].width, self.cells[id].height) == size;
+            if unshared && fits {
+                id
+            } else {
+                self.clone_cell_for(id, dst_layer)
+            }
+        };
+
+        let span = self.landing_span(dst_layer, dst_start, b);
+        // What shows right after the span, read after the source was blanked
+        // (a same-layer move can put the source there) but before the write.
+        let follow = self.layers[dst_layer]
+            .exposures
+            .get(span.end)
+            .is_some_and(Option::is_none)
+            .then(|| self.layers[dst_layer].resolve(span.end));
+        let l = &mut self.layers[dst_layer];
+        l.exposures[span.start] = Some(cell);
+        for f in span.start + 1..span.end {
+            l.exposures[f] = None;
+        }
+        if let Some(follow) = follow {
+            // Nothing was showing: stop the dropped drawing with a blank, or
+            // it would hold on to the end.
+            let key = match follow {
+                Some(k) => k,
+                None => self.alloc_cell_for(dst_layer),
+            };
+            self.layers[dst_layer].exposures[span.end] = Some(key);
+        }
+        Some(span.start)
+    }
+
+    /// The blocks keyed exactly at `starts`, skipping any that are not keys.
+    pub fn blocks_keyed_at(&self, starts: &[(usize, usize)]) -> Vec<Block> {
+        starts
+            .iter()
+            .filter_map(|&(l, f)| self.block_at(l, f).filter(|b| b.start == f))
+            .collect()
+    }
+
+    /// Whether [`Project::move_blocks`] would do anything: every block stays
+    /// on the sheet, lands only where [`Project::drop_allowed`] says it may,
+    /// and the drag actually goes somewhere.
+    pub fn can_move_blocks(&self, starts: &[(usize, usize)], dl: isize, df: isize, copy: bool) -> bool {
+        if !copy && dl == 0 && df == 0 {
+            return false;
+        }
+        let blocks = self.blocks_keyed_at(starts);
+        let n_layers = self.layers.len() as isize;
+        let fc = self.frame_count as isize;
+        !blocks.is_empty()
+            && blocks.iter().all(|b| {
+                let tl = b.layer as isize + dl;
+                let tf = b.start as isize + df;
+                (0..n_layers).contains(&tl)
+                    && (0..fc).contains(&tf)
+                    && self.drop_allowed(b.layer, tl as usize, copy)
+            })
+    }
+
+    /// Move (or copy) every block keyed at `starts` by `dl` layers and `df`
+    /// frames. `None`, with nothing changed, when any block would leave the
+    /// sheet or land on a layer it may not.
+    ///
+    /// Applied in the order that never lands on a source still waiting to
+    /// move: layers in the direction of travel first, and within a layer the
+    /// block furthest along the direction of travel first.
+    pub fn move_blocks(
+        &mut self,
+        starts: &[(usize, usize)],
+        dl: isize,
+        df: isize,
+        copy: bool,
+    ) -> Option<Vec<(usize, usize)>> {
+        if !self.can_move_blocks(starts, dl, df, copy) {
+            return None;
+        }
+        let mut blocks = self.blocks_keyed_at(starts);
+        blocks.sort_by_key(|b| {
+            let l = b.layer as isize * -dl.signum();
+            let f = b.start as isize * -df.signum();
+            (l, f)
+        });
+        let mut out = Vec::new();
+        for b in blocks {
+            let tl = (b.layer as isize + dl) as usize;
+            let tf = (b.start as isize + df) as usize;
+            if let Some(at) = self.drop_block(b, tl, tf, copy) {
+                out.push((tl, at));
+            }
+        }
+        Some(out)
+    }
+}
+
+/// A drawing and the frames it holds for, on one layer: the key at `start`
+/// through to the next key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Block {
+    pub layer: usize,
+    pub start: usize,
+    /// Frames held. `None` for the layer's last drawing, which holds to the
+    /// end of the timeline however long that is.
+    pub len: Option<usize>,
+}
+
+impl Block {
+    /// Frames the block covers on a timeline `frame_count` long.
+    pub fn span(&self, frame_count: usize) -> Range<usize> {
+        self.start..self.len.map_or(frame_count, |n| self.start + n)
+    }
+}
+
+/// Each layer named in `starts`, once, in order.
+fn distinct_layers(starts: &[(usize, usize)]) -> Vec<usize> {
+    let mut layers: Vec<usize> = starts.iter().map(|s| s.0).collect();
+    layers.sort_unstable();
+    layers.dedup();
+    layers
+}
+
+/// Insert `n` holds right after `after` on one layer, `track_points` kept in
+/// step. The layer can come out longer than the timeline; [`layer_fit`]
+/// settles it.
+pub fn layer_insert(l: &mut Layer, after: usize, n: usize) {
+    let at = (after + 1).min(l.exposures.len());
+    l.exposures.splice(at..at, std::iter::repeat(None).take(n));
+    for _ in 0..n {
+        l.track_insert_frame(at);
+    }
+}
+
+/// Remove `[at, at + n)` from one layer and pad its end with holds. When the
+/// cut took the key of a drawing that carries on past it, that drawing is
+/// re-keyed at `at`, so the frame after the cut shows what it showed before.
+pub fn layer_remove(l: &mut Layer, at: usize, n: usize) {
+    let len = l.exposures.len();
+    let end = (at + n).min(len);
+    if at >= end {
+        return;
+    }
+    let last_key = l.exposures[at..end].iter().rev().find_map(|e| *e);
+    l.exposures.drain(at..end);
+    l.exposures.resize(len, None);
+    for _ in at..end {
+        l.track_remove_frame(at);
+        l.track_insert_frame(l.track_points.len());
+    }
+    if end < len {
+        if let Some(k) = last_key {
+            if l.exposures[at].is_none() {
+                l.exposures[at] = Some(k);
+            }
+        }
+    }
+}
+
+/// Trim or pad a layer to the timeline — or past it, when a key was pushed
+/// beyond the end. Returns the length the timeline has to become.
+pub fn layer_fit(l: &mut Layer, min_len: usize) -> usize {
+    let need = l
+        .exposures
+        .iter()
+        .rposition(Option::is_some)
+        .map_or(0, |i| i + 1)
+        .max(min_len);
+    l.exposures.resize(need, None);
+    if !l.track_points.is_empty() {
+        l.track_points.resize(need, TrackSample::default());
+    }
+    need
+}
+
+/// [`Project::retime_block`] on one layer, with `blank` supplying a fresh blank
+/// cell when a last drawing is cut short. Public so the timeline can preview a
+/// retime on a copy of the layer, handing it a placeholder id, and show
+/// exactly what the edit is about to do. Returns the timeline length needed.
+pub fn layer_retime(
+    l: &mut Layer,
+    frame_count: usize,
+    b: Block,
+    new_len: usize,
+    blank: impl FnOnce() -> CellId,
+) -> usize {
+    let new_len = new_len.max(1);
+    let mut min_len = frame_count;
+    match b.len {
+        Some(old) if new_len > old => layer_insert(l, b.start + old - 1, new_len - old),
+        Some(old) if new_len < old => layer_remove(l, b.start + new_len, old - new_len),
+        Some(_) => {}
+        None => {
+            let old = frame_count.saturating_sub(b.start);
+            if new_len < old {
+                // A last drawing stops only if something follows it.
+                l.exposures[b.start + new_len] = Some(blank());
+            } else {
+                min_len = min_len.max(b.start + new_len);
+            }
+        }
+    }
+    layer_fit(l, min_len)
 }
 
 /// Copy `src` into a fresh `new_w`×`new_h` buffer with the old content
@@ -722,5 +1202,316 @@ mod tests {
         // …while layer 0 still has its seed key.
         p.current_layer = 0;
         assert_eq!(p.prev_key_frame(), Some(0));
+    }
+
+    // --- Drawing blocks ---
+
+    /// Key a fresh drawing on (`layer`, `f`) whose first byte is `mark`, so a
+    /// test can tell which drawing shows where after it has moved.
+    fn key(p: &mut Project, layer: usize, f: usize, mark: u8) -> CellId {
+        let id = p.alloc_cell_for(layer);
+        p.cells[id].pixels[0] = mark;
+        p.layers[layer].set_key(f, id);
+        id
+    }
+
+    /// One layer, `frames` long, with a drawing keyed on each of `keys`,
+    /// marked with its key frame + 1.
+    fn sheet(frames: usize, keys: &[usize]) -> Project {
+        let mut p = Project::new(4, 4, 12.0);
+        p.ensure_frame_count(frames);
+        p.layers[0].exposures = vec![None; frames];
+        for &f in keys {
+            key(&mut p, 0, f, f as u8 + 1);
+        }
+        p
+    }
+
+    fn key_frames(p: &Project, layer: usize) -> Vec<usize> {
+        (0..p.frame_count).filter(|&f| p.layers[layer].is_key(f)).collect()
+    }
+
+    /// The mark of the drawing showing on every frame; 0 for nothing or blank.
+    fn row(p: &Project, layer: usize) -> Vec<u8> {
+        (0..p.frame_count)
+            .map(|f| p.layers[layer].resolve(f).map_or(0, |id| p.cells[id].pixels[0]))
+            .collect()
+    }
+
+    /// What the whole timeline assumes: every layer exactly as long as the
+    /// timeline, and no cell shown on two layers.
+    fn assert_sound(p: &Project) {
+        for l in &p.layers {
+            assert_eq!(l.exposures.len(), p.frame_count, "layer {} length", l.name);
+        }
+        let mut owner = std::collections::HashMap::new();
+        for li in 0..p.layers.len() {
+            for id in p.layer_cell_ids(li) {
+                if let Some(prev) = owner.insert(id, li) {
+                    assert_eq!(prev, li, "cell {id} is on two layers");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_is_a_key_and_its_hold() {
+        let p = sheet(8, &[2, 5]);
+        assert_eq!(p.block_at(0, 1), None, "nothing shows before the first key");
+        let held = Block { layer: 0, start: 2, len: Some(3) };
+        assert_eq!(p.block_at(0, 2), Some(held));
+        assert_eq!(p.block_at(0, 4), Some(held), "a held frame belongs to its key");
+        let last = Block { layer: 0, start: 5, len: None };
+        assert_eq!(p.block_at(0, 7), Some(last), "the last drawing is open-ended");
+        assert_eq!(p.blocks(0), vec![held, last]);
+    }
+
+    /// The end of the timeline stays put: the last drawing's hold absorbs it.
+    #[test]
+    fn inserting_frames_slides_only_that_layer() {
+        let mut p = sheet(10, &[0, 2, 5]);
+        p.add_layer();
+        key(&mut p, 1, 3, 50);
+        p.insert_layer_frames(0, 3, 2);
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 7]);
+        assert_eq!(key_frames(&p, 1), vec![3], "other layers never move");
+        assert_eq!(p.frame_count, 10);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn a_key_pushed_off_the_end_grows_every_layer() {
+        let mut p = sheet(6, &[0, 5]);
+        p.add_layer();
+        p.insert_layer_frames(0, 0, 3);
+        assert_eq!(key_frames(&p, 0), vec![0, 8]);
+        assert_eq!(p.frame_count, 9);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn removing_frames_keeps_what_showed_after_the_cut() {
+        let mut p = sheet(10, &[0, 4]);
+        p.layers[0].track_points = (0..10)
+            .map(|f| TrackSample {
+                a: Some([f as f32, 0.0]),
+                b: None,
+            })
+            .collect();
+        // Takes the head of the drawing keyed on 4, which carries on past it.
+        p.remove_layer_frames(0, 3, 3);
+        assert_eq!(row(&p, 0), vec![1, 1, 1, 5, 5, 5, 5, 5, 5, 5]);
+        assert_eq!(p.layers[0].track_points.len(), 10);
+        assert_eq!(p.layers[0].track_points[3].a, Some([6.0, 0.0]));
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn retiming_a_drawing_slides_the_ones_after_it() {
+        let mut p = sheet(10, &[0, 2, 4]);
+        p.retime_block(p.block_at(0, 2).unwrap(), 4);
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 6]);
+        p.retime_block(p.block_at(0, 2).unwrap(), 1);
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 3]);
+        assert_eq!(p.frame_count, 10);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn retiming_the_last_drawing_stops_it_or_grows_the_timeline() {
+        let mut p = sheet(10, &[0, 6]);
+        p.retime_block(p.block_at(0, 6).unwrap(), 2);
+        assert_eq!(row(&p, 0)[6..], [7, 7, 0, 0], "a blank stops it after two");
+        assert_eq!(p.frame_count, 10);
+
+        let mut p = sheet(10, &[0, 6]);
+        p.add_layer();
+        p.retime_block(p.block_at(0, 6).unwrap(), 6);
+        assert_eq!(p.frame_count, 12);
+        assert_eq!(row(&p, 0)[6..], [7; 6]);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn set_timing_puts_a_run_on_twos() {
+        let mut p = sheet(6, &[0, 1, 2, 3]);
+        let out = p.set_timing(&[(0, 0), (0, 1), (0, 2)], 2);
+        assert_eq!(out, vec![(0, 0), (0, 2), (0, 4)]);
+        // The unselected drawing after the run slides along behind it.
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 4, 6]);
+        assert_eq!(row(&p, 0)[..6], [1, 1, 2, 2, 3, 3]);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn clearing_leaves_blank_frames_and_moves_nothing() {
+        let mut p = sheet(10, &[0, 2, 4, 6, 8]);
+        let out = p.clear_blocks(&[(0, 2), (0, 4), (0, 8)]);
+        // 2 and 4 touch, so they become one blank; 8 gets its own.
+        assert_eq!(out, vec![(0, 2), (0, 8)]);
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 6, 8]);
+        assert_eq!(row(&p, 0), vec![1, 1, 0, 0, 0, 0, 7, 7, 0, 0]);
+        assert_ne!(
+            p.layers[0].exposures[2], p.layers[0].exposures[8],
+            "painting one blank must not paint the other"
+        );
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn closing_the_gap_slides_later_drawings_up() {
+        let mut p = sheet(10, &[0, 2, 4, 7]);
+        p.close_blocks(&[(0, 2)]);
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 5]);
+        p.close_blocks(&[(0, 5)]);
+        assert_eq!(row(&p, 0)[5..], [5; 5], "the one before holds to the end");
+        assert_sound(&p);
+
+        // Closing the last drawing makes the one before it the last; it must
+        // still go, not come back holding over the gap.
+        let mut p = sheet(10, &[0, 2, 4, 7]);
+        p.close_blocks(&[(0, 4), (0, 7)]);
+        assert_eq!(row(&p, 0), vec![1, 1, 3, 3, 3, 3, 3, 3, 3, 3]);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn moving_within_a_layer_keeps_its_length_and_leaves_a_blank() {
+        let mut p = sheet(10, &[0, 2, 4]);
+        let b = p.block_at(0, 2).unwrap();
+        assert_eq!(p.drop_block(b, 0, 3, false), Some(3));
+        assert_eq!(row(&p, 0), vec![1, 1, 0, 3, 3, 5, 5, 5, 5, 5]);
+        assert_sound(&p);
+        let b = p.block_at(0, 3).unwrap();
+        assert_eq!(p.drop_block(b, 0, 3, false), None, "onto itself is no edit");
+    }
+
+    #[test]
+    fn landing_in_a_hold_keeps_the_rest_of_that_hold() {
+        let mut p = sheet(10, &[0, 2, 4]);
+        p.add_layer();
+        let bg = key(&mut p, 1, 0, 100);
+        let b = p.block_at(0, 2).unwrap();
+        p.drop_block(b, 1, 5, true);
+        assert_eq!(row(&p, 1), vec![100, 100, 100, 100, 100, 3, 3, 100, 100, 100]);
+        assert_eq!(p.layers[1].exposures[7], Some(bg), "the same drawing, not a copy");
+        // A copy is its own buffer.
+        let landed = p.layers[1].exposures[5].unwrap();
+        p.cells[landed].pixels[0] = 9;
+        assert_eq!(row(&p, 0)[2], 3);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn moving_to_an_empty_layer_hands_the_buffer_over_and_stops_it() {
+        let mut p = sheet(10, &[0, 2, 4]);
+        p.add_layer();
+        let moved = p.layers[0].exposures[2];
+        let b = p.block_at(0, 2).unwrap();
+        p.drop_block(b, 1, 5, false);
+        assert_eq!(row(&p, 1), vec![0, 0, 0, 0, 0, 3, 3, 0, 0, 0]);
+        assert_eq!(p.layers[1].exposures[5], moved, "no copy when nothing else shows it");
+        assert!(p.layers[1].is_key(7), "a blank stops it holding to the end");
+        assert_eq!(row(&p, 0)[2..4], [0, 0]);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn a_cross_layer_move_copies_when_it_has_to() {
+        // Still shown elsewhere on its own layer (as `duplicate_frame` does).
+        let mut p = sheet(6, &[0, 2]);
+        let first = p.layers[0].exposures[0].unwrap();
+        p.layers[0].set_key(4, first);
+        p.add_layer();
+        p.drop_block(p.block_at(0, 0).unwrap(), 1, 0, false);
+        assert_ne!(p.layers[1].exposures[0], Some(first));
+        assert_sound(&p);
+
+        // A different cell size: recentred, not stretched.
+        let mut p = sheet(6, &[0]);
+        p.add_layer();
+        p.expand_layer_canvas(1, 8, 8);
+        p.drop_block(p.block_at(0, 0).unwrap(), 1, 0, false);
+        let id = p.layers[1].exposures[0].unwrap();
+        assert_eq!((p.cells[id].width, p.cells[id].height), (8, 8));
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn a_last_drawing_keeps_its_length_but_stops_at_the_next_key() {
+        let mut p = sheet(10, &[0, 7]);
+        p.add_layer();
+        key(&mut p, 1, 0, 100);
+        key(&mut p, 1, 5, 101);
+        let last = p.block_at(0, 7).unwrap();
+        assert_eq!(last.len, None);
+        assert_eq!(p.landing_span(1, 1, last), 1..4, "its three frames, with room");
+        assert_eq!(p.landing_span(1, 3, last), 3..5, "stopped by the key on 5");
+        let fixed = Block { layer: 0, start: 0, len: Some(4) };
+        assert_eq!(p.landing_span(1, 8, fixed), 8..10, "clipped at the end");
+    }
+
+    /// The bug the tracks shipped with: the last drawing, dropped on a layer
+    /// with nothing after the drop point, flooded the rest of that layer.
+    #[test]
+    fn a_last_drawing_moved_to_an_emptier_layer_keeps_its_length() {
+        let mut p = sheet(8, &[0, 2, 5]);
+        p.add_layer();
+        key(&mut p, 1, 0, 50);
+        p.drop_block(p.block_at(0, 5).unwrap(), 1, 0, false);
+        assert_eq!(row(&p, 1), vec![6, 6, 6, 50, 50, 50, 50, 50]);
+        assert_eq!(row(&p, 0)[5..], [0, 0, 0]);
+        assert_sound(&p);
+    }
+
+    /// Moving the last drawing left on its own layer: its vacated key is not
+    /// an obstacle, so it keeps all of its frames.
+    #[test]
+    fn a_last_drawing_moved_left_keeps_its_length() {
+        let mut p = sheet(8, &[0, 2, 5]);
+        p.drop_block(p.block_at(0, 5).unwrap(), 0, 3, false);
+        assert_eq!(row(&p, 0), vec![1, 1, 3, 6, 6, 6, 0, 0]);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn moving_a_run_lands_every_block_in_either_direction() {
+        let mut p = sheet(10, &[0, 4, 6, 8]);
+        let out = p.move_blocks(&[(0, 4), (0, 6)], 0, 2, false).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(row(&p, 0), vec![1, 1, 1, 1, 0, 0, 5, 5, 7, 7]);
+        assert_sound(&p);
+
+        let mut p = sheet(10, &[0, 4, 6, 8]);
+        p.move_blocks(&[(0, 4), (0, 6)], 0, -2, false).unwrap();
+        assert_eq!(row(&p, 0), vec![1, 1, 5, 5, 7, 7, 0, 0, 9, 9]);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn moving_a_rectangle_down_a_layer_moves_the_lower_row_first() {
+        let mut p = sheet(6, &[0]);
+        p.add_layer();
+        p.add_layer();
+        key(&mut p, 1, 0, 20);
+        let out = p.move_blocks(&[(0, 0), (1, 0)], 1, 0, false).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(row(&p, 2)[0], 20, "layer 1's drawing went up first");
+        assert_eq!(row(&p, 1)[0], 1, "then layer 0's took its place");
+        assert_sound(&p);
+        assert!(
+            p.move_blocks(&[(2, 0)], 1, 0, false).is_none(),
+            "off the top of the sheet"
+        );
+    }
+
+    #[test]
+    fn locked_layers_are_never_edited_by_a_drag() {
+        let mut p = sheet(4, &[0]);
+        p.add_layer();
+        p.layers[1].locked = true;
+        assert!(!p.drop_allowed(0, 1, true));
+        assert!(p.drop_allowed(1, 0, true), "copying out of a locked layer is fine");
+        assert!(!p.drop_allowed(1, 0, false), "moving out of it is not");
     }
 }

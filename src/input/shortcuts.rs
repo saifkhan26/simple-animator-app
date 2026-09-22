@@ -66,6 +66,9 @@ pub enum Action {
     SelectionPaste,
     SelectionDelete,
     SelectionDeselect,
+    // Timeline tracks: the drawings selected there.
+    TrackClear,
+    TrackCloseGap,
     SaveProject,
     SaveProjectAs,
     OpenProject,
@@ -132,6 +135,8 @@ impl Action {
         Action::SelectionPaste,
         Action::SelectionDelete,
         Action::SelectionDeselect,
+        Action::TrackClear,
+        Action::TrackCloseGap,
         Action::SaveProject,
         Action::SaveProjectAs,
         Action::OpenProject,
@@ -196,6 +201,8 @@ impl Action {
             Action::SelectionPaste => "Selection: paste",
             Action::SelectionDelete => "Selection: delete",
             Action::SelectionDeselect => "Selection: deselect",
+            Action::TrackClear => "Timeline: delete drawings (leave blank)",
+            Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
             Action::SaveProject => "Save project",
             Action::SaveProjectAs => "Save project as…",
             Action::OpenProject => "Open project",
@@ -446,6 +453,10 @@ impl Default for ShortcutMap {
         b.insert(Action::SelectionPaste, KeyCombo::ctrl(K::V));
         b.insert(Action::SelectionDelete, KeyCombo::plain(K::Delete));
         b.insert(Action::SelectionDeselect, KeyCombo::ctrl(K::D));
+        // Delete shares its key with the pixel selection's erase; a live pixel
+        // selection claims the press (see the dispatch loop in `app`).
+        b.insert(Action::TrackClear, KeyCombo::plain(K::Delete));
+        b.insert(Action::TrackCloseGap, KeyCombo::ctrl(K::Delete));
         // The drawing clipboard moves a whole cell between frames or layers;
         // Alt keeps it clear of the pixel selection above.
         b.insert(Action::CellCut, KeyCombo::alt(K::X));

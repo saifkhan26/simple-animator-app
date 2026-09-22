@@ -201,6 +201,14 @@ mod tests {
         assert_eq!(eval("22/4", 0.0), Some(5.5));
     }
 
+    /// The layer canvas size fields: triple a 4K width, either way round.
+    #[test]
+    fn sizes_scale_from_the_current_value_or_from_scratch() {
+        assert_eq!(eval("*3", 3840.0), Some(11520.0));
+        assert_eq!(eval("3840*3", 1920.0), Some(11520.0));
+        assert_eq!(eval("(1920+64)*2", 0.0), Some(3968.0));
+    }
+
     #[test]
     fn junk_is_rejected_so_the_field_keeps_its_value() {
         for bad in [

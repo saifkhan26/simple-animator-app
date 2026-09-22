@@ -1,6 +1,6 @@
 //! Top-level application state. Wires project (timeline + layers), tools, UI.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -13,7 +13,7 @@ use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 use crate::doc::camera::{Camera, Ease};
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
-use crate::doc::project::Project;
+use crate::doc::project::{Block, Project};
 use crate::doc::transform::Transform;
 use crate::input::pointer::PointerSample;
 use crate::input::shortcuts::{self, Action, ShortcutMap};
@@ -220,6 +220,9 @@ struct UiPrefs {
     /// Pinned colour swatches. A workspace preference, not project data: a
     /// palette follows the artist between files.
     palette: Vec<[u8; 3]>,
+    /// Frame column width in the timeline tracks — how zoomed in the artist
+    /// likes to work.
+    track_frame_w: f32,
 }
 
 /// The built-in per-tool brushes.
@@ -266,8 +269,77 @@ impl Default for UiPrefs {
             smoothing: SmoothingOptions::default(),
             tool_brushes: None,
             palette: Vec::new(),
+            track_frame_w: crate::ui::tracks::DEFAULT_FRAME_W,
         }
     }
+}
+
+/// What a cell's GPU texture is missing.
+///
+/// A rect, not a flag: on a layer widened to 3× a 4K frame each cell is
+/// ~100 MB, and re-uploading all of it after every stroke — when the stroke
+/// touched a few hundred pixels — was the hitch at pen-up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Dirty {
+    Clean,
+    /// Only this region changed since the last upload.
+    Rect(DirtyRect),
+    /// Upload the whole cell.
+    Full,
+}
+
+impl Dirty {
+    /// This region with `more` added to it.
+    pub fn with(self, more: Dirty) -> Dirty {
+        match (self, more) {
+            (Dirty::Full, _) | (_, Dirty::Full) => Dirty::Full,
+            (Dirty::Clean, d) | (d, Dirty::Clean) => d,
+            (Dirty::Rect(a), Dirty::Rect(b)) => Dirty::Rect(union_rect(Some(a), b)),
+        }
+    }
+}
+
+/// GPU memory cell and ghost textures may hold together before the least
+/// recently shown are dropped. Unbounded, a long playback of a big layer kept
+/// every cell resident until the driver started paging.
+const TEXTURE_BUDGET: usize = 1536 * 1024 * 1024;
+
+/// Longest side of an onion ghost's texture. A ghost is a faint silhouette, so
+/// a smaller texture doesn't show — and on a 3×-wide 4K layer it is ~30× less
+/// to build and upload than the cell it comes from.
+const GHOST_MAX_SIDE: u32 = 2048;
+
+/// Seconds the playhead rests before a ghost that isn't built yet gets built.
+const GHOST_REST: f64 = 0.12;
+
+/// One resident texture, for the budget.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TexEntry {
+    ghost: bool,
+    id: CellId,
+    /// Last sync it was on screen.
+    used: u64,
+    bytes: usize,
+}
+
+/// Which textures to drop so the rest fit in `budget` bytes: least recently
+/// shown first, and never one shown at `now` — it's on screen this frame.
+fn evictions(entries: &[TexEntry], budget: usize, now: u64) -> Vec<TexEntry> {
+    let mut total: usize = entries.iter().map(|e| e.bytes).sum();
+    if total <= budget {
+        return Vec::new();
+    }
+    let mut order: Vec<TexEntry> = entries.iter().copied().filter(|e| e.used < now).collect();
+    order.sort_by_key(|e| e.used);
+    let mut out = Vec::new();
+    for e in order {
+        if total <= budget {
+            break;
+        }
+        total -= e.bytes;
+        out.push(e);
+    }
+    out
 }
 
 /// The tool panels (each rendered as a floating window).
@@ -370,8 +442,17 @@ pub struct AppState {
 
     /// GPU texture handle per CellId, lazily created.
     pub cell_textures: HashMap<CellId, TextureHandle>,
-    /// Per-CellId dirty flag — re-upload on next sync.
-    pub cell_dirty: HashMap<CellId, bool>,
+    /// What each cell's texture is missing: nothing, one rect, or the lot.
+    pub cell_dirty: HashMap<CellId, Dirty>,
+    /// Sync counter, and the last sync each texture was on screen — what the
+    /// texture budget evicts by.
+    sync_frame: u64,
+    cell_tex_used: HashMap<CellId, u64>,
+    ghost_tex_used: HashMap<CellId, u64>,
+    /// Frame the playhead sat on at the last sync, and since when (egui time).
+    /// A ghost not built yet waits for the playhead to rest, so a scrub
+    /// doesn't build one for every frame it passes.
+    playhead_rest: (usize, f64),
     /// Colorized onion ghosts: one silhouette texture per ghosted cell, with
     /// the tint it was built from so a tint change in the panel rebuilds it.
     /// Separate from `cell_textures` because the ghost replaces the artwork's
@@ -400,6 +481,28 @@ pub struct AppState {
     /// as a `Canvas` rather than a `CellId` so it survives the undo of the cut
     /// that produced it.
     pub cell_clip: Option<Canvas>,
+    /// Drawings selected in the timeline tracks, as (layer, key frame).
+    /// Session-only, and dropped by any structural edit the tracks did not
+    /// make themselves — keys move, and a stale entry would select whatever
+    /// slid into its place.
+    pub track_sel: BTreeSet<(usize, usize)>,
+    /// Where the last plain click in the tracks landed, as (layer, frame):
+    /// the corner a Shift-click selects a rectangle from.
+    pub track_anchor: Option<(usize, usize)>,
+    /// In-flight drag in the tracks, or `None`.
+    pub track_drag: Option<crate::ui::tracks::TrackDrag>,
+    /// Track scroll offset in points: x across frames, y down the layers.
+    pub track_scroll: egui::Vec2,
+    /// Width of one frame column in the tracks, in points. Ctrl+wheel.
+    pub track_frame_w: f32,
+    /// The N in the tracks' "On N" timing menu.
+    pub track_timing_n: usize,
+    /// Whether a cell has no painted pixel, per cell id. A scan is a full pass
+    /// over the buffer, so it is cached, and dropped only when pixels change
+    /// (`mark_dirty`) — a structural edit moves ids around but never pixels.
+    blank_cache: HashMap<CellId, bool>,
+    /// Blank scans still allowed this frame; see `cell_is_blank`.
+    blank_scans_left: u32,
     /// Floating lasso selection, if any. Bound to one cell: changing frame or
     /// layer commits it first.
     pub selection: Option<Selection>,
@@ -491,7 +594,12 @@ pub struct AppState {
     /// Full-pixel snapshot of the cell before the in-flight stroke started.
     /// Used to extract the `before` slice for an undo command when the stroke
     /// finishes.
-    stroke_pre_pixels: Option<Vec<u8>>,
+    stroke_pre_pixels: Vec<u8>,
+    /// Whether `stroke_pre_pixels` holds the current edit's snapshot. A flag
+    /// beside a kept buffer rather than an `Option<Vec>`: the buffer is reused,
+    /// because allocating a fresh 100 MB one at every pen-down on a big layer
+    /// was a hitch of its own.
+    stroke_pre_live: bool,
     /// Reusable per-stroke coverage workspace for the ribbon rasterizer.
     stroke_ws: StrokeWorkspace,
     /// Canvas region updated by stroke flushes since the last texture sync;
@@ -630,12 +738,6 @@ pub struct AppState {
 impl AppState {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         crate::ui::theme::install(&cc.egui_ctx);
-
-        let project = Project::new(1280, 720, 24.0);
-        let mut cell_dirty = HashMap::new();
-        for id in 0..project.cells.len() {
-            cell_dirty.insert(id, true);
-        }
         // GPU max texture size — cap imported cells to this. Fall back to the
         // 8192 wgpu downlevel guarantee if the render state isn't available.
         let max_tex = cc
@@ -648,6 +750,23 @@ impl AppState {
             .storage
             .and_then(|s| eframe::get_value(s, UI_PREFS_KEY))
             .unwrap_or_default();
+        Self::with_prefs(prefs, max_tex)
+    }
+
+    /// A state with default preferences and no window, for driving UI code
+    /// from tests. `CreationContext` can't be built outside eframe.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        Self::with_prefs(UiPrefs::default(), 8192)
+    }
+
+    /// Everything `new` does that doesn't need the window.
+    fn with_prefs(prefs: UiPrefs, max_tex: u32) -> Self {
+        let project = Project::new(1280, 720, 24.0);
+        let mut cell_dirty = HashMap::new();
+        for id in 0..project.cells.len() {
+            cell_dirty.insert(id, Dirty::Full);
+        }
         Self {
             project,
             project_path: None,
@@ -659,11 +778,23 @@ impl AppState {
             ghost_stale: HashSet::new(),
             retired_textures: Vec::new(),
             cell_dirty,
+            sync_frame: 0,
+            cell_tex_used: HashMap::new(),
+            ghost_tex_used: HashMap::new(),
+            playhead_rest: (usize::MAX, 0.0),
             tool: ActiveTool::Pencil,
             brush: restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()]
                 .clone(),
             palette: prefs.palette,
             cell_clip: None,
+            track_sel: BTreeSet::new(),
+            track_anchor: None,
+            track_drag: None,
+            track_scroll: egui::Vec2::ZERO,
+            track_frame_w: prefs.track_frame_w,
+            track_timing_n: 2,
+            blank_cache: HashMap::new(),
+            blank_scans_left: 0,
             selection: None,
             sel_drag: None,
             pixel_clip: None,
@@ -696,7 +827,8 @@ impl AppState {
             show_checker: false,
             pen: PenInput::new(),
             history: History::default(),
-            stroke_pre_pixels: None,
+            stroke_pre_pixels: Vec::new(),
+            stroke_pre_live: false,
             stroke_ws: StrokeWorkspace::new(),
             preview_upload_rect: None,
             shortcuts: shortcuts::load(),
@@ -766,8 +898,9 @@ impl AppState {
         self.retire_cell_textures();
         self.retire_all_ghosts();
         self.cell_dirty.clear();
+        self.clear_track_state();
         for id in 0..self.project.cells.len() {
-            self.cell_dirty.insert(id, true);
+            self.cell_dirty.insert(id, Dirty::Full);
         }
         self.tool = ActiveTool::Pencil;
         self.brush = BrushSettings::default_pencil();
@@ -797,7 +930,7 @@ impl AppState {
         self.bg_color = [0.12, 0.12, 0.13];
         self.show_checker = false;
         self.history = History::default();
-        self.stroke_pre_pixels = None;
+        self.stroke_pre_live = false;
         self.preview_upload_rect = None;
         self.rebinding = None;
         self.layer_rename = None;
@@ -886,8 +1019,18 @@ impl AppState {
         }
     }
 
+    /// Note that cell `id`'s pixels changed. The region comes from the canvas
+    /// itself: every pixel edit resets `Canvas::dirty` when it starts and
+    /// grows it as it writes, so it is exactly what this edit touched. A canvas
+    /// without one is taken as changed everywhere.
     pub fn mark_dirty(&mut self, id: CellId) {
-        self.cell_dirty.insert(id, true);
+        let region = match self.project.cell(id).and_then(|c| c.dirty) {
+            Some(r) => Dirty::Rect(r),
+            None => Dirty::Full,
+        };
+        let pending = self.cell_dirty.get(&id).copied().unwrap_or(Dirty::Full);
+        self.cell_dirty.insert(id, pending.with(region));
+        self.blank_cache.remove(&id);
         // The ghost is baked from these pixels, so it needs rebuilding — but
         // re-uploaded in place, never freed. See `ghost_stale`.
         if self.ghost_textures.contains_key(&id) {
@@ -909,6 +1052,7 @@ impl AppState {
     fn retire_cell_textures(&mut self) {
         self.retired_textures
             .extend(self.cell_textures.drain().map(|(_, tex)| tex));
+        self.cell_tex_used.clear();
     }
 
     /// Park every ghost for release on the next sync. See `retired_textures`.
@@ -916,15 +1060,21 @@ impl AppState {
         self.ghost_stale.clear();
         self.retired_textures
             .extend(self.ghost_textures.drain().map(|(_, (_, tex))| tex));
+        self.ghost_tex_used.clear();
     }
 
-    /// Mark every cell for re-upload (used after structural undo/redo, where
-    /// the whole timeline may have shifted).
-    fn mark_all_dirty(&mut self) {
-        for id in 0..self.project.cells.len() {
-            self.cell_dirty.insert(id, true);
+    /// Re-upload what an undo or redo changed, and nothing else. An edit that
+    /// only moved the timeline changed no pixels, so it re-uploads nothing.
+    fn apply_touched(&mut self, touched: Option<undo::Touched>) {
+        match touched {
+            Some(undo::Touched::Cell(id)) => self.mark_dirty(id),
+            Some(undo::Touched::Cells(ids)) => {
+                for id in ids {
+                    self.mark_dirty(id);
+                }
+            }
+            Some(undo::Touched::Structure) | None => {}
         }
-        self.retire_all_ghosts();
     }
 
     /// Frames moved or inserted by one step action, from the user's step size.
@@ -946,6 +1096,9 @@ impl AppState {
     /// All other structural edits leave the cell pool intact, so a cheap
     /// `TimelineState` snapshot is enough.
     pub fn structural_edit(&mut self, capture_cells: bool, edit: impl FnOnce(&mut Project)) {
+        // Keys may move under the track selection; the track edits that want
+        // one re-select after this returns.
+        self.track_sel.clear();
         let before = undo::TimelineState::capture(&self.project);
         let cells_before: Vec<Vec<u8>> = if capture_cells {
             self.project.cells.iter().map(|c| c.pixels.clone()).collect()
@@ -965,12 +1118,18 @@ impl AppState {
             })
             .collect();
 
+        // Only cells whose pixels this edit actually changed need a new
+        // texture. The rest are exactly as uploaded — the timeline around them
+        // moved, not them.
+        let changed: Vec<CellId> = cell_pixels.iter().map(|d| d.cell).collect();
         self.history.push(undo::Command::Structural {
             before,
             after,
             cell_pixels,
         });
-        self.mark_all_dirty();
+        for id in changed {
+            self.mark_dirty(id);
+        }
     }
 
     /// Insert `cells` as a brand-new layer *below* the active layer, recorded as
@@ -1639,6 +1798,9 @@ impl AppState {
         if self.active_layer_locked() {
             return;
         }
+        // Each cell is one GPU texture; a side past the device limit can't be
+        // uploaded at all.
+        let (w, h) = (w.clamp(1, self.max_tex), h.clamp(1, self.max_tex));
         let layer = self.project.current_layer;
         let before_size = self.active_layer_cell_size();
         if (w, h) == before_size {
@@ -1657,7 +1819,10 @@ impl AppState {
             after_size: (w, h),
             before,
         });
-        self.mark_all_dirty();
+        // Every cell on this layer was re-padded; no other layer's was.
+        for id in self.project.layer_cell_ids(layer) {
+            self.mark_dirty(id);
+        }
     }
 
     // --- Tracker / stabilization ---
@@ -2006,52 +2171,38 @@ impl AppState {
     /// uploaded on the next sync.
     fn ensure_cell_tracking(&mut self) {
         for id in 0..self.project.cells.len() {
-            self.cell_dirty.entry(id).or_insert(true);
+            self.cell_dirty.entry(id).or_insert(Dirty::Full);
         }
     }
 
-    /// Upload any dirty cells used by the composite this frame
-    /// (current + onion neighbours, across all visible layers).
-    /// During active strokes the full-buffer upload is skipped entirely so that
-    /// high-resolution canvases (4K+) don't lag; visual feedback is provided
-    /// via egui shape overlay in `paint_canvas`. The texture is refreshed on
-    /// the first frame after the stroke ends.
+    /// Upload what the canvas is about to draw and doesn't have yet: each
+    /// visible layer's cell on this frame, and the active layer's onion ghosts.
+    ///
+    /// Uploads are as small as the change. A cell that only had a stroke added
+    /// sends that stroke's rect; a whole cell goes up only when it has no
+    /// texture yet (or the texture's size is stale). During a stroke, only the
+    /// region flushed since the last frame goes up — the full refresh the pen-up
+    /// used to trigger on a big layer was the hitch.
     pub fn sync_textures(&mut self, ctx: &egui::Context) {
         // Release last frame's discarded ghosts here, before anything paints
         // this frame: the meshes that referenced them were submitted a frame
         // ago, so freeing now can't invalidate a texture mid-submit.
         self.retired_textures.clear();
         self.ensure_cell_tracking();
+        self.sync_frame += 1;
+        let now = self.sync_frame;
 
         // During an active stroke, stream only the flushed sub-rect to the
         // GPU as a partial texture update — exact WYSIWYG feedback without
-        // full-buffer uploads on large canvases. A full re-upload happens on
-        // the first frame after the stroke ends (cell marked dirty).
+        // full-buffer uploads on large canvases.
         if self.stroke.is_some() {
             let Some(target) = self.stroke_target else {
                 return;
             };
             if self.cell_textures.contains_key(&target) {
-                if let (Some(rect), Some(c)) =
-                    (self.preview_upload_rect.take(), self.project.cell(target))
-                {
-                    let w = rect.max_x.saturating_sub(rect.min_x) as usize;
-                    let h = rect.max_y.saturating_sub(rect.min_y) as usize;
-                    if w > 0 && h > 0 {
-                        let mut buf = Vec::with_capacity(w * h * 4);
-                        for y in rect.min_y..rect.max_y {
-                            let row = ((y * c.width + rect.min_x) * 4) as usize;
-                            buf.extend_from_slice(&c.pixels[row..row + w * 4]);
-                        }
-                        let img = premultiplied_image([w, h], &buf);
-                        if let Some(tex) = self.cell_textures.get_mut(&target) {
-                            tex.set_partial(
-                                [rect.min_x as usize, rect.min_y as usize],
-                                img,
-                                TextureOptions::LINEAR,
-                            );
-                        }
-                    }
+                self.cell_tex_used.insert(target, now);
+                if let Some(rect) = self.preview_upload_rect.take() {
+                    self.upload_rect(target, rect);
                 }
                 return;
             }
@@ -2060,9 +2211,10 @@ impl AppState {
             self.preview_upload_rect = None;
         }
 
+        // Only what's drawn. Onion ghosts are drawn from their own silhouette
+        // textures, so a ghosted cell's plain texture isn't needed at all.
         let mut needed: Vec<CellId> = Vec::new();
         let cur = self.project.current_frame;
-
         for layer in &self.project.layers {
             if !layer.visible {
                 continue;
@@ -2074,51 +2226,34 @@ impl AppState {
             }
         }
 
-        // Onion ghosts come from the same walker the canvas draws with, so the
-        // uploaded set can never drift from what gets painted — with drawing
-        // stepping the ghosts can sit well outside `cur ± prev/next`.
-        let ghosts: Vec<(CellId, [u8; 3])> = [OnionDirection::Prev, OnionDirection::Next]
-            .into_iter()
-            .flat_map(|dir| {
-                let tint = self.onion.tint_rgb(dir);
-                self.onion_steps(dir)
-                    .into_iter()
-                    .map(move |s| (s.cell, tint))
-            })
-            .collect();
-        for (id, _) in &ghosts {
-            if !needed.contains(id) {
-                needed.push(*id);
-            }
-        }
-
         for id in needed {
-            let dirty = self.cell_dirty.get(&id).copied().unwrap_or(true);
-            let has_tex = self.cell_textures.contains_key(&id);
-            if !dirty && has_tex {
-                continue;
-            }
+            self.cell_tex_used.insert(id, now);
             let Some(c) = self.project.cell(id) else {
                 continue;
             };
             let dims = [c.width as usize, c.height as usize];
-            let image = premultiplied_image(dims, &c.pixels);
-            // Expanding a layer's canvas resizes cells under their textures, so
-            // only reuse a handle whose dimensions still match; otherwise
-            // allocate a fresh one.
-            let reusable = self
-                .cell_textures
-                .get(&id)
-                .is_some_and(|t| t.size() == dims);
-            if reusable {
-                if let Some(tex) = self.cell_textures.get_mut(&id) {
-                    tex.set(image, TextureOptions::LINEAR);
+            // Expanding a layer's canvas resizes cells under their textures,
+            // so only a handle whose dimensions still match can take a partial
+            // update or be reused.
+            let fits = self.cell_textures.get(&id).is_some_and(|t| t.size() == dims);
+            match (self.cell_dirty.get(&id).copied().unwrap_or(Dirty::Full), fits) {
+                (Dirty::Clean, true) => continue,
+                (Dirty::Rect(r), true) => self.upload_rect(id, r),
+                (_, true) => {
+                    let image = premultiplied_image(dims, &c.pixels);
+                    if let Some(tex) = self.cell_textures.get_mut(&id) {
+                        tex.set(image, TextureOptions::LINEAR);
+                    }
                 }
-            } else {
-                let tex = ctx.load_texture(format!("cell_{id}"), image, TextureOptions::LINEAR);
-                self.cell_textures.insert(id, tex);
+                (_, false) => {
+                    let image = premultiplied_image(dims, &c.pixels);
+                    let tex = ctx.load_texture(format!("cell_{id}"), image, TextureOptions::LINEAR);
+                    if let Some(old) = self.cell_textures.insert(id, tex) {
+                        self.retired_textures.push(old);
+                    }
+                }
             }
-            self.cell_dirty.insert(id, false);
+            self.cell_dirty.insert(id, Dirty::Clean);
         }
 
         // The floating selection's own texture. Rebuilt only when the pixels
@@ -2150,22 +2285,61 @@ impl AppState {
             _ => {}
         }
 
-        // Ghost silhouettes for the onion cells. Bounded to the ghosted cells:
-        // each one is a second full-size texture, which matters on 4K canvases.
-        let stale: Vec<CellId> = self
-            .ghost_textures
-            .keys()
-            .copied()
-            .filter(|id| !ghosts.iter().any(|(g, _)| g == id))
-            .collect();
-        for id in stale {
-            self.retire_ghost(id);
+        self.sync_ghosts(ctx, now);
+        self.enforce_texture_budget();
+    }
+
+    /// Upload just `rect` of cell `id` into its existing texture.
+    fn upload_rect(&mut self, id: CellId, rect: DirtyRect) {
+        let Some(c) = self.project.cell(id) else {
+            return;
+        };
+        let (x0, y0) = (rect.min_x.min(c.width) as usize, rect.min_y.min(c.height) as usize);
+        let (x1, y1) = (rect.max_x.min(c.width) as usize, rect.max_y.min(c.height) as usize);
+        if x1 <= x0 || y1 <= y0 {
+            return;
         }
+        let (w, h, stride) = (x1 - x0, y1 - y0, c.width as usize);
+        let mut buf = Vec::with_capacity(w * h * 4);
+        for y in y0..y1 {
+            let row = (y * stride + x0) * 4;
+            buf.extend_from_slice(&c.pixels[row..row + w * 4]);
+        }
+        let image = premultiplied_image([w, h], &buf);
+        if let Some(tex) = self.cell_textures.get_mut(&id) {
+            tex.set_partial([x0, y0], image, TextureOptions::LINEAR);
+        }
+    }
+
+    /// Onion ghosts: built small (see `GHOST_MAX_SIDE`) and kept after they
+    /// leave the onion range, within the texture budget, so stepping back and
+    /// forth reuses them. One that isn't built yet waits until the playhead
+    /// has rested for `GHOST_REST`, so a scrub past a hundred frames doesn't
+    /// build a hundred ghosts on the way.
+    fn sync_ghosts(&mut self, ctx: &egui::Context, now: u64) {
+        let ghosts: Vec<(CellId, [u8; 3])> = [OnionDirection::Prev, OnionDirection::Next]
+            .into_iter()
+            .flat_map(|dir| {
+                let tint = self.onion.tint_rgb(dir);
+                self.onion_steps(dir)
+                    .into_iter()
+                    .map(move |s| (s.cell, tint))
+            })
+            .collect();
+
+        let time = ctx.input(|i| i.time);
+        let cur = self.project.current_frame;
+        if self.playhead_rest.0 != cur {
+            self.playhead_rest = (cur, time);
+        }
+        let rested = time - self.playhead_rest.1;
+
         for (id, tint) in ghosts {
-            let dims = match self.project.cell(id) {
-                Some(c) => [c.width as usize, c.height as usize],
-                None => continue,
+            self.ghost_tex_used.insert(id, now);
+            let Some(c) = self.project.cell(id) else {
+                continue;
             };
+            let dims = ghost_dims(c.width, c.height);
             let fresh = !self.ghost_stale.contains(&id)
                 && self
                     .ghost_textures
@@ -2174,10 +2348,11 @@ impl AppState {
             if fresh {
                 continue;
             }
-            let Some(c) = self.project.cell(id) else {
+            if !self.ghost_textures.contains_key(&id) && rested < GHOST_REST {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(GHOST_REST - rested));
                 continue;
-            };
-            let image = ghost_image(dims, &c.pixels, tint);
+            }
+            let image = ghost_image(c.width, c.height, &c.pixels, tint);
             // Same reuse rule as the cell textures: keep the handle when the
             // dimensions still match — re-uploading into it avoids freeing a
             // texture the last frame may still have queued a mesh against.
@@ -2190,12 +2365,45 @@ impl AppState {
                     tex.set(image, TextureOptions::LINEAR);
                     *t = tint;
                 }
-                self.ghost_stale.remove(&id);
             } else {
                 self.retire_ghost(id);
                 let tex = ctx.load_texture(format!("ghost{id}"), image, TextureOptions::LINEAR);
                 self.ghost_textures.insert(id, (tint, tex));
-                self.ghost_stale.remove(&id);
+            }
+            self.ghost_stale.remove(&id);
+        }
+    }
+
+    /// Drop the least recently shown cell and ghost textures until what's
+    /// resident fits `TEXTURE_BUDGET`. Nothing on screen this sync is
+    /// touched. A dropped cell re-uploads in full the next time it's shown.
+    fn enforce_texture_budget(&mut self) {
+        let bytes = |t: &TextureHandle| t.size()[0] * t.size()[1] * 4;
+        let mut entries: Vec<TexEntry> = Vec::new();
+        for (&id, tex) in &self.cell_textures {
+            entries.push(TexEntry {
+                ghost: false,
+                id,
+                used: self.cell_tex_used.get(&id).copied().unwrap_or(0),
+                bytes: bytes(tex),
+            });
+        }
+        for (&id, (_, tex)) in &self.ghost_textures {
+            entries.push(TexEntry {
+                ghost: true,
+                id,
+                used: self.ghost_tex_used.get(&id).copied().unwrap_or(0),
+                bytes: bytes(tex),
+            });
+        }
+        for e in evictions(&entries, TEXTURE_BUDGET, self.sync_frame) {
+            if e.ghost {
+                self.retire_ghost(e.id);
+                self.ghost_tex_used.remove(&e.id);
+            } else if let Some(tex) = self.cell_textures.remove(&e.id) {
+                self.retired_textures.push(tex);
+                self.cell_tex_used.remove(&e.id);
+                self.cell_dirty.insert(e.id, Dirty::Full);
             }
         }
     }
@@ -2250,7 +2458,7 @@ impl AppState {
         self.stroke_target = Some(target);
 
         // Snapshot pre-stroke state so undo can roll back the dirty sub-rect.
-        self.stroke_pre_pixels = Some(self.project.cells[target].pixels.clone());
+        self.snapshot_pre(target);
         self.project.cells[target].dirty = None;
 
         if self.tool == ActiveTool::Fill {
@@ -2276,6 +2484,7 @@ impl AppState {
             }
             self.commit_undo(target);
             self.mark_dirty(target);
+            self.painted(target);
             self.stroke = None;
             self.stroke_target = None;
             return;
@@ -2298,7 +2507,7 @@ impl AppState {
                     pose,
                 });
                 self.stroke = None;
-                self.stroke_pre_pixels = None;
+                self.stroke_pre_live = false;
                 return;
             }
             self.commit_selection();
@@ -2306,7 +2515,7 @@ impl AppState {
             // pointer-up. Preview is drawn by egui shapes in `paint_canvas`.
             self.lasso = Some(vec![(sample.x, sample.y)]);
             self.stroke = None;
-            self.stroke_pre_pixels = None;
+            self.stroke_pre_live = false;
             return;
         }
 
@@ -2337,7 +2546,7 @@ impl AppState {
             StrokeBuilder::new(brush, self.tool, self.cell_view_scale(), self.smoothing);
         builder.push(sample);
         if let (Some(pre), Some(c)) = (
-            self.stroke_pre_pixels.as_deref(),
+            self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
             self.project.cell_mut(target),
         ) {
             if let Some(r) = builder.flush(c, &mut self.stroke_ws, pre) {
@@ -2377,7 +2586,7 @@ impl AppState {
         };
         builder.push(sample);
         if let (Some(pre), Some(c)) = (
-            self.stroke_pre_pixels.as_deref(),
+            self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
             self.project.cell_mut(target),
         ) {
             if let Some(r) = builder.flush(c, &mut self.stroke_ws, pre) {
@@ -2396,14 +2605,14 @@ impl AppState {
             self.stroke = None;
             self.shape_drag = None;
             self.lasso = None;
-            self.stroke_pre_pixels = None;
+            self.stroke_pre_live = false;
             self.preview_upload_rect = None;
             return;
         };
         if let Some(path) = self.lasso.take() {
             // The lasso now *selects* rather than erasing outright — Delete on
             // the selection is the erase.
-            self.stroke_pre_pixels = None;
+            self.stroke_pre_live = false;
             self.preview_upload_rect = None;
             self.begin_selection(target, path);
             return;
@@ -2418,7 +2627,7 @@ impl AppState {
             };
             self.stroke_ws.begin(cw, ch, &brush);
             if let (Some(pre), Some(c)) = (
-                self.stroke_pre_pixels.as_deref(),
+                self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
                 self.project.cell_mut(target),
             ) {
                 crate::tools::shape::rasterize(
@@ -2432,27 +2641,43 @@ impl AppState {
                 );
             }
             self.mark_dirty(target);
+            self.painted(target);
         } else if let Some(mut builder) = self.stroke.take() {
             if let (Some(pre), Some(c)) = (
-                self.stroke_pre_pixels.as_deref(),
+                self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
                 self.project.cell_mut(target),
             ) {
                 builder.finish(c, &mut self.stroke_ws, pre);
             }
             self.mark_dirty(target);
+            if self.tool != ActiveTool::Eraser {
+                self.painted(target);
+            }
         }
-        // Any pending partial upload is superseded by the full re-upload the
-        // dirty flag triggers now that the stroke ended.
+        // Any pending partial upload is superseded by the stroke's own rect,
+        // which the dirty mark above uploads now that the stroke ended.
         self.preview_upload_rect = None;
         self.commit_undo(target);
+    }
+
+    /// Snapshot `cell`'s pixels as they are before an edit, for the stroke
+    /// compositor and for undo. Into the kept buffer: `extend_from_slice` into
+    /// capacity already there is a plain copy, with no allocation and no page
+    /// faults to pay at pen-down.
+    fn snapshot_pre(&mut self, cell: CellId) {
+        self.stroke_pre_pixels.clear();
+        self.stroke_pre_pixels
+            .extend_from_slice(&self.project.cells[cell].pixels);
+        self.stroke_pre_live = true;
     }
 
     /// Push a PixelPatch covering the dirty rect accumulated since the last
     /// `stroke_pre_pixels` snapshot.
     fn commit_undo(&mut self, cell: CellId) {
-        let Some(pre) = self.stroke_pre_pixels.take() else {
+        if !std::mem::take(&mut self.stroke_pre_live) {
             return;
-        };
+        }
+        let pre = &self.stroke_pre_pixels;
         let canvas = &self.project.cells[cell];
         let Some(rect) = canvas.dirty else {
             return;
@@ -2463,7 +2688,7 @@ impl AppState {
             return;
         }
 
-        let before = subrect_from_buffer(&pre, canvas.width, rect.min_x, rect.min_y, w, h);
+        let before = subrect_from_buffer(pre, canvas.width, rect.min_x, rect.min_y, w, h);
         let after = undo::snapshot_subrect(canvas, rect.min_x, rect.min_y, w, h);
 
         // Skip recording no-op strokes (before == after).
@@ -2556,6 +2781,159 @@ impl AppState {
         });
     }
 
+    // --- Timeline tracks ---
+
+    /// Forget everything the tracks hold about the project: selection, drag,
+    /// and which cells are blank. For when the project itself is replaced.
+    fn clear_track_state(&mut self) {
+        self.track_sel.clear();
+        self.track_anchor = None;
+        self.track_drag = None;
+        self.blank_cache.clear();
+    }
+
+    /// The track selection as (layer, key frame) pairs, in sheet order.
+    pub fn track_selection(&self) -> Vec<(usize, usize)> {
+        self.track_sel.iter().copied().collect()
+    }
+
+    /// Scans `cell_is_blank` may start in one frame. A blank cell has to be
+    /// read to the end, and one on a 3×-wide 4K layer is ~100 MB.
+    const BLANK_SCANS_PER_FRAME: u32 = 1;
+
+    /// Whether cell `id` has no painted pixel. `None` when that isn't known
+    /// yet and this frame's scans are spent: the caller shows it as a drawing
+    /// and asks for another frame.
+    ///
+    /// Alpha only — an erased pixel can keep its colour at zero coverage.
+    pub fn cell_is_blank(&mut self, id: CellId) -> Option<bool> {
+        if let Some(&blank) = self.blank_cache.get(&id) {
+            return Some(blank);
+        }
+        if self.blank_scans_left == 0 {
+            return None;
+        }
+        self.blank_scans_left -= 1;
+        let blank = self.project.cell(id).map_or(true, |c| no_alpha(&c.pixels));
+        self.blank_cache.insert(id, blank);
+        Some(blank)
+    }
+
+    /// Record that a paint edit just laid coverage on `id`, so the tracks know
+    /// it isn't blank without reading the cell back. Only for edits that add
+    /// paint: an eraser or a delete can empty a cell, and those leave the
+    /// answer to a scan.
+    fn painted(&mut self, id: CellId) {
+        if self.project.cell(id).is_some_and(|c| c.dirty.is_some()) {
+            self.blank_cache.insert(id, false);
+        }
+    }
+
+    /// Whether every one of `layers` may be edited.
+    fn layers_editable(&self, layers: impl IntoIterator<Item = usize>) -> bool {
+        layers.into_iter().all(|i| {
+            self.project
+                .layers
+                .get(i)
+                .is_some_and(|l| !l.locked && !l.reference)
+        })
+    }
+
+    /// Run a track edit as one undo step, then select what it hands back.
+    fn track_edit(&mut self, edit: impl FnOnce(&mut Project) -> Vec<(usize, usize)>) {
+        // Same as a paste: floating pixels belong to a cell that may be about
+        // to move.
+        self.commit_selection();
+        let mut selected = Vec::new();
+        self.structural_edit(false, |p| selected = edit(p));
+        self.track_sel = selected.into_iter().collect();
+    }
+
+    /// Drop the selected drawings `dl` layers and `df` frames away, moving or
+    /// copying them, and put the cursor on `cursor` (layer, frame).
+    pub fn move_track_selection(&mut self, dl: isize, df: isize, copy: bool, cursor: (usize, usize)) {
+        let starts = self.track_selection();
+        if !self.project.can_move_blocks(&starts, dl, df, copy) {
+            return;
+        }
+        self.track_edit(|p| {
+            let landed = p.move_blocks(&starts, dl, df, copy).unwrap_or_default();
+            // Inside the edit, so undo puts the cursor back too.
+            p.current_layer = cursor.0.min(p.layers.len().saturating_sub(1));
+            p.goto(cursor.1);
+            landed
+        });
+    }
+
+    /// Hold the drawing `b` for `new_len` frames, sliding the ones after it.
+    pub fn retime_track_block(&mut self, b: Block, new_len: usize) {
+        let old = b.len.unwrap_or(self.project.frame_count.saturating_sub(b.start));
+        if new_len.max(1) == old || !self.layers_editable([b.layer]) {
+            return;
+        }
+        self.track_edit(|p| match p.block_at(b.layer, b.start).filter(|x| x.start == b.start) {
+            Some(b) => {
+                p.retime_block(b, new_len);
+                vec![(b.layer, b.start)]
+            }
+            None => Vec::new(),
+        });
+    }
+
+    /// Put every selected drawing on `n`s.
+    pub fn set_track_timing(&mut self, n: usize) {
+        let starts = self.track_selection();
+        if starts.is_empty() || !self.layers_editable(starts.iter().map(|s| s.0)) {
+            return;
+        }
+        self.track_edit(|p| p.set_timing(&starts, n));
+    }
+
+    /// Delete the selected drawings, leaving their frames blank.
+    pub fn clear_track_selection(&mut self) {
+        let starts = self.track_selection();
+        if starts.is_empty() || !self.layers_editable(starts.iter().map(|s| s.0)) {
+            return;
+        }
+        self.track_edit(|p| p.clear_blocks(&starts));
+    }
+
+    /// Delete the selected drawings and close the gap they leave.
+    pub fn close_track_selection(&mut self) {
+        let starts = self.track_selection();
+        if starts.is_empty() || !self.layers_editable(starts.iter().map(|s| s.0)) {
+            return;
+        }
+        self.track_edit(|p| {
+            p.close_blocks(&starts);
+            Vec::new()
+        });
+    }
+
+    /// Insert `n` held frames on the active layer after the playhead.
+    pub fn insert_layer_frames_here(&mut self, n: usize) {
+        let (layer, frame) = (self.project.current_layer, self.project.current_frame);
+        if !self.layers_editable([layer]) {
+            return;
+        }
+        self.track_edit(|p| {
+            p.insert_layer_frames(layer, frame, n);
+            Vec::new()
+        });
+    }
+
+    /// Remove `n` frames from the active layer, starting at the playhead.
+    pub fn remove_layer_frames_here(&mut self, n: usize) {
+        let (layer, frame) = (self.project.current_layer, self.project.current_frame);
+        if !self.layers_editable([layer]) {
+            return;
+        }
+        self.track_edit(|p| {
+            p.remove_layer_frames(layer, frame, n);
+            Vec::new()
+        });
+    }
+
     fn active_layer_is_reference(&self) -> bool {
         self.project
             .layers
@@ -2586,10 +2964,10 @@ impl AppState {
             return;
         }
         let cell = sel.cell;
-        let Some(canvas) = self.project.cell(cell) else {
+        if self.project.cell(cell).is_none() {
             return;
-        };
-        self.stroke_pre_pixels = Some(canvas.pixels.clone());
+        }
+        self.snapshot_pre(cell);
         if let Some(c) = self.project.cell_mut(cell) {
             c.dirty = None;
             sel.stamp(c);
@@ -2626,10 +3004,10 @@ impl AppState {
             return;
         }
         let cell = sel.cell;
-        let Some(canvas) = self.project.cell(cell) else {
+        if self.project.cell(cell).is_none() {
             return;
-        };
-        self.stroke_pre_pixels = Some(canvas.pixels.clone());
+        }
+        self.snapshot_pre(cell);
         if let Some(c) = self.project.cell_mut(cell) {
             c.dirty = None;
             crate::tools::lasso::erase_masked(c, &sel.mask);
@@ -2741,10 +3119,10 @@ impl AppState {
 
     /// Erase the source region behind a selection and record it, once.
     fn lift_selection_source(&mut self, cell: CellId) {
-        let Some(canvas) = self.project.cell(cell) else {
+        if self.project.cell(cell).is_none() {
             return;
-        };
-        self.stroke_pre_pixels = Some(canvas.pixels.clone());
+        }
+        self.snapshot_pre(cell);
         let mut sel = match self.selection.take() {
             Some(s) => s,
             None => return,
@@ -3078,6 +3456,8 @@ impl AppState {
             }
             Action::SelectionPaste => self.paste_selection(),
             Action::SelectionDelete => self.delete_selection(),
+            Action::TrackClear => self.clear_track_selection(),
+            Action::TrackCloseGap => self.close_track_selection(),
             Action::SelectionDeselect => self.commit_selection(),
             Action::SaveProject => self.save_project(),
             Action::SaveProjectAs => self.save_project_as(),
@@ -3213,14 +3593,15 @@ impl AppState {
         self.retire_cell_textures();
         self.retire_all_ghosts();
         self.cell_dirty.clear();
+        self.clear_track_state();
         for id in 0..self.project.cells.len() {
-            self.cell_dirty.insert(id, true);
+            self.cell_dirty.insert(id, Dirty::Full);
         }
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
         self.lasso = None;
-        self.stroke_pre_pixels = None;
+        self.stroke_pre_live = false;
         self.preview_upload_rect = None;
         self.history = History::default();
         self.view = View::default();
@@ -3238,19 +3619,15 @@ impl AppState {
     }
 
     pub fn undo(&mut self) {
-        match self.history.undo(&mut self.project) {
-            Some(undo::Touched::Cell(id)) => self.mark_dirty(id),
-            Some(undo::Touched::All) => self.mark_all_dirty(),
-            None => {}
-        }
+        self.track_sel.clear();
+        let touched = self.history.undo(&mut self.project);
+        self.apply_touched(touched);
     }
 
     pub fn redo(&mut self) {
-        match self.history.redo(&mut self.project) {
-            Some(undo::Touched::Cell(id)) => self.mark_dirty(id),
-            Some(undo::Touched::All) => self.mark_all_dirty(),
-            None => {}
-        }
+        self.track_sel.clear();
+        let touched = self.history.redo(&mut self.project);
+        self.apply_touched(touched);
     }
 }
 
@@ -3291,6 +3668,7 @@ impl eframe::App for AppState {
                 smoothing: self.smoothing,
                 tool_brushes: Some(self.tool_brushes.to_vec()),
                 palette: self.palette.clone(),
+                track_frame_w: self.track_frame_w,
             },
         );
     }
@@ -3308,6 +3686,7 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Pick up any layer selection made last frame, whatever moved it.
         self.track_layer_change();
+        self.blank_scans_left = Self::BLANK_SCANS_PER_FRAME;
 
         // Resolve any deferred preview-texture free now, before drawing, so the
         // freed textures are never referenced by this frame's paint list.
@@ -3452,8 +3831,23 @@ impl eframe::App for AppState {
             // allowed through so the user can recover panels if focus is stuck.
             if ctx.memory(|m| m.focused()).is_none() {
                 let actions = self.shortcuts.poll_actions(ctx);
+                // Delete is both the pixel selection's erase and the tracks'
+                // delete. Decided once, before either runs: the erase drops
+                // the pixel selection, which would otherwise let the tracks'
+                // delete fire on the same press.
+                let pixel_sel = self.selection.is_some();
                 for a in actions {
+                    if pixel_sel && a == Action::TrackClear {
+                        continue;
+                    }
                     self.dispatch(a);
+                }
+                // Esc backs out of the tracks one step at a time: a drag in
+                // progress first, then the selection.
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                    && self.track_drag.take().is_none()
+                {
+                    self.track_sel.clear();
                 }
                 // Arrow keys nudge a floating selection by a pixel. Not bound
                 // actions: they only mean anything while something is selected,
@@ -3542,29 +3936,83 @@ pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
     ColorImage { size, pixels }
 }
 
-/// Build a `ColorImage` of a cell as a flat silhouette in `tint`: the source
-/// alpha is kept as the shape and the RGB is replaced wholesale.
+/// Box-filter factor that brings a `w`×`h` cell within `GHOST_MAX_SIDE`.
+fn ghost_step(w: u32, h: u32) -> usize {
+    w.max(h).div_ceil(GHOST_MAX_SIDE).max(1) as usize
+}
+
+/// Texture size of the onion ghost for a `w`×`h` cell.
+pub(crate) fn ghost_dims(w: u32, h: u32) -> [usize; 2] {
+    let k = ghost_step(w, h);
+    [(w as usize).div_ceil(k), (h as usize).div_ceil(k)]
+}
+
+/// Build a cell's onion ghost: a flat silhouette in `tint`, the source alpha
+/// kept as the shape and the RGB replaced wholesale, box-filtered down to
+/// `ghost_dims`.
 ///
 /// This is what makes onion skins actually read as blue-past / red-future.
 /// Painting the cell texture with a tinted vertex color only *multiplies*, and
-/// black line art times any tint is still black.
-pub(crate) fn ghost_image(size: [usize; 2], rgba: &[u8], tint: [u8; 3]) -> ColorImage {
+/// black line art times any tint is still black. The canvas stretches it back
+/// over the cell's corners, so its smaller size never shows as misplacement.
+pub(crate) fn ghost_image(w: u32, h: u32, rgba: &[u8], tint: [u8; 3]) -> ColorImage {
+    let k = ghost_step(w, h);
+    let [ow, oh] = ghost_dims(w, h);
+    let (w, h) = (w as usize, h as usize);
+    // Alpha summed per ghost texel, one source row at a time.
+    let mut sum = vec![0u32; ow * oh];
+    for y in 0..h {
+        let src = &rgba[y * w * 4..(y + 1) * w * 4];
+        let dst = &mut sum[(y / k) * ow..(y / k + 1) * ow];
+        // One destination texel per k-pixel run of the row; the last run can
+        // be shorter.
+        for (d, run) in dst.iter_mut().zip(src.chunks(k * 4)) {
+            *d += run.chunks_exact(4).map(|p| p[3] as u32).sum::<u32>();
+        }
+    }
     // Premultiplied in gamma space, matching `premultiplied_image`.
-    let pixels = rgba
-        .chunks_exact(4)
-        .map(|p| match p[3] {
-            0 => Color32::TRANSPARENT,
-            255 => Color32::from_rgb(tint[0], tint[1], tint[2]),
-            a => {
-                let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
-                Color32::from_rgba_premultiplied(m(tint[0]), m(tint[1]), m(tint[2]), a)
+    let pixels = sum
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| {
+            let (ox, oy) = (i % ow, i / ow);
+            // Texels on the right and bottom edges can cover fewer pixels.
+            let n = ((w - ox * k).min(k) * (h - oy * k).min(k)) as u32;
+            let a = ((s + n / 2) / n) as u8;
+            match a {
+                0 => Color32::TRANSPARENT,
+                255 => Color32::from_rgb(tint[0], tint[1], tint[2]),
+                a => {
+                    let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
+                    Color32::from_rgba_premultiplied(m(tint[0]), m(tint[1]), m(tint[2]), a)
+                }
             }
         })
         .collect();
-    ColorImage { size, pixels }
+    ColorImage {
+        size: [ow, oh],
+        pixels,
+    }
 }
 
-/// Build a small (≤360px wide) preview `ColorImage` from RGBA pixels.
+/// Whether no pixel in straight-alpha RGBA8 has any coverage. OR-reduces the
+/// buffer a word at a time, in blocks so a drawing stops at its first stroke:
+/// a blank 100 MB cell is one pass at memory speed, not 25M branches.
+pub(crate) fn no_alpha(px: &[u8]) -> bool {
+    let (head, words, tail) = bytemuck::pod_align_to::<u8, u64>(px);
+    if !head.is_empty() {
+        // Words wouldn't line up with pixels. Allocations this size are
+        // aligned in practice, so this is the rare path.
+        return px.chunks_exact(4).all(|p| p[3] == 0);
+    }
+    const ALPHA: u64 = u64::from_ne_bytes([0, 0, 0, 0xff, 0, 0, 0, 0xff]);
+    words
+        .chunks(4096)
+        .all(|block| block.iter().fold(0, |acc, w| acc | w) & ALPHA == 0)
+        && tail.chunks_exact(4).all(|p| p[3] == 0)
+}
+
+// Build a small (≤360px wide) preview `ColorImage` from RGBA pixels.
 fn preview_color_image(w: u32, h: u32, pixels: &[u8]) -> ColorImage {
     let maxw = 360u32;
     if w <= maxw {
@@ -3608,4 +4056,222 @@ fn subrect_from_buffer(buf: &[u8], full_w: u32, x: u32, y: u32, w: u32, h: u32) 
         out[dst_off..dst_off + row_bytes].copy_from_slice(&buf[src_off..src_off + row_bytes]);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(min_x: u32, min_y: u32, max_x: u32, max_y: u32) -> DirtyRect {
+        DirtyRect {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        }
+    }
+
+    /// The upload a stroke sends is that stroke's rect, grown by later ones,
+    /// and a whole-cell change swallows any rect.
+    #[test]
+    fn dirty_regions_union_and_full_wins() {
+        let a = Dirty::Rect(rect(10, 10, 20, 20));
+        let b = Dirty::Rect(rect(15, 5, 40, 12));
+        assert_eq!(Dirty::Clean.with(a), a);
+        assert_eq!(a.with(Dirty::Clean), a);
+        assert_eq!(a.with(b), Dirty::Rect(rect(10, 5, 40, 20)));
+        assert_eq!(a.with(Dirty::Full), Dirty::Full);
+        assert_eq!(Dirty::Full.with(a), Dirty::Full);
+    }
+
+    fn entry(id: CellId, used: u64, mb: usize) -> TexEntry {
+        TexEntry {
+            ghost: false,
+            id,
+            used,
+            bytes: mb << 20,
+        }
+    }
+
+    #[test]
+    fn the_budget_drops_the_least_recently_shown_first() {
+        let e = [entry(0, 5, 100), entry(1, 2, 100), entry(2, 9, 100), entry(3, 7, 100)];
+        let out: Vec<CellId> = evictions(&e, 250 << 20, 9).iter().map(|e| e.id).collect();
+        assert_eq!(out, vec![1, 0], "oldest first, and only until it fits");
+        assert!(evictions(&e, 400 << 20, 9).is_empty(), "under budget: nothing");
+    }
+
+    #[test]
+    fn the_budget_never_drops_what_is_on_screen() {
+        let e = [entry(0, 9, 900), entry(1, 9, 900)];
+        assert!(evictions(&e, 100 << 20, 9).is_empty());
+    }
+
+    #[test]
+    fn ghosts_of_big_cells_are_small_and_keep_their_coverage() {
+        assert_eq!(ghost_dims(11520, 2160), [1920, 360]);
+        assert_eq!(ghost_dims(1920, 1080), [1920, 1080], "small cells stay 1:1");
+        assert!(ghost_dims(20000, 16).iter().all(|&d| d <= GHOST_MAX_SIDE as usize));
+
+        // A solid block stays solid; half coverage averages to half.
+        let (w, h) = (4096u32, 8u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for p in px.chunks_exact_mut(4) {
+            p[3] = 255;
+        }
+        let g = ghost_image(w, h, &px, [255, 0, 0]);
+        assert_eq!(g.size, [2048, 4]);
+        assert!(g.pixels.iter().all(|&c| c == Color32::from_rgb(255, 0, 0)));
+        for (i, p) in px.chunks_exact_mut(4).enumerate() {
+            p[3] = if i % 2 == 0 { 255 } else { 0 };
+        }
+        let g = ghost_image(w, h, &px, [255, 0, 0]);
+        assert!(g.pixels.iter().all(|c| (127..=128).contains(&c.a())));
+    }
+
+    #[test]
+    fn a_ghost_that_needs_no_shrinking_is_the_plain_silhouette() {
+        let px = [9, 9, 9, 0, 9, 9, 9, 255, 9, 9, 9, 128, 9, 9, 9, 1];
+        let g = ghost_image(4, 1, &px, [0, 0, 255]);
+        let alphas: Vec<u8> = g.pixels.iter().map(|c| c.a()).collect();
+        assert_eq!(alphas, vec![0, 255, 128, 1]);
+    }
+
+    #[test]
+    fn blank_means_no_coverage_anywhere() {
+        let mut px = vec![0u8; 4 * 100_003];
+        // Colour without coverage is still blank: an eraser can leave that.
+        px[0] = 200;
+        assert!(no_alpha(&px));
+        let last = px.len() - 1;
+        px[last] = 1;
+        assert!(!no_alpha(&px), "the last pixel counts");
+        assert!(!no_alpha(&px[4..]), "and on an unaligned slice too");
+    }
+
+    /// The fix for the big-layer stalls in one test: moving the timeline
+    /// around re-uploads nothing, and a stroke re-uploads only its own rect.
+    #[test]
+    fn only_changed_pixels_are_marked_for_upload() {
+        let mut state = AppState::for_test();
+        state.structural_edit(false, |p| p.add_frame());
+        for d in state.cell_dirty.values_mut() {
+            *d = Dirty::Clean;
+        }
+        state.structural_edit(false, |p| {
+            p.add_frame();
+            p.insert_blank_key_here();
+        });
+        state.ensure_cell_tracking();
+        let old = 0;
+        assert_eq!(state.cell_dirty[&old], Dirty::Clean, "structure alone uploads nothing");
+
+        let c = &mut state.project.cells[old];
+        c.dirty = None;
+        c.pixels[3] = 255;
+        c.mark_dirty(0, 0, 1, 1);
+        state.mark_dirty(old);
+        assert_eq!(state.cell_dirty[&old], Dirty::Rect(rect(0, 0, 1, 1)));
+    }
+
+    #[test]
+    fn undo_of_a_structural_edit_uploads_nothing() {
+        let mut state = AppState::for_test();
+        state.structural_edit(false, |p| p.add_frame());
+        for d in state.cell_dirty.values_mut() {
+            *d = Dirty::Clean;
+        }
+        state.undo();
+        assert!(state.cell_dirty.values().all(|&d| d == Dirty::Clean));
+    }
+
+    /// Undo of a stroke re-uploads the stroke's rect, not the cell.
+    #[test]
+    fn undo_of_a_stroke_uploads_its_rect() {
+        let mut state = AppState::for_test();
+        let id = 0;
+        state.history.push(undo::Command::PixelPatch {
+            cell: id,
+            x: 4,
+            y: 6,
+            w: 2,
+            h: 3,
+            before: vec![0; 2 * 3 * 4],
+            after: vec![255; 2 * 3 * 4],
+        });
+        for d in state.cell_dirty.values_mut() {
+            *d = Dirty::Clean;
+        }
+        state.undo();
+        assert_eq!(state.cell_dirty[&id], Dirty::Rect(rect(4, 6, 6, 9)));
+    }
+
+    /// Old against new on one cell of a 4K frame widened to 3×. Not a
+    /// pass/fail test — run it for the numbers:
+    /// `cargo test --release perf_big_layer -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn perf_big_layer() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let (w, h) = (11520u32, 2160u32);
+        let (wu, hu) = (w as usize, h as usize);
+        // A band of semi-transparent paint, like a few strokes.
+        let mut px = vec![0u8; wu * hu * 4];
+        for y in 1000..1100 {
+            for x in 0..wu {
+                let i = (y * wu + x) * 4;
+                px[i..i + 4].copy_from_slice(&[20, 20, 20, 200]);
+            }
+        }
+        let blank = vec![0u8; px.len()];
+        let time = |label: &str, f: &mut dyn FnMut()| {
+            f(); // warm the caches and the allocator
+            let start = Instant::now();
+            for _ in 0..3 {
+                f();
+            }
+            let ms = start.elapsed().as_secs_f64() * 1e3 / 3.0;
+            eprintln!("{label:<46} {ms:>8.1} ms");
+        };
+        time("pen-up upload, whole cell (old)", &mut || {
+            black_box(premultiplied_image([wu, hu], &px));
+        });
+        time("pen-up upload, 300x300 stroke rect (new)", &mut || {
+            let mut buf = Vec::with_capacity(300 * 300 * 4);
+            for y in 1000..1300 {
+                let row = (y * wu + 5000) * 4;
+                buf.extend_from_slice(&px[row..row + 300 * 4]);
+            }
+            black_box(premultiplied_image([300, 300], &buf));
+        });
+        time("onion ghost, full size (old)", &mut || {
+            let pixels: Vec<Color32> = px
+                .chunks_exact(4)
+                .map(|p| match p[3] {
+                    0 => Color32::TRANSPARENT,
+                    a => Color32::from_rgba_premultiplied(0, 0, a, a),
+                })
+                .collect();
+            black_box(pixels);
+        });
+        time("onion ghost, downsampled (new)", &mut || {
+            black_box(ghost_image(w, h, &px, [0, 0, 255]));
+        });
+        time("blank scan of a blank cell, per pixel (old)", &mut || {
+            black_box(blank.chunks_exact(4).all(|p| p[3] == 0));
+        });
+        time("blank scan of a blank cell, word-wise (new)", &mut || {
+            black_box(no_alpha(&blank));
+        });
+        time("pen-down snapshot, fresh clone (old)", &mut || {
+            black_box(px.clone());
+        });
+        let mut kept: Vec<u8> = Vec::new();
+        time("pen-down snapshot, kept buffer (new)", &mut || {
+            kept.clear();
+            kept.extend_from_slice(&px);
+            black_box(&kept);
+        });
+    }
 }

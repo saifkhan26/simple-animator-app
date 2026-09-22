@@ -23,7 +23,7 @@ fn tip(state: &AppState, action: Action, base: &str) -> String {
 }
 
 /// Bare shortcut text for an action (e.g. "Ctrl+S"), empty if unbound.
-fn combo_text(state: &AppState, action: Action) -> String {
+pub(crate) fn combo_text(state: &AppState, action: Action) -> String {
     state
         .shortcuts
         .get(action)
@@ -126,6 +126,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             });
 
             if resp.drag_started() {
+                // Pressing on the canvas hands the keyboard back to it: Delete
+                // stops meaning "delete the drawings selected in the tracks".
+                state.track_sel.clear();
                 // Decide once, on press, what this drag does. Configurable
                 // modifiers pick zoom/rotate/pan; middle-mouse always pans the
                 // canvas; otherwise draw. When layer-transform mode is on, the
@@ -508,11 +511,24 @@ fn timeline_wheel_scrub(state: &mut AppState, ctx: &egui::Context) {
     else {
         return;
     };
+    let over_timeline = layer.id == egui::Id::new(panel_key(PanelId::Timeline));
     let scrubs = layer.order == egui::Order::Background
-        || layer.id == egui::Id::new(panel_key(PanelId::Timeline))
+        || over_timeline
         || layer.id == egui::Id::new("mini_timeline");
     if !scrubs {
         return;
+    }
+    // The tracks own the modified wheel (Ctrl zooms, Shift pans) and the
+    // wheel over the layer names (scrolls the rows).
+    if over_timeline {
+        let mods = ctx.input(|i| i.modifiers);
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let on_names = crate::ui::tracks::header_rect(ctx)
+            .zip(pointer)
+            .is_some_and(|(r, p)| r.contains(p));
+        if mods.command || mods.shift || on_names {
+            return;
+        }
     }
 
     // Only the vertical axis. Horizontal (shift+wheel, trackpad-X) is left for
@@ -1021,152 +1037,172 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
-    {
-            ui.horizontal(|ui| {
-                let play_icon = if state.playback.playing {
-                    ic::PAUSE
-                } else {
-                    ic::PLAY
-                };
-                let play_base = if state.playback.playing {
-                    "Pause"
-                } else {
-                    "Play"
-                };
-                let play_tip = tip(state, Action::PlayPause, play_base);
-                if theme::icon_button(ui, play_icon, &play_tip).clicked() {
-                    let now = ctx.input(|i| i.time);
-                    state.playback.toggle(now);
+    // One strip: transport, step size, whole-timeline frame edits, then the
+    // active layer's own frame edits, with the frame counter and fps pinned to
+    // the right. The ruler under it scrubs, so there is no frame slider.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let gap = |ui: &mut egui::Ui| {
+            ui.add(egui::Separator::default().spacing(12.0));
+        };
+
+        let play_icon = if state.playback.playing {
+            ic::PAUSE
+        } else {
+            ic::PLAY
+        };
+        let play_base = if state.playback.playing { "Pause" } else { "Play" };
+        let play_tip = tip(state, Action::PlayPause, play_base);
+        if theme::icon_button(ui, play_icon, &play_tip).clicked() {
+            let now = ctx.input(|i| i.time);
+            state.playback.toggle(now);
+        }
+        if loop_toggle(ui, state).clicked() {
+            state.loop_timeline = !state.loop_timeline;
+        }
+        gap(ui);
+
+        if theme::icon_button(ui, ic::SKIP_BACK, "Go to loop start").clicked() {
+            state.project.goto(state.project.loop_start);
+        }
+        let prev_tip = tip(state, Action::FramePrev, "Step back");
+        if theme::icon_button(ui, ic::CARET_LEFT, &prev_tip).clicked() {
+            state.project.step(-state.frame_step_delta(), state.loop_timeline);
+        }
+        let next_tip = tip(state, Action::FrameNext, "Step forward");
+        if theme::icon_button(ui, ic::CARET_RIGHT, &next_tip).clicked() {
+            state.project.step(state.frame_step_delta(), state.loop_timeline);
+        }
+        // Jump drawing-to-drawing, skipping holds. Resolved before the
+        // closures: `add_enabled_ui` borrows `state` for the duration, so the
+        // target frame has to be in hand first.
+        let key_prev = state.project.prev_key_frame();
+        let key_next = state.project.next_key_frame();
+        let key_prev_tip = tip(state, Action::KeyJumpPrev, "Previous drawing key");
+        ui.add_enabled_ui(key_prev.is_some(), |ui| {
+            if theme::icon_button(ui, ic::CARET_LINE_LEFT, &key_prev_tip).clicked() {
+                state.project.goto(key_prev.unwrap_or_default());
+            }
+        });
+        let key_next_tip = tip(state, Action::KeyJumpNext, "Next drawing key");
+        ui.add_enabled_ui(key_next.is_some(), |ui| {
+            if theme::icon_button(ui, ic::CARET_LINE_RIGHT, &key_next_tip).clicked() {
+                state.project.goto(key_next.unwrap_or_default());
+            }
+        });
+        // One value for both halves of the toolbar: how far the arrows move,
+        // and how many frames the + / copy buttons insert.
+        let step_tip = format!(
+            "Step size — frames moved by {} / {}, frames inserted by {} / {}",
+            combo_text(state, Action::FramePrev),
+            combo_text(state, Action::FrameNext),
+            combo_text(state, Action::FrameAdd),
+            combo_text(state, Action::FrameDuplicate),
+        );
+        ui.add(
+            egui::DragValue::new(&mut state.frame_step)
+                .range(1..=999)
+                .speed(1)
+                .prefix("×"),
+        )
+        .on_hover_text(step_tip);
+        gap(ui);
+
+        let n = state.frame_step_count();
+        let add_base = if n == 1 {
+            "Add frame (hold)".to_string()
+        } else {
+            format!("Add {n} frames (hold)")
+        };
+        let add_tip = tip(state, Action::FrameAdd, &add_base);
+        if theme::icon_button(ui, ic::PLUS, &add_tip).clicked() {
+            state.structural_edit(false, |p| {
+                for _ in 0..n {
+                    p.add_frame();
                 }
-                if loop_toggle(ui, state).clicked() {
-                    state.loop_timeline = !state.loop_timeline;
+            });
+        }
+        let dup_base = if n == 1 {
+            "Duplicate frame".to_string()
+        } else {
+            format!("Duplicate frame ×{n}")
+        };
+        let dup_tip = tip(state, Action::FrameDuplicate, &dup_base);
+        if theme::icon_button(ui, ic::COPY, &dup_tip).clicked() {
+            state.structural_edit(false, |p| {
+                for _ in 0..n {
+                    p.duplicate_frame();
                 }
-                if theme::icon_button(ui, ic::SKIP_BACK, "Go to loop start").clicked() {
-                    state.project.goto(state.project.loop_start);
-                }
-                let prev_tip = tip(state, Action::FramePrev, "Step back");
-                if theme::icon_button(ui, ic::CARET_LEFT, &prev_tip).clicked() {
-                    state.project.step(-state.frame_step_delta(), state.loop_timeline);
-                }
-                let next_tip = tip(state, Action::FrameNext, "Step forward");
-                if theme::icon_button(ui, ic::CARET_RIGHT, &next_tip).clicked() {
-                    state.project.step(state.frame_step_delta(), state.loop_timeline);
-                }
-                // Jump drawing-to-drawing, skipping holds. Resolved before
-                // the closures: `add_enabled_ui` borrows `state` for the
-                // duration, so the target frame has to be in hand first.
-                let key_prev = state.project.prev_key_frame();
-                let key_next = state.project.next_key_frame();
-                let key_prev_tip = tip(state, Action::KeyJumpPrev, "Previous drawing key");
-                ui.add_enabled_ui(key_prev.is_some(), |ui| {
-                    if theme::icon_button(ui, ic::CARET_LINE_LEFT, &key_prev_tip).clicked() {
-                        state.project.goto(key_prev.unwrap_or_default());
-                    }
-                });
-                let key_next_tip = tip(state, Action::KeyJumpNext, "Next drawing key");
-                ui.add_enabled_ui(key_next.is_some(), |ui| {
-                    if theme::icon_button(ui, ic::CARET_LINE_RIGHT, &key_next_tip).clicked() {
-                        state.project.goto(key_next.unwrap_or_default());
-                    }
-                });
-                // One value for both halves of the toolbar: how far the arrows
-                // move, and how many frames the + / copy buttons insert.
-                let step_tip = format!(
-                    "Step size — frames moved by {} / {}, frames inserted by {} / {}",
-                    combo_text(state, Action::FramePrev),
-                    combo_text(state, Action::FrameNext),
-                    combo_text(state, Action::FrameAdd),
-                    combo_text(state, Action::FrameDuplicate),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut state.frame_step)
-                        .range(1..=999)
+            });
+        }
+        let del_tip = tip(state, Action::FrameDelete, "Delete frame");
+        if theme::icon_button(ui, ic::TRASH, &del_tip).clicked() {
+            let wipes_pixels = state.project.frame_count <= 1;
+            state.structural_edit(wipes_pixels, |p| p.delete_frame());
+        }
+        gap(ui);
+
+        // The same step size, on the active layer alone: its drawings slide,
+        // every other layer stays where it is.
+        let frames = if n == 1 {
+            "a frame".to_string()
+        } else {
+            format!("{n} frames")
+        };
+        let ins_tip = format!(
+            "Insert {frames} on this layer — the drawing at the playhead holds longer, \
+             later ones slide"
+        );
+        if theme::icon_button(ui, ic::ARROWS_OUT_LINE_HORIZONTAL, &ins_tip).clicked() {
+            state.insert_layer_frames_here(n);
+        }
+        let rem_tip = format!(
+            "Remove {frames} on this layer, from the playhead — later drawings slide up"
+        );
+        if theme::icon_button(ui, ic::ARROWS_IN_LINE_HORIZONTAL, &rem_tip).clicked() {
+            state.remove_layer_frames_here(n);
+        }
+
+        // Right to left: fps at the edge, the frame counter beside it.
+        let count = state.project.frame_count.max(1);
+        let mut cur = state.project.current_frame;
+        // Frozen before the widget is built: a relative expression must
+        // measure from where the edit started, not from a value the edit has
+        // already moved.
+        let base = cur as f64;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(
+                egui::DragValue::new(&mut state.project.fps)
+                    .range(1.0..=60.0)
+                    .speed(0.1)
+                    .max_decimals(1)
+                    .suffix(" fps"),
+            )
+            .on_hover_text("Playback speed");
+            gap(ui);
+            ui.label(egui::RichText::new(format!("/ {count}")).color(theme::TEXT_MUTED));
+            let field = ui
+                .add(
+                    egui::DragValue::new(&mut cur)
+                        .range(0..=count.saturating_sub(1))
                         .speed(1)
-                        .prefix("×"),
+                        .update_while_editing(false)
+                        .custom_parser(move |s| expr::eval(s, base).map(f64::round)),
                 )
-                .on_hover_text(step_tip);
-                ui.separator();
-                let n = state.frame_step_count();
-                let add_base = if n == 1 {
-                    "Add frame (hold)".to_string()
-                } else {
-                    format!("Add {n} frames (hold)")
-                };
-                let add_tip = tip(state, Action::FrameAdd, &add_base);
-                if theme::icon_button(ui, ic::PLUS, &add_tip).clicked() {
-                    state.structural_edit(false, |p| {
-                        for _ in 0..n {
-                            p.add_frame();
-                        }
-                    });
-                }
-                let dup_base = if n == 1 {
-                    "Duplicate frame".to_string()
-                } else {
-                    format!("Duplicate frame ×{n}")
-                };
-                let dup_tip = tip(state, Action::FrameDuplicate, &dup_base);
-                if theme::icon_button(ui, ic::COPY, &dup_tip).clicked() {
-                    state.structural_edit(false, |p| {
-                        for _ in 0..n {
-                            p.duplicate_frame();
-                        }
-                    });
-                }
-                let del_tip = tip(state, Action::FrameDelete, "Delete frame");
-                if theme::icon_button(ui, ic::TRASH, &del_tip).clicked() {
-                    let wipes_pixels = state.project.frame_count <= 1;
-                    state.structural_edit(wipes_pixels, |p| p.delete_frame());
-                }
-                ui.separator();
-                ui.add(egui::Slider::new(&mut state.project.fps, 1.0..=60.0).text("fps"));
-            });
-
-            ui.add_space(4.0);
-
-            let n = state.project.frame_count.max(1);
-            let mut cur = state.project.current_frame;
-            // Frozen before the widgets are built: a relative expression must
-            // measure from where the edit started, not from a value the edit
-            // has already moved.
-            let base = cur as f64;
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(ic::CLOCK)
-                        .color(theme::TEXT_MUTED)
-                        .size(13.0),
+                .on_hover_text(
+                    "Frame number. Takes arithmetic: 22/2, 8+12, (4+8)*2.\n\n\
+                     Start with an operator to go relative to this frame: +12 jumps 12 \
+                     ahead, -3 back, /2 to the halfway frame. Enter applies it.",
                 );
-                // Its own DragValue rather than the slider's built-in value:
-                // `Slider` hard-codes update-while-editing, which would apply
-                // the half-typed "+1" of "+12" and shift the base underfoot.
-                let field = ui
-                    .add(
-                        egui::DragValue::new(&mut cur)
-                            .range(0..=n.saturating_sub(1))
-                            .speed(1)
-                            .update_while_editing(false)
-                            .custom_parser(move |s| expr::eval(s, base).map(f64::round)),
-                    )
-                    .on_hover_text(
-                        "Frame number. Takes arithmetic: 22/2, 8+12, (4+8)*2.\n\n\
-                         Start with an operator to go relative to this frame: \
-                         +12 jumps 12 ahead, -3 back, /2 to the halfway frame. \
-                         Enter applies it.",
-                    );
-                let track = ui.add(
-                    egui::Slider::new(&mut cur, 0..=n.saturating_sub(1))
-                        .integer()
-                        .show_value(false)
-                        .text("frame"),
-                );
-                if field.changed() || track.changed() {
-                    state.project.goto(cur);
-                }
-                ui.label(egui::RichText::new(format!("/ {n}")).color(theme::TEXT_MUTED));
-            });
+            if field.changed() {
+                state.project.goto(cur);
+            }
+            ui.label(egui::RichText::new(ic::CLOCK).color(theme::TEXT_MUTED).size(13.0));
+        });
+    });
 
-            frame_strip(state, ui);
-    }
+    ui.add_space(6.0);
+    crate::ui::tracks::show(state, ui);
 }
 
 /// Compact playback HUD shown when the floating panels are hidden (Tab).
@@ -1257,7 +1293,7 @@ fn diag_row(ui: &mut egui::Ui, key: &str, value: String) {
 
 /// Colour for a diagnostic reading that is out of range. Local because the
 /// theme has no warning colour and one readout does not justify adding to it.
-const DIAG_BAD: Color32 = Color32::from_rgb(232, 138, 96);
+pub(crate) const DIAG_BAD: Color32 = Color32::from_rgb(232, 138, 96);
 
 /// What the tablet driver is actually reporting.
 ///
@@ -1616,9 +1652,9 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
 
 /// Marker colour for active-layer transform keys — same blue as the layer
 /// bounds outline on the canvas.
-const KEY_LAYER: Color32 = Color32::from_rgb(120, 160, 220);
+pub(crate) const KEY_LAYER: Color32 = Color32::from_rgb(120, 160, 220);
 /// Marker colour for camera keys — same amber as the camera-edit guide.
-const KEY_CAMERA: Color32 = Color32::from_rgb(255, 190, 90);
+pub(crate) const KEY_CAMERA: Color32 = Color32::from_rgb(255, 190, 90);
 
 /// Per-frame "is there a key here" flags for the active layer's transform and
 /// for the camera, as two `n`-long tables.
@@ -1642,89 +1678,6 @@ fn key_flags(state: &AppState, n: usize) -> (Vec<bool>, Vec<bool>) {
         }
     }
     (layer, camera)
-}
-
-fn frame_strip(state: &mut AppState, ui: &mut egui::Ui) {
-    let n = state.project.frame_count.max(1);
-    let cur = state.project.current_frame;
-    let (layer_keys, camera_keys) = key_flags(state, n);
-    let height = 26.0;
-    // Fill the panel while frames fit; clamp so cells never squeeze below a
-    // readable width — the strip scrolls instead.
-    let cell_w = (ui.available_width() / n as f32).max(22.0);
-
-    egui::ScrollArea::horizontal()
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            let (rect, resp) = ui.allocate_exact_size(
-                egui::vec2(n as f32 * cell_w, height),
-                Sense::click_and_drag(),
-            );
-            let painter = ui.painter_at(rect);
-
-            painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(10, 11, 14, 220));
-            for i in 0..n {
-                let x = rect.min.x + i as f32 * cell_w;
-                let r = Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(cell_w, height));
-                let fill = if i == cur {
-                    theme::ACCENT
-                } else if i >= state.project.loop_start && i < state.project.loop_end {
-                    theme::BG_HOVER
-                } else {
-                    theme::BG_INACTIVE
-                };
-                painter.rect_filled(r.shrink(1.5), 3.0, fill);
-                if cell_w > 18.0 {
-                    let txt_color = if i == cur {
-                        Color32::WHITE
-                    } else {
-                        theme::TEXT_MUTED
-                    };
-                    painter.text(
-                        r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        format!("{i}"),
-                        egui::FontId::monospace(10.0),
-                        txt_color,
-                    );
-                }
-                // Keyframe markers: layer transform bottom-left, camera
-                // bottom-right. Without these the only sign a frame is keyed is
-                // a text count in the panels.
-                let y = r.max.y - 4.0;
-                if layer_keys[i] {
-                    painter.circle_filled(egui::pos2(r.min.x + 5.0, y), 2.0, KEY_LAYER);
-                }
-                if camera_keys[i] {
-                    painter.circle_filled(egui::pos2(r.max.x - 5.0, y), 2.0, KEY_CAMERA);
-                }
-            }
-
-            // Keep the active frame centered, but only when it changes so the
-            // user can still scroll the strip freely, and never while
-            // drag-scrubbing (recentering would shift the content under the
-            // pointer and make the drag jump).
-            let mem_id = ui.id().with("frame_strip_frame");
-            let last: Option<usize> = ui.data(|d| d.get_temp(mem_id));
-            if last != Some(cur) {
-                if !resp.dragged() {
-                    let active = Rect::from_center_size(
-                        egui::pos2(rect.min.x + (cur as f32 + 0.5) * cell_w, rect.center().y),
-                        egui::vec2(cell_w * 3.0, height),
-                    );
-                    ui.scroll_to_rect(active, Some(egui::Align::Center));
-                }
-                ui.data_mut(|d| d.insert_temp(mem_id, cur));
-            }
-
-            if resp.dragged() || resp.clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let rel = ((pos.x - rect.min.x) / cell_w).floor() as isize;
-                    let idx = rel.clamp(0, n as isize - 1) as usize;
-                    state.project.goto(idx);
-                }
-            }
-        });
 }
 
 fn onion_content(state: &mut AppState, ui: &mut egui::Ui) {
@@ -2219,22 +2172,39 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             theme::section_header(ui, ic::FRAME_CORNERS, "Layer canvas");
             let (cur_w, cur_h) = state.active_layer_cell_size();
             let li = state.project.current_layer;
+            // One texture per cell, so no side may exceed what the GPU holds
+            // in one texture — past it the upload fails outright.
+            let max = state.max_tex;
             let (mut ew, mut eh) = match state.expand_cfg {
                 Some((l, w, h)) if l == li => (w, h),
                 _ => (cur_w, cur_h),
             };
+            let size_tip = "Size in pixels. Takes arithmetic: 3840*3, (1920+64)*2.\n\n\
+                            Start with an operator to change what's there: *3 triples it, \
+                            +512 adds 512, /2 halves it. Enter applies it.";
             ui.horizontal(|ui| {
+                /// A pixel-size field that takes arithmetic, as the frame
+                /// field does. The base is frozen before the widget is built:
+                /// a relative expression measures from where the edit started.
+                fn size_field(value: &mut u32, max: u32) -> egui::DragValue<'_> {
+                    let base = *value as f64;
+                    egui::DragValue::new(value)
+                        .speed(8.0)
+                        .range(1..=max)
+                        .update_while_editing(false)
+                        .custom_parser(move |s| expr::eval(s, base).map(f64::round))
+                }
                 ui.label("W");
-                ui.add(egui::DragValue::new(&mut ew).speed(8.0).range(1..=32768));
+                ui.add(size_field(&mut ew, max)).on_hover_text(size_tip);
                 ui.label("H");
-                ui.add(egui::DragValue::new(&mut eh).speed(8.0).range(1..=32768));
+                ui.add(size_field(&mut eh, max)).on_hover_text(size_tip);
             });
             state.expand_cfg = Some((li, ew, eh));
             ui.horizontal(|ui| {
                 for (label, mul) in [("2×", 2u32), ("3×", 3)] {
                     if ui.small_button(label).clicked() {
-                        state.expand_cfg =
-                            Some((li, state.project.width * mul, state.project.height * mul));
+                        let (w, h) = (state.project.width * mul, state.project.height * mul);
+                        state.expand_cfg = Some((li, w.min(max), h.min(max)));
                     }
                 }
                 if ui.small_button("Frame").clicked() {
@@ -2250,6 +2220,13 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 .color(theme::TEXT_MUTED)
                 .size(10.5),
             );
+            if ew == max || eh == max {
+                ui.label(
+                    egui::RichText::new(format!("GPU limit: {max} px per side"))
+                        .color(theme::TEXT_MUTED)
+                        .size(10.5),
+                );
+            }
             let changed = (ew, eh) != (cur_w, cur_h);
             if ui
                 .add_enabled(

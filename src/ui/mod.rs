@@ -3,4 +3,5 @@
 pub mod expr;
 pub mod shell;
 pub mod theme;
+pub mod tracks;
 pub mod widgets;

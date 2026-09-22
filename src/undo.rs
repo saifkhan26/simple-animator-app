@@ -13,10 +13,14 @@ const MAX_HISTORY: usize = 80;
 
 /// What an undo/redo touched, so the caller knows what to re-upload.
 pub enum Touched {
-    /// A single cell changed — mark just that texture dirty.
+    /// One cell's pixels changed; its `Canvas::dirty` says where.
     Cell(CellId),
-    /// Timeline/layer structure changed — refresh every cell texture.
-    All,
+    /// These cells' pixels changed wholesale.
+    Cells(Vec<CellId>),
+    /// Only the timeline structure changed. Every pixel is where it was, so
+    /// every texture is still good — on a big layer, re-uploading them all is
+    /// what made undo stall.
+    Structure,
 }
 
 /// Snapshot of the timeline structure (exposures + cursors), excluding the
@@ -163,6 +167,14 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
             let bytes = if forward { after } else { before };
             if let Some(c) = project.cell_mut(*cell) {
                 blit_subrect(c, *x, *y, *w, *h, bytes);
+                // Exactly the patch, not unioned with whatever the last edit
+                // left there: this is what gets re-uploaded.
+                c.dirty = Some(crate::doc::canvas::DirtyRect {
+                    min_x: *x,
+                    min_y: *y,
+                    max_x: x + w,
+                    max_y: y + h,
+                });
             }
             Touched::Cell(*cell)
         }
@@ -185,7 +197,11 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
                     });
                 }
             }
-            Touched::All
+            if cell_pixels.is_empty() {
+                Touched::Structure
+            } else {
+                Touched::Cells(cell_pixels.iter().map(|d| d.cell).collect())
+            }
         }
         Command::LayerCanvasResize {
             layer,
@@ -212,7 +228,7 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
                     l.cell_h = before_size.1;
                 }
             }
-            Touched::All
+            Touched::Cells(project.layer_cell_ids(*layer))
         }
     }
 }
