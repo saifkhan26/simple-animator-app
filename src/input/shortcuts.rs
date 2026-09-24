@@ -26,6 +26,9 @@ pub enum Action {
     ToolShape,
     ToolTracker,
     ToolLasso,
+    ToolPerspective,
+    TogglePerspectiveGrid,
+    TogglePerspectiveSnap,
     PlayPause,
     FramePrev,
     FrameNext,
@@ -97,6 +100,9 @@ impl Action {
         Action::ToolShape,
         Action::ToolTracker,
         Action::ToolLasso,
+        Action::ToolPerspective,
+        Action::TogglePerspectiveGrid,
+        Action::TogglePerspectiveSnap,
         Action::PlayPause,
         Action::FramePrev,
         Action::FrameNext,
@@ -163,6 +169,9 @@ impl Action {
             Action::ToolShape => "Tool: Shape",
             Action::ToolTracker => "Tool: Tracker",
             Action::ToolLasso => "Tool: Lasso select",
+            Action::ToolPerspective => "Tool: Perspective grid",
+            Action::TogglePerspectiveGrid => "Show perspective grids",
+            Action::TogglePerspectiveSnap => "Snap strokes to perspective grid",
             Action::PlayPause => "Play / Pause",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
@@ -399,6 +408,10 @@ impl Default for ShortcutMap {
         b.insert(Action::ToolTracker, KeyCombo::plain(K::X));
         // Y is the only free key left in the left cluster (see module docs).
         b.insert(Action::ToolLasso, KeyCombo::plain(K::Y));
+        // Perspective grid: the G family, beside the Shape tool it guides.
+        b.insert(Action::ToolPerspective, KeyCombo::shift(K::G));
+        b.insert(Action::TogglePerspectiveGrid, KeyCombo::ctrl(K::G));
+        b.insert(Action::TogglePerspectiveSnap, KeyCombo::ctrl_shift(K::G));
         // Frame navigation: A / S.
         b.insert(Action::FramePrev, KeyCombo::plain(K::A));
         b.insert(Action::FrameNext, KeyCombo::plain(K::S));

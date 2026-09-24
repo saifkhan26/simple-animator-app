@@ -3,6 +3,7 @@
 pub mod dab;
 pub mod fill;
 pub mod lasso;
+pub mod perspective;
 pub mod paper;
 pub mod ribbon;
 pub mod selection;
@@ -21,6 +22,8 @@ pub enum ActiveTool {
     /// Freehand lasso; everything inside the closed path is erased from the
     /// active layer's cell on pointer-up.
     Lasso,
+    /// Perspective grids — edits the viewport guides, draws nothing.
+    Perspective,
 }
 
 impl ActiveTool {
@@ -33,6 +36,7 @@ impl ActiveTool {
             ActiveTool::Shape => 4,
             ActiveTool::Tracker => 5,
             ActiveTool::Lasso => 6,
+            ActiveTool::Perspective => 7,
         }
     }
 }
@@ -113,6 +117,17 @@ pub enum BrushMode {
     Dab,
 }
 
+/// How a ribbon stroke ends, at pen-down and at pen-up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StrokeCap {
+    /// A half-disc, the natural end of a capsule.
+    #[default]
+    Round,
+    /// Cut straight across, square to the stroke, flush with where the pen
+    /// touched down and lifted.
+    Flat,
+}
+
 /// Response of a brush property to pressure or tilt.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Dyn {
@@ -180,6 +195,9 @@ pub struct BrushSettings {
     pub tilt_size: f32,
     /// Rasterization model. See [`BrushMode`].
     pub mode: BrushMode,
+    /// Shape of the stroke's two ends. `Ribbon` mode only: a dab brush's
+    /// coverage builds up, so its ends cannot be re-cut after the fact.
+    pub cap: StrokeCap,
     /// Flood-fill tolerance per channel (0..=255). Only used by Fill tool.
     pub fill_tolerance: u8,
     /// Grow the filled region by this many pixels after the flood, so colour
@@ -210,6 +228,7 @@ impl Default for BrushSettings {
             tilt_elongation: 0.0,
             tilt_size: 0.0,
             mode: BrushMode::Ribbon,
+            cap: StrokeCap::Round,
             fill_tolerance: 16,
             fill_expand: 0,
             shape_kind: ShapeKind::Line,

@@ -34,6 +34,27 @@ pub const ACCENT_HOVER: Color32 = Color32::from_rgb(140, 150, 255);
 /// Subtle indigo tint for selection backgrounds.
 pub const ACCENT_DIM: Color32 = Color32::from_rgb(35, 38, 62);
 
+// --- Translucent colours ---
+//
+// egui 0.29's `Color32::from_rgba_unmultiplied` and `from_white_alpha`
+// premultiply in *linear* space and convert back to gamma, but egui-wgpu
+// blends in *gamma* space. The result has RGB above alpha — white at half
+// alpha comes out as (188, 188, 188, 128) — so anything translucent adds more
+// light than its opacity allows and clips toward white, like blown
+// highlights. The CPU compositor that exports frames premultiplies in gamma
+// space, so these match it; `clippy.toml` bans the egui helpers.
+
+/// Straight-alpha sRGB colour, premultiplied in gamma space.
+pub fn premul(r: u8, g: u8, b: u8, a: u8) -> Color32 {
+    let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
+    Color32::from_rgba_premultiplied(m(r), m(g), m(b), a)
+}
+
+/// White at alpha `a` — also the tint that draws a texture at opacity `a`.
+pub const fn white_alpha(a: u8) -> Color32 {
+    Color32::from_rgba_premultiplied(a, a, a, a)
+}
+
 pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -175,4 +196,22 @@ pub fn section_header(ui: &mut egui::Ui, icon: &str, title: &str) {
     ui.add(egui::Label::new(label));
     ui.add_space(2.0);
     ui.separator();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn premultiplying_stays_in_gamma_space() {
+        assert_eq!(premul(255, 255, 255, 128), Color32::from_rgba_premultiplied(128, 128, 128, 128));
+        assert_eq!(white_alpha(128), premul(255, 255, 255, 128));
+        assert_eq!(premul(10, 20, 30, 255), Color32::from_rgb(10, 20, 30));
+        assert_eq!(premul(10, 20, 30, 0), Color32::TRANSPARENT);
+        // RGB never exceeds alpha: nothing adds more light than it covers.
+        for a in 0..=255u8 {
+            let c = premul(255, 200, 80, a);
+            assert!(c.r() <= a && c.g() <= a && c.b() <= a, "alpha {a}: {c:?}");
+        }
+    }
 }

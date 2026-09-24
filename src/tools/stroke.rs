@@ -23,8 +23,10 @@
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::input::pointer::PointerSample;
 use crate::tools::dab::Dab;
-use crate::tools::ribbon::{union_rect, SpineNode, StrokeWorkspace};
-use crate::tools::{ActiveTool, BrushMode, BrushSettings, Smoothing, SmoothingOptions};
+use crate::tools::ribbon::{union_rect, CapPlane, SpineNode, StrokeWorkspace};
+use crate::tools::{
+    ActiveTool, BrushMode, BrushSettings, Smoothing, SmoothingOptions, StrokeCap,
+};
 
 /// A control point closer than this to the chord means the Bezier is flat
 /// enough to draw as a line. Krita's `BEZIER_FLATNESS_THRESHOLD`.
@@ -57,6 +59,13 @@ pub struct StrokeBuilder {
     /// already-rasterized geometry can never be retracted, so nodes are only
     /// emitted for curve segments whose shape is final.
     spine: Vec<SpineNode>,
+    /// Arc length from the first node to each spine node, parallel to
+    /// `spine`. Says which segments are close enough to an end to be cut.
+    arc: Vec<f32>,
+    /// The flat cuts, once known: the start's as soon as the stroke has run
+    /// far enough to have a direction, the end's at pen-up.
+    start_cut: Option<CapPlane>,
+    end_cut: Option<CapPlane>,
     /// Stamps, in `Dab` mode. Parallel to `spine`, which that mode keeps
     /// only so the live-tail overlay has something to draw.
     dabs: Vec<Dab>,
@@ -110,6 +119,9 @@ impl StrokeBuilder {
             samples: Vec::with_capacity(256),
             distance_history: Vec::with_capacity(256),
             spine: Vec::with_capacity(256),
+            arc: Vec::with_capacity(256),
+            start_cut: None,
+            end_cut: None,
             dabs: Vec::new(),
             raster_from: 0,
             previous: None,
@@ -207,6 +219,18 @@ impl StrokeBuilder {
 
         acc = self.drain(ws, acc);
         self.composite(canvas, ws, pre, acc);
+
+        // The start's direction is settled once the stroke has left the
+        // start's neighbourhood; cut it now rather than at pen-up, so the
+        // live stroke shows the end it will have.
+        if self.flat_ends() && self.start_cut.is_none() && self.total_arc() >= self.cap_zone() {
+            self.start_cut = self.start_plane();
+            if self.start_cut.is_some() {
+                if let Some(r) = self.recut(canvas, ws, pre, true, false) {
+                    acc = Some(union_rect(acc, r));
+                }
+            }
+        }
         acc
     }
 
@@ -248,6 +272,23 @@ impl StrokeBuilder {
 
         acc = self.drain(ws, acc);
         self.composite(canvas, ws, pre, acc);
+
+        // Shorter than its own radius, a stroke is a tap with a little
+        // tremor in it. Cut square at both ends it would be a sliver across
+        // the pen's path rather than the dot the tap meant.
+        if self.flat_ends() && self.total_arc() >= self.brush.radius {
+            // A stroke too short to have cut its start yet gets both here.
+            let redraw_start = self.start_cut.is_none();
+            if redraw_start {
+                self.start_cut = self.start_plane();
+            }
+            self.end_cut = self.end_plane();
+            let redraw_start = redraw_start && self.start_cut.is_some();
+            let redraw_end = self.end_cut.is_some();
+            if let Some(r) = self.recut(canvas, ws, pre, redraw_start, redraw_end) {
+                acc = Some(union_rect(acc, r));
+            }
+        }
         acc
     }
 
@@ -557,6 +598,11 @@ impl StrokeBuilder {
     /// spacing is a fraction of a dab whose size follows pressure and tilt.
     fn emit(&mut self, s: &PointerSample) {
         let n = self.node_at(s);
+        let arc = match (self.spine.last(), self.arc.last()) {
+            (Some(p), Some(&a)) => a + (n.x - p.x).hypot(n.y - p.y),
+            _ => 0.0,
+        };
+        self.arc.push(arc);
         self.spine.push(n);
         if self.brush.mode == BrushMode::Dab {
             let d = Dab::from_sample(&self.brush, s);
@@ -609,6 +655,121 @@ impl StrokeBuilder {
         );
     }
 
+    // --- Flat ends --------------------------------------------------------
+    //
+    // Every capsule ends in a half-disc, and nodes sit a fraction of a radius
+    // apart, so a flat end cannot be had by squaring off the last capsule
+    // alone: the round caps of the nodes just before it bulge past the end
+    // too. Instead the stroke is drawn round as usual and each end is then
+    // cut — the coverage around it cleared and redrawn with a straight cut
+    // applied. Compositing is a pure function of (pre-stroke pixels,
+    // coverage), so redrawing a patch of it is exact.
+
+    fn flat_ends(&self) -> bool {
+        self.brush.cap == StrokeCap::Flat && self.brush.mode == BrushMode::Ribbon
+    }
+
+    /// Arc length from an end within which a node's round cap can reach past
+    /// that end: the full-pressure radius, plus its anti-aliasing rim, plus a
+    /// margin. Anything further along that crosses back over an end is the
+    /// stroke returning, and stays.
+    fn cap_zone(&self) -> f32 {
+        self.brush.radius + 2.0
+    }
+
+    fn total_arc(&self) -> f32 {
+        self.arc.last().copied().unwrap_or(0.0)
+    }
+
+    /// The start's cut, square to the direction the stroke leaves in: from
+    /// the first node towards the first one past the cap zone (or the last,
+    /// on a short stroke). `None` for a tap, which has no direction.
+    fn start_plane(&self) -> Option<CapPlane> {
+        let zone = self.cap_zone();
+        let first = *self.spine.first()?;
+        let k = self
+            .arc
+            .iter()
+            .position(|&a| a >= zone)
+            .unwrap_or(self.spine.len() - 1);
+        cut_through(first, self.spine[k])
+    }
+
+    /// The end's cut, the mirror image of `start_plane`: facing back along
+    /// the direction the stroke arrived from.
+    fn end_plane(&self) -> Option<CapPlane> {
+        let zone = self.cap_zone();
+        let last = *self.spine.last()?;
+        let total = self.total_arc();
+        let k = self.arc.iter().rposition(|&a| total - a >= zone).unwrap_or(0);
+        cut_through(last, self.spine[k])
+    }
+
+    /// Clear and redraw the neighbourhood of the start and/or end, applying
+    /// each known cut to the segments within its zone. Returns the rect
+    /// recomposited.
+    fn recut(
+        &self,
+        canvas: &mut Canvas,
+        ws: &mut StrokeWorkspace,
+        pre: &[u8],
+        redraw_start: bool,
+        redraw_end: bool,
+    ) -> Option<DirtyRect> {
+        let zone = self.cap_zone();
+        let total = self.total_arc();
+        let near_start = |i: usize| self.arc[i] < zone;
+        let near_end = |i: usize| total - self.arc[i] < zone;
+
+        // Segment `j` joins node `j - 1` to node `j`; segment 0 is the
+        // pen-down dot. One is near an end if the node nearer it is.
+        let zones = |j: usize| -> (bool, bool) {
+            match j {
+                0 => (true, near_end(0)),
+                _ => (near_start(j - 1), near_end(j)),
+            }
+        };
+        let rect_of = |ws: &StrokeWorkspace, j: usize| match j {
+            0 => ws.capsule_rect(self.spine[0], self.spine[0]),
+            _ => ws.capsule_rect(self.spine[j - 1], self.spine[j]),
+        };
+
+        let mut region: Option<DirtyRect> = None;
+        for j in 0..self.spine.len() {
+            let (s, e) = zones(j);
+            if (redraw_start && s) || (redraw_end && e) {
+                if let Some(r) = rect_of(ws, j) {
+                    region = Some(union_rect(region, r));
+                }
+            }
+        }
+        let region = region?;
+
+        ws.clear_coverage(region);
+        for j in 0..self.spine.len() {
+            if !rect_of(ws, j).is_some_and(|r| overlaps(r, region)) {
+                continue;
+            }
+            let (s, e) = zones(j);
+            let mut clips = [self.start_cut, self.end_cut];
+            if !s {
+                clips[0] = None;
+            }
+            if !e {
+                clips[1] = None;
+            }
+            let clips: Vec<CapPlane> = clips.into_iter().flatten().collect();
+            match j {
+                0 => ws.raster_dot_clipped(self.spine[0], &clips),
+                _ => ws.raster_capsule_clipped(self.spine[j - 1], self.spine[j], &clips),
+            };
+        }
+
+        ws.restore_pre(canvas, pre, region);
+        self.composite(canvas, ws, pre, Some(region));
+        Some(region)
+    }
+
     /// Spine node at a curve sample: pressure-modulated radius and flow.
     /// `brush.opacity` is applied per-stroke at composite time, not here.
     fn node_at(&self, s: &PointerSample) -> SpineNode {
@@ -659,6 +820,27 @@ fn is_null(v: (f32, f32)) -> bool {
 fn tangent(from: PointerSample, to: PointerSample) -> (f32, f32) {
     let dt = ((to.t - from.t) * 1000.0).max(1.0);
     ((to.x - from.x) / dt, (to.y - from.y) / dt)
+}
+
+/// The cut through `at`, keeping the side `toward` is on. `None` when the two
+/// are too close to say which way that is.
+fn cut_through(at: SpineNode, toward: SpineNode) -> Option<CapPlane> {
+    let (dx, dy) = (toward.x - at.x, toward.y - at.y);
+    let l = dx.hypot(dy);
+    if l < 0.5 {
+        return None;
+    }
+    Some(CapPlane {
+        x: at.x,
+        y: at.y,
+        ux: dx / l,
+        uy: dy / l,
+    })
+}
+
+#[inline]
+fn overlaps(a: DirtyRect, b: DirtyRect) -> bool {
+    a.min_x < b.max_x && b.min_x < a.max_x && a.min_y < b.max_y && b.min_y < a.max_y
 }
 
 /// `from` moved `length` along the direction of `toward`.
@@ -925,6 +1107,34 @@ mod tests {
         }
     }
 
+    /// What the tablet actually delivers: dense packets on a quarter-pixel
+    /// grid. Fed only those — no whole-pixel cursor positions slipped in
+    /// between — a slow straight line must stay straight however far out the
+    /// view is zoomed.
+    #[test]
+    fn quarter_pixel_pen_samples_stay_straight_zoomed_out() {
+        let q = |v: f32| (v * 4.0).round() / 4.0;
+        let path: Vec<(f32, f32)> = (0..300)
+            .map(|i| {
+                let t = i as f32 * 1.3;
+                (q(60.0 + t), q(120.0 + t * 0.4))
+            })
+            .collect();
+        for scale in [0.25, 1.0] {
+            let spine = spine_in_screen_px(scale, SmoothingOptions::default(), &path);
+            let a = *spine.first().unwrap();
+            let b = *spine.last().unwrap();
+            let worst = spine
+                .iter()
+                .map(|p| line_distance(*p, a, b))
+                .fold(0.0f32, f32::max);
+            assert!(
+                worst < 0.25,
+                "quarter-pixel input wandered {worst} screen px at scale {scale}"
+            );
+        }
+    }
+
     /// A tablet delivers several packets per frame, a fraction of a pixel
     /// apart. Consecutive tangents are then nearly collinear, and the meeting
     /// point of two nearly-parallel lines runs off towards infinity — so a
@@ -1063,6 +1273,117 @@ mod tests {
             worst < 2.0,
             "spine deviates from the arc by {worst}px — the curve is faceted"
         );
+    }
+
+    // --- Flat ends ---------------------------------------------------------
+
+    const GROUND: [u8; 4] = [200, 200, 200, 255];
+
+    /// Draw `path` at full pressure with `brush` on a grey canvas, flushing
+    /// after every sample as the app does. Returns the canvas and the
+    /// pre-stroke pixels.
+    fn draw(brush: BrushSettings, w: u32, h: u32, path: &[(f32, f32)]) -> (Canvas, Vec<u8>) {
+        let mut canvas = Canvas::new(w, h);
+        for px in canvas.pixels.chunks_mut(4) {
+            px.copy_from_slice(&GROUND);
+        }
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(w, h, &brush);
+        let mut b = StrokeBuilder::new(brush, ActiveTool::Ink, 1.0, SmoothingOptions::default());
+        for &(x, y) in path {
+            b.push(sample(x, y));
+            b.flush(&mut canvas, &mut ws, &pre);
+        }
+        b.finish(&mut canvas, &mut ws, &pre);
+        (canvas, pre)
+    }
+
+    fn ink(cap: StrokeCap) -> BrushSettings {
+        let mut brush = BrushSettings::default_ink();
+        brush.radius = 8.0;
+        brush.cap = cap;
+        brush
+    }
+
+    fn px(c: &Canvas, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * c.width + x) * 4) as usize;
+        [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+    }
+
+    fn horizontal(x0: i32, x1: i32, y: f32) -> Vec<(f32, f32)> {
+        (x0..=x1).map(|x| (x as f32, y)).collect()
+    }
+
+    /// A flat end stops at the pen, square across. Beyond it the canvas must
+    /// be exactly what it was — the round end the live stroke showed before
+    /// the cut must not be left behind.
+    #[test]
+    fn flat_ends_stop_square_at_the_pen() {
+        let (c, pre) = draw(ink(StrokeCap::Flat), 64, 64, &horizontal(16, 48, 32.0));
+        let untouched = |x, y| px(&c, x, y) == px_of(&pre, c.width, x, y);
+        for y in [28, 32, 36] {
+            assert!(untouched(12, y), "ink left before the start at y={y}");
+            assert!(untouched(52, y), "ink left past the end at y={y}");
+        }
+        // Square, not rounded: the corners are solid right up to the cut.
+        for y in [27, 32, 37] {
+            assert_eq!(px(&c, 17, y)[..3], [10, 10, 10], "start corner at y={y}");
+            assert_eq!(px(&c, 46, y)[..3], [10, 10, 10], "end corner at y={y}");
+        }
+    }
+
+    #[test]
+    fn round_ends_reach_past_the_pen() {
+        let (c, pre) = draw(ink(StrokeCap::Round), 64, 64, &horizontal(16, 48, 32.0));
+        assert_ne!(px(&c, 12, 32), px_of(&pre, c.width, 12, 32));
+        assert_ne!(px(&c, 52, 32), px_of(&pre, c.width, 52, 32));
+    }
+
+    fn px_of(pixels: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * w + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    }
+
+    /// A tap has no direction to cut across, and a tap with a pixel or two of
+    /// tremor must not become a sliver: both stay round dots.
+    #[test]
+    fn a_flat_tap_is_still_a_dot() {
+        for path in [vec![(32.0, 32.0)], vec![(31.0, 32.0), (32.0, 32.0), (33.0, 32.0)]] {
+            let (c, pre) = draw(ink(StrokeCap::Flat), 64, 64, &path);
+            for (x, y) in [(26, 32), (38, 32), (32, 26), (32, 38)] {
+                assert_ne!(
+                    px(&c, x, y),
+                    px_of(&pre, c.width, x, y),
+                    "tap {path:?} lost its round edge at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    /// Only the stroke's own end is cut. A later stretch of the same stroke
+    /// that runs back past the start is ink, and stays.
+    #[test]
+    fn a_stroke_returning_past_its_start_keeps_that_ink() {
+        let mut path = horizontal(30, 60, 32.0);
+        path.extend((33..=36).map(|y| (60.0, y as f32)));
+        path.extend((14..=59).rev().map(|x| (x as f32, 36.0)));
+        let (c, _) = draw(ink(StrokeCap::Flat), 80, 64, &path);
+        assert_eq!(px(&c, 22, 36)[..3], [10, 10, 10], "the return was cut with the start");
+    }
+
+    /// Dab coverage builds up, so it cannot be redrawn after the fact; the
+    /// setting must leave a dab brush alone.
+    #[test]
+    fn a_dab_brush_ignores_the_cap() {
+        let path = horizontal(16, 48, 32.0);
+        let mut round = BrushSettings::default_pencil();
+        round.cap = StrokeCap::Round;
+        let mut flat = round.clone();
+        flat.cap = StrokeCap::Flat;
+        let (a, _) = draw(round, 64, 64, &path);
+        let (b, _) = draw(flat, 64, 64, &path);
+        assert!(a.pixels == b.pixels);
     }
 
     /// Render every preset as a stroke on a grey ground, for eyeballing brush

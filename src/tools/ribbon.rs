@@ -40,6 +40,25 @@ pub struct SpineNode {
 /// Half-pixel anti-aliasing band added to the local radius.
 const AA: f32 = 0.5;
 
+/// A straight cut across one end of a stroke: a point on the cut and the unit
+/// normal pointing *into* the stroke. Coverage on the far side is removed,
+/// with a one-pixel anti-aliased edge centred on the line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CapPlane {
+    pub x: f32,
+    pub y: f32,
+    pub ux: f32,
+    pub uy: f32,
+}
+
+impl CapPlane {
+    /// Fraction of a pixel centred at `(fx, fy)` that lies on the kept side.
+    #[inline]
+    fn keep(&self, fx: f32, fy: f32) -> f32 {
+        ((fx - self.x) * self.ux + (fy - self.y) * self.uy + 0.5).clamp(0.0, 1.0)
+    }
+}
+
 /// Persistent, reusable per-stroke scratch state. One per app; `begin()` is
 /// called at stroke start and clears only the region the previous stroke
 /// touched.
@@ -163,25 +182,30 @@ impl StrokeWorkspace {
     /// segments' caps and deduplicated by `max()`. The shape is well-formed
     /// for any taper, so no |r0-r1| special-casing is needed.
     pub fn raster_capsule(&mut self, a: SpineNode, b: SpineNode) -> Option<DirtyRect> {
+        self.raster_capsule_clipped(a, b, &[])
+    }
+
+    /// `raster_capsule`, with coverage beyond each of `clips` cut away. This
+    /// is how a flat end is made: the round caps are drawn as usual and then
+    /// sliced off square.
+    pub fn raster_capsule_clipped(
+        &mut self,
+        a: SpineNode,
+        b: SpineNode,
+        clips: &[CapPlane],
+    ) -> Option<DirtyRect> {
         let dx = b.x - a.x;
         let dy = b.y - a.y;
         let len2 = dx * dx + dy * dy;
         if len2 < 1e-6 {
             let n = if a.radius >= b.radius { a } else { b };
-            return self.raster_dot(n);
+            return self.raster_dot_clipped(n, clips);
         }
         let inv_len2 = 1.0 / len2;
         let dr = b.radius - a.radius;
         let dflow = b.flow - a.flow;
 
-        let pad = a.radius.max(b.radius) + AA + 1.0;
-        let x0 = ((a.x.min(b.x) - pad).floor() as i32).max(0);
-        let y0 = ((a.y.min(b.y) - pad).floor() as i32).max(0);
-        let x1 = ((a.x.max(b.x) + pad).ceil() as i32).min(self.w as i32 - 1);
-        let y1 = ((a.y.max(b.y) + pad).ceil() as i32).min(self.h as i32 - 1);
-        if x1 < x0 || y1 < y0 {
-            return None;
-        }
+        let (x0, y0, x1, y1) = self.capsule_box(a, b)?;
 
         for py in y0..=y1 {
             let fy = py as f32 + 0.5;
@@ -197,7 +221,13 @@ impl StrokeWorkspace {
                 if d2 >= outer * outer {
                     continue;
                 }
-                let mask = self.mask(d2.sqrt(), outer);
+                let mut mask = self.mask(d2.sqrt(), outer);
+                for c in clips {
+                    mask *= c.keep(fx, fy);
+                }
+                if mask <= 0.0 {
+                    continue;
+                }
                 let c16 = self.pixel_cov(mask, a.flow + t * dflow, px as u32, py as u32);
                 self.combine(row + px as usize, c16);
             }
@@ -206,17 +236,38 @@ impl StrokeWorkspace {
         self.touched(x0, y0, x1, y1)
     }
 
+    /// Inclusive, canvas-clipped pixel box a capsule from `a` to `b` can
+    /// touch, or `None` if it lies wholly off the canvas. A dot is the
+    /// capsule from a node to itself.
+    fn capsule_box(&self, a: SpineNode, b: SpineNode) -> Option<(i32, i32, i32, i32)> {
+        let pad = a.radius.max(b.radius) + AA + 1.0;
+        let x0 = ((a.x.min(b.x) - pad).floor() as i32).max(0);
+        let y0 = ((a.y.min(b.y) - pad).floor() as i32).max(0);
+        let x1 = ((a.x.max(b.x) + pad).ceil() as i32).min(self.w as i32 - 1);
+        let y1 = ((a.y.max(b.y) + pad).ceil() as i32).min(self.h as i32 - 1);
+        (x1 >= x0 && y1 >= y0).then_some((x0, y0, x1, y1))
+    }
+
+    /// The rect `raster_capsule(a, b)` would return, without drawing it.
+    pub fn capsule_rect(&self, a: SpineNode, b: SpineNode) -> Option<DirtyRect> {
+        let (x0, y0, x1, y1) = self.capsule_box(a, b)?;
+        Some(DirtyRect {
+            min_x: x0 as u32,
+            min_y: y0 as u32,
+            max_x: (x1 + 1) as u32,
+            max_y: (y1 + 1) as u32,
+        })
+    }
+
     /// Rasterize a single dot (tap / first sample): a plain disc, the
     /// degenerate case of `raster_capsule`.
     pub fn raster_dot(&mut self, n: SpineNode) -> Option<DirtyRect> {
-        let pad = n.radius + AA + 1.0;
-        let x0 = ((n.x - pad).floor() as i32).max(0);
-        let y0 = ((n.y - pad).floor() as i32).max(0);
-        let x1 = ((n.x + pad).ceil() as i32).min(self.w as i32 - 1);
-        let y1 = ((n.y + pad).ceil() as i32).min(self.h as i32 - 1);
-        if x1 < x0 || y1 < y0 {
-            return None;
-        }
+        self.raster_dot_clipped(n, &[])
+    }
+
+    /// `raster_dot` with coverage beyond each of `clips` cut away.
+    pub fn raster_dot_clipped(&mut self, n: SpineNode, clips: &[CapPlane]) -> Option<DirtyRect> {
+        let (x0, y0, x1, y1) = self.capsule_box(n, n)?;
         let outer = n.radius + AA;
         let outer2 = outer * outer;
 
@@ -231,7 +282,13 @@ impl StrokeWorkspace {
                 if d2 >= outer2 {
                     continue;
                 }
-                let mask = self.mask(d2.sqrt(), outer);
+                let mut mask = self.mask(d2.sqrt(), outer);
+                for c in clips {
+                    mask *= c.keep(fx, fy);
+                }
+                if mask <= 0.0 {
+                    continue;
+                }
                 let c16 = self.pixel_cov(mask, n.flow, px as u32, py as u32);
                 self.combine(row + px as usize, c16);
             }
@@ -316,7 +373,9 @@ impl StrokeWorkspace {
                 let idx = (row + x as usize) * 4;
                 if cov == 0 {
                     // Coverage 0 now was always 0 (monotonicity): the canvas
-                    // still equals `pre` here.
+                    // still equals `pre` here. A cap cut is the one thing
+                    // that lowers coverage, and it restores `pre` itself
+                    // first — see `restore_pre`.
                     continue;
                 }
                 let a_src = cov as f32 / 65535.0 * opacity;
@@ -368,6 +427,30 @@ impl StrokeWorkspace {
                     dst[3] = a8;
                 }
             }
+        }
+    }
+
+    /// Zero the coverage inside `rect`, ready for it to be redrawn. Only for
+    /// re-cutting a stroke's ends: it breaks the monotonicity the composite
+    /// relies on, so follow it with `restore_pre` over the same rect.
+    pub fn clear_coverage(&mut self, rect: DirtyRect) {
+        for y in rect.min_y..rect.max_y.min(self.h) {
+            let row = (y * self.w) as usize;
+            let (x0, x1) = (rect.min_x.min(self.w), rect.max_x.min(self.w));
+            self.cov[row + x0 as usize..row + x1 as usize].fill(0);
+        }
+    }
+
+    /// Put the pre-stroke pixels back inside `rect`. The composite skips
+    /// zero-coverage pixels on the grounds that they were never painted; after
+    /// `clear_coverage` that is no longer true, and without this the stroke's
+    /// old round ends would stay on the canvas beyond the cut.
+    pub fn restore_pre(&self, canvas: &mut Canvas, pre: &[u8], rect: DirtyRect) {
+        for y in rect.min_y..rect.max_y.min(self.h) {
+            let row = (y * self.w) as usize;
+            let a = (row + rect.min_x.min(self.w) as usize) * 4;
+            let b = (row + rect.max_x.min(self.w) as usize) * 4;
+            canvas.pixels[a..b].copy_from_slice(&pre[a..b]);
         }
     }
 
@@ -442,6 +525,35 @@ mod tests {
         b.raster_dot(node(32.0, 32.0, 8.0, 1.0));
 
         assert_eq!(a.cov, b.cov);
+    }
+
+    #[test]
+    fn a_capsule_with_no_cuts_is_unchanged() {
+        let (a0, b0) = (node(12.0, 20.0, 6.0, 1.0), node(50.0, 41.0, 3.0, 0.8));
+        let mut a = StrokeWorkspace::new();
+        a.begin(64, 64, &ribbon(0.7, 0.3));
+        a.raster_capsule(a0, b0);
+        let mut b = StrokeWorkspace::new();
+        b.begin(64, 64, &ribbon(0.7, 0.3));
+        b.raster_capsule_clipped(a0, b0, &[]);
+        assert_eq!(a.cov, b.cov);
+    }
+
+    /// A cut through the middle keeps one side, with a one-pixel edge on
+    /// the line itself.
+    #[test]
+    fn a_cut_removes_everything_beyond_it() {
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        let cut = CapPlane { x: 32.0, y: 32.0, ux: 1.0, uy: 0.0 };
+        ws.raster_capsule_clipped(node(16.0, 32.0, 8.0, 1.0), node(48.0, 32.0, 8.0, 1.0), &[cut]);
+        for y in 26..=38 {
+            for x in 0..32 {
+                assert_eq!(ws.cov[y * 64 + x], 0, "kept ({x}, {y}) beyond the cut");
+            }
+        }
+        assert_eq!(ws.cov[32 * 64 + 32], 65535, "pixel on the kept side of the line");
+        assert_eq!(ws.cov[32 * 64 + 40], 65535);
     }
 
     #[test]

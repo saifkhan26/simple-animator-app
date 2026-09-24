@@ -22,6 +22,7 @@ use crate::timeline::onion::{OnionConfig, OnionDirection, OnionStep};
 use crate::timeline::playback::Playback;
 use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
+use crate::tools::perspective::{self, GridGrab, PerspectiveConfig};
 use crate::tools::selection::{Grab, Pose, Selection};
 use crate::tools::stroke::StrokeBuilder;
 use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
@@ -129,6 +130,24 @@ pub struct ShapeDrag {
 /// scale or rotation is re-solved against it every frame rather than
 /// accumulated — so a slow drag and a fast one ending in the same place give
 /// the same result, and float error cannot creep in over a long drag.
+/// A drag on a perspective grid. Like [`SelDrag`], solved against the corners
+/// at press time (document space) rather than accumulated.
+#[derive(Clone, Copy)]
+struct GridDrag {
+    grid: usize,
+    grab: GridGrab,
+    start: [f32; 2],
+    corners: [[f32; 2]; 4],
+}
+
+/// Perspective snap state for one stroke: where it started, and — once the
+/// pointer has moved far enough to tell — the grid direction it is locked to.
+#[derive(Clone, Copy)]
+struct SnapLock {
+    start: [f32; 2],
+    dir: Option<[f32; 2]>,
+}
+
 #[derive(Clone, Copy)]
 pub struct SelDrag {
     grab: Grab,
@@ -223,18 +242,26 @@ struct UiPrefs {
     /// Frame column width in the timeline tracks — how zoomed in the artist
     /// likes to work.
     track_frame_w: f32,
+    /// Perspective grids. A workspace preference rather than project data:
+    /// the same guides follow the artist between files, stored frame-relative
+    /// so they fit any resolution.
+    perspective: PerspectiveConfig,
 }
 
+/// Number of tools, and so of slots in the per-tool brush array.
+const TOOL_COUNT: usize = 8;
+
 /// The built-in per-tool brushes.
-fn default_tool_brushes() -> [BrushSettings; 7] {
+fn default_tool_brushes() -> [BrushSettings; TOOL_COUNT] {
     [
         BrushSettings::default_pencil(),
         BrushSettings::default_ink(),
         BrushSettings::default_eraser(),
         BrushSettings::default_fill(),
         BrushSettings::default_shape(),
-        // Tracker and Lasso draw nothing; the slots only keep tool indexing
-        // into this array safe.
+        // Tracker, Lasso and Perspective draw nothing; the slots only keep
+        // tool indexing into this array safe.
+        BrushSettings::default_shape(),
         BrushSettings::default_shape(),
         BrushSettings::default_shape(),
     ]
@@ -243,10 +270,17 @@ fn default_tool_brushes() -> [BrushSettings; 7] {
 /// Saved brushes, or the defaults. A blob from a build with a different
 /// number of tools is discarded rather than padded: the array is indexed by
 /// `ActiveTool::idx`, so a short one would silently reassign brushes to the
-/// wrong tools.
-fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; 7] {
+/// wrong tools. The one exception is a blob from just before the Perspective
+/// tool: it was appended last, so the older slots still line up and only its
+/// own is missing.
+fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; TOOL_COUNT] {
     match saved {
-        Some(v) => <[BrushSettings; 7]>::try_from(v).unwrap_or_else(|_| default_tool_brushes()),
+        Some(mut v) => {
+            if v.len() == ActiveTool::Perspective.idx() {
+                v.push(default_tool_brushes()[ActiveTool::Perspective.idx()].clone());
+            }
+            <[BrushSettings; TOOL_COUNT]>::try_from(v).unwrap_or_else(|_| default_tool_brushes())
+        }
         None => default_tool_brushes(),
     }
 }
@@ -270,6 +304,7 @@ impl Default for UiPrefs {
             tool_brushes: None,
             palette: Vec::new(),
             track_frame_w: crate::ui::tracks::DEFAULT_FRAME_W,
+            perspective: PerspectiveConfig::default(),
         }
     }
 }
@@ -517,7 +552,7 @@ pub struct AppState {
     /// GPU texture for the floating pixels.
     pub selection_tex: Option<TextureHandle>,
     /// Per-tool brush settings preserved across tool switches.
-    pub tool_brushes: [BrushSettings; 7],
+    pub tool_brushes: [BrushSettings; TOOL_COUNT],
     pub stroke: Option<StrokeBuilder>,
     /// CellId being painted into during the current stroke.
     pub stroke_target: Option<CellId>,
@@ -530,6 +565,13 @@ pub struct AppState {
     /// packets rather than egui events, so they have no `InputState` of their
     /// own to ask; a selection scale reads this for its uniform constraint.
     shift_held: bool,
+    /// Perspective grids and their display/snap switches.
+    pub perspective: PerspectiveConfig,
+    /// In-flight drag on a perspective grid, or `None`.
+    grid_drag: Option<GridDrag>,
+    /// Perspective snap for the stroke in progress, or `None` when the stroke
+    /// isn't snapping.
+    snap_lock: Option<SnapLock>,
 
     /// Canvas view transform (zoom / pan / rotate).
     pub view: View,
@@ -578,6 +620,17 @@ pub struct AppState {
     /// readout: neither is visible while drawing, which is when they happen.
     pub pen_batches_rejected: u32,
     pub pen_packets_dropped: u32,
+    /// Where the current stroke's positions come from, decided at pen-down.
+    /// A pen stroke takes tablet packets only: the cursor is the same
+    /// position rounded to a whole pixel, and slipping it in on a frame with
+    /// no packet puts a half-pixel kink into the line — several canvas pixels
+    /// once zoomed out. Cleared for good if the pen mapping stops agreeing
+    /// with the cursor partway through.
+    pub stroke_from_pen: bool,
+    /// Samples the last stroke took from each source, for the tablet readout.
+    /// A pen stroke should show none from the cursor.
+    pub stroke_pen_samples: u32,
+    pub stroke_mouse_samples: u32,
     /// Leftover trackpad scroll (in points) not yet worth a whole frame step.
     /// Session-only: a wheel gesture never spans a run. Mice report whole
     /// lines and bypass this entirely — see `ui::shell::timeline_wheel_scrub`.
@@ -806,6 +859,9 @@ impl AppState {
             shape_drag: None,
             lasso: None,
             shift_held: false,
+            perspective: prefs.perspective,
+            grid_drag: None,
+            snap_lock: None,
             view: View::default(),
             view_scale: 1.0,
             lock_brush_to_view: prefs.lock_brush_to_view,
@@ -821,6 +877,9 @@ impl AppState {
             pen_outlier_logged: false,
             pen_batches_rejected: 0,
             pen_packets_dropped: 0,
+            stroke_from_pen: false,
+            stroke_pen_samples: 0,
+            stroke_mouse_samples: 0,
             wheel_scrub_accum: 0.0,
             bg_opacity: 1.0,
             bg_color: [0.12, 0.12, 0.13],
@@ -904,15 +963,9 @@ impl AppState {
         }
         self.tool = ActiveTool::Pencil;
         self.brush = BrushSettings::default_pencil();
-        self.tool_brushes = [
-            BrushSettings::default_pencil(),
-            BrushSettings::default_ink(),
-            BrushSettings::default_eraser(),
-            BrushSettings::default_fill(),
-            BrushSettings::default_shape(),
-            BrushSettings::default_shape(),
-            BrushSettings::default_shape(),
-        ];
+        self.tool_brushes = default_tool_brushes();
+        self.grid_drag = None;
+        self.snap_lock = None;
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
@@ -2601,6 +2654,8 @@ impl AppState {
         // it set would let the next drag — with any tool — keep posing the
         // selection that is still floating.
         self.sel_drag = None;
+        self.grid_drag = None;
+        self.snap_lock = None;
         let Some(target) = self.stroke_target.take() else {
             self.stroke = None;
             self.shape_drag = None;
@@ -3056,6 +3111,122 @@ impl AppState {
         self.sel_tex_stale = true;
     }
 
+    /// Give the perspective tool something to edit: selecting it with every
+    /// grid deleted brings a default one back.
+    pub fn ensure_perspective_grid(&mut self) {
+        if self.perspective.grids.is_empty() {
+            self.perspective.grids.push(perspective::PerspectiveGrid::default());
+            self.perspective.active = 0;
+        }
+        self.perspective.active = self.perspective.active.min(self.perspective.grids.len() - 1);
+    }
+
+    fn frame_size(&self) -> (f32, f32) {
+        (self.project.width as f32, self.project.height as f32)
+    }
+
+    /// Perspective tool press at document point `p`. The active grid gets
+    /// first pick; a press on another visible grid makes it active and grabs
+    /// it. A locked grid is selected but never grabbed.
+    pub fn perspective_down(&mut self, p: [f32; 2]) {
+        self.grid_drag = None;
+        let (w, h) = self.frame_size();
+        let tol = crate::tools::selection::HANDLE_PX / self.view_scale.max(1e-6);
+        let n = self.perspective.grids.len();
+        let order = std::iter::once(self.perspective.active).chain((0..n).filter(|&i| i != self.perspective.active));
+        for i in order {
+            let Some(g) = self.perspective.grids.get(i) else {
+                continue;
+            };
+            if !g.visible {
+                continue;
+            }
+            let corners = g.doc_corners(w, h);
+            let Some(grab) = perspective::grab_at(&corners, p, tol) else {
+                continue;
+            };
+            self.perspective.active = i;
+            if !g.locked {
+                self.grid_drag = Some(GridDrag {
+                    grid: i,
+                    grab,
+                    start: p,
+                    corners,
+                });
+            }
+            return;
+        }
+    }
+
+    /// Perspective tool drag to document point `p`. A corner drag that would
+    /// fold the quad leaves it where it last was.
+    pub fn perspective_move(&mut self, p: [f32; 2]) {
+        let Some(d) = self.grid_drag else {
+            return;
+        };
+        let (w, h) = self.frame_size();
+        let snap = self.shift_held;
+        if let (Some(c), Some(g)) = (
+            perspective::dragged(&d.corners, d.grab, d.start, p, snap),
+            self.perspective.grids.get_mut(d.grid),
+        ) {
+            g.set_doc_corners(c, w, h);
+        }
+    }
+
+    /// Whether strokes should snap to the active grid right now.
+    fn snapping(&self) -> bool {
+        self.perspective.snap
+            && self.perspective.show
+            && matches!(self.tool, ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser)
+            && self.perspective.active_grid().is_some_and(|g| g.visible)
+    }
+
+    /// Start of a stroke at document point `p`. Arms perspective snap when it
+    /// is on; the first point itself is never moved.
+    pub fn snap_begin(&mut self, p: [f32; 2]) -> [f32; 2] {
+        self.snap_lock = self.snapping().then_some(SnapLock { start: p, dir: None });
+        p
+    }
+
+    /// A stroke point at document point `p`, snapped to the active grid.
+    ///
+    /// The direction is picked once, when the pointer is far enough from the
+    /// start to show where it is heading, and then held for the whole stroke —
+    /// re-picking per point would let a wobbly hand flip between families.
+    /// Until then every point stays on the start.
+    pub fn snap_doc(&mut self, p: [f32; 2]) -> [f32; 2] {
+        const DECIDE_PX: f32 = 10.0;
+        let Some(mut lock) = self.snap_lock else {
+            return p;
+        };
+        let dir = match lock.dir {
+            Some(d) => d,
+            None => {
+                let motion = [p[0] - lock.start[0], p[1] - lock.start[1]];
+                if motion[0].hypot(motion[1]) * self.view_scale < DECIDE_PX {
+                    return lock.start;
+                }
+                let (w, h) = self.frame_size();
+                let dirs = self
+                    .perspective
+                    .active_grid()
+                    .and_then(|g| perspective::Plane::new(g.doc_corners(w, h)))
+                    .map(|plane| plane.snap_dirs(lock.start, self.perspective.snap_vertical))
+                    .unwrap_or_default();
+                let Some(d) = perspective::pick_dir(&dirs, motion) else {
+                    // A degenerate grid has nothing to snap to.
+                    self.snap_lock = None;
+                    return p;
+                };
+                lock.dir = Some(d);
+                self.snap_lock = Some(lock);
+                d
+            }
+        };
+        perspective::project(lock.start, dir, p)
+    }
+
     /// Nudge a floating selection by whole pixels (arrow keys, and the plain
     /// drag). Stays integral, so a move alone never reaches the resampler.
     pub fn nudge_selection(&mut self, dx: i32, dy: i32) {
@@ -3348,6 +3519,19 @@ impl AppState {
                 self.tool_brushes[self.tool.idx()] = self.brush.clone();
                 self.tool = ActiveTool::Lasso;
                 self.brush = self.tool_brushes[ActiveTool::Lasso.idx()].clone();
+            }
+            Action::ToolPerspective => {
+                self.commit_selection();
+                self.tool_brushes[self.tool.idx()] = self.brush.clone();
+                self.tool = ActiveTool::Perspective;
+                self.brush = self.tool_brushes[ActiveTool::Perspective.idx()].clone();
+                self.ensure_perspective_grid();
+            }
+            Action::TogglePerspectiveGrid => {
+                self.perspective.show = !self.perspective.show;
+            }
+            Action::TogglePerspectiveSnap => {
+                self.perspective.snap = !self.perspective.snap;
             }
             Action::PlayPause => {
                 let now = 0.0; // refreshed by playback.tick on next frame
@@ -3669,6 +3853,7 @@ impl eframe::App for AppState {
                 tool_brushes: Some(self.tool_brushes.to_vec()),
                 palette: self.palette.clone(),
                 track_frame_w: self.track_frame_w,
+                perspective: self.perspective.clone(),
             },
         );
     }
@@ -4147,6 +4332,170 @@ mod tests {
         px[last] = 1;
         assert!(!no_alpha(&px), "the last pixel counts");
         assert!(!no_alpha(&px[4..]), "and on an unaligned slice too");
+    }
+
+    /// A state on the perspective tool with one square grid, 100 doc px a
+    /// side, and a 1:1 view so handle tolerance is `HANDLE_PX` doc px.
+    fn perspective_state() -> AppState {
+        let mut state = AppState::for_test();
+        state.dispatch(Action::ToolPerspective);
+        state.view_scale = 1.0;
+        let (w, h) = state.frame_size();
+        let sq = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]];
+        state.perspective.grids[0].set_doc_corners(sq, w, h);
+        state
+    }
+
+    fn doc_corners(state: &AppState, i: usize) -> [[f32; 2]; 4] {
+        let (w, h) = state.frame_size();
+        state.perspective.grids[i].doc_corners(w, h)
+    }
+
+    fn near(a: [f32; 2], b: [f32; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-2 && (a[1] - b[1]).abs() < 1e-2
+    }
+
+    #[test]
+    fn dragging_a_grid_corner_moves_only_that_corner() {
+        let mut state = perspective_state();
+        let before = doc_corners(&state, 0);
+        state.perspective_down([201.0, 99.0]);
+        state.perspective_move([231.0, 89.0]);
+        state.perspective_move([240.0, 80.0]);
+        state.pointer_up();
+        let after = doc_corners(&state, 0);
+        assert!(near(after[1], [239.0, 81.0]), "{:?}", after[1]);
+        for i in [0, 2, 3] {
+            assert!(near(after[i], before[i]));
+        }
+        // Released: further moves do nothing.
+        state.perspective_move([0.0, 0.0]);
+        assert_eq!(doc_corners(&state, 0), after);
+    }
+
+    #[test]
+    fn a_locked_grid_is_selected_but_not_moved() {
+        let mut state = perspective_state();
+        state.perspective.grids.push(state.perspective.grids[0].clone());
+        state.perspective.grids[0].locked = true;
+        state.perspective.active = 1;
+        // Hide grid 1 so the press can only land on the locked one.
+        state.perspective.grids[1].visible = false;
+        let before = doc_corners(&state, 0);
+        state.perspective_down([150.0, 150.0]);
+        assert_eq!(state.perspective.active, 0);
+        state.perspective_move([170.0, 170.0]);
+        assert_eq!(doc_corners(&state, 0), before);
+    }
+
+    #[test]
+    fn pressing_another_grid_makes_it_active() {
+        let mut state = perspective_state();
+        let mut other = state.perspective.grids[0].clone();
+        let (w, h) = state.frame_size();
+        other.set_doc_corners([[400.0, 100.0], [500.0, 100.0], [500.0, 200.0], [400.0, 200.0]], w, h);
+        state.perspective.grids.push(other);
+        state.perspective_down([450.0, 150.0]);
+        assert_eq!(state.perspective.active, 1);
+        state.perspective_move([460.0, 150.0]);
+        assert!(near(doc_corners(&state, 1)[0], [410.0, 100.0]));
+        assert!(near(doc_corners(&state, 0)[0], [100.0, 100.0]), "grid 0 untouched");
+        // Empty canvas grabs nothing and keeps the selection.
+        state.pointer_up();
+        state.perspective_down([900.0, 600.0]);
+        assert_eq!(state.perspective.active, 1);
+    }
+
+    #[test]
+    fn a_folding_corner_drag_is_refused() {
+        let mut state = perspective_state();
+        state.perspective_down([200.0, 100.0]);
+        state.perspective_move([210.0, 110.0]);
+        let ok = doc_corners(&state, 0);
+        // Across the far diagonal: the quad would fold.
+        state.perspective_move([50.0, 250.0]);
+        assert_eq!(doc_corners(&state, 0), ok);
+    }
+
+    #[test]
+    fn snap_locks_a_stroke_to_one_grid_direction() {
+        let mut state = perspective_state();
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        // A square seen square-on: rows horizontal, columns vertical.
+        assert_eq!(state.snap_begin([150.0, 150.0]), [150.0, 150.0]);
+        // Too close to tell yet: held on the start.
+        assert_eq!(state.snap_doc([152.0, 151.0]), [150.0, 150.0]);
+        // Heading right: locked horizontal...
+        assert!(near(state.snap_doc([170.0, 153.0]), [170.0, 150.0]));
+        // ...and it stays locked even when the hand drifts steeply.
+        assert!(near(state.snap_doc([175.0, 190.0]), [175.0, 150.0]));
+        state.pointer_up();
+        // Snap off: points pass straight through.
+        state.perspective.snap = false;
+        state.snap_begin([150.0, 150.0]);
+        assert_eq!(state.snap_doc([170.0, 153.0]), [170.0, 153.0]);
+    }
+
+    #[test]
+    fn a_near_vertical_stroke_follows_the_vanishing_point_not_the_vertical() {
+        let mut state = perspective_state();
+        let (w, h) = state.frame_size();
+        // One-point floor: the columns meet at about (150, 67).
+        let trap = [[140.0, 100.0], [160.0, 100.0], [250.0, 400.0], [50.0, 400.0]];
+        state.perspective.grids[0].set_doc_corners(trap, w, h);
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        // Straight up from just right of centre: nearly vertical, but the
+        // column through here leans toward the vanishing point.
+        state.snap_begin([170.0, 400.0]);
+        let p = state.snap_doc([170.0, 300.0]);
+        assert!(p[0] < 170.0 - 1.0, "leans toward the VP: {p:?}");
+        state.pointer_up();
+        // With verticals on, the same stroke stays vertical.
+        state.perspective.snap_vertical = true;
+        state.snap_begin([170.0, 400.0]);
+        let p = state.snap_doc([170.0, 300.0]);
+        assert!((p[0] - 170.0).abs() < 1e-3, "{p:?}");
+    }
+
+    #[test]
+    fn selecting_the_tool_brings_back_a_grid() {
+        let mut state = AppState::for_test();
+        state.perspective.grids.clear();
+        state.dispatch(Action::ToolPerspective);
+        assert_eq!(state.perspective.grids.len(), 1);
+        assert_eq!(state.perspective.active, 0);
+    }
+
+    #[test]
+    fn brushes_saved_before_the_perspective_tool_survive() {
+        let mut old: Vec<BrushSettings> = default_tool_brushes()[..7].to_vec();
+        old[0].radius = 42.0;
+        let restored = restore_tool_brushes(Some(old));
+        assert_eq!(restored[0].radius, 42.0, "tuned pencil kept");
+        // Any other length is still thrown out.
+        let odd = default_tool_brushes()[..5].to_vec();
+        let mut short = odd;
+        short[0].radius = 42.0;
+        assert_ne!(restore_tool_brushes(Some(short))[0].radius, 42.0);
+    }
+
+    #[test]
+    fn perspective_prefs_round_trip_and_default_when_missing() {
+        let mut prefs = UiPrefs::default();
+        prefs.perspective.show = true;
+        prefs.perspective.grids[0].rows = 11;
+        prefs.perspective.grids[0].locked = true;
+        let text = toml::to_string(&prefs).unwrap();
+        let back: UiPrefs = toml::from_str(&text).unwrap();
+        assert_eq!(back.perspective, prefs.perspective);
+        // A blob from before grids existed still loads, with the default grid.
+        let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
+        assert!(!old.show_panels);
+        assert_eq!(old.perspective, PerspectiveConfig::default());
     }
 
     /// The fix for the big-layer stalls in one test: moving the timeline

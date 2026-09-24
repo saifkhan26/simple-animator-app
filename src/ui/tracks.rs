@@ -977,7 +977,7 @@ fn paint(
                 Stroke::NONE,
             ),
             (false, true) => (
-                Color32::from_white_alpha(if hovered { 14 } else { 6 }),
+                theme::white_alpha(if hovered { 14 } else { 6 }),
                 Stroke::new(1.0, theme::TEXT_MUTED.gamma_multiply(0.35 * dim)),
             ),
         };

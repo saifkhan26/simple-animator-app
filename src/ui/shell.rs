@@ -11,7 +11,7 @@ use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::OnionDirection;
 use crate::tools::selection::Grab as SelGrab;
-use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing};
+use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing, StrokeCap};
 use crate::ui::{expr, theme};
 
 /// Tooltip text including the currently-bound shortcut (e.g. "Pencil  (Q)").
@@ -154,10 +154,27 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             // Tracker takes the raw doc-space point — no cell
                             // mapping, no cell allocation.
                             state.tracker_click(canvas_to_doc(pos));
+                        } else if state.tool == ActiveTool::Perspective {
+                            // So do the grids: they live in document space,
+                            // on no layer.
+                            let (x, y) = canvas_to_doc(pos);
+                            state.perspective_down([x, y]);
                         } else {
-                            let (cx, cy) = doc_to_active_cell(state, canvas_to_doc(pos));
+                            // Decided once, here: see `AppState::stroke_from_pen`.
+                            let ppp = ui.ctx().pixels_per_point();
+                            let start = pen_stroke_start(state, ppp, pos);
+                            state.stroke_from_pen = start.is_some();
+                            state.stroke_pen_samples = 0;
+                            state.stroke_mouse_samples = 0;
+                            let (at, packet) = match start {
+                                Some((at, p)) => (at, Some(p)),
+                                None => (pos, None),
+                            };
+                            let (x, y) = canvas_to_doc(at);
+                            let [x, y] = state.snap_begin([x, y]);
+                            let (cx, cy) = doc_to_active_cell(state, (x, y));
                             let t = ui.input(|i| i.time as f32);
-                            let s = state.make_sample(cx, cy, t);
+                            let s = stroke_sample(state, cx, cy, t, packet);
                             state.pointer_down(s);
                         }
                     }
@@ -250,33 +267,33 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                                 state.view.pan += cursor - after;
                             }
                         }
+                        None if state.tool == ActiveTool::Perspective => {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                let (x, y) = canvas_to_doc(pos);
+                                state.perspective_move([x, y]);
+                            }
+                        }
+                        // The press frame: `pointer_down` has just started
+                        // the stroke at the newest packet, and this frame's
+                        // other packets lie at or behind it. Feeding them
+                        // too would double the line back on itself.
+                        None if resp.drag_started() => {}
                         None => {
                             let t = ui.input(|i| i.time as f32);
                             let pointer = resp.interact_pointer_pos();
-                            // Tablet packets first: several per frame, each
-                            // with its own sub-pixel position and pressure.
-                            // `pen_stroke_points` returns None when the pen is
-                            // not the live device or when its mapping does not
-                            // agree with the OS pointer, and the single egui
-                            // position is used instead.
-                            let ctx = ui.ctx().clone();
-                            match pen_stroke_points(state, &ctx, pointer) {
-                                Some(points) => {
-                                    for (pos, packet) in points {
-                                        let (cx, cy) =
-                                            doc_to_active_cell(state, canvas_to_doc(pos));
-                                        let s = state.make_pen_sample(cx, cy, t, &packet);
-                                        state.pointer_move(s);
-                                    }
-                                }
-                                None => {
-                                    if let Some(pos) = pointer {
-                                        let (cx, cy) =
-                                            doc_to_active_cell(state, canvas_to_doc(pos));
-                                        let s = state.make_sample(cx, cy, t);
-                                        state.pointer_move(s);
-                                    }
-                                }
+                            let frame = if state.stroke_from_pen {
+                                let ppp = ui.ctx().pixels_per_point();
+                                pen_stroke_points(state, ppp, pointer)
+                            } else {
+                                PenFrame::Untrusted
+                            };
+                            let samples =
+                                stroke_frame_samples(&mut state.stroke_from_pen, frame, pointer);
+                            for (pos, packet) in samples {
+                                let doc = snapped(state, canvas_to_doc(pos));
+                                let (cx, cy) = doc_to_active_cell(state, doc);
+                                let s = stroke_sample(state, cx, cy, t, packet);
+                                state.pointer_move(s);
                             }
                         }
                     }
@@ -403,7 +420,7 @@ fn screen_pick_banner(ctx: &egui::Context) {
     );
     let pad = Vec2::new(12.0, 6.0);
     let rect = Rect::from_center_size(center, galley.size() + pad * 2.0);
-    painter.rect_filled(rect, 6.0, Color32::from_rgba_unmultiplied(10, 11, 14, 230));
+    painter.rect_filled(rect, 6.0, theme::premul(10, 11, 14, 230));
     painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_gray(80)));
     painter.galley(rect.min + pad, galley, Color32::WHITE);
 }
@@ -435,7 +452,7 @@ fn draw_screen_pick_loupe(
     let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("screen_pick_loupe"));
     let painter = ctx.layer_painter(layer);
 
-    painter.rect_filled(rect, 6.0, Color32::from_rgba_unmultiplied(10, 11, 14, 235));
+    painter.rect_filled(rect, 6.0, theme::premul(10, 11, 14, 235));
     if let Some(t) = tex {
         painter.image(
             t.id(),
@@ -454,13 +471,13 @@ fn draw_screen_pick_loupe(
     // Hex readout + swatch below the loupe.
     let (swatch, label) = match color {
         Some(c) => (
-            Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
+            Color32::from_rgb(c[0], c[1], c[2]),
             format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
         ),
         None => (Color32::from_gray(40), "—".to_string()),
     };
     let bar = Rect::from_min_size(egui::pos2(rect.min.x, rect.max.y + 4.0), Vec2::new(size, 22.0));
-    painter.rect_filled(bar, 4.0, Color32::from_rgba_unmultiplied(10, 11, 14, 235));
+    painter.rect_filled(bar, 4.0, theme::premul(10, 11, 14, 235));
     let sw = Rect::from_min_size(bar.min + Vec2::new(5.0, 4.0), Vec2::splat(14.0));
     painter.rect_filled(sw, 2.0, swatch);
     painter.rect_stroke(sw, 2.0, Stroke::new(1.0, Color32::from_gray(90)));
@@ -712,6 +729,8 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 tool_toggle(ui, state, ActiveTool::Lasso, ic::LASSO, &l);
                 let tr = tip(state, Action::ToolTracker, "Tracker (stabilize)");
                 tool_toggle(ui, state, ActiveTool::Tracker, ic::CROSSHAIR, &tr);
+                let pg = tip(state, Action::ToolPerspective, "Perspective grid");
+                tool_toggle(ui, state, ActiveTool::Perspective, ic::PERSPECTIVE, &pg);
                 ui.add_space(6.0);
                 // The one colour picker — a momentary mode, not a persistent
                 // tool. Samples any pixel on screen, canvas included, leaving
@@ -806,6 +825,8 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                         state.clear_track_points();
                     }
                 });
+            } else if state.tool == ActiveTool::Perspective {
+                perspective_options(state, ui);
             } else if state.tool == ActiveTool::Lasso {
                 ui.label(
                     egui::RichText::new(
@@ -1250,6 +1271,19 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
     ui.add(egui::Slider::new(&mut state.brush.grain_scale, 0.5..=6.0).text("Grain scale"))
         .on_hover_text("Canvas pixels per grain texel — coarser paper as it rises.");
 
+    ui.add_enabled_ui(!dab, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Ends");
+            ui.selectable_value(&mut state.brush.cap, StrokeCap::Round, "Round")
+                .on_hover_text("The stroke ends in a half-circle.");
+            ui.selectable_value(&mut state.brush.cap, StrokeCap::Flat, "Flat")
+                .on_hover_text(
+                    "Cut straight across where the pen touched down and lifted. \
+                     A quick tap still leaves a dot.",
+                );
+        });
+    });
+
     ui.add_enabled_ui(dab, |ui| {
         ui.add(egui::Slider::new(&mut state.brush.flow, 0.02..=1.0).text("Flow"))
             .on_hover_text("Alpha of a single stamp. Low values build density slowly.");
@@ -1346,6 +1380,16 @@ fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
             state.pen_batches_rejected, state.pen_packets_dropped, d.drained_full
         ),
     );
+    // A pen stroke should read "0 cursor": any cursor sample in it is a
+    // whole-pixel position among sub-pixel ones, and shows up as a kink.
+    diag_row(
+        ui,
+        "last stroke",
+        format!(
+            "{} pen / {} cursor samples",
+            state.stroke_pen_samples, state.stroke_mouse_samples
+        ),
+    );
     diag_row(ui, "pressure", format!("{:.3}", d.pressure));
     diag_row(ui, "tilt", format!("{:.1}, {:.1} deg", d.tilt.0, d.tilt.1));
     diag_row(
@@ -1358,6 +1402,18 @@ fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
         "map y",
         format!("origin {:.0}, packet origin {:.0}, {:.5} px/unit", d.map_y.0, d.map_y.1, d.map_y.2),
     );
+    // What the positions actually go through once learned — the rows above
+    // are only what the driver claims.
+    for (name, fit) in [("fit x", d.fit_x), ("fit y", d.fit_y)] {
+        let text = match fit {
+            Some(f) => format!(
+                "origin {:.1}, {:.5} px/unit, rms {:.2} px",
+                f.origin, f.scale, f.rms
+            ),
+            None => format!("learning, {} pairs — move the pen around", d.fit_pairs),
+        };
+        diag_row(ui, name, text);
+    }
     if let Some((rx, ry)) = d.last_raw {
         diag_row(ui, "raw", format!("{rx}, {ry}"));
     }
@@ -1547,7 +1603,7 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 ui.painter().rect_filled(
                     rect,
                     3.0,
-                    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
+                    Color32::from_rgb(c[0], c[1], c[2]),
                 );
                 ui.painter()
                     .rect_stroke(rect, 3.0, Stroke::new(1.0, theme::STROKE_THIN));
@@ -1567,6 +1623,7 @@ fn tool_icon(tool: ActiveTool) -> &'static str {
         ActiveTool::Shape => ic::SHAPES,
         ActiveTool::Tracker => ic::CROSSHAIR,
         ActiveTool::Lasso => ic::LASSO,
+        ActiveTool::Perspective => ic::PERSPECTIVE,
     }
 }
 
@@ -1579,6 +1636,7 @@ fn tool_name(tool: ActiveTool) -> &'static str {
         ActiveTool::Shape => "Shape",
         ActiveTool::Tracker => "Tracker",
         ActiveTool::Lasso => "Lasso select",
+        ActiveTool::Perspective => "Perspective grid",
     }
 }
 
@@ -2614,6 +2672,142 @@ fn floating_frame() -> Frame {
         })
 }
 
+/// Perspective tool options: the grid list, then the active grid's settings.
+fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
+    use crate::tools::perspective::{PerspectiveGrid, MAX_DIVISIONS};
+
+    ui.label(
+        egui::RichText::new(
+            "Drag a corner to reshape, a vanishing point to re-aim, just outside a \
+             corner to rotate (hold Shift once dragging for 15° steps), inside to move.",
+        )
+        .color(theme::TEXT_MUTED)
+        .size(11.0),
+    );
+    let show = combo_text(state, Action::TogglePerspectiveGrid);
+    let snap = combo_text(state, Action::TogglePerspectiveSnap);
+    ui.checkbox(&mut state.perspective.show, format!("Show grids with every tool ({show})"));
+    ui.add_enabled(
+        state.perspective.show,
+        egui::Checkbox::new(&mut state.perspective.snap, format!("Snap strokes ({snap})")),
+    )
+    .on_hover_text(
+        "Pencil, ink and eraser strokes lock to the active grid, toward whichever \
+         vanishing point the stroke starts out heading for.",
+    );
+    ui.add_enabled(
+        state.perspective.show && state.perspective.snap,
+        egui::Checkbox::new(&mut state.perspective.snap_vertical, "Vertical lines too"),
+    )
+    .on_hover_text(
+        "Also snap to the vertical (square to the horizon) — for building edges. \
+         Near the middle of a one-point grid it competes with the columns.",
+    );
+
+    ui.add_space(4.0);
+    let cfg = &mut state.perspective;
+    let mut remove = None;
+    for i in 0..cfg.grids.len() {
+        let selected = i == cfg.active;
+        Frame::none()
+            .fill(if selected { theme::ACCENT_DIM } else { Color32::TRANSPARENT })
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(Margin::symmetric(6.0, 2.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let g = &mut cfg.grids[i];
+                    let eye = if g.visible { ic::EYE } else { ic::EYE_SLASH };
+                    if theme::icon_button(ui, eye, "Toggle visibility").clicked() {
+                        g.visible = !g.visible;
+                    }
+                    let lock = if g.locked { ic::LOCK_SIMPLE } else { ic::LOCK_SIMPLE_OPEN };
+                    if theme::icon_button(ui, lock, "Toggle lock").clicked() {
+                        g.locked = !g.locked;
+                    }
+                    let [r, gr, b] = g.color;
+                    if ui.selectable_label(selected, format!("Grid {}", i + 1)).clicked() {
+                        cfg.active = i;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::icon_button(ui, ic::TRASH, "Delete grid").clicked() {
+                            remove = Some(i);
+                        }
+                        // Colour swatch, so grids on the canvas can be matched
+                        // to their rows here.
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                        ui.painter().rect_filled(rect, 3.0, Color32::from_rgb(r, gr, b));
+                        ui.painter().rect_stroke(
+                            rect,
+                            3.0,
+                            Stroke::new(1.0, Color32::from_black_alpha(120)),
+                        );
+                    });
+                });
+            });
+    }
+    if let Some(i) = remove {
+        cfg.remove(i);
+    }
+    ui.horizontal(|ui| {
+        if ui.button(theme::icon_text(ic::PLUS, "Add")).clicked() {
+            cfg.grids.push(PerspectiveGrid::default());
+            cfg.active = cfg.grids.len() - 1;
+        }
+        let dup = cfg.active_grid().cloned();
+        if ui
+            .add_enabled(dup.is_some(), egui::Button::new(theme::icon_text(ic::COPY, "Duplicate")))
+            .clicked()
+        {
+            if let Some(mut g) = dup {
+                // Nudged so the copy doesn't sit invisibly on the original.
+                for c in &mut g.corners {
+                    c[0] += 0.03;
+                    c[1] += 0.03;
+                }
+                g.locked = false;
+                cfg.grids.push(g);
+                cfg.active = cfg.grids.len() - 1;
+            }
+        }
+    });
+
+    let Some(g) = cfg.active_grid_mut() else {
+        return;
+    };
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Columns");
+        ui.add(egui::DragValue::new(&mut g.cols).range(1..=MAX_DIVISIONS));
+        ui.label("Rows");
+        ui.add(egui::DragValue::new(&mut g.rows).range(1..=MAX_DIVISIONS));
+    });
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(!g.locked, |ui| {
+            if theme::icon_button(ui, ic::ARROW_COUNTER_CLOCKWISE, "Rotate 15° left").clicked() {
+                g.rotate(-std::f32::consts::PI / 12.0);
+            }
+            if theme::icon_button(ui, ic::ARROW_CLOCKWISE, "Rotate 15° right").clicked() {
+                g.rotate(std::f32::consts::PI / 12.0);
+            }
+            if ui
+                .button("Reset shape")
+                .on_hover_text("Back to the default floor grid, keeping rows, columns and look")
+                .clicked()
+            {
+                g.corners = PerspectiveGrid::default().corners;
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.color_edit_button_srgb(&mut g.color);
+        ui.add(egui::Slider::new(&mut g.opacity, 0.05..=1.0).text("Opacity"));
+    });
+    ui.add(egui::Slider::new(&mut g.weight, 0.5..=4.0).text("Line weight"));
+    ui.checkbox(&mut g.extend, "Extend lines to vanishing points");
+    ui.checkbox(&mut g.horizon, "Horizon and vanishing points");
+}
+
 fn tool_toggle(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -2628,6 +2822,9 @@ fn tool_toggle(
         state.tool_brushes[state.tool.idx()] = state.brush.clone();
         state.tool = target;
         state.brush = state.tool_brushes[target.idx()].clone();
+        if target == ActiveTool::Perspective {
+            state.ensure_perspective_grid();
+        }
     }
 }
 
@@ -2713,7 +2910,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 &painter,
                 tex.id(),
                 lc,
-                Color32::from_rgba_unmultiplied(255, 255, 255, a),
+                theme::white_alpha(a),
             );
         }
     };
@@ -2730,7 +2927,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                     &painter,
                     tex.id(),
                     lc,
-                    Color32::from_rgba_unmultiplied(255, 255, 255, a),
+                    theme::white_alpha(a),
                 );
             }
         }
@@ -2753,7 +2950,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                     &painter,
                     tex.id(),
                     lc,
-                    Color32::from_rgba_unmultiplied(255, 255, 255, a),
+                    theme::white_alpha(a),
                 );
             }
         }
@@ -2770,7 +2967,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             let a_col = theme::ACCENT;
             let b_col = Color32::from_rgb(255, 170, 60);
             let draw_marker = |p: [f32; 2], col: Color32, alpha: u8, label: &str| {
-                let col = Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), alpha);
+                let col = theme::premul(col.r(), col.g(), col.b(), alpha);
                 let pos = xf.doc_to_screen(p[0], p[1]);
                 let arm = 7.0;
                 painter.line_segment(
@@ -2843,13 +3040,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         if let (Some((tail, _)), Some(cur)) = (builder.live_tail(), builder.current_node()) {
             let is_eraser = builder.tool == crate::tools::ActiveTool::Eraser;
             let a = builder.brush.opacity.clamp(0.0, 1.0);
-            // Premultiply in gamma space to match the CPU compositor; egui's
-            // `from_rgba_unmultiplied` premultiplies in linear space, which
-            // over-brightens light colors at fractional alpha.
-            let gamma_premul = |c: [u8; 3], a: u8| {
-                let m = |v: u8| ((v as u16 * a as u16 + 127) / 255) as u8;
-                Color32::from_rgba_premultiplied(m(c[0]), m(c[1]), m(c[2]), a)
-            };
+            // Premultiplied in gamma space to match the CPU compositor (see
+            // `theme::premul`).
+            let gamma_premul = |c: [u8; 3], a: u8| theme::premul(c[0], c[1], c[2], a);
             let fill = if is_eraser {
                 // Translucent cool-grey — reads as "lifting", not painting.
                 gamma_premul([150, 158, 172], (a * 80.0) as u8)
@@ -2874,7 +3067,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         // layer transform (cell_to_screen) so the preview follows zoom / pan /
         // rotation and the layer transform, matching the rasterised result.
         let c = state.brush.color;
-        let col = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255);
+        let col = Color32::from_rgb(c[0], c[1], c[2]);
         let thick = (state.effective_radius() * 2.0 * scale * layer_scale).max(1.0);
         let stroke = Stroke::new(thick, col);
         let (sx, sy) = drag.start;
@@ -2999,7 +3192,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             painter.line_segment([last, first], Stroke::new(2.2, Color32::from_black_alpha(120)));
             painter.line_segment(
                 [last, first],
-                Stroke::new(1.0, Color32::from_white_alpha(140)),
+                Stroke::new(1.0, theme::white_alpha(140)),
             );
         }
     }
@@ -3018,7 +3211,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     if outline_a > 0 && !(state.show_camera_guide && cam.is_identity()) {
         painter.add(egui::Shape::closed_line(
             corners.to_vec(),
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 80, 80, outline_a)),
+            Stroke::new(1.0, theme::premul(80, 80, 80, outline_a)),
         ));
     }
 
@@ -3043,7 +3236,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             if let Some(c) = resolved.and_then(|id| cell_corners(cur_layer, id)) {
                 painter.add(egui::Shape::closed_line(
                     c.to_vec(),
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 160, 220, 110)),
+                    Stroke::new(1.0, theme::premul(120, 160, 220, 110)),
                 ));
             }
         }
@@ -3100,6 +3293,137 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 let len = d.length();
                 if len > 1e-3 {
                     painter.line_segment([c, c + d / len * tick], Stroke::new(2.6, accent));
+                }
+            }
+        }
+    }
+
+    draw_perspective_grids(state, &painter, &xf, rect);
+}
+
+/// The perspective grids, over everything else: guides, not artwork.
+///
+/// Shown while the perspective tool is active, or everywhere once "Show
+/// grids" is on. The active grid also gets its corner handles while the tool
+/// is active — sized in screen pixels like the selection's, which is the size
+/// `grab_at` tests against.
+fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform, clip: Rect) {
+    use crate::tools::perspective::{clip_line, Plane, Vp};
+
+    let editing = state.tool == ActiveTool::Perspective;
+    if !editing && !state.perspective.show {
+        return;
+    }
+    let (w, h) = (state.project.width as f32, state.project.height as f32);
+    let to_screen = |p: [f32; 2]| xf.doc_to_screen(p[0], p[1]);
+    let lo = [clip.min.x, clip.min.y];
+    let hi = [clip.max.x, clip.max.y];
+    let at = |a: egui::Pos2, b: egui::Pos2, t: f32| a + (b - a) * t;
+
+    for (i, g) in state.perspective.grids.iter().enumerate() {
+        if !g.visible {
+            continue;
+        }
+        let active = i == state.perspective.active;
+        let corners = g.doc_corners(w, h);
+        let Some(plane) = Plane::new(corners) else {
+            continue;
+        };
+        // Inactive grids recede while one is being edited.
+        let fade = if editing && !active { 0.45 } else { 1.0 };
+        let alpha = (g.opacity.clamp(0.0, 1.0) * fade * 255.0) as u8;
+        let color = theme::premul(g.color[0], g.color[1], g.color[2], alpha);
+        let thin = Stroke::new(g.weight.max(0.25), color);
+        let faint = Stroke::new(
+            g.weight.max(0.25) * 0.8,
+            theme::premul(g.color[0], g.color[1], g.color[2], alpha / 3),
+        );
+
+        let vp_screen = |vp: Vp| match vp {
+            Vp::Point(p) => Some(to_screen(p)),
+            Vp::Dir(_) => None,
+        };
+        let lines = plane.grid_lines(g.rows, g.cols);
+        if g.extend {
+            // Carry each line out to its vanishing point — and no further, so
+            // the rays converge rather than crossing — or to the canvas edge
+            // when it has none.
+            for &(a, b, vp) in &lines {
+                let (sa, sb) = (to_screen(a), to_screen(b));
+                let Some((mut t0, mut t1)) = clip_line([sa.x, sa.y], [sb.x, sb.y], lo, hi) else {
+                    continue;
+                };
+                if let Some(v) = vp_screen(vp) {
+                    let d = sb - sa;
+                    let dd = d.length_sq();
+                    if dd > 1e-6 {
+                        let tv = (v - sa).dot(d) / dd;
+                        if tv > 1.0 {
+                            t1 = t1.min(tv);
+                        } else if tv < 0.0 {
+                            t0 = t0.max(tv);
+                        }
+                    }
+                }
+                if t0 < 0.0 {
+                    painter.line_segment([at(sa, sb, t0), sa], faint);
+                }
+                if t1 > 1.0 {
+                    painter.line_segment([sb, at(sa, sb, t1)], faint);
+                }
+            }
+        }
+        for &(a, b, _) in &lines {
+            painter.line_segment([to_screen(a), to_screen(b)], thin);
+        }
+        let quad: Vec<egui::Pos2> = corners.iter().map(|&c| to_screen(c)).collect();
+        painter.add(egui::Shape::closed_line(
+            quad.clone(),
+            Stroke::new(g.weight.max(0.25) + 1.0, color),
+        ));
+
+        if g.horizon {
+            if let Some(hz) = plane.horizon() {
+                let a = to_screen(hz.p);
+                // A second point a good way along, in document space: one
+                // pixel apart, the direction would be at the mercy of
+                // rounding once the view is zoomed in.
+                let b = to_screen([hz.p[0] + hz.d[0] * 100.0, hz.p[1] + hz.d[1] * 100.0]);
+                if let Some((t0, t1)) = clip_line([a.x, a.y], [b.x, b.y], lo, hi) {
+                    painter.line_segment(
+                        [at(a, b, t0), at(a, b, t1)],
+                        Stroke::new(g.weight.max(0.25) + 0.5, color),
+                    );
+                }
+            }
+            for v in [plane.vp_rows, plane.vp_cols].into_iter().filter_map(vp_screen) {
+                if clip.contains(v) {
+                    painter.circle_filled(v, 3.5, color);
+                    painter.circle_stroke(v, 3.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
+                }
+            }
+        }
+
+        if editing && active {
+            let r = crate::tools::selection::HANDLE_PX;
+            for &c in &quad {
+                let rect = egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 2.0));
+                if g.locked {
+                    painter.rect_stroke(rect, 1.0, Stroke::new(1.0, color));
+                } else {
+                    painter.rect_filled(rect, 1.0, Color32::WHITE);
+                    painter.rect_stroke(rect, 1.0, Stroke::new(1.0, Color32::from_black_alpha(200)));
+                }
+            }
+            // Vanishing-point handles: round, to tell them from the corners.
+            // Sized to the 1.5x tolerance `grab_at` gives them.
+            if !g.locked {
+                for v in [plane.vp_rows, plane.vp_cols].into_iter().filter_map(vp_screen) {
+                    if clip.contains(v) {
+                        painter.circle_filled(v, r * 1.3, Color32::WHITE);
+                        painter.circle_stroke(v, r * 1.3, Stroke::new(1.0, Color32::from_black_alpha(200)));
+                        painter.circle_filled(v, 2.0, color);
+                    }
                 }
             }
         }
@@ -3362,8 +3686,8 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
     // Effective document-pixels → screen-pixels scale (includes zoom).
     let scale = Xform::new(state, canvas_rect).scale;
 
-    let white = Color32::from_rgba_unmultiplied(255, 255, 255, 220);
-    let black = Color32::from_rgba_unmultiplied(0, 0, 0, 180);
+    let white = theme::white_alpha(220);
+    let black = theme::premul(0, 0, 0, 180);
 
     match state.tool {
         ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser => {
@@ -3430,7 +3754,7 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
             painter.circle_filled(
                 pos,
                 2.8,
-                Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
+                Color32::from_rgb(c[0], c[1], c[2]),
             );
             painter.circle_stroke(pos, 2.8, Stroke::new(0.8, black));
         }
@@ -3457,7 +3781,7 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
             painter.circle_filled(
                 pos,
                 2.8,
-                Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
+                Color32::from_rgb(c[0], c[1], c[2]),
             );
             painter.circle_stroke(pos, 2.8, Stroke::new(0.8, black));
         }
@@ -3478,6 +3802,20 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
             let c = pos + egui::vec2(9.0, -9.0);
             painter.circle_stroke(c, 5.0, Stroke::new(1.6, black));
             painter.circle_stroke(c, 5.0, Stroke::new(0.9, white));
+        }
+        ActiveTool::Perspective => {
+            // Plain crosshair: the handles are the real feedback.
+            let arm = 7.0;
+            for (w, col) in [(1.4, black), (0.8, white)] {
+                painter.line_segment(
+                    [egui::pos2(pos.x - arm, pos.y), egui::pos2(pos.x + arm, pos.y)],
+                    Stroke::new(w, col),
+                );
+                painter.line_segment(
+                    [egui::pos2(pos.x, pos.y - arm), egui::pos2(pos.x, pos.y + arm)],
+                    Stroke::new(w, col),
+                );
+            }
         }
         ActiveTool::Tracker => {
             // Wide crosshair with an open centre — precise point placement.
@@ -3519,6 +3857,12 @@ fn canvas_to_doc_mapping(state: &AppState, rect: Rect) -> impl Fn(egui::Pos2) ->
     move |pos: egui::Pos2| -> (f32, f32) { xf.screen_to_doc(pos) }
 }
 
+/// A stroke point in document space, passed through perspective snap.
+fn snapped(state: &mut AppState, doc: (f32, f32)) -> (f32, f32) {
+    let [x, y] = state.snap_doc([doc.0, doc.1]);
+    (x, y)
+}
+
 /// Map a document point to the active layer's cell-local pixel space, inverting
 /// the layer transform so drawing lands correctly on moved/scaled/rotated
 /// layers. Sizes through `Project::draw_cell_size`, so an unkeyed frame maps
@@ -3551,52 +3895,98 @@ const PEN_MOUSE_AGREEMENT: f32 = 20.0;
 /// What it catches is a packet that is not a position at all.
 const MAX_PACKET_JUMP: f32 = 400.0;
 
-/// This frame's tablet packets as egui screen positions, paired with the
-/// packet they came from.
+/// This frame's tablet input, as far as a stroke is concerned.
+#[derive(Debug)]
+enum PenFrame {
+    /// Packets as egui screen positions, oldest first, each paired with the
+    /// packet it came from. Sub-pixel, and typically several per frame,
+    /// against the one whole-pixel position egui reports — which is the
+    /// entire reason this path exists.
+    Points(Vec<(egui::Pos2, PenPacket)>),
+    /// The pen is live and its mapping trusted, but it reported nothing new
+    /// this frame. Common: a live stroke repaints as fast as it can, far
+    /// faster than a pen reports.
+    Empty,
+    /// No pen to draw from: none at all, or a mapping that disagrees with the
+    /// OS cursor.
+    Untrusted,
+}
+
+/// A tablet packet as an egui screen position: virtual-desktop physical
+/// pixels -> client physical pixels -> points.
+fn pen_to_points(p: &PenPacket, (ox, oy): (f32, f32), ppp: f32) -> egui::Pos2 {
+    egui::pos2((p.x - ox) / ppp, (p.y - oy) / ppp)
+}
+
+/// Whether a packet position is close enough to the OS cursor to believe.
+/// Counts and logs (once per stroke) when it is not.
+fn pen_agrees_with_cursor(state: &mut AppState, pen: egui::Pos2, cursor: egui::Pos2) -> bool {
+    if (pen.x - cursor.x).abs() + (pen.y - cursor.y).abs() <= PEN_MOUSE_AGREEMENT {
+        return true;
+    }
+    state.pen_batches_rejected = state.pen_batches_rejected.saturating_add(1);
+    if !state.pen_outlier_logged {
+        state.pen_outlier_logged = true;
+        log::warn!(
+            "tablet reports {pen:?} but the cursor is at {cursor:?}; \
+             drawing this stroke from the cursor instead"
+        );
+    }
+    false
+}
+
+/// Where a stroke pressed at `cursor` should start, if the pen is to draw
+/// it: the newest packet, from this frame or an earlier one, in screen
+/// points. `None` makes it a cursor stroke.
 ///
-/// `None` means "use the egui pointer instead": no tablet, no packets this
-/// frame, or a mapping that disagrees with the OS cursor. Positions are
-/// sub-pixel and there are typically two to four per frame at 60 fps, against
-/// the one whole-pixel position egui reports — which is the entire reason this
-/// path exists.
-fn pen_stroke_points(
+/// The newest packet rather than the cursor, because the cursor is that same
+/// position rounded to a whole pixel — and because this frame's older
+/// packets, which are skipped, lie at or behind it.
+fn pen_stroke_start(
     state: &mut AppState,
-    ctx: &egui::Context,
-    pointer: Option<egui::Pos2>,
-) -> Option<Vec<(egui::Pos2, PenPacket)>> {
+    ppp: f32,
+    cursor: egui::Pos2,
+) -> Option<(egui::Pos2, PenPacket)> {
     if !state.pen.pen_active() {
         return None;
     }
-    let (ox, oy) = state.pen.client_origin()?;
-    let ppp = ctx.pixels_per_point();
-    // Virtual-desktop physical pixels -> client physical pixels -> points.
-    let to_points = |p: &PenPacket| egui::pos2((p.x - ox) / ppp, (p.y - oy) / ppp);
+    let origin = state.pen.client_origin()?;
+    let packet = state.pen.last_packet()?;
+    let at = pen_to_points(&packet, origin, ppp);
+    pen_agrees_with_cursor(state, at, cursor).then_some((at, packet))
+}
+
+/// This frame's tablet packets, for a stroke already being drawn by the pen.
+fn pen_stroke_points(state: &mut AppState, ppp: f32, pointer: Option<egui::Pos2>) -> PenFrame {
+    if !state.pen.pen_active() {
+        return PenFrame::Untrusted;
+    }
+    let Some(origin) = state.pen.client_origin() else {
+        return PenFrame::Untrusted;
+    };
     let raw = state.pen.packets();
-    let newest = to_points(raw.last()?);
-    let pointer = pointer?;
+    let Some(last) = raw.last() else {
+        return PenFrame::Empty;
+    };
+    let newest = pen_to_points(last, origin, ppp);
 
     // Checked every frame rather than latched once per stroke. An earlier
     // version decided at pen-down and held, on the theory that the newest
     // packet outruns the cursor during fast motion — it does not, and holding
     // the decision meant a mapping that only looked right at the moment of
     // contact stayed trusted for the whole stroke.
-    if (newest.x - pointer.x).abs() + (newest.y - pointer.y).abs() > PEN_MOUSE_AGREEMENT {
-        state.pen_batches_rejected = state.pen_batches_rejected.saturating_add(1);
-        if !state.pen_outlier_logged {
-            state.pen_outlier_logged = true;
-            log::warn!(
-                "tablet reports {newest:?} but the cursor is at {pointer:?}; \
-                 drawing from the cursor instead"
-            );
+    if let Some(pointer) = pointer {
+        if !pen_agrees_with_cursor(state, newest, pointer) {
+            return PenFrame::Untrusted;
         }
-        return None;
     }
+    let raw = state.pen.packets();
 
     // Everything else in the batch is measured against the newest, not against
     // the cursor: the oldest is legitimately a frame of travel behind.
     let points: Vec<(egui::Pos2, PenPacket)> = raw
         .iter()
-        .map(|p| (to_points(p), *p))
+        .map(|p| (pen_to_points(p, origin, ppp), *p))
         .filter(|(at, _)| at.distance(newest) <= MAX_PACKET_JUMP)
         .collect();
     let dropped = raw.len() - points.len();
@@ -3610,7 +4000,56 @@ fn pen_stroke_points(
             raw.len(),
         );
     }
-    (!points.is_empty()).then_some(points)
+    // Never empty — the newest packet is always within reach of itself.
+    PenFrame::Points(points)
+}
+
+/// One frame's stroke samples, as screen positions paired with the packet
+/// each came from (`None` for the cursor).
+///
+/// A stroke draws from one source. The cursor is the pen's own position
+/// rounded to a whole pixel, so a pen stroke that took it on every frame
+/// without a packet — most frames, since a live stroke repaints far faster
+/// than a pen reports — zigzagged half a pixel either side of the line, which
+/// is several canvas pixels once zoomed out. So a pen frame with nothing new
+/// adds nothing. Only a mapping that stops agreeing with the cursor hands the
+/// stroke over, and then for good: one switch rather than one per frame.
+fn stroke_frame_samples(
+    from_pen: &mut bool,
+    pen: PenFrame,
+    cursor: Option<egui::Pos2>,
+) -> Vec<(egui::Pos2, Option<PenPacket>)> {
+    if *from_pen {
+        match pen {
+            PenFrame::Points(points) => {
+                return points.into_iter().map(|(at, p)| (at, Some(p))).collect();
+            }
+            PenFrame::Empty => return Vec::new(),
+            PenFrame::Untrusted => *from_pen = false,
+        }
+    }
+    cursor.map(|at| (at, None)).into_iter().collect()
+}
+
+/// A stroke sample at a cell-space position — from its own packet when the
+/// pen drew it — counted against its source for the tablet readout.
+fn stroke_sample(
+    state: &mut AppState,
+    x: f32,
+    y: f32,
+    t: f32,
+    packet: Option<PenPacket>,
+) -> crate::input::pointer::PointerSample {
+    match packet {
+        Some(p) => {
+            state.stroke_pen_samples = state.stroke_pen_samples.saturating_add(1);
+            state.make_pen_sample(x, y, t, &p)
+        }
+        None => {
+            state.stroke_mouse_samples = state.stroke_mouse_samples.saturating_add(1);
+            state.make_sample(x, y, t)
+        }
+    }
 }
 
 /// Small floating menu strip: File / Edit menus + a panel-visibility toggle.
@@ -4290,9 +4729,7 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
     ctx.request_repaint_after(left);
     // Fade over the last half second.
     let a = (left.as_secs_f32() / 0.5).clamp(0.0, 1.0);
-    let fade = |c: Color32| {
-        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * a) as u8)
-    };
+    let fade = |c: Color32| c.gamma_multiply(a);
 
     egui::Area::new(egui::Id::new("save_toast"))
         .order(egui::Order::Foreground)
@@ -4481,5 +4918,159 @@ mod tests {
         for lo in [12.0, 320.0, 1004.0] {
             assert_eq!(restick(lo, 252.0, SMALL, SMALL), lo, "lo={lo}");
         }
+    }
+}
+
+/// The perspective tool through the real canvas: egui events in, grid out.
+#[cfg(test)]
+mod perspective_tests {
+    use super::*;
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
+
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| draw(state, ctx));
+    }
+
+    fn state() -> AppState {
+        let mut state = AppState::for_test();
+        // Floating panels would sit over the canvas and take the press.
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolPerspective);
+        let g = &mut state.perspective.grids[0];
+        g.extend = true;
+        g.horizon = true;
+        state
+    }
+
+    #[test]
+    fn dragging_a_corner_on_the_canvas_reshapes_the_grid() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let cells = state.project.cells.len();
+        let (w, h) = (state.project.width as f32, state.project.height as f32);
+        let before = state.perspective.grids[0].doc_corners(w, h);
+        let xf = Xform::new(&state, SCREEN);
+        let from = xf.doc_to_screen(before[1][0], before[1][1]);
+        let to = from + vec2(40.0, 0.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 4.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame(&ctx, &mut state, vec![button(to, false)]);
+        frame(&ctx, &mut state, vec![]);
+
+        let after = state.perspective.grids[0].doc_corners(w, h);
+        let moved = xf.screen_to_doc(to);
+        assert!((after[1][0] - moved.0).abs() < 0.5, "{:?} vs {moved:?}", after[1]);
+        assert!((after[1][1] - moved.1).abs() < 0.5);
+        assert_eq!(after[0], before[0], "the other corners stay put");
+        // Grids are guides: nothing was drawn, so no cell was allocated.
+        assert_eq!(state.project.cells.len(), cells);
+        assert!(state.stroke.is_none());
+    }
+
+    #[test]
+    fn grids_paint_with_every_option_and_tool() {
+        let mut state = state();
+        state.show_panels = true;
+        state.perspective.show = true;
+        state.perspective.grids.push(Default::default());
+        // A two-point grid, so both rays and the horizon have finite ends.
+        let (w, h) = (state.project.width as f32, state.project.height as f32);
+        state.perspective.grids[1].set_doc_corners(
+            [[300.0, 200.0], [700.0, 260.0], [650.0, 500.0], [250.0, 560.0]],
+            w,
+            h,
+        );
+        let ctx = egui::Context::default();
+        for tool in [Action::ToolPerspective, Action::ToolPencil] {
+            state.dispatch(tool);
+            frame(&ctx, &mut state, vec![]);
+            frame(&ctx, &mut state, vec![]);
+        }
+    }
+}
+
+/// Which source a stroke draws from, frame by frame.
+#[cfg(test)]
+mod stroke_source_tests {
+    use super::{stroke_frame_samples, PenFrame};
+    use crate::input::tablet::PenPacket;
+    use egui::pos2;
+
+    fn packet(x: f32, y: f32) -> PenPacket {
+        PenPacket {
+            x,
+            y,
+            pressure: 0.5,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+        }
+    }
+
+    /// The wobble regression. A pen stroke on a frame with no packet must add
+    /// nothing — not the cursor, which is the same point rounded to a pixel.
+    #[test]
+    fn a_pen_frame_without_packets_adds_nothing() {
+        let mut from_pen = true;
+        let out = stroke_frame_samples(&mut from_pen, PenFrame::Empty, Some(pos2(10.0, 10.0)));
+        assert!(out.is_empty(), "took {out:?} from the cursor");
+        assert!(from_pen);
+    }
+
+    #[test]
+    fn a_pen_frame_takes_every_packet_and_only_packets() {
+        let mut from_pen = true;
+        let points = vec![
+            (pos2(10.25, 10.5), packet(10.25, 10.5)),
+            (pos2(11.75, 10.5), packet(11.75, 10.5)),
+        ];
+        let out = stroke_frame_samples(&mut from_pen, PenFrame::Points(points), Some(pos2(12.0, 11.0)));
+        let at: Vec<_> = out.iter().map(|(p, _)| *p).collect();
+        assert_eq!(at, vec![pos2(10.25, 10.5), pos2(11.75, 10.5)]);
+        assert!(out.iter().all(|(_, p)| p.is_some()));
+    }
+
+    /// A mapping that stops agreeing hands the stroke to the cursor once, and
+    /// the stroke stays there: switching back and forth is the zigzag again.
+    #[test]
+    fn an_untrusted_pen_hands_over_to_the_cursor_for_good() {
+        let mut from_pen = true;
+        let out = stroke_frame_samples(&mut from_pen, PenFrame::Untrusted, Some(pos2(5.0, 6.0)));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, pos2(5.0, 6.0));
+        assert!(out[0].1.is_none());
+        assert!(!from_pen);
+
+        let points = vec![(pos2(7.5, 6.0), packet(7.5, 6.0))];
+        let out = stroke_frame_samples(&mut from_pen, PenFrame::Points(points), Some(pos2(8.0, 6.0)));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.is_none(), "went back to the pen mid-stroke");
+    }
+
+    #[test]
+    fn a_cursor_stroke_ignores_packets() {
+        let mut from_pen = false;
+        let points = vec![(pos2(7.5, 6.0), packet(7.5, 6.0))];
+        let out = stroke_frame_samples(&mut from_pen, PenFrame::Points(points), Some(pos2(8.0, 6.0)));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, pos2(8.0, 6.0));
+        assert!(out[0].1.is_none());
     }
 }

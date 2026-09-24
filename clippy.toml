@@ -1,0 +1,7 @@
+# egui 0.29 premultiplies these in linear space but blends in gamma space, so
+# translucent colours made with them come out overbright (blown highlights).
+# Use `ui::theme::premul` / `ui::theme::white_alpha` instead.
+disallowed-methods = [
+    { path = "egui::Color32::from_rgba_unmultiplied", reason = "premultiplies in linear space; use ui::theme::premul" },
+    { path = "egui::Color32::from_white_alpha", reason = "premultiplies in linear space; use ui::theme::white_alpha" },
+]

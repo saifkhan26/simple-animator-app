@@ -11,8 +11,10 @@
 //! are several document pixels wide and any interpolator traces the resulting
 //! staircase faithfully. Reading *every* queued packet is what removes it.
 //!
-//! Positions arrive in the driver's own screen convention rather than at a
-//! finer scale of our asking; see the note at the output area in `try_init`.
+//! Positions are asked for at `SUBPIXEL` times screen resolution and mapped
+//! back down, so they land between screen pixels; see the note at the output
+//! area in `try_init`. A driver that ignores the request still maps correctly,
+//! just on whole pixels.
 //!
 //! Windows: Wintab via `wintab_lite`, dynamic-loaded so the app still runs
 //! without a tablet driver. Linux/macOS: not yet implemented — no packets are
@@ -150,6 +152,170 @@ fn axis_map(base_org: i32, base_ext: i32, granted_org: i32, granted_ext: i32) ->
     )
 }
 
+/// One axis of a fitted packet -> screen mapping: `origin + raw * scale`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AxisFit {
+    pub origin: f64,
+    pub scale: f64,
+    /// Root-mean-square distance of the fitted pairs from the line, in
+    /// screen pixels. Whole-pixel cursor rounding alone gives about 0.3.
+    pub rms: f64,
+}
+
+impl AxisFit {
+    #[inline]
+    pub fn map(&self, raw: i32) -> f32 {
+        (self.origin + raw as f64 * self.scale) as f32
+    }
+}
+
+/// Pairs pulled into a fit. Enough to average whole-pixel rounding down to a
+/// small fraction of a pixel, few enough to refit every frame.
+const FIT_WINDOW: usize = 256;
+/// Fewest pairs a fit is trusted on.
+const FIT_MIN_PAIRS: usize = 16;
+/// Cursor travel, in screen pixels, the pairs must span on an axis before
+/// that axis's slope means anything.
+const FIT_MIN_SPAN: f64 = 48.0;
+/// Scatter above which the pairs are not describing a straight line — a
+/// mouse moved alongside the pen, say — and the fit is not used.
+const FIT_MAX_RMS: f64 = 1.5;
+/// Cursor travel in one frame above which a pair is left out: moving that
+/// fast, the gap between reading the queue and reading the cursor matters.
+const FIT_MAX_STEP: i32 = 8;
+/// A new pair this far off a trusted fit is a miss. A miss is left out of
+/// the fit — it is usually the cursor lagging the pen for a moment — but a
+/// long enough run of them means the mapping itself has changed (a monitor
+/// rearranged, the tablet remapped in its driver), and the fit starts over.
+const FIT_MISS_PX: f64 = 6.0;
+const FIT_MISSES_TO_RESET: u32 = 24;
+
+/// The packet -> screen mapping, learned from where the driver puts the
+/// cursor.
+///
+/// The output area a driver reports back from `WTOpen` cannot be taken at
+/// its word. One seen here accepted a Y-flipped area, reported it back
+/// flipped, and delivered top-down coordinates anyway: every position landed
+/// a screen-height off, every batch failed the cursor check, and every
+/// stroke fell back to whole-pixel cursor positions — a staircase, several
+/// canvas pixels deep once zoomed out.
+///
+/// The cursor is the one mapping that is always right, because the driver
+/// moves it from these same packets. It is only rounded to a whole pixel, and
+/// a straight-line fit over many pairs averages that rounding away. So the
+/// fit recovers flip, offset and scale alike, to a fraction of a pixel, with
+/// no assumptions about what the driver does with the area it was asked for.
+#[derive(Clone, Debug, Default)]
+pub struct CursorFit {
+    pairs: std::collections::VecDeque<((i32, i32), (i32, i32))>,
+    last_cursor: Option<(i32, i32)>,
+    misses: u32,
+    pub x: Option<AxisFit>,
+    pub y: Option<AxisFit>,
+}
+
+impl CursorFit {
+    /// Record the newest packet of a poll against the cursor read straight
+    /// after it.
+    pub fn observe(&mut self, raw: (i32, i32), cursor: (i32, i32)) {
+        let last = self.last_cursor.replace(cursor);
+        if let Some(last) = last {
+            let step = (cursor.0 - last.0).abs().max((cursor.1 - last.1).abs());
+            // A pen held still would fill the window with one point, and one
+            // moving fast pairs a packet with a cursor it has already left.
+            if step == 0 || step > FIT_MAX_STEP {
+                return;
+            }
+        }
+
+        if let (Some(fx), Some(fy)) = (self.x, self.y) {
+            let off = (fx.map(raw.0) as f64 - cursor.0 as f64)
+                .abs()
+                .max((fy.map(raw.1) as f64 - cursor.1 as f64).abs());
+            if off > FIT_MISS_PX {
+                self.misses += 1;
+                if self.misses < FIT_MISSES_TO_RESET {
+                    return;
+                }
+                *self = Self {
+                    last_cursor: Some(cursor),
+                    ..Self::default()
+                };
+            } else {
+                self.misses = 0;
+            }
+        }
+
+        self.pairs.push_back((raw, cursor));
+        if self.pairs.len() > FIT_WINDOW {
+            self.pairs.pop_front();
+        }
+        // A window that has turned noisy keeps the last good line rather than
+        // dropping it. Losing the fit means falling back to the driver's own
+        // mapping, which may be a screen-height out — and that stops every
+        // stroke from using the pen at all.
+        if let Some(f) = fit_axis(self.pairs.iter().map(|&(r, c)| (r.0, c.0))) {
+            self.x = Some(f);
+        }
+        if let Some(f) = fit_axis(self.pairs.iter().map(|&(r, c)| (r.1, c.1))) {
+            self.y = Some(f);
+        }
+    }
+
+    /// Stop learning until the next `observe`, which then starts its step
+    /// check afresh. Called for every poll made with the pen down: a stroke
+    /// is drawn through one mapping from end to end, and drawing is also when
+    /// the cursor trails the pen furthest.
+    pub fn pause(&mut self) {
+        self.last_cursor = None;
+    }
+
+    pub fn pairs(&self) -> usize {
+        self.pairs.len()
+    }
+}
+
+/// Least-squares line through `(raw, cursor)` pairs, or `None` when there
+/// are too few, they span too little, or they do not lie on a line.
+fn fit_axis(pairs: impl Iterator<Item = (i32, i32)> + Clone) -> Option<AxisFit> {
+    let n = pairs.clone().count();
+    if n < FIT_MIN_PAIRS {
+        return None;
+    }
+    let nf = n as f64;
+    let (mut sr, mut sc) = (0.0f64, 0.0f64);
+    let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+    for (r, c) in pairs.clone() {
+        sr += r as f64;
+        sc += c as f64;
+        lo = lo.min(c);
+        hi = hi.max(c);
+    }
+    if ((hi - lo) as f64) < FIT_MIN_SPAN {
+        return None;
+    }
+    let (mr, mc) = (sr / nf, sc / nf);
+    let (mut srr, mut src) = (0.0f64, 0.0f64);
+    for (r, c) in pairs.clone() {
+        let (dr, dc) = (r as f64 - mr, c as f64 - mc);
+        srr += dr * dr;
+        src += dr * dc;
+    }
+    if srr <= 0.0 {
+        return None;
+    }
+    let scale = src / srr;
+    let origin = mc - scale * mr;
+    let sq: f64 = pairs
+        .map(|(r, c)| {
+            let e = origin + scale * r as f64 - c as f64;
+            e * e
+        })
+        .sum();
+    let rms = (sq / nf).sqrt();
+    (rms <= FIT_MAX_RMS).then_some(AxisFit { origin, scale, rms })
+}
+
 /// What the tablet backend is currently seeing.
 ///
 /// This exists because the interesting failures here are invisible: a release
@@ -181,6 +347,11 @@ pub struct PenDiagnostics {
     /// The packet layout the driver granted. `size` is the giveaway: a device
     /// that grants every field gives 76 bytes on a 64-bit build.
     pub layout: PacketLayout,
+    /// The mapping learned from the cursor, per axis, once trusted, and how
+    /// many pairs it is drawn from. See [`CursorFit`].
+    pub fit_x: Option<AxisFit>,
+    pub fit_y: Option<AxisFit>,
+    pub fit_pairs: usize,
 }
 
 /// Frames without a packet after which the pen is considered gone and pressure
@@ -195,6 +366,11 @@ pub struct PenInput {
     backend: (),
     /// This frame's packets, oldest first. Cleared by every `poll`.
     packets: Vec<PenPacket>,
+    /// The newest packet ever drained. Unlike `packets` it survives a poll
+    /// that comes back empty, which is what a stroke's first sample needs:
+    /// the frame that sees the press has often already drained its packet a
+    /// frame earlier.
+    last_packet: Option<PenPacket>,
     last_pressure: f32,
     idle_frames: u32,
 }
@@ -207,6 +383,7 @@ impl PenInput {
             #[cfg(not(target_os = "windows"))]
             backend: (),
             packets: Vec::new(),
+            last_packet: None,
             last_pressure: 1.0,
             idle_frames: u32::MAX,
         }
@@ -215,9 +392,9 @@ impl PenInput {
     /// Called once per frame. Initialises the backend lazily (once the window
     /// exists) and drains the whole packet queue into `packets`.
     ///
-    /// `pointer_down` gates the idle reset only: a pen held still mid-stroke
-    /// produces no packets, and dropping its pressure back to 1.0 there would
-    /// swell the line.
+    /// `pointer_down` freezes the idle count: a pen held still mid-stroke
+    /// produces no packets, and handing the stroke to the mouse there — at
+    /// pressure 1.0 — stamps a full-size blob into the line.
     pub fn poll(&mut self, pointer_down: bool) {
         self.packets.clear();
         #[cfg(target_os = "windows")]
@@ -236,19 +413,30 @@ impl PenInput {
                 }
             }
             if let Some(w) = &mut self.backend {
-                w.poll(&mut self.packets);
+                w.poll(&mut self.packets, pointer_down);
             }
         }
+        self.track_idle(pointer_down);
+    }
 
-        if let Some(last) = self.packets.last() {
+    /// Idle bookkeeping for the packets `poll` just drained.
+    ///
+    /// The count only runs while nothing is pressed. It used to run always,
+    /// with only the pressure reset gated — but `pen_active` reads the count
+    /// directly, so a pen paused for `PEN_IDLE_FRAMES` mid-stroke (a live
+    /// stroke repaints every frame) went inactive anyway, and the next sample
+    /// came from the mouse path at pressure 1.0.
+    fn track_idle(&mut self, pointer_down: bool) {
+        if let Some(&last) = self.packets.last() {
             self.last_pressure = last.pressure;
+            self.last_packet = Some(last);
             self.idle_frames = 0;
-        } else {
+        } else if !pointer_down {
             self.idle_frames = self.idle_frames.saturating_add(1);
             // Idle with nothing pressed: assume the mouse took over. Without
             // this the pressure left behind by a pen lift (~0.0) would make
             // every subsequent mouse stroke a hairline.
-            if !pointer_down && self.idle_frames > PEN_IDLE_FRAMES {
+            if self.idle_frames > PEN_IDLE_FRAMES {
                 self.last_pressure = 1.0;
             }
         }
@@ -257,6 +445,12 @@ impl PenInput {
     /// This frame's tablet packets, oldest first.
     pub fn packets(&self) -> &[PenPacket] {
         &self.packets
+    }
+
+    /// The most recent packet, from this frame or any earlier one. `None`
+    /// until the pen has reported at all.
+    pub fn last_packet(&self) -> Option<PenPacket> {
+        self.last_packet
     }
 
     /// A snapshot for the diagnostics readout. See [`PenDiagnostics`].
@@ -281,16 +475,14 @@ impl PenInput {
             d.layout = w.layout;
             d.max_packets_per_frame = w.max_packets_per_frame;
             d.drained_full = w.drained_full;
+            d.fit_x = w.fit.x;
+            d.fit_y = w.fit.y;
+            d.fit_pairs = w.fit.pairs();
+            // Mapped from the retained raw value rather than from this frame's
+            // packets, which are empty whenever the pen holds still — the
+            // readout would otherwise blink out exactly while being read.
+            d.last_mapped = w.last_raw.map(|(x, y)| w.map_point(x, y));
         }
-        // Mapped from the retained raw value rather than from this frame's
-        // packets, which are empty whenever the pen holds still — the readout
-        // would otherwise blink out exactly while being read.
-        d.last_mapped = d.last_raw.map(|(x, y)| {
-            (
-                d.map_x.0 + (x as f32 - d.map_x.1) * d.map_x.2,
-                d.map_y.0 + (y as f32 - d.map_y.1) * d.map_y.2,
-            )
-        });
         d
     }
 
@@ -298,7 +490,12 @@ impl PenInput {
     /// has produced packets recently. False for mouse input, so callers know
     /// to ignore `current_pressure` and the packet positions.
     pub fn pen_active(&self) -> bool {
-        self.is_active() && self.idle_frames <= PEN_IDLE_FRAMES
+        self.is_active() && self.recently_seen()
+    }
+
+    /// The backend-independent half of `pen_active`.
+    fn recently_seen(&self) -> bool {
+        self.idle_frames <= PEN_IDLE_FRAMES
     }
 
     /// Returns latest reported pen pressure (0..=1) if available.
@@ -410,6 +607,9 @@ mod windows_backend {
         tilt_support: bool,
         /// Refreshed every poll; see `PenInput::client_origin`.
         pub client_origin: Option<(f32, f32)>,
+        /// The mapping as the cursor shows it to be. Preferred over
+        /// `map_x`/`map_y` per axis once trusted.
+        pub fit: super::CursorFit,
         pub queue_err_logged: bool,
         /// Polls since the context opened, and whether any packet has ever
         /// arrived. A context that opens but never delivers looks exactly like
@@ -660,18 +860,24 @@ mod windows_backend {
                 max_packets_per_frame: 0,
                 drained_full: 0,
                 client_origin: None,
+                fit: super::CursorFit::default(),
                 queue_err_logged: false,
                 polls: 0,
                 seen_packets: false,
             })
         }
 
-        /// Packet coordinate → virtual-desktop pixels.
+        /// Packet coordinate → virtual-desktop pixels. Each axis goes through
+        /// the cursor fit once it is trusted, and through the area the driver
+        /// reported until then.
         #[inline]
-        fn map_point(&self, x: i32, y: i32) -> (f32, f32) {
+        pub fn map_point(&self, x: i32, y: i32) -> (f32, f32) {
             let (sx, ox, kx) = self.map_x;
             let (sy, oy, ky) = self.map_y;
-            (sx + (x as f32 - ox) * kx, sy + (y as f32 - oy) * ky)
+            (
+                self.fit.x.map_or(sx + (x as f32 - ox) * kx, |f| f.map(x)),
+                self.fit.y.map_or(sy + (y as f32 - oy) * ky, |f| f.map(y)),
+            )
         }
 
         /// Azimuth/altitude → x/y tilt in degrees. Straight from Qt's
@@ -702,8 +908,10 @@ mod windows_backend {
         /// long, or the window goes without redrawing — would otherwise never
         /// catch up, and would keep handing back positions from further and
         /// further in the past.
-        pub fn poll(&mut self, out: &mut Vec<PenPacket>) {
+        /// `pointer_down` holds the cursor fit still; see `CursorFit::pause`.
+        pub fn poll(&mut self, out: &mut Vec<PenPacket>, pointer_down: bool) {
             self.client_origin = client_origin(self.hwnd);
+            let seen = self.total_packets;
             // Bounded: a pen that could outrun this is not one we can draw
             // with anyway, and an unbounded loop here would stall a frame.
             for _ in 0..8 {
@@ -711,6 +919,17 @@ mod windows_backend {
                 self.poll_once(out);
                 if out.len() - before < QUEUE_SIZE as usize {
                     break;
+                }
+            }
+            // The cursor is read straight after the drain, so it stands where
+            // the newest packet put it.
+            if pointer_down {
+                self.fit.pause();
+            } else if self.total_packets != seen {
+                if let (Some(raw), Some(cursor)) =
+                    (self.last_raw, crate::input::screen_pixel::cursor_pos())
+                {
+                    self.fit.observe(raw, cursor);
                 }
             }
         }
@@ -962,6 +1181,180 @@ mod tests {
         assert_eq!(apply(map, 0), 1440.0, "packet 0 is the bottom of the screen");
         assert_eq!(apply(map, 1440), 0.0, "packet 1440 is the top");
         assert_eq!(apply(map, 720), 720.0);
+    }
+
+    fn packet(pressure: f32) -> PenPacket {
+        PenPacket {
+            x: 0.0,
+            y: 0.0,
+            pressure,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+        }
+    }
+
+    /// The blob regression. A pen held still mid-stroke sends no packets while
+    /// the stroke keeps repainting; it must stay the live device, at its own
+    /// pressure, however long the pause.
+    #[test]
+    fn a_pen_paused_mid_stroke_keeps_its_pressure() {
+        let mut pen = PenInput::new();
+        pen.packets.push(packet(0.3));
+        pen.track_idle(true);
+        pen.packets.clear();
+        for _ in 0..PEN_IDLE_FRAMES * 10 {
+            pen.track_idle(true);
+        }
+        assert!(pen.recently_seen());
+        assert_eq!(pen.last_pressure, 0.3);
+    }
+
+    /// A pen hovering around the screen, as `(true x, true y)` in screen
+    /// pixels, a few pixels per step.
+    fn hover_path() -> Vec<(f64, f64)> {
+        (0..600)
+            .map(|i| {
+                let t = i as f64 * 0.01;
+                (700.0 + 300.0 * (t * 1.3).sin(), 500.0 + 250.0 * (t * 0.9).cos())
+            })
+            .collect()
+    }
+
+    /// Feed `path` through a driver whose packets are `raw(true position)`,
+    /// with the cursor on the whole pixel nearest the truth.
+    fn learn(fit: &mut CursorFit, path: &[(f64, f64)], raw: impl Fn(f64, f64) -> (i32, i32)) {
+        for &(x, y) in path {
+            fit.observe(raw(x, y), (x.round() as i32, y.round() as i32));
+        }
+    }
+
+    fn worst_error(fit: &CursorFit, path: &[(f64, f64)], raw: impl Fn(f64, f64) -> (i32, i32)) -> f64 {
+        let (fx, fy) = (fit.x.expect("x fitted"), fit.y.expect("y fitted"));
+        path.iter()
+            .map(|&(x, y)| {
+                let (rx, ry) = raw(x, y);
+                (fx.map(rx) as f64 - x).abs().max((fy.map(ry) as f64 - y).abs())
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// The driver seen in the field: accepted a Y-flipped output area,
+    /// reported it back flipped, and delivered top-down coordinates offset
+    /// by the flipped origin anyway. The fit must land on the cursor to a
+    /// fraction of a pixel regardless.
+    #[test]
+    fn a_driver_that_misreports_its_area_is_fitted_from_the_cursor() {
+        let raw = |x: f64, y: f64| ((x * 32.0).round() as i32, 46048 + (y * 32.0).round() as i32);
+        let mut fit = CursorFit::default();
+        let path = hover_path();
+        learn(&mut fit, &path, raw);
+        let worst = worst_error(&fit, &path, raw);
+        assert!(worst < 0.35, "fitted positions off by up to {worst} px");
+    }
+
+    /// And one that really does flip, at a scale nobody asked for.
+    #[test]
+    fn a_flipped_axis_at_any_scale_is_fitted() {
+        let raw = |x: f64, y: f64| {
+            (
+                (x * 7.3).round() as i32 + 1200,
+                ((1439.0 - y) * 11.0).round() as i32,
+            )
+        };
+        let mut fit = CursorFit::default();
+        let path = hover_path();
+        learn(&mut fit, &path, raw);
+        assert!(fit.y.unwrap().scale < 0.0);
+        let worst = worst_error(&fit, &path, raw);
+        assert!(worst < 0.35, "fitted positions off by up to {worst} px");
+    }
+
+    /// Until the pen has moved enough to pin a slope down, there is no fit,
+    /// and the driver's own mapping stays in charge.
+    #[test]
+    fn too_little_travel_is_not_trusted() {
+        let mut fit = CursorFit::default();
+        let path: Vec<(f64, f64)> = (0..200)
+            .map(|i| (300.0 + (i % 20) as f64, 300.0 + (i % 17) as f64))
+            .collect();
+        learn(&mut fit, &path, |x, y| ((x * 32.0) as i32, (y * 32.0) as i32));
+        assert!(fit.x.is_none() && fit.y.is_none());
+    }
+
+    /// A pen resting in place must not flood the window with one point.
+    #[test]
+    fn a_still_pen_adds_one_pair() {
+        let mut fit = CursorFit::default();
+        for _ in 0..50 {
+            fit.observe((3200, 3200), (100, 100));
+        }
+        assert_eq!(fit.pairs(), 1);
+    }
+
+    /// Rearrange the monitors and the old fit is simply wrong. It must be
+    /// dropped and relearned, not averaged into the new one.
+    #[test]
+    fn a_changed_mapping_is_relearned() {
+        let before = |x: f64, y: f64| ((x * 32.0).round() as i32, (y * 32.0).round() as i32);
+        let after = |x: f64, y: f64| (((x - 1920.0) * 32.0).round() as i32, (y * 32.0).round() as i32);
+        let mut fit = CursorFit::default();
+        let path = hover_path();
+        learn(&mut fit, &path, before);
+        learn(&mut fit, &path, after);
+        let worst = worst_error(&fit, &path, after);
+        assert!(worst < 0.35, "still mapping the old layout: off by {worst} px");
+    }
+
+    /// The regression from the field: a stroke fast enough that the cursor
+    /// trails the pen used to push the fit out of trust mid-stroke, and the
+    /// stroke fell back to the cursor. A run of lagging pairs must neither
+    /// move a trusted fit nor lose it.
+    #[test]
+    fn a_lagging_cursor_neither_bends_nor_drops_the_fit() {
+        let raw = |x: f64, y: f64| ((x * 32.0).round() as i32, 46048 + (y * 32.0).round() as i32);
+        let mut fit = CursorFit::default();
+        let path = hover_path();
+        learn(&mut fit, &path, raw);
+        let (x0, y0) = (fit.x, fit.y);
+
+        // The cursor ten pixels behind the pen, then three behind — outliers,
+        // then pairs merely noisy enough to push the window's scatter up.
+        for &(x, y) in path.iter().take(FIT_MISSES_TO_RESET as usize - 1) {
+            fit.observe(raw(x, y), ((x - 10.0).round() as i32, (y - 10.0).round() as i32));
+        }
+        assert_eq!((fit.x, fit.y), (x0, y0), "outliers moved the fit");
+        for &(x, y) in path.iter().skip(100).take(200) {
+            fit.observe(raw(x, y), ((x - 3.0).round() as i32, (y + 3.0).round() as i32));
+        }
+        assert!(fit.x.is_some() && fit.y.is_some(), "noise dropped the fit");
+    }
+
+    /// A stroke's first sample comes from the newest packet, and the press is
+    /// often seen a frame after that packet was drained. An empty poll must
+    /// not forget it.
+    #[test]
+    fn the_last_packet_survives_an_empty_poll() {
+        let mut pen = PenInput::new();
+        assert!(pen.last_packet().is_none());
+        pen.packets.push(packet(0.4));
+        pen.track_idle(false);
+        pen.packets.clear();
+        pen.track_idle(true);
+        assert_eq!(pen.last_packet().map(|p| p.pressure), Some(0.4));
+    }
+
+    /// And once lifted and left alone, the mouse takes over at full pressure.
+    #[test]
+    fn an_idle_pen_hands_over_to_the_mouse() {
+        let mut pen = PenInput::new();
+        pen.packets.push(packet(0.0));
+        pen.track_idle(false);
+        pen.packets.clear();
+        for _ in 0..=PEN_IDLE_FRAMES {
+            pen.track_idle(false);
+        }
+        assert!(!pen.recently_seen());
+        assert_eq!(pen.last_pressure, 1.0);
     }
 
     /// A driver free to grant a different origin as well as a different extent
