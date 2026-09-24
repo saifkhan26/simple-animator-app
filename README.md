@@ -218,6 +218,9 @@ Open the **Onion skin** window:
   of the same held one. Off: literal frame stepping, which simply shows fewer
   ghosts across a hold.
 - **Prev / Next** — how many in each direction (0..=8).
+- **Offset chips** — one chip per ghost under the sliders (`−2 −1 • +1 +2`).
+  Click one to hide just that offset: hiding −1 leaves −2 where it was, at
+  its own fade.
 - **Max α** — alpha of the nearest ghost.
 - **Falloff** — exponent on the distance-to-current weight. The farthest ghost
   keeps a floor of the max alpha, so it never fades to nothing.
@@ -227,6 +230,13 @@ Open the **Onion skin** window:
 Ghosts are drawn from silhouette textures baked in the tint color, not by
 multiplying a tint over the artwork — a multiply leaves black line art black,
 which is what made ghosts read as a grey smudge.
+
+**Pinned frames** keep one particular frame of the active layer on screen as
+a ghost wherever the playhead is — a key pose to check the in-betweens
+against. Type a frame number and **+**, or pin the current frame. Each pin
+has its own color, a show/hide toggle, and a delete button. Pins follow their
+drawing when frames are inserted or deleted before them, show only while
+their layer is active, and are not saved with the project.
 
 A drawing already showing on the current frame is never ghosted (on a hold it
 would land exactly on top), and ghosts are hidden during playback.

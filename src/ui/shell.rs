@@ -6,10 +6,11 @@ use egui_phosphor::regular as ic;
 
 use crate::app::{AppState, ExportKind, NavKind, PanelId, MP4_PRESETS};
 use crate::doc::camera::Ease;
+use crate::doc::layer::CellId;
 use crate::input::shortcuts::{Action, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
-use crate::timeline::onion::OnionDirection;
+use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, PIN_TINTS};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing, StrokeCap};
 use crate::ui::{expr, theme};
@@ -1751,12 +1752,193 @@ fn onion_content(state: &mut AppState, ui: &mut egui::Ui) {
             ui.add_space(4.0);
             ui.add(egui::Slider::new(&mut state.onion.prev, 0..=8).text("Prev"));
             ui.add(egui::Slider::new(&mut state.onion.next, 0..=8).text("Next"));
+            onion_offset_chips(state, ui);
             ui.add(egui::Slider::new(&mut state.onion.max_alpha, 0.0..=1.0).text("Max α"));
             ui.add(egui::Slider::new(&mut state.onion.falloff, 0.5..=4.0).text("Falloff"));
             ui.add_space(4.0);
             theme::section_header(ui, ic::PALETTE, "Tints");
             color_picker_u8(ui, "Prev", &mut state.onion.prev_tint);
             color_picker_u8(ui, "Next", &mut state.onion.next_tint);
+    }
+    ui.add_space(6.0);
+    onion_pins_content(state, ui);
+}
+
+/// Offset chip size, and the gap between chips.
+const CHIP: Vec2 = Vec2::new(18.0, 16.0);
+const CHIP_GAP: f32 = 2.0;
+
+/// One chip per ghost in range, `−prev … −1 • +1 … +next`; clicking one
+/// hides or shows that offset without touching the others. One row when it
+/// fits the panel; otherwise the past on one row and the future under it,
+/// rather than wrapping mid-range or stretching the panel.
+fn onion_offset_chips(state: &mut AppState, ui: &mut egui::Ui) {
+    let onion = &mut state.onion;
+    let (prev, next) = (onion.prev, onion.next);
+    if prev == 0 && next == 0 {
+        return;
+    }
+    let unit = if onion.by_key { "drawing" } else { "frame" };
+    let step = CHIP.x + CHIP_GAP;
+    let one_row = f32::from(prev + next) * step + CHIP.y * 0.5 <= ui.available_width();
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(CHIP_GAP, CHIP_GAP);
+        let past = |ui: &mut egui::Ui, onion: &mut OnionConfig| {
+            for k in (1..=prev).rev() {
+                offset_chip(ui, onion, k, OnionDirection::Prev, unit);
+            }
+        };
+        let future = |ui: &mut egui::Ui, onion: &mut OnionConfig| {
+            for k in 1..=next {
+                offset_chip(ui, onion, k, OnionDirection::Next, unit);
+            }
+        };
+        if one_row {
+            ui.horizontal(|ui| {
+                past(ui, onion);
+                // The current frame. Painted: the UI font has no bullet glyph.
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(CHIP.y * 0.5, CHIP.y), Sense::hover());
+                ui.painter().circle_filled(rect.center(), 2.5, theme::TEXT_MUTED);
+                resp.on_hover_text("The current frame");
+                future(ui, onion);
+            });
+        } else {
+            if prev > 0 {
+                ui.horizontal(|ui| past(ui, onion));
+            }
+            if next > 0 {
+                ui.horizontal(|ui| future(ui, onion));
+            }
+        }
+    });
+    ui.add_space(2.0);
+}
+
+fn offset_chip(
+    ui: &mut egui::Ui,
+    onion: &mut OnionConfig,
+    k: u8,
+    dir: OnionDirection,
+    unit: &str,
+) {
+    let shown = !onion.is_hidden(k, dir);
+    let [r, g, b] = onion.tint_rgb(dir);
+    let tint = Color32::from_rgb(r, g, b);
+    let (sign, way) = match dir {
+        OnionDirection::Prev => ('−', "back"),
+        OnionDirection::Next => ('+', "ahead"),
+    };
+    let (rect, resp) = ui.allocate_exact_size(CHIP, Sense::click());
+    let painter = ui.painter();
+    let text = if shown {
+        painter.rect_filled(rect, 3.0, tint);
+        // Dark or light label, whichever reads on the tint.
+        let luma = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+        if luma > 150.0 { Color32::BLACK } else { Color32::WHITE }
+    } else {
+        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, tint.gamma_multiply(0.6)));
+        theme::TEXT_MUTED
+    };
+    if resp.hovered() {
+        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::TEXT));
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("{sign}{k}"),
+        egui::FontId::proportional(10.0),
+        text,
+    );
+    let plural = if k == 1 { "" } else { "s" };
+    let state = if shown { "shown — click to hide" } else { "hidden — click to show" };
+    if resp
+        .on_hover_text(format!("{k} {unit}{plural} {way}: {state}"))
+        .clicked()
+    {
+        onion.toggle_hidden(k, dir);
+    }
+}
+
+/// Pinned frames of the active layer: pin one by number or from the
+/// playhead, then recolour, hide or remove each.
+fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
+    theme::section_header(ui, ic::PUSH_PIN, "Pinned frames");
+    let count = state.project.frame_count.max(1);
+    let cur = state.project.current_frame;
+    let li = state.project.current_layer;
+    let Some(layer) = state.project.layers.get_mut(li) else {
+        return;
+    };
+    ui.label(
+        egui::RichText::new(format!(
+            "Pins on \u{201c}{}\u{201d} show while it's the active layer.",
+            layer.name
+        ))
+        .color(theme::TEXT_MUTED)
+        .size(10.5),
+    );
+
+    // The frame to pin: a scratch value, kept in egui memory rather than in
+    // the state. Numbered like the timeline, from 0.
+    let mem_id = ui.id().with("onion_pin_frame");
+    let mut typed: usize = ui.data(|d| d.get_temp(mem_id)).unwrap_or(0);
+    typed = typed.min(count - 1);
+    let mut add = None;
+    ui.horizontal(|ui| {
+        ui.label("Frame");
+        ui.add(egui::DragValue::new(&mut typed).range(0..=count - 1).speed(0.25));
+        if theme::icon_button(ui, ic::PLUS, "Pin this frame").clicked() {
+            add = Some(typed);
+        }
+        if theme::icon_button(
+            ui,
+            ic::PUSH_PIN,
+            "Pin the current frame. Its ghost shows once the playhead moves off it.",
+        )
+        .clicked()
+        {
+            add = Some(cur);
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(mem_id, typed));
+    if let Some(frame) = add {
+        if !layer.onion_pins.iter().any(|p| p.frame == frame) {
+            let tint = PIN_TINTS[layer.onion_pins.len() % PIN_TINTS.len()];
+            layer.onion_pins.push(OnionPin {
+                frame,
+                tint,
+                visible: true,
+            });
+        }
+    }
+
+    let mut remove = None;
+    for (i, pin) in layer.onion_pins.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            let eye = if pin.visible { ic::EYE } else { ic::EYE_SLASH };
+            if theme::icon_button(ui, eye, "Show / hide this pin").clicked() {
+                pin.visible = !pin.visible;
+            }
+            color_picker_u8(ui, "", &mut pin.tint);
+            ui.label("Frame");
+            ui.add(egui::DragValue::new(&mut pin.frame).range(0..=count - 1).speed(0.25));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button(ui, ic::TRASH, "Remove pin").clicked() {
+                    remove = Some(i);
+                }
+            });
+        });
+    }
+    if let Some(i) = remove {
+        layer.onion_pins.remove(i);
+    }
+    if !state.onion.enabled && !layer.onion_pins.is_empty() {
+        ui.label(
+            egui::RichText::new("Onion skin is off — pins show when it's enabled.")
+                .color(theme::TEXT_MUTED)
+                .size(10.5),
+        );
     }
 }
 
@@ -2893,25 +3075,33 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // Ghosts come from `ghost_textures` — silhouettes already baked in the
     // tint colour. The vertex colour only fades them: multiplying a tint over
     // the plain cell texture leaves black line art black.
+    let draw_ghost = |id: CellId, frame: usize, a: u8| {
+        let Some((_, tex)) = state.ghost_textures.get(&id) else {
+            return;
+        };
+        let Some(cell) = state.project.cell(id) else {
+            return;
+        };
+        let t = state.display_transform(cur_layer, frame);
+        let lc = layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
+        image_quad(&painter, tex.id(), lc, theme::white_alpha(a));
+    };
     let draw_onion = |dir: OnionDirection| {
         // Farthest first so the nearest ghost — the most opaque one, and the
         // one the user is comparing against — ends up on top.
         for step in state.onion_steps(dir).into_iter().rev() {
-            let Some((_, tex)) = state.ghost_textures.get(&step.cell) else {
-                continue;
-            };
-            let Some(cell) = state.project.cell(step.cell) else {
-                continue;
-            };
-            let a = state.onion.alpha_for(step.k, dir);
-            let t = state.display_transform(cur_layer, step.frame);
-            let lc = layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
-            image_quad(
-                &painter,
-                tex.id(),
-                lc,
-                theme::white_alpha(a),
-            );
+            draw_ghost(step.cell, step.frame, state.onion.alpha_for(step.k, dir));
+        }
+    };
+    // Pinned frames sit on the side of the current cell their frame is on,
+    // under that side's range ghosts so the nearest neighbour stays on top.
+    let pins = state.onion_pin_ghosts();
+    let pin_alpha = (state.onion.max_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let draw_pins = |before: bool| {
+        for &(pin, id) in &pins {
+            if (pin.frame < cur_frame) == before {
+                draw_ghost(id, pin.frame, pin_alpha);
+            }
         }
     };
 
@@ -2941,6 +3131,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         // behind its current cell, next frames just in front.
         let active = li == cur_layer;
         if active {
+            draw_pins(true);
             draw_onion(OnionDirection::Prev);
         }
         if let Some(id) = layer.resolve(cur_frame) {
@@ -2955,6 +3146,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             }
         }
         if active {
+            draw_pins(false);
             draw_onion(OnionDirection::Next);
         }
     }
@@ -5004,6 +5196,99 @@ mod perspective_tests {
             frame(&ctx, &mut state, vec![]);
             frame(&ctx, &mut state, vec![]);
         }
+    }
+}
+
+#[cfg(test)]
+mod onion_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    #[test]
+    fn a_pin_gets_a_ghost_in_its_own_colour_and_everything_paints() {
+        let mut state = AppState::for_test();
+        state.onion.enabled = true;
+        state.onion.prev = 3;
+        state.onion.next = 2;
+        state.onion.toggle_hidden(1, OnionDirection::Prev);
+        for _ in 0..4 {
+            state.structural_edit(false, |p| {
+                p.add_frame();
+                p.insert_blank_key_here();
+            });
+        }
+        // Playhead on 4: −1 is frame 3, −2 frame 2, −3 frame 1.
+        let green = [0, 200, 0];
+        let li = state.project.current_layer;
+        state.project.layers[li].onion_pins = vec![
+            OnionPin { frame: 1, tint: green, visible: true },
+            OnionPin { frame: 3, tint: [9, 9, 9], visible: false },
+        ];
+        let cell_on = |f| state.project.layers[li].resolve(f).unwrap();
+        let (pinned, plain, hidden) = (cell_on(1), cell_on(2), cell_on(3));
+
+        let ctx = egui::Context::default();
+        // Two passes, the second past `GHOST_REST`, so ghosts get built.
+        for time in [0.0, 1.0] {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0))),
+                time: Some(time),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                state.sync_textures(ctx);
+                draw(&mut state, ctx);
+                egui::Window::new("onion").show(ctx, |ui| onion_content(&mut state, ui));
+            });
+        }
+        let tint = |id| state.ghost_textures.get(&id).map(|(t, _)| *t);
+        assert_eq!(tint(pinned), Some(green), "pin colour, not the prev tint");
+        assert_eq!(tint(plain), Some(state.onion.prev_tint));
+        // −1 is a hidden offset, and its pin is switched off.
+        assert_eq!(tint(hidden), None);
+    }
+
+    /// Size of the chip row laid out `width` wide.
+    fn chip_row(width: f32, prev: u8, next: u8) -> Vec2 {
+        let mut state = AppState::for_test();
+        state.onion.prev = prev;
+        state.onion.next = next;
+        let ctx = egui::Context::default();
+        let mut size = Vec2::ZERO;
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                size = ui
+                    .allocate_ui(egui::vec2(width, 400.0), |ui| {
+                        onion_offset_chips(&mut state, ui);
+                        ui.min_rect().size()
+                    })
+                    .inner;
+            });
+        });
+        size
+    }
+
+    /// Eight each way in the default-width panel (232px inside): past and
+    /// future on a row each, never wrapped mid-range or wider than the panel.
+    #[test]
+    fn a_full_range_splits_into_two_rows_in_a_narrow_panel() {
+        let s = chip_row(232.0, 8, 8);
+        assert!(s.x <= 232.0, "{s:?}");
+        assert!(s.y > 2.0 * CHIP.y && s.y < 3.0 * CHIP.y, "two rows: {s:?}");
+    }
+
+    #[test]
+    fn a_range_that_fits_stays_on_one_compact_row() {
+        let narrow = chip_row(232.0, 3, 3);
+        assert!(narrow.y < 2.0 * CHIP.y, "{narrow:?}");
+        // A wide panel doesn't stretch the chips to fill it.
+        let wide = chip_row(460.0, 8, 8);
+        assert!(wide.y < 2.0 * CHIP.y, "{wide:?}");
+        assert!(wide.x <= 16.0 * (CHIP.x + CHIP_GAP) + CHIP.y, "{wide:?}");
     }
 }
 

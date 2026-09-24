@@ -18,7 +18,7 @@ use crate::doc::transform::Transform;
 use crate::input::pointer::PointerSample;
 use crate::input::shortcuts::{self, Action, ShortcutMap};
 use crate::input::tablet::{PenInput, PenPacket};
-use crate::timeline::onion::{OnionConfig, OnionDirection, OnionStep};
+use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep};
 use crate::timeline::playback::Playback;
 use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
@@ -2378,6 +2378,7 @@ impl AppState {
                     .into_iter()
                     .map(move |s| (s.cell, tint))
             })
+            .chain(self.onion_pin_ghosts().into_iter().map(|(pin, cell)| (cell, pin.tint)))
             .collect();
 
         let time = ctx.input(|i| i.time);
@@ -2473,11 +2474,33 @@ impl AppState {
         let Some(layer) = self.project.layers.get(self.project.current_layer) else {
             return Vec::new();
         };
-        self.onion.steps(
+        let mut steps = self.onion.steps(
             layer,
             self.project.current_frame,
             self.project.frame_count,
             dir,
+        );
+        // A pinned drawing is ghosted once, in the pin's colour: the ghost
+        // cache holds one tint per cell.
+        let pins = self.onion_pin_ghosts();
+        steps.retain(|s| !pins.iter().any(|&(_, cell)| cell == s.cell));
+        steps
+    }
+
+    /// Pinned onion ghosts for the active layer at the current frame, under
+    /// the same conditions as [`Self::onion_steps`] — and hidden with the rest
+    /// of the onion skin when it's switched off.
+    pub fn onion_pin_ghosts(&self) -> Vec<(OnionPin, CellId)> {
+        if self.playback.playing || !self.onion.enabled {
+            return Vec::new();
+        }
+        let Some(layer) = self.project.layers.get(self.project.current_layer) else {
+            return Vec::new();
+        };
+        crate::timeline::onion::pin_ghosts(
+            layer,
+            self.project.current_frame,
+            self.project.frame_count,
         )
     }
 
@@ -4496,6 +4519,47 @@ mod tests {
         let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
         assert!(!old.show_panels);
         assert_eq!(old.perspective, PerspectiveConfig::default());
+    }
+
+    #[test]
+    fn hidden_onion_offsets_round_trip_and_default_to_shown() {
+        let mut prefs = UiPrefs::default();
+        prefs.onion.toggle_hidden(1, OnionDirection::Prev);
+        let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
+        assert!(back.onion.is_hidden(1, OnionDirection::Prev));
+        // Onion prefs saved before the toggles existed show every offset.
+        let old: UiPrefs = toml::from_str("[onion]\nprev = 3\n").unwrap();
+        assert_eq!(old.onion.prev, 3);
+        assert_eq!((old.onion.prev_hidden, old.onion.next_hidden), (0, 0));
+    }
+
+    #[test]
+    fn a_pinned_drawing_is_ghosted_once_in_the_pin_colour() {
+        let mut state = AppState::for_test();
+        state.onion.enabled = true;
+        state.onion.prev = 2;
+        for _ in 0..3 {
+            state.structural_edit(false, |p| {
+                p.add_frame();
+                p.insert_blank_key_here();
+            });
+        }
+        let li = state.project.current_layer;
+        let pin_cell = state.project.layers[li].resolve(1).unwrap();
+        state.project.layers[li].onion_pins.push(OnionPin {
+            frame: 1,
+            tint: [0, 200, 0],
+            visible: true,
+        });
+        let pins = state.onion_pin_ghosts();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].1, pin_cell);
+        let prev = state.onion_steps(OnionDirection::Prev);
+        assert!(prev.iter().all(|s| s.cell != pin_cell), "{prev:?}");
+        assert_eq!(prev.len(), 1, "the other ghost in range still shows");
+        // Switching the onion skin off hides pins too.
+        state.onion.enabled = false;
+        assert!(state.onion_pin_ghosts().is_empty());
     }
 
     /// The fix for the big-layer stalls in one test: moving the timeline

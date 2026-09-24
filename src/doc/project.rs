@@ -285,6 +285,7 @@ impl Project {
                 l.exposures.insert(insert_at, None);
             }
             l.track_insert_frame(insert_at);
+            l.pins_insert_frames(insert_at, 1);
         }
         self.frame_count += 1;
         self.current_frame = insert_at;
@@ -298,6 +299,7 @@ impl Project {
             l.exposures.insert(insert_at, resolved);
             // Same cell shows, but the user hasn't tracked the new frame.
             l.track_insert_frame(insert_at);
+            l.pins_insert_frames(insert_at, 1);
         }
         self.frame_count += 1;
         self.current_frame = insert_at;
@@ -324,6 +326,7 @@ impl Project {
                 l.exposures.remove(f);
             }
             l.track_remove_frame(f);
+            l.pins_remove_frames(f, 1);
         }
         self.frame_count -= 1;
         self.current_frame = self.current_frame.min(self.frame_count - 1);
@@ -896,6 +899,7 @@ pub fn layer_insert(l: &mut Layer, after: usize, n: usize) {
     for _ in 0..n {
         l.track_insert_frame(at);
     }
+    l.pins_insert_frames(at, n);
 }
 
 /// Remove `[at, at + n)` from one layer and pad its end with holds. When the
@@ -914,6 +918,7 @@ pub fn layer_remove(l: &mut Layer, at: usize, n: usize) {
         l.track_remove_frame(at);
         l.track_insert_frame(l.track_points.len());
     }
+    l.pins_remove_frames(at, end - at);
     if end < len {
         if let Some(k) = last_key {
             if l.exposures[at].is_none() {
@@ -1513,5 +1518,57 @@ mod tests {
         assert!(!p.drop_allowed(0, 1, true));
         assert!(p.drop_allowed(1, 0, true), "copying out of a locked layer is fine");
         assert!(!p.drop_allowed(1, 0, false), "moving out of it is not");
+    }
+
+    // --- Onion pins ---
+
+    fn pin_frames(p: &Project, layer: usize) -> Vec<usize> {
+        p.layers[layer].onion_pins.iter().map(|p| p.frame).collect()
+    }
+
+    fn pinned(frames: usize, keys: &[usize], pins: &[usize]) -> Project {
+        let mut p = sheet(frames, keys);
+        p.layers[0].onion_pins = pins
+            .iter()
+            .map(|&frame| crate::timeline::onion::OnionPin {
+                frame,
+                tint: [0, 255, 0],
+                visible: true,
+            })
+            .collect();
+        p
+    }
+
+    #[test]
+    fn pins_follow_their_drawings_through_frame_inserts() {
+        let mut p = pinned(10, &[0, 4, 8], &[0, 4, 8]);
+        p.current_frame = 3;
+        p.add_frame(); // inserts at 4
+        assert_eq!(pin_frames(&p, 0), vec![0, 5, 9]);
+        p.current_frame = 5;
+        p.duplicate_frame(); // inserts at 6
+        assert_eq!(pin_frames(&p, 0), vec![0, 5, 10]);
+        p.insert_layer_frames(0, 0, 2); // inserts at 1
+        assert_eq!(pin_frames(&p, 0), vec![0, 7, 12]);
+        // Every pin still shows the drawing it was put on.
+        let marks: Vec<u8> = pin_frames(&p, 0).iter().map(|&f| row(&p, 0)[f]).collect();
+        assert_eq!(marks, vec![1, 5, 9]);
+    }
+
+    #[test]
+    fn a_pin_on_a_removed_frame_goes_with_it() {
+        let mut p = pinned(10, &[0, 4, 8], &[0, 4, 8]);
+        p.current_frame = 4;
+        p.delete_frame();
+        assert_eq!(pin_frames(&p, 0), vec![0, 7]);
+        p.remove_layer_frames(0, 1, 2);
+        assert_eq!(pin_frames(&p, 0), vec![0, 5]);
+    }
+
+    #[test]
+    fn padding_the_timeline_leaves_pins_alone() {
+        let mut p = pinned(4, &[0, 2], &[0, 2]);
+        p.ensure_frame_count(9);
+        assert_eq!(pin_frames(&p, 0), vec![0, 2]);
     }
 }

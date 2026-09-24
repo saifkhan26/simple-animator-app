@@ -11,6 +11,7 @@
 pub type CellId = usize;
 
 use crate::doc::transform::{Ease, Transform, TransformKey};
+use crate::timeline::onion::OnionPin;
 
 /// One frame's stabilization tracking points, in document space.
 /// `a` is the primary point (translation); `b` is optional and enables
@@ -46,6 +47,11 @@ pub struct Layer {
     /// so it resets on load.
     #[serde(skip)]
     pub lines_from: Option<usize>,
+    /// Frames of this layer pinned as onion ghosts in the Onion panel.
+    /// Session-only like `lines_from`. Frame edits shift them the way they
+    /// shift `track_points`, so a pin stays on its drawing.
+    #[serde(skip)]
+    pub onion_pins: Vec<OnionPin>,
     /// Per-frame stabilization tracking samples, parallel to `exposures`.
     /// Empty vec = tracker unused on this layer. Project frame edits keep the
     /// indices aligned with `exposures`.
@@ -73,6 +79,7 @@ impl Layer {
             transform: Transform::default(),
             transform_keys: Vec::new(),
             lines_from: None,
+            onion_pins: Vec::new(),
             track_points: Vec::new(),
             cell_w: 0,
             cell_h: 0,
@@ -106,6 +113,27 @@ impl Layer {
     pub fn track_remove_frame(&mut self, at: usize) {
         if at < self.track_points.len() {
             self.track_points.remove(at);
+        }
+    }
+
+    /// Keep onion pins on their drawings after `n` frames are inserted at
+    /// `at`. Only for a real insert — padding the end moves nothing.
+    pub fn pins_insert_frames(&mut self, at: usize, n: usize) {
+        for p in &mut self.onion_pins {
+            if p.frame >= at {
+                p.frame += n;
+            }
+        }
+    }
+
+    /// Keep onion pins on their drawings after `[at, at + n)` is removed. A
+    /// pin on a removed frame goes with it.
+    pub fn pins_remove_frames(&mut self, at: usize, n: usize) {
+        self.onion_pins.retain(|p| !(at..at + n).contains(&p.frame));
+        for p in &mut self.onion_pins {
+            if p.frame >= at + n {
+                p.frame -= n;
+            }
         }
     }
 

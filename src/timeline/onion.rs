@@ -35,6 +35,31 @@ pub struct OnionConfig {
     /// animation on twos/threes still shows `prev` real drawings back instead
     /// of the same held cell repeated.
     pub by_key: bool,
+    /// Offsets switched off in the panel: bit `k - 1` hides the ghost `k`
+    /// steps back. A hidden offset keeps its slot, so hiding −1 leaves −2
+    /// where it was and at the alpha it had.
+    pub prev_hidden: u8,
+    /// Same as `prev_hidden`, for the ghosts ahead.
+    pub next_hidden: u8,
+}
+
+/// Starting colours for new pins, handed out in turn. Kept clear of the
+/// default blue/red so a pin never reads as an ordinary prev/next ghost.
+pub const PIN_TINTS: [[u8; 3]; 4] = [
+    [70, 200, 110],
+    [255, 165, 40],
+    [185, 110, 255],
+    [235, 215, 60],
+];
+
+/// A frame of one layer kept on screen as a ghost wherever the playhead is,
+/// in its own colour. Session-only: pins live on the `Layer` but aren't
+/// written to `.anim`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OnionPin {
+    pub frame: usize,
+    pub tint: [u8; 3],
+    pub visible: bool,
 }
 
 impl Default for OnionConfig {
@@ -48,6 +73,8 @@ impl Default for OnionConfig {
             falloff: 1.2,
             max_alpha: 0.75,
             by_key: true,
+            prev_hidden: 0,
+            next_hidden: 0,
         }
     }
 }
@@ -68,6 +95,27 @@ impl OnionConfig {
             OnionDirection::Prev => self.prev_tint,
             OnionDirection::Next => self.next_tint,
         }
+    }
+
+    /// Whether the ghost `k` steps away in `direction` is switched off.
+    pub fn is_hidden(&self, k: u8, direction: OnionDirection) -> bool {
+        let mask = match direction {
+            OnionDirection::Prev => self.prev_hidden,
+            OnionDirection::Next => self.next_hidden,
+        };
+        matches!(k, 1..=8) && mask & (1 << (k - 1)) != 0
+    }
+
+    /// Switch the ghost `k` steps away in `direction` on or off.
+    pub fn toggle_hidden(&mut self, k: u8, direction: OnionDirection) {
+        if !matches!(k, 1..=8) {
+            return;
+        }
+        let mask = match direction {
+            OnionDirection::Prev => &mut self.prev_hidden,
+            OnionDirection::Next => &mut self.next_hidden,
+        };
+        *mask ^= 1 << (k - 1);
     }
 
     /// Alpha (0..=255) for a ghost `k` steps away from the current frame.
@@ -93,6 +141,10 @@ impl OnionConfig {
     /// A cell that resolves to the same drawing as the current frame is never
     /// emitted: on a hold that ghost would land exactly on top of the current
     /// cell, adding tint but no motion information.
+    ///
+    /// Each ghost's `k` is its slot in the range — the how-many-th drawing
+    /// back when stepping by drawings, the frame distance when stepping by
+    /// frames — so a hidden offset leaves the others where they were.
     pub fn steps(
         &self,
         layer: &Layer,
@@ -111,7 +163,7 @@ impl OnionConfig {
         let current = layer.resolve(frame);
         let mut seen: Vec<CellId> = Vec::new();
         let mut f = frame;
-        while out.len() < want as usize {
+        loop {
             f = match direction {
                 OnionDirection::Prev => match f.checked_sub(1) {
                     Some(p) => p,
@@ -125,28 +177,53 @@ impl OnionConfig {
                     n
                 }
             };
+            let dist = frame.abs_diff(f);
             if let Some(cell) = layer.resolve(f) {
                 // Skip the current frame's own drawing, and any drawing already
                 // ghosted from a nearer frame of the same hold — either would
-                // paint a second copy in the same place.
+                // paint a second copy in the same place. A hidden ghost still
+                // counts as seen, so a later frame of its hold can't step into
+                // the slot it left.
                 if Some(cell) != current && !seen.contains(&cell) {
                     seen.push(cell);
-                    out.push(OnionStep {
-                        k: out.len() as u8 + 1,
-                        cell,
-                        frame: f,
-                    });
+                    let k = if self.by_key { seen.len() } else { dist } as u8;
+                    if !self.is_hidden(k, direction) {
+                        out.push(OnionStep { k, cell, frame: f });
+                    }
                 }
             }
             // Frame stepping stays literal: the walk covers `want` frames each
             // way and simply draws fewer ghosts across a hold. Drawing stepping
             // keeps walking until it has `want` distinct drawings.
-            if !self.by_key && frame.abs_diff(f) >= want as usize {
+            let reached = if self.by_key { seen.len() } else { dist };
+            if reached >= want as usize {
                 break;
             }
         }
         out
     }
+}
+
+/// The pins of `layer` to ghost at `frame`, each with the drawing it shows.
+///
+/// Same rules as [`OnionConfig::steps`]: a pin on the current frame's own
+/// drawing is skipped, since it would sit exactly on top of it, and a drawing
+/// two pins share is ghosted once, in the first pin's colour.
+pub fn pin_ghosts(layer: &Layer, frame: usize, frame_count: usize) -> Vec<(OnionPin, CellId)> {
+    let current = layer.resolve(frame);
+    let mut out: Vec<(OnionPin, CellId)> = Vec::new();
+    for pin in &layer.onion_pins {
+        if !pin.visible || pin.frame >= frame_count {
+            continue;
+        }
+        let Some(cell) = layer.resolve(pin.frame) else {
+            continue;
+        };
+        if Some(cell) != current && !out.iter().any(|&(_, c)| c == cell) {
+            out.push((*pin, cell));
+        }
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,5 +328,85 @@ mod tests {
         let layer = on_twos(6, 1);
         let cfg = OnionConfig::default();
         assert!(cfg.steps(&layer, 3, 6, OnionDirection::Prev).is_empty());
+    }
+
+    #[test]
+    fn hiding_the_nearest_offset_keeps_the_next_one_in_its_slot() {
+        let layer = on_twos(12, 3);
+        let mut cfg = OnionConfig {
+            enabled: true,
+            prev: 2,
+            by_key: true,
+            ..Default::default()
+        };
+        cfg.toggle_hidden(1, OnionDirection::Prev);
+        // Frame 7: −1 is cell 1 (hidden), −2 is cell 0, first reached on
+        // frame 2 of its hold. Cell 1's hold must not slide into the gap, and
+        // −2 keeps k = 2 and so its own alpha.
+        let steps = cfg.steps(&layer, 7, 12, OnionDirection::Prev);
+        assert_eq!(steps, vec![OnionStep { k: 2, cell: 0, frame: 2 }]);
+        // Next is untouched by a Prev toggle.
+        cfg.next = 1;
+        assert_eq!(cfg.steps(&layer, 7, 12, OnionDirection::Next).len(), 1);
+    }
+
+    #[test]
+    fn toggling_twice_shows_the_offset_again() {
+        let mut cfg = OnionConfig::default();
+        cfg.toggle_hidden(3, OnionDirection::Next);
+        assert!(cfg.is_hidden(3, OnionDirection::Next));
+        assert!(!cfg.is_hidden(3, OnionDirection::Prev));
+        cfg.toggle_hidden(3, OnionDirection::Next);
+        assert!(!cfg.is_hidden(3, OnionDirection::Next));
+        // Out-of-range slots are ignored rather than overflowing the shift.
+        cfg.toggle_hidden(0, OnionDirection::Next);
+        cfg.toggle_hidden(9, OnionDirection::Next);
+        assert_eq!(cfg.next_hidden, 0);
+    }
+
+    #[test]
+    fn frame_stepping_slots_are_frame_distances() {
+        // Keys on 0, 3, 6, 9: from frame 7, one frame back is the current
+        // hold, two back is frame 5 (cell 1's hold), three back frame 4.
+        let layer = on_twos(12, 3);
+        let mut cfg = OnionConfig {
+            enabled: true,
+            prev: 3,
+            by_key: false,
+            ..Default::default()
+        };
+        let steps = cfg.steps(&layer, 7, 12, OnionDirection::Prev);
+        assert_eq!(steps, vec![OnionStep { k: 2, cell: 1, frame: 5 }]);
+        cfg.toggle_hidden(2, OnionDirection::Prev);
+        assert!(cfg.steps(&layer, 7, 12, OnionDirection::Prev).is_empty());
+    }
+
+    fn pin(frame: usize) -> OnionPin {
+        OnionPin {
+            frame,
+            tint: PIN_TINTS[0],
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn pins_skip_the_current_drawing_and_what_they_cannot_show() {
+        let mut layer = on_twos(12, 3);
+        layer.onion_pins = vec![
+            pin(0),
+            // Same drawing as frame 0: ghosted once.
+            pin(2),
+            // Frame 7's own drawing (key at 6).
+            pin(6),
+            // Past the end of the timeline.
+            pin(40),
+            OnionPin {
+                visible: false,
+                ..pin(9)
+            },
+            pin(4),
+        ];
+        let cells: Vec<CellId> = pin_ghosts(&layer, 7, 12).iter().map(|&(_, c)| c).collect();
+        assert_eq!(cells, vec![0, 1]);
     }
 }
