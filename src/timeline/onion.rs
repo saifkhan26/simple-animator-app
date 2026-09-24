@@ -1,7 +1,8 @@
 //! Onion-skin configuration.
 //!
-//! Composition: previous drawings tinted (default blue) below the current cell,
-//! next drawings tinted (default red) above. Alpha falls off with distance.
+//! Composition: previous drawings tinted (default blue) and next drawings
+//! tinted (default red), all below the current cell so they never cover the
+//! lines being drawn. Alpha falls off with distance.
 //!
 //! The ghosts are drawn from *colorized* textures (see `AppState::ghost_image`),
 //! not by multiplying a tint over the cell texture — a multiply leaves black

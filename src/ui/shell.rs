@@ -10,7 +10,7 @@ use crate::doc::layer::CellId;
 use crate::input::shortcuts::{Action, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
-use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, PIN_TINTS};
+use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, PIN_TINTS};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing, StrokeCap};
 use crate::ui::{expr, theme};
@@ -3107,8 +3107,8 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     };
 
     // Onion ghosts of the active layer at nearby frames. Drawn inside the layer
-    // loop so they sit at the active layer's depth (prev just behind its cell,
-    // next just in front) instead of behind/above the whole stack.
+    // loop so they sit at the active layer's depth, all of them just behind
+    // its cell — never over the lines being drawn.
     // Ghosts come from `ghost_textures` — silhouettes already baked in the
     // tint colour. The vertex colour only fades them: multiplying a tint over
     // the plain cell texture leaves black line art black.
@@ -3123,22 +3123,23 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         let lc = layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
         image_quad(&painter, tex.id(), lc, theme::white_alpha(a));
     };
-    let draw_onion = |dir: OnionDirection| {
-        // Farthest first so the nearest ghost — the most opaque one, and the
-        // one the user is comparing against — ends up on top.
-        for step in state.onion_steps(dir).into_iter().rev() {
-            draw_ghost(step.cell, step.frame, state.onion.alpha_for(step.k, dir));
+    let draw_onion = || {
+        // Pins at the bottom: they're references, usually far off. Then the
+        // range ghosts of both sides, farthest first, so the nearest ones — the
+        // most opaque, and what the user is comparing against — sit right
+        // under the drawing.
+        let pin_alpha = (state.onion.max_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        for (pin, id) in state.onion_pin_ghosts() {
+            draw_ghost(id, pin.frame, pin_alpha);
         }
-    };
-    // Pinned frames sit on the side of the current cell their frame is on,
-    // under that side's range ghosts so the nearest neighbour stays on top.
-    let pins = state.onion_pin_ghosts();
-    let pin_alpha = (state.onion.max_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let draw_pins = |before: bool| {
-        for &(pin, id) in &pins {
-            if (pin.frame < cur_frame) == before {
-                draw_ghost(id, pin.frame, pin_alpha);
-            }
+        let dirs = [OnionDirection::Prev, OnionDirection::Next];
+        let mut steps: Vec<(OnionStep, OnionDirection)> = dirs
+            .into_iter()
+            .flat_map(|dir| state.onion_steps(dir).into_iter().map(move |s| (s, dir)))
+            .collect();
+        steps.sort_by_key(|(s, _)| std::cmp::Reverse(s.k));
+        for (step, dir) in steps {
+            draw_ghost(step.cell, step.frame, state.onion.alpha_for(step.k, dir));
         }
     };
 
@@ -3164,12 +3165,10 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         if !layer.visible || layer.reference {
             continue;
         }
-        // Onion ghosts render at the active layer's depth: previous frames just
-        // behind its current cell, next frames just in front.
-        let active = li == cur_layer;
-        if active {
-            draw_pins(true);
-            draw_onion(OnionDirection::Prev);
+        // Onion ghosts render at the active layer's depth, just behind its
+        // current cell.
+        if li == cur_layer {
+            draw_onion();
         }
         if let Some(id) = layer.resolve(cur_frame) {
             if let (Some(tex), Some(lc)) = (state.cell_textures.get(&id), cell_corners(li, id)) {
@@ -3181,10 +3180,6 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                     theme::white_alpha(a),
                 );
             }
-        }
-        if active {
-            draw_pins(false);
-            draw_onion(OnionDirection::Next);
         }
     }
 
@@ -5283,6 +5278,60 @@ mod onion_tests {
         assert_eq!(tint(plain), Some(state.onion.prev_tint));
         // −1 is a hidden offset, and its pin is switched off.
         assert_eq!(tint(hidden), None);
+    }
+
+    /// Every ghost — past, future and pinned — paints before the current
+    /// drawing, so none of them lands on top of the lines being drawn.
+    #[test]
+    fn the_current_drawing_paints_over_every_ghost() {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.onion.enabled = true;
+        state.onion.prev = 1;
+        state.onion.next = 1;
+        for _ in 0..4 {
+            state.structural_edit(false, |p| {
+                p.add_frame();
+                p.insert_blank_key_here();
+            });
+        }
+        let li = state.project.current_layer;
+        state.project.layers[li].onion_pins =
+            vec![OnionPin { frame: 4, tint: [0, 200, 0], visible: true }];
+        state.project.goto(2);
+        let cell_on = |f| state.project.layers[li].resolve(f).unwrap();
+        let (past, current, future, pinned) = (cell_on(1), cell_on(2), cell_on(3), cell_on(4));
+
+        let ctx = egui::Context::default();
+        let mut meshes = Vec::new();
+        for time in [0.0, 1.0] {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0))),
+                time: Some(time),
+                ..Default::default()
+            };
+            let out = ctx.run(raw, |ctx| {
+                state.sync_textures(ctx);
+                draw(&mut state, ctx);
+            });
+            meshes = out
+                .shapes
+                .into_iter()
+                .filter_map(|c| match c.shape {
+                    egui::Shape::Mesh(m) => Some(m.texture_id),
+                    _ => None,
+                })
+                .collect();
+        }
+        let at = |tex: Option<egui::TextureId>| {
+            let tex = tex.expect("texture built");
+            meshes.iter().position(|&t| t == tex).expect("painted")
+        };
+        let cell = at(state.cell_textures.get(&current).map(|t| t.id()));
+        for (name, id) in [("past", past), ("future", future), ("pinned", pinned)] {
+            let ghost = at(state.ghost_textures.get(&id).map(|(_, t)| t.id()));
+            assert!(ghost < cell, "{name} ghost painted over the drawing");
+        }
     }
 
     /// Size of the chip row laid out `width` wide.

@@ -238,8 +238,10 @@ has its own color, a show/hide toggle, and a delete button. Pins follow their
 drawing when frames are inserted or deleted before them, show only while
 their layer is active, and are not saved with the project.
 
-A drawing already showing on the current frame is never ghosted (on a hold it
-would land exactly on top), and ghosts are hidden during playback.
+All ghosts draw under the current drawing, nearest on top, so they never
+cover the lines being drawn. A drawing already showing on the current frame
+is never ghosted (on a hold it would land exactly on top), and ghosts are
+hidden during playback.
 
 Onion skin only applies to the *active layer*. Other layers stay solid.
 Settings persist across runs and survive **File → New**.
