@@ -655,7 +655,42 @@ fn panel_window(
             window = window.current_pos(pos);
         }
     }
-    window.show(ctx, |ui| panel_content(state, ctx, ui, id));
+    window.show(ctx, |ui| {
+        drag_by_title_only(ui);
+        panel_content(state, ctx, ui, id)
+    });
+}
+
+/// Make a window move by its title bar only.
+///
+/// egui moves a window on a drag anywhere no widget claims — the margins, the
+/// gap between two sliders — so a slightly-off grab on a control dragged the
+/// whole panel. This lays a drag-only catcher over the body, above egui's
+/// move handle and under every control, since those are added after it.
+/// The outer edges stay clear so they still resize.
+///
+/// Call it first thing in the window's contents. A collapsed window has no
+/// contents, so it still drags from its header.
+fn drag_by_title_only(ui: &mut egui::Ui) {
+    // Contents live on the window's own layer, whose id is the window's.
+    let id = ui.layer_id().id;
+    let Some(outer) = egui::AreaState::load(ui.ctx(), id).map(|s| s.rect()) else {
+        return;
+    };
+    let edge = ui.style().interaction.resize_grab_radius_side;
+    let body = Rect::from_min_max(
+        egui::pos2(outer.left() + edge, ui.max_rect().top()),
+        outer.max - Vec2::splat(edge),
+    );
+    if !body.is_positive() {
+        return;
+    }
+    // The body clip would trim the catcher to the content and leave the
+    // margins draggable, so interact under the catcher's own rect.
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(body);
+    ui.interact(body, id.with("body_drag_catcher"), Sense::drag());
+    ui.set_clip_rect(clip);
 }
 
 /// Where a panel should sit after the viewport went from `old` to `new`.
@@ -2634,6 +2669,7 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
         .collapsible(true)
         .frame(floating_frame())
         .show(ctx, |ui| {
+            drag_by_title_only(ui);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 theme::section_header(ui, ic::PEN_NIB, "Preset");
                 brush_presets(state, ui);
@@ -2671,6 +2707,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
         .collapsible(true)
         .frame(floating_frame())
         .show(ctx, |ui| {
+            drag_by_title_only(ui);
             ui.checkbox(&mut state.invert_timeline_scroll, "Invert timeline scroll")
                 .on_hover_text(
                     "Mouse wheel over the canvas or the timeline scrubs frames.\n\n\
@@ -5289,6 +5326,103 @@ mod onion_tests {
         let wide = chip_row(460.0, 8, 8);
         assert!(wide.y < 2.0 * CHIP.y, "{wide:?}");
         assert!(wide.x <= 16.0 * (CHIP.x + CHIP_GAP) + CHIP.y, "{wide:?}");
+    }
+}
+
+#[cfg(test)]
+mod panel_drag_tests {
+    use super::*;
+    use egui::{pos2, vec2, Pos2};
+
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            panel_window(state, ctx, PanelId::Onion, [300.0, 200.0], 252.0, true, None);
+        });
+    }
+
+    fn panel_rect(ctx: &egui::Context) -> Rect {
+        egui::AreaState::load(ctx, egui::Id::new(panel_key(PanelId::Onion)))
+            .expect("panel laid out")
+            .rect()
+    }
+
+    /// Press at `from`, drag 40px by `dir`, release; the panel's rect after.
+    fn drag(from: Pos2, dir: Vec2) -> (Rect, Rect) {
+        let mut state = AppState::for_test();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        let before = panel_rect(&ctx);
+        let from = before.min + from.to_vec2();
+        let to = from + dir * 40.0;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 4.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame(&ctx, &mut state, vec![button(to, false)]);
+        frame(&ctx, &mut state, vec![]);
+        (before, panel_rect(&ctx))
+    }
+
+    #[test]
+    fn dragging_the_body_leaves_the_panel_where_it_is() {
+        // Offsets from the panel's top-left: the bottom margin, clear of any
+        // control, and beside the "Enabled" checkbox.
+        for at in [pos2(40.0, -8.0), pos2(200.0, 50.0)] {
+            let mut state = AppState::for_test();
+            let ctx = egui::Context::default();
+            frame(&ctx, &mut state, vec![]);
+            let h = panel_rect(&ctx).height();
+            let at = if at.y < 0.0 { pos2(at.x, h + at.y) } else { at };
+            let (before, after) = drag(at, vec2(1.0, 1.0));
+            assert_eq!(after.min, before.min, "grabbed at {at:?}");
+        }
+    }
+
+    #[test]
+    fn dragging_the_title_bar_moves_the_panel() {
+        let (before, after) = drag(pos2(120.0, 14.0), vec2(1.0, 1.0));
+        assert_eq!(after.min - before.min, vec2(40.0, 40.0));
+    }
+
+    #[test]
+    fn controls_under_the_catcher_still_work() {
+        let mut state = AppState::for_test();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        let at = panel_rect(&ctx).min + vec2(24.0, 50.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let was = state.onion.enabled;
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(at), button(true)]);
+        frame(&ctx, &mut state, vec![button(false)]);
+        assert_ne!(state.onion.enabled, was, "the Enabled checkbox took the click");
+    }
+
+    #[test]
+    fn the_edges_still_resize() {
+        let (before, after) = drag(pos2(1.0, 150.0), vec2(-1.0, 0.0));
+        assert!(after.left() < before.left() - 30.0, "{before:?} → {after:?}");
+        assert_eq!(after.right(), before.right());
     }
 }
 
