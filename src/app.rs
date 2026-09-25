@@ -102,6 +102,23 @@ pub struct ExportConfig {
     /// Sprite-sheet columns; `0` = near-square.
     pub sheet_columns: usize,
     pub sheet_padding: u32,
+    /// Play the range forward then back (MP4, PNG sequence, GIF).
+    pub ping_pong: bool,
+    /// Repeat the range to fill `loop_secs`, rounded up to whole loops (MP4,
+    /// PNG sequence — a GIF repeats forever on its own).
+    pub loop_on: bool,
+    pub loop_secs: f32,
+}
+
+impl ExportConfig {
+    /// How `kind` plays the range, from the options that apply to it.
+    pub fn playback(&self, kind: ExportKind) -> crate::io::frame_order::Playback {
+        let loops = matches!(kind, ExportKind::Mp4 | ExportKind::PngSequence);
+        crate::io::frame_order::Playback {
+            ping_pong: self.ping_pong && kind != ExportKind::SpriteSheet,
+            loop_secs: (loops && self.loop_on).then_some(self.loop_secs),
+        }
+    }
 }
 
 impl Default for ExportConfig {
@@ -113,6 +130,9 @@ impl Default for ExportConfig {
             mp4: Mp4ExportConfig::default(),
             sheet_columns: 0,
             sheet_padding: 0,
+            ping_pong: false,
+            loop_on: false,
+            loop_secs: 10.0,
         }
     }
 }
@@ -1549,16 +1569,22 @@ impl AppState {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        let order = crate::io::frame_order::frame_order(
+            range.0,
+            range.1,
+            self.export_cfg.playback(kind),
+            self.project.fps,
+        );
         let project = self.project.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let res = match kind {
                 ExportKind::PngSequence => {
-                    crate::io::png_seq::export_to(&project, &path, range)
+                    crate::io::png_seq::export_to(&project, &path, &order)
                 }
-                ExportKind::Gif => crate::io::gif_export::export_to(&project, &path, range),
+                ExportKind::Gif => crate::io::gif_export::export_to(&project, &path, &order),
                 ExportKind::Mp4 => {
-                    crate::io::mp4_export::export_to(&project, &path, &settings, range)
+                    crate::io::mp4_export::export_to(&project, &path, &settings, &order)
                 }
                 ExportKind::SpriteSheet => {
                     crate::io::sprite_sheet::export_to(&project, &path, range, &sheet)

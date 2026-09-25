@@ -8,6 +8,7 @@
 //! *unmultiplied* RGBA, so we premultiply (`rgb * a / 255`) before dropping the
 //! alpha — otherwise semi-transparent pixels would encode too bright.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -15,7 +16,7 @@ use std::process::{Command, Stdio};
 use anyhow::{anyhow, Context, Result};
 
 use crate::doc::project::Project;
-use crate::io::composite;
+use crate::io::{composite, frame_order};
 
 /// Encoder settings chosen in the export dialog.
 pub struct Mp4Settings {
@@ -38,13 +39,18 @@ fn cmd(program: &str) -> Command {
     c
 }
 
-/// Encode every frame of `project` to an MP4 at `path`. Blocking — run on a
-/// worker thread (see `AppState::start_mp4_export`).
+/// Flattened frames kept for reuse by a looping or ping-pong order. Past
+/// this, a repeat is flattened again instead — slower, never out of memory.
+const REUSE_BUDGET: usize = 1 << 30;
+
+/// Encode the timeline frames in `order` (see [`crate::io::frame_order`]) to an
+/// MP4 at `path`. Blocking — run on a worker thread (see
+/// `AppState::start_export`).
 pub fn export_to(
     project: &Project,
     path: &Path,
     settings: &Mp4Settings,
-    range: (usize, usize),
+    order: &[usize],
 ) -> Result<()> {
     let w = project.width;
     let h = project.height;
@@ -86,16 +92,33 @@ pub fn export_to(
     });
 
     // Stream frames. Feed rgb24 (3 bytes/px) composited over black.
-    let mut rgb = vec![0u8; (w as usize) * (h as usize) * 3];
+    let frame_bytes = (w as usize) * (h as usize) * 3;
+    let mut rgb = vec![0u8; frame_bytes];
     let write_result = (|| -> Result<()> {
-        let last = project.frame_count.saturating_sub(1);
-        let (start, end) = (range.0.min(last), range.1.min(last));
-        for f in start..=end {
-            let flat = composite::flatten_frame(project, f);
-            rgba_over_black(&flat.pixels, &mut rgb);
-            stdin
-                .write_all(&rgb)
-                .with_context(|| format!("writing frame {f} to ffmpeg"))?;
+        // A frame that comes round again (loop, ping-pong) is flattened once
+        // and kept until its last use.
+        let mut left = frame_order::uses(order);
+        let mut kept: HashMap<usize, Vec<u8>> = HashMap::new();
+        for &f in order {
+            let remaining = left.get_mut(&f).map_or(0, |n| {
+                *n -= 1;
+                *n
+            });
+            let res = match kept.get(&f) {
+                Some(buf) => stdin.write_all(buf),
+                None => {
+                    let flat = composite::flatten_frame(project, f);
+                    rgba_over_black(&flat.pixels, &mut rgb);
+                    if remaining > 0 && (kept.len() + 1) * frame_bytes <= REUSE_BUDGET {
+                        kept.insert(f, rgb.clone());
+                    }
+                    stdin.write_all(&rgb)
+                }
+            };
+            res.with_context(|| format!("writing frame {f} to ffmpeg"))?;
+            if remaining == 0 {
+                kept.remove(&f);
+            }
         }
         Ok(())
     })();
@@ -114,7 +137,7 @@ pub fn export_to(
 
     log::info!(
         "Exported MP4 ({} frames, {w}x{h} @ {fps}fps) → {}",
-        project.frame_count,
+        order.len(),
         path.display()
     );
     Ok(())
@@ -128,5 +151,41 @@ fn rgba_over_black(src: &[u8], dst: &mut [u8]) {
         out[0] = (px[0] as u32 * a / 255) as u8;
         out[1] = (px[1] as u32 * a / 255) as u8;
         out[2] = (px[2] as u32 * a / 255) as u8;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::frame_order::{frame_order, Playback};
+
+    /// Not a unit test: needs ffmpeg on PATH. Writes `loop.mp4` (21 frames
+    /// looped to 10 s) and `pingpong.mp4` (ping-ponged to 10 s) into
+    /// `$MP4_OUT`, for ffprobe to count.
+    #[test]
+    #[ignore]
+    fn mp4_loop_fixture() {
+        let dir = std::path::PathBuf::from(std::env::var("MP4_OUT").unwrap());
+        let mut p = Project::new(64, 36, 24.0);
+        p.ensure_frame_count(21);
+        for f in 0..21usize {
+            let id = p.cells.len();
+            let mut c = crate::doc::canvas::Canvas::new(64, 36);
+            // A block that walks right, one column per frame.
+            for y in 10..26 {
+                for x in f * 2..f * 2 + 8 {
+                    let o = (y * 64 + x) * 4;
+                    c.pixels[o..o + 4].copy_from_slice(&[240, 200, 40, 255]);
+                }
+            }
+            p.cells.push(c);
+            p.layers[0].exposures[f] = Some(id);
+        }
+        let settings = Mp4Settings { crf: 18, preset: "ultrafast" };
+        for (name, ping_pong) in [("loop", false), ("pingpong", true)] {
+            let pb = Playback { ping_pong, loop_secs: Some(10.0) };
+            let order = frame_order(0, 20, pb, 24.0);
+            export_to(&p, &dir.join(format!("{name}.mp4")), &settings, &order).unwrap();
+        }
     }
 }

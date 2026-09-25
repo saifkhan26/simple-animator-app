@@ -4775,6 +4775,38 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
 
             let count = state.export_cfg.end.saturating_sub(state.export_cfg.start) + 1;
 
+            if kind != ExportKind::SpriteSheet {
+                ui.add_space(6.0);
+                theme::section_header(ui, ic::REPEAT, "Playback");
+                ui.checkbox(&mut state.export_cfg.ping_pong, "Ping-pong (forward, then back)");
+                // A GIF repeats forever by itself; only files with an end
+                // need a length.
+                if matches!(kind, ExportKind::Mp4 | ExportKind::PngSequence) {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut state.export_cfg.loop_on, "Loop to");
+                        ui.add_enabled(
+                            state.export_cfg.loop_on,
+                            egui::DragValue::new(&mut state.export_cfg.loop_secs)
+                                .range(0.1..=3600.0)
+                                .speed(0.1)
+                                .max_decimals(2)
+                                .suffix(" s"),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new("Rounds up to whole loops, so it repeats seamlessly.")
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
+                }
+            }
+            let order = crate::io::frame_order::info(
+                state.export_cfg.start,
+                state.export_cfg.end,
+                state.export_cfg.playback(kind),
+                state.project.fps,
+            );
+
             match kind {
                 ExportKind::Mp4 => {
                     ui.add_space(6.0);
@@ -4850,13 +4882,29 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                     );
                     format!("{count} frames - {cols}x{rows} grid - {sw} x {sh} px")
                 }
+                // Same rule as `png_seq::export_to`: numbered by position once
+                // any frame shows twice.
+                ExportKind::PngSequence if order.frames > count => format!(
+                    "{} files, frame_0000.png to frame_{:04}.png",
+                    order.frames,
+                    order.frames - 1
+                ),
                 ExportKind::PngSequence => format!(
                     "{count} files, frame_{:04}.png to frame_{:04}.png",
                     state.export_cfg.start, state.export_cfg.end
                 ),
+                _ if order.loops > 1 => format!(
+                    "{} loops of {} frames - {} frames - {:.1}s at {:.0} fps",
+                    order.loops,
+                    order.cycle,
+                    order.frames,
+                    order.secs,
+                    state.project.fps
+                ),
                 _ => format!(
-                    "{count} frames - {:.1}s at {:.0} fps",
-                    count as f32 / state.project.fps.max(1.0),
+                    "{} frames - {:.1}s at {:.0} fps",
+                    order.frames,
+                    order.secs,
                     state.project.fps
                 ),
             };

@@ -306,9 +306,23 @@ from the loop bars on the frame strip), plus the options that format needs —
 CRF and preset for MP4, columns and padding for the sheet. It reports the frame
 count, and for a sheet the pixel dimensions, before you commit to it.
 
+A **Playback** section shapes how the range plays:
+
+- **Ping-pong** (MP4, PNG sequence, GIF) — forward, then back, without
+  doubling the end frames, so the wrap is seamless.
+- **Loop to N s** (MP4, PNG sequence) — repeats the range to fill that many
+  seconds, rounded *up* to whole loops so the file ends on a loop boundary and
+  a player that repeats it repeats it seamlessly. 21 frames at 24 fps looped
+  to 10 s gives 12 loops, 10.5 s; the dialog shows the real length before you
+  export. GIFs repeat forever on their own, so they don't need it.
+
+These last until you quit, like the other export settings.
+
 PNG-sequence filenames keep the absolute frame index, so a range starting at 10
 writes `frame_0010.png` — a partial re-export still lines up with files from an
-earlier full one.
+earlier full one. With a loop or ping-pong a frame appears more than once, so
+the files are numbered in playing order from `frame_0000.png` instead (repeats
+are file copies, not re-renders).
 
 Sprite-sheet cells are laid out row-major at the project frame size; `columns:
 0` picks a near-square grid, and padding is a transparent gutter *between*
