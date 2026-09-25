@@ -246,6 +246,29 @@ struct UiPrefs {
     /// the same guides follow the artist between files, stored frame-relative
     /// so they fit any resolution.
     perspective: PerspectiveConfig,
+    /// How far "fade other layers" pushes the rest of the stack back. Only
+    /// the amounts persist — the toggle itself starts off every launch.
+    fade: FadeOthers,
+}
+
+/// Opacity multipliers for the layers around the active one while "fade other
+/// layers" is on. View-only: layer opacity, export and the `.anim` file never
+/// see it. Above and below differ because a layer over the drawing covers it,
+/// while one under it is usually what the drawing is being matched against.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FadeOthers {
+    pub above: f32,
+    pub below: f32,
+}
+
+impl Default for FadeOthers {
+    fn default() -> Self {
+        Self {
+            above: 0.2,
+            below: 0.35,
+        }
+    }
 }
 
 /// Number of tools, and so of slots in the per-tool brush array.
@@ -305,6 +328,7 @@ impl Default for UiPrefs {
             palette: Vec::new(),
             track_frame_w: crate::ui::tracks::DEFAULT_FRAME_W,
             perspective: PerspectiveConfig::default(),
+            fade: FadeOthers::default(),
         }
     }
 }
@@ -593,6 +617,11 @@ pub struct AppState {
 
     pub playback: Playback,
     pub onion: OnionConfig,
+    /// "Fade other layers": every layer but the active one drops to the
+    /// `fade` amounts on the canvas. Session-only, so a launch never opens
+    /// looking washed out; see [`AppState::layer_view_alpha`].
+    pub fade_others: bool,
+    pub fade: FadeOthers,
     /// Editing the active layer's transform writes a key on the current frame
     /// instead of moving the whole layer.
     pub auto_key_transform: bool,
@@ -868,6 +897,8 @@ impl AppState {
             nav_drag: None,
             playback: Playback::default(),
             onion: prefs.onion,
+            fade_others: false,
+            fade: prefs.fade,
             auto_key_transform: prefs.auto_key_transform,
             auto_key_draw: prefs.auto_key_draw,
             frame_step: prefs.frame_step,
@@ -2504,6 +2535,31 @@ impl AppState {
         )
     }
 
+    /// Canvas opacity multiplier for layer `li` under "fade other layers":
+    /// `fade.above` for layers drawn over the active one, `fade.below` for
+    /// those under it, 1.0 when the fade is off. Always 1.0 for
+    ///   * the active layer — it's the one being brought forward;
+    ///   * any layer during playback — like onion skin, playing shows the real
+    ///     mix, which is what's being checked;
+    ///   * the active layer's `lines_from` layer — it bounds the fill being
+    ///     painted, so it has to stay readable;
+    ///   * reference layers — they already sit at their own fixed dim.
+    pub fn layer_view_alpha(&self, li: usize) -> f32 {
+        let cur = self.project.current_layer;
+        if !self.fade_others || self.playback.playing || li == cur {
+            return 1.0;
+        }
+        let Some(layer) = self.project.layers.get(li) else {
+            return 1.0;
+        };
+        let lines_from = self.project.layers.get(cur).and_then(|l| l.lines_from);
+        if layer.reference || lines_from == Some(li) {
+            return 1.0;
+        }
+        let a = if li > cur { self.fade.above } else { self.fade.below };
+        a.clamp(0.0, 1.0)
+    }
+
     pub fn pointer_down(&mut self, sample: PointerSample) {
         self.playback.stop();
         if let Some(layer) = self.project.layers.get(self.project.current_layer) {
@@ -3610,6 +3666,7 @@ impl AppState {
                 }
             }
             Action::LayerLast => self.goto_last_layer(),
+            Action::FadeOthersToggle => self.fade_others = !self.fade_others,
             Action::KeyBlank => {
                 self.structural_edit(false, |p| {
                     p.insert_blank_key_here();
@@ -3877,6 +3934,7 @@ impl eframe::App for AppState {
                 palette: self.palette.clone(),
                 track_frame_w: self.track_frame_w,
                 perspective: self.perspective.clone(),
+                fade: self.fade,
             },
         );
     }
@@ -4617,6 +4675,55 @@ mod tests {
         }
         state.undo();
         assert_eq!(state.cell_dirty[&id], Dirty::Rect(rect(4, 6, 6, 9)));
+    }
+
+    /// Four layers, the second one active, fade on.
+    fn faded_stack() -> AppState {
+        let mut state = AppState::for_test();
+        while state.project.layers.len() < 4 {
+            state.project.add_layer();
+        }
+        state.project.current_layer = 1;
+        state.fade = FadeOthers { above: 0.2, below: 0.5 };
+        state.fade_others = true;
+        state
+    }
+
+    #[test]
+    fn fade_others_splits_above_and_below_the_active_layer() {
+        let state = faded_stack();
+        let alphas: Vec<f32> = (0..4).map(|i| state.layer_view_alpha(i)).collect();
+        assert_eq!(alphas, [0.5, 1.0, 0.2, 0.2]);
+    }
+
+    #[test]
+    fn fade_others_spares_reference_and_lines_from_layers() {
+        let mut state = faded_stack();
+        state.project.layers[3].reference = true;
+        state.project.layers[1].lines_from = Some(0);
+        assert_eq!(state.layer_view_alpha(3), 1.0);
+        assert_eq!(state.layer_view_alpha(0), 1.0);
+        // Only the *active* layer's link counts.
+        state.project.layers[1].lines_from = None;
+        state.project.layers[2].lines_from = Some(0);
+        assert_eq!(state.layer_view_alpha(0), 0.5);
+    }
+
+    #[test]
+    fn fade_others_lifts_while_playing_or_switched_off() {
+        let mut state = faded_stack();
+        state.playback.playing = true;
+        assert!((0..4).all(|i| state.layer_view_alpha(i) == 1.0));
+        state.playback.playing = false;
+        state.dispatch(Action::FadeOthersToggle);
+        assert!(!state.fade_others);
+        assert!((0..4).all(|i| state.layer_view_alpha(i) == 1.0));
+    }
+
+    /// The toggle is session-only: a fresh state never opens faded.
+    #[test]
+    fn fade_others_starts_off() {
+        assert!(!AppState::for_test().fade_others);
     }
 
     /// Old against new on one cell of a 4K frame widened to 3×. Not a

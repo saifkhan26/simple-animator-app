@@ -2135,7 +2135,31 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                         state.merge_layer_down();
                     }
                 });
+                let fade_key = combo_text(state, Action::FadeOthersToggle);
+                if theme::icon_toggle(
+                    ui,
+                    ic::CIRCLE_HALF,
+                    &format!("Fade other layers ({fade_key})"),
+                    state.fade_others,
+                )
+                .clicked()
+                {
+                    state.fade_others = !state.fade_others;
+                }
             });
+            // How faint the other layers go. Dragging either slider switches
+            // the fade on — adjusting an amount you can't see is guesswork.
+            let fade_help = "How visible the other layers stay while faded. \
+                             View only: layer opacity and export are unaffected.";
+            let above = ui
+                .add(egui::Slider::new(&mut state.fade.above, 0.0..=1.0).text("fade above"))
+                .on_hover_text(fade_help);
+            let below = ui
+                .add(egui::Slider::new(&mut state.fade.below, 0.0..=1.0).text("fade below"))
+                .on_hover_text(fade_help);
+            if above.changed() || below.changed() {
+                state.fade_others = true;
+            }
             ui.add_space(4.0);
             ui.separator();
 
@@ -3172,7 +3196,8 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
         if let Some(id) = layer.resolve(cur_frame) {
             if let (Some(tex), Some(lc)) = (state.cell_textures.get(&id), cell_corners(li, id)) {
-                let a = (layer.opacity.clamp(0.0, 1.0) * 255.0) as u8;
+                let op = layer.opacity * state.layer_view_alpha(li);
+                let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
                 image_quad(
                     &painter,
                     tex.id(),
@@ -5375,6 +5400,66 @@ mod onion_tests {
         let wide = chip_row(460.0, 8, 8);
         assert!(wide.y < 2.0 * CHIP.y, "{wide:?}");
         assert!(wide.x <= 16.0 * (CHIP.x + CHIP_GAP) + CHIP.y, "{wide:?}");
+    }
+}
+
+/// "Fade other layers" through the real canvas: the quad each layer paints.
+#[cfg(test)]
+mod fade_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    #[test]
+    fn other_layers_paint_at_their_fade_and_the_active_one_at_full() {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        // Three layers, each with a drawing on frame 0.
+        while state.project.layers.len() < 3 {
+            state.project.add_layer();
+        }
+        for li in 0..3 {
+            state.project.current_layer = li;
+            if state.project.layers[li].resolve(0).is_none() {
+                state.structural_edit(false, |p| {
+                    p.insert_blank_key_here();
+                });
+            }
+        }
+        state.project.current_layer = 1;
+        state.fade = crate::app::FadeOthers { above: 0.25, below: 0.5 };
+        state.fade_others = true;
+        let cell_of = |li: usize| state.project.layers[li].resolve(0).unwrap();
+        let (below, active, above) = (cell_of(0), cell_of(1), cell_of(2));
+
+        let ctx = egui::Context::default();
+        let mut meshes = Vec::new();
+        for time in [0.0, 1.0] {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0))),
+                time: Some(time),
+                ..Default::default()
+            };
+            let out = ctx.run(raw, |ctx| {
+                state.sync_textures(ctx);
+                draw(&mut state, ctx);
+            });
+            meshes = out
+                .shapes
+                .into_iter()
+                .filter_map(|c| match c.shape {
+                    egui::Shape::Mesh(m) => Some((m.texture_id, m.vertices[0].color.a())),
+                    _ => None,
+                })
+                .collect();
+        }
+        let alpha = |id: CellId| {
+            let tex = state.cell_textures.get(&id).expect("texture built").id();
+            meshes.iter().find(|&&(t, _)| t == tex).expect("painted").1
+        };
+        assert_eq!(alpha(active), 255);
+        assert_eq!(alpha(above), (0.25f32 * 255.0) as u8);
+        assert_eq!(alpha(below), (0.5f32 * 255.0) as u8);
     }
 }
 

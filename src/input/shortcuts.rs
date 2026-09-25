@@ -42,6 +42,7 @@ pub enum Action {
     LayerDelete,
     LayerToggleVisible,
     LayerLast,
+    FadeOthersToggle,
     KeyBlank,
     KeyCopy,
     Hold,
@@ -116,6 +117,7 @@ impl Action {
         Action::LayerDelete,
         Action::LayerToggleVisible,
         Action::LayerLast,
+        Action::FadeOthersToggle,
         Action::KeyBlank,
         Action::KeyCopy,
         Action::Hold,
@@ -185,6 +187,7 @@ impl Action {
             Action::LayerDelete => "Delete layer",
             Action::LayerToggleVisible => "Toggle layer visibility",
             Action::LayerLast => "Go to last selected layer",
+            Action::FadeOthersToggle => "Fade other layers",
             Action::KeyBlank => "Insert blank key",
             Action::KeyCopy => "Insert duplicate key",
             Action::Hold => "Hold (delete key)",
@@ -431,6 +434,8 @@ impl Default for ShortcutMap {
         b.insert(Action::LayerDelete, KeyCombo::shift(K::T));
         b.insert(Action::LayerToggleVisible, KeyCombo::plain(K::V));
         b.insert(Action::LayerLast, KeyCombo::plain(K::Z));
+        // Shifted sibling of the layer jump: push every other layer back.
+        b.insert(Action::FadeOthersToggle, KeyCombo::shift(K::Z));
         // X-sheet keys: 1 / 2 / 3 (numeric row, left side).
         b.insert(Action::KeyBlank, KeyCombo::plain(K::Num1));
         b.insert(Action::KeyCopy, KeyCombo::plain(K::Num2));
