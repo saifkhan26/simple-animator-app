@@ -34,6 +34,11 @@ color_quant = "1"
 # `.anim` payload deflates by one to two orders of magnitude. Already in the
 # tree via `png`, on the miniz_oxide backend, so this costs no new code.
 flate2 = "1"
+# Krita `.kra` round trip. A `.kra` is a zip of XML + tiled layer data; `zip`
+# deflates through the flate2 already above (no zlib-rs / zopfli), and
+# roxmltree is already in the tree via egui_extras' SVG support.
+zip       = { version = "4.2", default-features = false, features = ["deflate-flate2"] }
+roxmltree = "0.19"
 
 bytemuck = { version = "1", features = ["derive"] }
 glam     = { version = "0.29", features = ["bytemuck"] }

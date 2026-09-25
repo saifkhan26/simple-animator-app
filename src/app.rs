@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use eframe::CreationContext;
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
@@ -18,6 +18,8 @@ use crate::doc::transform::Transform;
 use crate::input::pointer::PointerSample;
 use crate::input::shortcuts::{self, Action, ShortcutMap};
 use crate::input::tablet::{PenInput, PenPacket};
+use crate::io::kra::{self, KraDoc};
+use crate::krita_link::{self, Baseline, KritaLink, Pulled, Stamp};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep};
 use crate::timeline::playback::Playback;
 use crate::tools::lasso::Mask;
@@ -249,6 +251,8 @@ struct UiPrefs {
     /// How far "fade other layers" pushes the rest of the stack back. Only
     /// the amounts persist — the toggle itself starts off every launch.
     fade: FadeOthers,
+    /// Where Krita is installed, once found or picked for Edit in Krita.
+    krita_path: Option<PathBuf>,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -329,6 +333,7 @@ impl Default for UiPrefs {
             track_frame_w: crate::ui::tracks::DEFAULT_FRAME_W,
             perspective: PerspectiveConfig::default(),
             fade: FadeOthers::default(),
+            krita_path: None,
         }
     }
 }
@@ -461,6 +466,8 @@ pub enum BgJob {
         rx: Receiver<Result<Vec<Canvas>>>,
         name: String,
     },
+    /// Reading a `.kra` for File ▸ Import .kra.
+    KraImport(Receiver<Result<KraDoc>>),
 }
 
 /// A project write running on a worker thread.
@@ -474,6 +481,14 @@ pub struct SaveJob {
     path: PathBuf,
     /// File name, for the success toast.
     name: String,
+}
+
+/// The worker writing the `.kra` for Edit in Krita.
+struct KritaSend {
+    rx: Receiver<Result<(Baseline, Option<Stamp>)>>,
+    /// Krita to start once the file is on disk; `None` when the Krita we
+    /// launched earlier is still open.
+    launch: Option<PathBuf>,
 }
 
 /// In-progress inline layer rename: which layer, the edit buffer, and
@@ -498,6 +513,15 @@ pub struct AppState {
     /// Write in flight on a worker thread. Serialising and compressing a few
     /// hundred MB would otherwise stall the window.
     pub save_job: Option<SaveJob>,
+    /// Two-way link with Krita (File ▸ Edit in Krita). Session-only: it ends
+    /// with the app, a New or an Open.
+    pub krita: Option<KritaLink>,
+    /// A send in flight, and the Krita to launch once the file is written.
+    krita_send: Option<KritaSend>,
+    /// Latest Krita-link message: text, whether it is a warning, expiry.
+    pub krita_toast: Option<(String, bool, Instant)>,
+    /// Where Krita is installed. Found or picked once, then remembered.
+    pub krita_path: Option<PathBuf>,
 
     /// GPU texture handle per CellId, lazily created.
     pub cell_textures: HashMap<CellId, TextureHandle>,
@@ -855,6 +879,10 @@ impl AppState {
             save_toast: None,
             save_error: None,
             save_job: None,
+            krita: None,
+            krita_send: None,
+            krita_toast: None,
+            krita_path: prefs.krita_path.clone(),
             cell_textures: HashMap::new(),
             ghost_textures: HashMap::new(),
             ghost_stale: HashSet::new(),
@@ -979,6 +1007,7 @@ impl AppState {
         // report success *after* the swap and set `project_path` back to the
         // old file — the exact overwrite the reset below is guarding against.
         self.finish_pending_save();
+        self.stop_krita_link();
         self.project = Project::new(width, height, fps);
         // Forget the old file, or the next Save silently overwrites the project
         // the user just navigated away from.
@@ -2116,6 +2145,19 @@ impl AppState {
                 Err(TryRecvError::Disconnected) => {
                     self.bg_label = None;
                     log::error!("Video extract worker died");
+                    None
+                }
+            },
+            BgJob::KraImport(rx) => match rx.try_recv() {
+                Ok(res) => {
+                    self.bg_label = None;
+                    self.on_kra_imported(res);
+                    None
+                }
+                Err(TryRecvError::Empty) => Some(BgJob::KraImport(rx)),
+                Err(TryRecvError::Disconnected) => {
+                    self.bg_label = None;
+                    log::error!("Krita import worker died");
                     None
                 }
             },
@@ -3850,6 +3892,7 @@ impl AppState {
         // back after the swap and point the freshly opened project at the file
         // the previous one was being saved to.
         self.finish_pending_save();
+        self.stop_krita_link();
         self.project = project;
         self.project_path = path;
         self.save_toast = None;
@@ -3935,6 +3978,7 @@ impl eframe::App for AppState {
                 track_frame_w: self.track_frame_w,
                 perspective: self.perspective.clone(),
                 fade: self.fade,
+                krita_path: self.krita_path.clone(),
             },
         );
     }
@@ -4161,6 +4205,7 @@ impl eframe::App for AppState {
         // Advance background import jobs / preview fetches without blocking.
         self.poll_bg_jobs();
         self.poll_save_job();
+        self.poll_krita(ctx);
         self.poll_preview(ctx);
         // A save reports back on a channel, not an input event, so without this
         // the toast would wait for the next mouse move to appear.
@@ -4294,6 +4339,350 @@ fn preview_color_image(w: u32, h: u32, pixels: &[u8]) -> ColorImage {
     }
 }
 
+// --- Krita: the Edit-in-Krita link, and one-way .kra import / export --------
+
+impl AppState {
+    /// How long a Krita message stays up. Warnings name what was dropped, so
+    /// they get long enough to read.
+    const KRITA_NOTE: Duration = Duration::from_secs(4);
+    const KRITA_WARN: Duration = Duration::from_secs(9);
+
+    fn krita_notice(&mut self, msg: impl Into<String>, warn: bool) {
+        let ttl = if warn { Self::KRITA_WARN } else { Self::KRITA_NOTE };
+        self.krita_toast = Some((msg.into(), warn, Instant::now() + ttl));
+    }
+
+    /// Krita's executable: the remembered or usual location, else ask. What
+    /// was found is remembered.
+    fn resolve_krita(&mut self) -> Option<PathBuf> {
+        let found = krita_link::find_krita(self.krita_path.as_deref()).or_else(|| {
+            let d = rfd::FileDialog::new().set_title("Where is Krita?");
+            let d = if cfg!(windows) { d.add_filter("Krita (krita.exe)", &["exe"]) } else { d };
+            d.pick_file()
+        })?;
+        self.krita_path = Some(found.clone());
+        Some(found)
+    }
+
+    /// File ▸ Edit in Krita, and the layer menu's (with that layer selected
+    /// in Krita). Writes the whole project as an animated `.kra` on a worker,
+    /// then opens it in Krita. With a link already live it rewrites the same
+    /// file instead. Krita 5 neither watches files nor has a Revert/Reload
+    /// command, so the toast says to close the file there and reopen it.
+    pub fn edit_in_krita(&mut self, selected: usize) {
+        if self.krita_send.is_some() {
+            return;
+        }
+        let running = self.krita.as_mut().is_some_and(KritaLink::krita_running);
+        let launch = if running {
+            None
+        } else {
+            match self.resolve_krita() {
+                Some(exe) => Some(exe),
+                None => return,
+            }
+        };
+        let temp = KritaLink::temp_path(self.project_path.as_deref());
+        let link = self.krita.get_or_insert_with(|| KritaLink::new(temp));
+        // A read in flight was matched against the baseline this send
+        // replaces; polling waits for the new one.
+        link.pending = None;
+        link.baseline = None;
+        for l in &self.project.layers {
+            link.uuids.entry(l.uid).or_insert_with(krita_link::new_uuid);
+        }
+        let uuids: Vec<String> = self.project.layers.iter().map(|l| link.uuids[&l.uid].clone()).collect();
+        let path = link.path.clone();
+        let project = self.project.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(krita_link::send(&project, &uuids, selected, &path));
+        });
+        self.krita_send = Some(KritaSend { rx, launch });
+    }
+
+    /// End the link. The temp `.kra` stays on disk, so a save made in Krita
+    /// afterwards can still come in through Import .kra.
+    pub fn stop_krita_link(&mut self) {
+        self.krita = None;
+        self.krita_send = None;
+    }
+
+    /// Whether Edit in Krita would re-send rather than start a link.
+    pub fn krita_linked(&self) -> bool {
+        self.krita.is_some()
+    }
+
+    /// Per frame: land a finished send, start a read once Krita has saved,
+    /// and fold a finished read into the project.
+    fn poll_krita(&mut self, ctx: &egui::Context) {
+        if let Some(send) = self.krita_send.take() {
+            match send.rx.try_recv() {
+                Err(TryRecvError::Empty) => self.krita_send = Some(send),
+                Ok(Ok((base, stamp))) => {
+                    let Some(link) = self.krita.as_mut() else { return };
+                    link.baseline = Some(base);
+                    link.mark_seen(stamp);
+                    match send.launch {
+                        Some(exe) => match link.launch(&exe) {
+                            Ok(()) => self.krita_notice("Opened in Krita. Save there to bring changes back.", false),
+                            Err(e) => {
+                                log::error!("Starting Krita failed: {e:#}");
+                                self.krita_notice(format!("Couldn't start Krita: {e:#}"), true);
+                            }
+                        },
+                        None => self.krita_notice(
+                            "Sent to Krita again. Krita doesn't reload open files: close it there \
+                             without saving, then reopen it from File ▸ Open Recent.",
+                            false,
+                        ),
+                    }
+                }
+                Ok(Err(e)) => {
+                    log::error!("Sending to Krita failed: {e:#}");
+                    self.krita = None;
+                    self.krita_notice(format!("Couldn't write the Krita file: {e:#}"), true);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.krita = None;
+                    self.krita_notice("Sending to Krita stopped unexpectedly.", true);
+                }
+            }
+        }
+
+        let stroking = self.stroke.is_some();
+        let Some(link) = self.krita.as_mut() else {
+            return;
+        };
+        // A Krita save is a file change, not an input event: keep checking
+        // while the window sits idle.
+        ctx.request_repaint_after(Duration::from_millis(500));
+        if let Some((stamp, rx)) = link.pending.take() {
+            // Never restructure the timeline under a stroke in progress; the
+            // result waits in the channel until the pen lifts.
+            if stroking {
+                link.pending = Some((stamp, rx));
+                return;
+            }
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => link.pending = Some((stamp, rx)),
+                Ok(res) => {
+                    link.mark_seen(Some(stamp));
+                    self.apply_krita_pull(res);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    link.mark_seen(Some(stamp));
+                    self.krita_notice("Reading Krita's save stopped unexpectedly.", true);
+                }
+            }
+            return;
+        }
+        let Some(stamp) = link.poll(Instant::now()) else {
+            return;
+        };
+        let Some(base) = link.baseline.clone() else {
+            return;
+        };
+        let path = link.path.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(krita_link::pull(&path, &base));
+        });
+        link.pending = Some((stamp, rx));
+    }
+
+    /// Fold a read Krita save into the project as one undo step.
+    fn apply_krita_pull(&mut self, res: Result<Pulled>) {
+        let Some(link) = self.krita.as_ref() else {
+            return;
+        };
+        let Some(base) = link.baseline.as_ref() else {
+            return;
+        };
+        let plan = match res.and_then(|pulled| krita_link::plan(&self.project, base, &link.uuids, pulled)) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("Krita pull failed: {e:#}");
+                self.krita_notice(format!("Couldn't read Krita's save: {e:#}"), true);
+                return;
+            }
+        };
+        let warnings = plan.warnings.join("; ");
+        let next = plan.next.clone();
+        let summary = (!plan.is_noop()).then(|| plan.report.summary());
+        if summary.is_some() {
+            self.playback.stop();
+            let mut linked = Vec::new();
+            self.structural_edit(false, |p| linked = plan.apply(p));
+            if let Some(link) = self.krita.as_mut() {
+                link.uuids.extend(linked);
+            }
+        }
+        if let Some(link) = self.krita.as_mut() {
+            link.baseline = Some(next);
+        }
+        match (summary, warnings.is_empty()) {
+            (Some(s), true) => self.krita_notice(format!("Updated from Krita: {s}"), false),
+            (Some(s), false) => self.krita_notice(format!("Updated from Krita: {s}. {warnings}"), true),
+            (None, false) => self.krita_notice(format!("Krita save: {warnings}"), true),
+            (None, true) => {}
+        }
+    }
+
+    /// File ▸ Import .kra…: a Krita document's paint layers as new layers
+    /// under the active one, 1:1 at the document's size.
+    pub fn import_kra(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import Krita document")
+            .add_filter("Krita document", &["kra"])
+            .pick_file()
+        else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let res = std::fs::read(&path)
+                .with_context(|| format!("reading {}", path.display()))
+                .and_then(kra::read);
+            let _ = tx.send(res);
+        });
+        self.bg_job = Some(BgJob::KraImport(rx));
+        self.bg_label = Some("Importing Krita document…");
+    }
+
+    fn on_kra_imported(&mut self, res: Result<KraDoc>) {
+        let doc = match res {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("Krita import failed: {e:#}");
+                self.krita_notice(format!("Couldn't import: {e:#}"), true);
+                return;
+            }
+        };
+        let (kw, kh) = (doc.width, doc.height);
+        let (pw, ph) = (self.project.width, self.project.height);
+        let max_tex = self.max_tex;
+        let mut need = doc.range_end.map_or(1, |e| e + 1);
+        let mut clipped = 0usize;
+        struct Imported {
+            name: String,
+            opacity: u8,
+            visible: bool,
+            locked: bool,
+            cells: Vec<Canvas>,
+            keys: Vec<(usize, usize)>,
+        }
+        let mut layers: Vec<Imported> = Vec::new();
+        for kl in &doc.layers {
+            // Krita's canvas *is* its frame, so each drawing becomes a cell of
+            // the canvas size; the identity transform centers it on ours.
+            let mut cells: Vec<Canvas> = Vec::new();
+            let mut index: HashMap<usize, usize> = HashMap::new();
+            let mut keys: Vec<(usize, usize)> = Vec::new();
+            for &(t, di) in &kl.keys {
+                let ci = match index.get(&di) {
+                    Some(&ci) => ci,
+                    None => {
+                        let (c, clip) = kl.drawings[di].place(0, 0, kw, kh);
+                        // Nothing to show before the first drawing: a blank
+                        // lead-in key is just Krita's way of saying so.
+                        if keys.is_empty() && c.pixels.iter().all(|&b| b == 0) {
+                            continue;
+                        }
+                        clipped += clip as usize;
+                        cells.push(cap_canvas(c, max_tex));
+                        index.insert(di, cells.len() - 1);
+                        cells.len() - 1
+                    }
+                };
+                keys.push((t, ci));
+                need = need.max(t + 1);
+            }
+            layers.push(Imported {
+                name: kl.name.clone(),
+                opacity: kl.opacity,
+                visible: kl.visible,
+                locked: kl.locked,
+                cells,
+                keys,
+            });
+        }
+        if layers.is_empty() {
+            self.krita_notice("That Krita file has no paint layers to import.", true);
+            return;
+        }
+        let n = layers.len();
+        self.structural_edit(false, move |p| {
+            p.ensure_frame_count(need);
+            // Bottom first: each lands on top of the one before, all under
+            // the active layer.
+            for im in layers {
+                let idx = p.add_layer_below_active(im.name);
+                let base = p.cells.len();
+                let size = im.cells.first().map(|c| (c.width, c.height));
+                p.cells.extend(im.cells);
+                let l = &mut p.layers[idx];
+                l.opacity = im.opacity as f32 / 255.0;
+                l.visible = im.visible;
+                l.locked = im.locked;
+                if let Some((cw, ch)) = size.filter(|&s| s != (pw, ph)) {
+                    l.cell_w = cw;
+                    l.cell_h = ch;
+                }
+                for (t, ci) in im.keys {
+                    l.set_key(t, base + ci);
+                }
+            }
+        });
+        let mut warnings = doc.warnings;
+        if let Some(fps) = doc.fps.filter(|f| (f - self.project.fps).abs() > 0.01) {
+            warnings.push(format!("the Krita file is {fps} fps; the project stays at {} fps", self.project.fps));
+        }
+        if clipped > 0 {
+            warnings.push(format!("{clipped} drawing(s) had paint outside the Krita canvas (clipped)"));
+        }
+        let msg = format!("Imported {n} layer{} from Krita", if n == 1 { "" } else { "s" });
+        if warnings.is_empty() {
+            self.krita_notice(msg, false);
+        } else {
+            self.krita_notice(format!("{msg}. {}", warnings.join("; ")), true);
+        }
+    }
+
+    /// File ▸ Export .kra…: the whole project as an animated Krita document.
+    /// One-way — this starts no link.
+    pub fn export_kra(&mut self) {
+        let stem = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map_or_else(|| "animation".to_string(), |s| s.to_string_lossy().into_owned());
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export Krita document")
+            .add_filter("Krita document", &["kra"])
+            .set_file_name(format!("{stem}.kra"))
+            .save_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let uuids: Vec<String> = self.project.layers.iter().map(|_| krita_link::new_uuid()).collect();
+        let selected = self.project.current_layer;
+        let project = self.project.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let res = kra::write(&project, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: selected })
+                .and_then(|bytes| std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display())))
+                .map(|()| name);
+            let _ = tx.send(res);
+        });
+        self.bg_job = Some(BgJob::Export(rx));
+        self.bg_label = Some("Exporting Krita document…");
+    }
+}
+
 /// Downscale a canvas (aspect-preserving) so neither side exceeds `max`. No-op
 /// if it already fits. Used to keep imported cells within the GPU texture limit.
 fn cap_canvas(c: Canvas, max: u32) -> Canvas {
@@ -4327,6 +4716,63 @@ fn subrect_from_buffer(buf: &[u8], full_w: u32, x: u32, y: u32, w: u32, h: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Krita link end to end on a real file, minus Krita: send, a "Krita
+    /// save" (our own writer standing in — the reader is proven against
+    /// Krita's output in `io::kra`), the watcher noticing it, the worker
+    /// reading it, and the pull landing as one undo step.
+    #[test]
+    fn krita_save_lands_as_one_undo_step() {
+        let mut st = AppState::for_test();
+        let ctx = egui::Context::default();
+        let dir = std::env::temp_dir().join(format!("animator-krita-test-{}", std::process::id()));
+        let path = dir.join("link.kra");
+
+        let mut link = KritaLink::new(path.clone());
+        link.poll_every = Duration::ZERO;
+        link.settle = Duration::ZERO;
+        for l in &st.project.layers {
+            link.uuids.insert(l.uid, krita_link::new_uuid());
+        }
+        let uuids: Vec<String> = st.project.layers.iter().map(|l| link.uuids[&l.uid].clone()).collect();
+        let (base, stamp) = krita_link::send(&st.project, &uuids, 0, &path).unwrap();
+        link.baseline = Some(base);
+        link.mark_seen(stamp);
+        st.krita = Some(link);
+
+        // Nothing changed on disk: polling does nothing.
+        for _ in 0..3 {
+            st.poll_krita(&ctx);
+        }
+        assert!(!st.history.can_undo());
+
+        // "Krita" paints on the first drawing and saves.
+        let mut k = st.project.clone();
+        let id = k.layers[0].exposures[0].unwrap();
+        k.cells[id].pixels[0..4].copy_from_slice(&[255, 0, 0, 255]);
+        let bytes = kra::write(&k, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: 0 }).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !st.history.can_undo() && Instant::now() < deadline {
+            st.poll_krita(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let now = st.project.layers[0].exposures[0].unwrap();
+        assert_ne!(now, id, "the pull should have landed");
+        assert_eq!(&st.project.cells[now].pixels[0..4], &[255, 0, 0, 255]);
+        assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.starts_with("Updated from Krita")));
+
+        // The same save seen again changes nothing.
+        for _ in 0..3 {
+            st.poll_krita(&ctx);
+        }
+        st.undo();
+        assert_eq!(st.project.layers[0].exposures[0], Some(id));
+        assert!(!st.history.can_undo());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn rect(min_x: u32, min_y: u32, max_x: u32, max_y: u32) -> DirtyRect {
         DirtyRect {

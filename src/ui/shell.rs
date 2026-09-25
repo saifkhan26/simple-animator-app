@@ -79,6 +79,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     }
     save_error_dialog(state, ctx);
     save_toast(state, ctx);
+    krita_toast(state, ctx);
     timeline_wheel_scrub(state, ctx);
 
     egui::CentralPanel::default()
@@ -2169,6 +2170,8 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut start_rename: Option<usize> = None;
             let mut rename_commit = false;
             let mut rename_cancel = false;
+            let mut krita_edit: Option<usize> = None;
+            let krita_label = krita_menu_label(state);
             // Owned copy: the "lines from" combo lists every layer's name while
             // a single layer is mutably borrowed below.
             let names: Vec<String> = state
@@ -2275,6 +2278,16 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         } else if resp.clicked() {
                                             select = Some(i);
                                         }
+                                        resp.context_menu(|ui| {
+                                            if ui
+                                                .button(theme::icon_text(ic::PAINT_BRUSH, krita_label))
+                                                .on_hover_text("Opens the whole project in Krita with this layer selected")
+                                                .clicked()
+                                            {
+                                                krita_edit = Some(i);
+                                                ui.close_menu();
+                                            }
+                                        });
                                     }
                                 });
                                 ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
@@ -2332,6 +2345,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             }
             if let Some(i) = select {
                 state.project.current_layer = i;
+            }
+            if let Some(i) = krita_edit {
+                state.edit_in_krita(i);
             }
 
             // --- Layer transform ---
@@ -4446,6 +4462,28 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         ui.separator();
         if ui
+            .button(theme::icon_text(ic::PAINT_BRUSH, krita_menu_label(state)))
+            .on_hover_text(
+                "Opens the whole project in Krita as an animation. Each time you \
+                 save there, the drawings, timing and layers you changed come \
+                 back here as one undo step.",
+            )
+            .clicked()
+        {
+            state.edit_in_krita(state.project.current_layer);
+            ui.close_menu();
+        }
+        if state.krita_linked()
+            && ui
+                .button(theme::icon_text(ic::LINK_BREAK, "Stop Krita link"))
+                .on_hover_text("Stop bringing Krita saves back here")
+                .clicked()
+        {
+            state.stop_krita_link();
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui
             .button(theme::icon_text(
                 ic::IMAGE,
                 "Save PNG (current frame)…",
@@ -4468,6 +4506,10 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
                 open_export(state, kind);
                 ui.close_menu();
             }
+        }
+        if ui.button(theme::icon_text(ic::FILE_ARROW_UP, "Export .kra…")).clicked() {
+            state.export_kra();
+            ui.close_menu();
         }
         ui.separator();
         if ui
@@ -4511,6 +4553,14 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             .clicked()
         {
             state.open_gif_import();
+            ui.close_menu();
+        }
+        if ui
+            .button(theme::icon_text(ic::FILE_ARROW_DOWN, "Import .kra…"))
+            .on_hover_text("Adds the Krita document's paint layers under the active layer")
+            .clicked()
+        {
+            state.import_kra();
             ui.close_menu();
         }
         ui.separator();
@@ -4996,6 +5046,52 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
                         );
                         ui.label(
                             egui::RichText::new(format!("Saved  {name}")).color(fade(theme::TEXT)),
+                        );
+                    });
+                });
+        });
+}
+
+/// "Edit in Krita" until a link is live, then what the click does instead.
+fn krita_menu_label(state: &AppState) -> &'static str {
+    if state.krita_linked() {
+        "Send to Krita again"
+    } else {
+        "Edit in Krita"
+    }
+}
+
+/// Krita-link messages: a pull landing, a send, or what a Krita save held
+/// that couldn't come across. Sits above the save toast so both can show.
+fn krita_toast(state: &mut AppState, ctx: &egui::Context) {
+    let Some((msg, warn, deadline)) = state.krita_toast.clone() else {
+        return;
+    };
+    let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+        state.krita_toast = None;
+        return;
+    };
+    ctx.request_repaint_after(left);
+    let a = (left.as_secs_f32() / 0.5).clamp(0.0, 1.0);
+    let fade = |c: Color32| c.gamma_multiply(a);
+    let (icon, tint) = if warn {
+        (ic::WARNING, Color32::from_rgb(232, 176, 72))
+    } else {
+        (ic::PAINT_BRUSH, theme::ACCENT)
+    };
+    egui::Area::new(egui::Id::new("krita_toast"))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -64.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(fade(theme::BG_PANEL))
+                .show(ui, |ui| {
+                    ui.set_max_width(520.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon).color(fade(tint)).size(15.0));
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(msg).color(fade(theme::TEXT))).wrap(),
                         );
                     });
                 });

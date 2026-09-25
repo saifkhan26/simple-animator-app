@@ -10,6 +10,7 @@ mod app;
 mod doc;
 mod input;
 mod io;
+mod krita_link;
 #[cfg(target_os = "windows")]
 mod platform;
 mod timeline;

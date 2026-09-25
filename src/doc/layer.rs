@@ -10,6 +10,13 @@
 
 pub type CellId = usize;
 
+/// A fresh [`Layer::uid`].
+pub fn next_uid() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 use crate::doc::transform::{Ease, Transform, TransformKey};
 use crate::timeline::onion::OnionPin;
 
@@ -52,6 +59,12 @@ pub struct Layer {
     /// shift `track_points`, so a pin stays on its drawing.
     #[serde(skip)]
     pub onion_pins: Vec<OnionPin>,
+    /// Session-unique identity. Undo snapshots clone it, so a layer keeps it
+    /// through undo/redo; a load hands out fresh ones. What the Krita link
+    /// (`crate::krita_link`) keys its layers by — an index shifts with every
+    /// insert, and a field set at send time would vanish on undoing past it.
+    #[serde(skip, default = "next_uid")]
+    pub uid: u64,
     /// Per-frame stabilization tracking samples, parallel to `exposures`.
     /// Empty vec = tracker unused on this layer. Project frame edits keep the
     /// indices aligned with `exposures`.
@@ -80,6 +93,7 @@ impl Layer {
             transform_keys: Vec::new(),
             lines_from: None,
             onion_pins: Vec::new(),
+            uid: next_uid(),
             track_points: Vec::new(),
             cell_w: 0,
             cell_h: 0,

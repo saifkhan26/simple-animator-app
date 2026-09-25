@@ -38,6 +38,9 @@ threads except export.
 - **Export** to PNG sequence, animated GIF (NeuQuant palette), MP4, sprite
   sheet, or a single PNG of the current flattened frame — each over a chosen
   frame range.
+- **Edit in Krita** — opens the whole animation in Krita and brings each
+  Krita save back as one undo step, changing only what Krita changed. Plain
+  `.kra` import and export too.
 - **Floating, movable, collapsible panels** — Tools, Brush, Timeline, Onion
   skin, Layers, X-sheet. Drag titlebars to rearrange.
 
@@ -318,6 +321,45 @@ Export flattens visible non-reference layers per frame. The X-sheet's holds are
 resolved, so a single keyed cell held over 3 frames produces 3 identical PNGs
 (or GIF frames) — matching what playback shows. A flipped view is never
 exported.
+
+## Krita
+
+**File → Edit in Krita** (or right-click a layer name → *Edit in Krita*, which
+opens with that layer selected) writes the project as an animated `.kra` to a
+temp folder and opens it in Krita. Keys, holds, layer names, opacity,
+visibility and lock all travel; a drawing reused at several frames arrives as
+a Krita cloned frame.
+
+Every time you save in Krita, the app notices within a couple of seconds and
+folds the save back in as **one undo step**, touching only what Krita changed:
+
+- **Drawings** are matched by content. One you didn't touch in Krita keeps
+  whatever you have drawn on it here since; one you changed in Krita replaces
+  it (if both sides changed it, Krita wins — Ctrl+Z brings yours back).
+- **Timing** on a layer is only rebuilt if its keys changed in Krita.
+- **Layers** added, deleted or reordered in Krita are added, deleted or
+  reordered here. Layers you added here meanwhile stay where they are.
+
+Layer transforms, the camera, tracker points and the light-table flag stay
+here — Krita edits the drawings, this app keeps the staging.
+
+The link lasts until you quit, start a new project, open another, or choose
+**Stop Krita link**. While linked, the menu item becomes **Send to Krita
+again**: it rewrites the file, but Krita doesn't reload a file it has open, so
+close it in Krita without saving and reopen it (*File → Open Recent*). Save in
+Krita *before* sending again if it has changes you want — they come back here;
+saving the old copy after a re-send would overwrite your newer edits here (Ctrl+Z
+recovers them). Krita is found under Program Files, in
+`/Applications`, or on `PATH`; otherwise the app asks once and remembers.
+
+What doesn't come back, with a note saying so: vector, filter, fill, clone
+and file layers, masks, blend modes other than Normal, animated opacity.
+Groups are flattened into plain layers. The file must stay 8-bit RGBA.
+
+**File → Import .kra…** adds a Krita document's paint layers under the
+active layer; **File → Export .kra…** writes the project as an animated `.kra`
+without linking. Import is also how to recover a Krita save made after the
+app closed — the temp file stays on disk.
 
 ## Keyboard shortcuts
 
