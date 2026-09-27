@@ -4,13 +4,14 @@
 use egui::{Align, Color32, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as ic;
 
-use crate::app::{AppState, ExportKind, NavKind, PanelId, MP4_PRESETS};
+use crate::app::{AppState, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
 use crate::doc::camera::Ease;
 use crate::doc::layer::CellId;
 use crate::input::shortcuts::{Action, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, PIN_TINTS};
+use crate::tools::select_mask::{self, SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing, StrokeCap};
 use crate::ui::{expr, theme};
@@ -114,8 +115,18 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             let zoom_bind = state.shortcuts.get(Action::CanvasZoom);
             let pan_bind = state.shortcuts.get(Action::CanvasPan);
             let rotate_bind = state.shortcuts.get(Action::CanvasRotate);
+            // A selection mode held as the drag starts. Only the Lasso reads
+            // them, and while it is active they win over a nav gesture bound
+            // to the same keys.
+            let held_op = if state.tool == ActiveTool::Lasso {
+                ui.input(|i| held_sel_op(state, i))
+            } else {
+                None
+            };
             let (nav_gesture, mid_down) = ui.input(|i| {
-                let g = if zoom_bind.is_some_and(|c| c.mods_held(i)) {
+                let g = if held_op.is_some() {
+                    None
+                } else if zoom_bind.is_some_and(|c| c.mods_held(i)) {
                     Some(NavKind::Zoom)
                 } else if rotate_bind.is_some_and(|c| c.mods_held(i)) {
                     Some(NavKind::Rotate)
@@ -161,6 +172,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             // on no layer.
                             let (x, y) = canvas_to_doc(pos);
                             state.perspective_down([x, y]);
+                        } else if state.tool == ActiveTool::Lasso {
+                            // As does the selection: it belongs to the canvas,
+                            // not to the layer under it. The cursor, not pen
+                            // packets — a selection edge has no pressure.
+                            state.select_down(canvas_to_doc(pos), held_op);
                         } else {
                             // Decided once, here: see `AppState::stroke_from_pen`.
                             let ppp = ui.ctx().pixels_per_point();
@@ -275,6 +291,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                                 state.perspective_move([x, y]);
                             }
                         }
+                        None if state.tool == ActiveTool::Lasso => {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                state.select_move(canvas_to_doc(pos));
+                            }
+                        }
                         // The press frame: `pointer_down` has just started
                         // the stroke at the newest packet, and this frame's
                         // other packets lie at or behind it. Feeding them
@@ -307,11 +328,23 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 } else if state.nav_to_camera {
                     state.commit_camera_drag();
                 } else if state.nav_drag.is_none() {
+                    // Both are no-ops when idle, so a tool change mid-drag
+                    // cannot strand either.
+                    state.select_up();
                     state.pointer_up();
                 }
                 state.nav_drag = None;
                 state.nav_to_layer = false;
                 state.nav_to_camera = false;
+            }
+            // A double-click closes a polygon selection. Its second press has
+            // already placed a corner on top of the first; `polygon_finish`
+            // drops the duplicate.
+            if state.polygon_active()
+                && resp.hovered()
+                && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+            {
+                state.polygon_finish();
             }
 
             // Tool cursor preview — only while drawing (not during nav gestures),
@@ -865,29 +898,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
             } else if state.tool == ActiveTool::Perspective {
                 perspective_options(state, ui);
             } else if state.tool == ActiveTool::Lasso {
-                ui.label(
-                    egui::RichText::new(
-                        "Draw a loop to select — the path closes itself on release. \
-                         Drag inside it to move the pixels, or nudge with the arrow \
-                         keys.",
-                    )
-                    .color(theme::TEXT_MUTED)
-                    .size(11.0),
-                );
-                let del = combo_text(state, Action::SelectionDelete);
-                let cut = combo_text(state, Action::SelectionCut);
-                let copy = combo_text(state, Action::SelectionCopy);
-                let paste = combo_text(state, Action::SelectionPaste);
-                let off = combo_text(state, Action::SelectionDeselect);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{del} erases it - {cut} / {copy} / {paste} move it between \
-                         frames and layers - {off} drops it in place. Changing frame \
-                         or tool commits it.",
-                    ))
-                    .color(theme::TEXT_MUTED)
-                    .size(11.0),
-                );
+                selection_options(state, ui);
             } else {
                 brush_size_lock(state, ui);
                 let label = if state.lock_brush_to_view {
@@ -2805,47 +2816,26 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                                 // Canvas nav gestures are modifier-only; show a
                                 // modifier picker instead of press-to-bind (egui
                                 // has no Key for a bare Ctrl/Shift/Alt).
-                                if matches!(
-                                    action,
-                                    Action::CanvasZoom
-                                        | Action::CanvasPan
-                                        | Action::CanvasRotate
-                                ) {
+                                if action.is_drag_modifier() {
                                     ui.label(action.label());
                                     let cur = state.shortcuts.get(action);
-                                    let cur_label = match cur {
-                                        Some(c) if c.ctrl => "Ctrl",
-                                        Some(c) if c.shift => "Shift",
-                                        Some(c) if c.alt => "Alt",
-                                        _ => "(none)",
-                                    };
+                                    let cur_label = cur
+                                        .map(|c| c.display())
+                                        .unwrap_or_else(|| "(none)".to_string());
                                     egui::ComboBox::from_id_salt(("navmod", action))
-                                        .selected_text(cur_label)
+                                        .selected_text(cur_label.as_str())
                                         .width(140.0)
                                         .show_ui(ui, |ui| {
-                                            for (lbl, combo) in [
-                                                (
-                                                    "Ctrl",
-                                                    Some(KeyCombo::modifier_only(
-                                                        true, false, false,
-                                                    )),
-                                                ),
-                                                (
-                                                    "Shift",
-                                                    Some(KeyCombo::modifier_only(
-                                                        false, true, false,
-                                                    )),
-                                                ),
-                                                (
-                                                    "Alt",
-                                                    Some(KeyCombo::modifier_only(
-                                                        false, false, true,
-                                                    )),
-                                                ),
-                                                ("(none)", None),
-                                            ] {
+                                            let choices = crate::input::shortcuts::DRAG_MODIFIERS
+                                                .iter()
+                                                .map(|&(c, s, a)| Some(KeyCombo::modifier_only(c, s, a)))
+                                                .chain(std::iter::once(None));
+                                            for combo in choices {
+                                                let lbl = combo
+                                                    .map(|c| c.display())
+                                                    .unwrap_or_else(|| "(none)".to_string());
                                                 if ui
-                                                    .selectable_label(cur_label == lbl, lbl)
+                                                    .selectable_label(cur_label == lbl, lbl.as_str())
                                                     .clicked()
                                                 {
                                                     match combo {
@@ -3067,6 +3057,107 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     ui.checkbox(&mut g.horizon, "Horizon and vanishing points");
 }
 
+/// The Lasso's options: what a drag draws, how it combines with the
+/// selection already there, and the commands that act on the selection.
+fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        for (shape, icon) in [
+            (SelShape::Freehand, ic::LASSO),
+            (SelShape::Rect, ic::RECTANGLE_DASHED),
+            (SelShape::Ellipse, ic::CIRCLE_DASHED),
+            (SelShape::Polygon, ic::POLYGON),
+        ] {
+            if theme::icon_toggle(ui, icon, shape.label(), state.sel_shape == shape).clicked() {
+                // A half-placed polygon means nothing to the other shapes.
+                if shape != state.sel_shape {
+                    state.cancel_gesture();
+                }
+                state.sel_shape = shape;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        for (op, icon, bind) in [
+            (SelOp::Replace, ic::SELECTION, None),
+            (SelOp::Add, ic::UNITE, Some(Action::SelModeAdd)),
+            (SelOp::Subtract, ic::SUBTRACT, Some(Action::SelModeSubtract)),
+            (SelOp::Intersect, ic::INTERSECT, Some(Action::SelModeIntersect)),
+        ] {
+            let held = bind
+                .and_then(|a| state.shortcuts.get(a))
+                .map(|c| format!(" — or hold {} as you drag", c.display()))
+                .unwrap_or_default();
+            let tip = format!("{}{held}", op.label());
+            if theme::icon_toggle(ui, icon, &tip, state.sel_op == op).clicked() {
+                state.sel_op = op;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        let all = tip(state, Action::SelectAll, "Select all");
+        if theme::icon_button(ui, ic::SELECTION_ALL, &all).clicked() {
+            state.select_all();
+        }
+        let inv = tip(state, Action::SelectInvert, "Invert selection");
+        if theme::icon_button(ui, ic::SELECTION_INVERSE, &inv).clicked() {
+            state.select_invert();
+        }
+        let off = tip(state, Action::SelectionDeselect, "Deselect (Esc)");
+        if ui
+            .add_enabled(
+                state.sel_mask.is_some(),
+                egui::Button::new(egui::RichText::new(ic::SELECTION_SLASH).size(15.0))
+                    .min_size(egui::vec2(28.0, 22.0)),
+            )
+            .on_hover_text(off)
+            .clicked()
+        {
+            state.deselect();
+        }
+        let fill = tip(state, Action::SelectionFill, "Fill with brush colour");
+        if ui
+            .add_enabled(
+                state.sel_mask.is_some(),
+                egui::Button::new(egui::RichText::new(ic::PAINT_BUCKET).size(15.0))
+                    .min_size(egui::vec2(28.0, 22.0)),
+            )
+            .on_hover_text(fill)
+            .clicked()
+        {
+            state.fill_selection();
+        }
+    });
+    ui.horizontal(|ui| {
+        let on = state.sel_mask.is_some();
+        ui.add(
+            egui::DragValue::new(&mut state.sel_amount)
+                .range(1..=200)
+                .suffix(" px"),
+        );
+        if ui.add_enabled(on, egui::Button::new("Grow")).clicked() {
+            state.grow_selection();
+        }
+        if ui.add_enabled(on, egui::Button::new("Shrink")).clicked() {
+            state.shrink_selection();
+        }
+        if ui.add_enabled(on, egui::Button::new("Feather")).clicked() {
+            state.feather_selection();
+        }
+    });
+    ui.checkbox(&mut state.tint_outside, "Tint outside selection");
+    let del = combo_text(state, Action::SelectionDelete);
+    let cut = combo_text(state, Action::SelectionCut);
+    let copy = combo_text(state, Action::SelectionCopy);
+    let paste = combo_text(state, Action::SelectionPaste);
+    ui.label(
+        egui::RichText::new(format!(
+            "Every stroke and fill stays inside the selection. Drag inside it to              move the pixels, or nudge with the arrow keys; Enter puts them down.              {del} erases inside it - {cut} / {copy} / {paste} move it between              frames and layers.",
+        ))
+        .color(theme::TEXT_MUTED)
+        .size(11.0),
+    );
+}
+
 fn tool_toggle(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -3076,14 +3167,7 @@ fn tool_toggle(
 ) {
     let selected = state.tool == target;
     if theme::icon_toggle(ui, icon, label, selected).clicked() && !selected {
-        // Leaving the lasso puts a floating selection down first.
-        state.commit_selection();
-        state.tool_brushes[state.tool.idx()] = state.brush.clone();
-        state.tool = target;
-        state.brush = state.tool_brushes[target.idx()].clone();
-        if target == ActiveTool::Perspective {
-            state.ensure_perspective_grid();
-        }
+        state.set_tool(target);
     }
 }
 
@@ -3221,6 +3305,20 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                     theme::white_alpha(a),
                 );
             }
+        }
+    }
+
+    // Dim what is not selected. Over the artwork, under every overlay.
+    if state.tint_outside && state.sel_mask.is_some() {
+        if let Some(t) = &state.sel_tint {
+            let (x0, y0, x1, y1) = t.rect;
+            let q = [
+                xf.doc_to_screen(x0, y0),
+                xf.doc_to_screen(x1, y0),
+                xf.doc_to_screen(x1, y1),
+                xf.doc_to_screen(x0, y1),
+            ];
+            image_quad(&painter, t.tex.id(), q, Color32::WHITE);
         }
     }
 
@@ -3368,12 +3466,15 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
-    // Lasso preview: the path so far plus a dashed-looking closing chord back
-    // to the start, so it's obvious the loop seals itself on release. Drawn in
-    // cell space like the other previews, since that is what gets rasterised.
+    // Marching ants: animated dashes, which is what tells a selection outline
+    // apart from an inked line. Only repainted a few times a second — a
+    // selection can stay up for as long as the user likes.
+    let phase = (ui.input(|i| i.time) * 24.0) as f32 % 12.0;
+    let mut ants_shown = false;
+
     // Floating selection: the lifted pixels as a quad under their pose, plus
-    // marching ants around the path so it reads as "selected", not "drawn", and
-    // the transform box that scales and rotates it.
+    // marching ants around the mask so it reads as "selected", not "drawn",
+    // and the transform box that scales and rotates it.
     if let Some(sel) = &state.selection {
         // The pose is applied to the quad's corners rather than baked into the
         // texture, so the GPU does the scaling and rotation for free and the
@@ -3391,35 +3492,17 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 Color32::WHITE,
             );
         }
-        if sel.path.len() >= 2 {
-            let pts: Vec<egui::Pos2> = sel
-                .path
+        for outline in &sel.outline {
+            let pts: Vec<egui::Pos2> = outline
                 .iter()
                 .map(|&(x, y)| {
                     let (cx, cy) = sel.path_point(x, y);
                     cell_to_screen(cx, cy)
                 })
                 .collect();
-            let mut closed = pts.clone();
-            closed.push(pts[0]);
-            // Animated dash offset — the classic marching ants, which is what
-            // tells a selection outline apart from an inked line.
-            let phase = (ui.input(|i| i.time) * 24.0) as f32 % 12.0;
-            painter.add(egui::Shape::dashed_line_with_offset(
-                &closed,
-                Stroke::new(1.6, Color32::from_black_alpha(190)),
-                &[6.0],
-                &[6.0],
-                phase,
-            ));
-            painter.add(egui::Shape::dashed_line_with_offset(
-                &closed,
-                Stroke::new(1.6, Color32::WHITE),
-                &[6.0],
-                &[6.0],
-                phase + 6.0,
-            ));
+            marching_ants(&painter, &pts, phase);
         }
+        ants_shown = true;
 
         // Transform box: a thin outline plus the eight handles, drawn at a
         // fixed *screen* size so they stay grabbable however far out the view
@@ -3438,27 +3521,117 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             painter.rect_filled(rect, 1.0, Color32::WHITE);
             painter.rect_stroke(rect, 1.0, Stroke::new(1.0, Color32::from_black_alpha(200)));
         }
-        ui.ctx().request_repaint();
+    } else if let Some(mask) = &state.sel_mask {
+        // The selection itself, in document space. Past a couple of hundred
+        // thousand vertices the outline costs more than it tells; its box
+        // says where it is instead.
+        let total: usize = state.sel_outline.iter().map(Vec::len).sum();
+        if total <= 200_000 {
+            for outline in &state.sel_outline {
+                let pts: Vec<egui::Pos2> = outline
+                    .iter()
+                    .map(|&(x, y)| xf.doc_to_screen(x, y))
+                    .collect();
+                marching_ants(&painter, &pts, phase);
+            }
+        } else if let Some((x0, y0, x1, y1)) = mask.bounds() {
+            let (x0, y0, x1, y1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+            let pts = [
+                xf.doc_to_screen(x0, y0),
+                xf.doc_to_screen(x1, y0),
+                xf.doc_to_screen(x1, y1),
+                xf.doc_to_screen(x0, y1),
+            ];
+            marching_ants(&painter, &pts, phase);
+        }
+        // Everything beyond the outline is selected too (Select All, or an
+        // inverted selection): the frame edge says so.
+        if mask.outside == 255 {
+            marching_ants(&painter, &corners, phase);
+        }
+        ants_shown = true;
+
+        // The transform box a plain drag would pick up — the handles that
+        // scale and rotate the selected pixels before any have moved.
+        let boxed = state.tool == crate::tools::ActiveTool::Lasso
+            && state.sel_op == SelOp::Replace
+            && state.sel_gesture.is_none()
+            && state.mask_is_grabbable();
+        if let Some(m) = state.cached_cell_mask().filter(|m| boxed && m.w > 0 && m.h > 0) {
+            let (mx, my) = (m.x as f32, m.y as f32);
+            let (w, h) = (m.w as f32, m.h as f32);
+            let box_pts = vec![
+                cell_to_screen(mx, my),
+                cell_to_screen(mx + w, my),
+                cell_to_screen(mx + w, my + h),
+                cell_to_screen(mx, my + h),
+            ];
+            painter.add(egui::Shape::closed_line(
+                box_pts,
+                Stroke::new(1.0, Color32::from_black_alpha(120)),
+            ));
+            let r = crate::tools::selection::HANDLE_PX;
+            for (hu, hv) in SelGrab::handle_positions(w, h) {
+                let rect = egui::Rect::from_center_size(
+                    cell_to_screen(mx + hu, my + hv),
+                    egui::vec2(r * 2.0, r * 2.0),
+                );
+                painter.rect_filled(rect, 1.0, theme::white_alpha(200));
+                painter.rect_stroke(rect, 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
+            }
+        }
+    }
+    if ants_shown {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(60));
     }
 
-    if let Some(path) = &state.lasso {
-        if path.len() >= 2 {
-            let pts: Vec<egui::Pos2> = path.iter().map(|&(x, y)| cell_to_screen(x, y)).collect();
-            // Two-tone stroke: readable over both ink and empty canvas.
-            painter.add(egui::Shape::line(
-                pts.clone(),
-                Stroke::new(2.2, Color32::from_black_alpha(180)),
-            ));
-            painter.add(egui::Shape::line(
-                pts.clone(),
-                Stroke::new(1.0, Color32::WHITE),
-            ));
-            let (first, last) = (pts[0], pts[pts.len() - 1]);
-            painter.line_segment([last, first], Stroke::new(2.2, Color32::from_black_alpha(120)));
-            painter.line_segment(
-                [last, first],
-                Stroke::new(1.0, theme::white_alpha(140)),
-            );
+    // The selection being drawn, in document space like the selection itself.
+    if let Some(g) = &state.sel_gesture {
+        let to_screen = |&(x, y): &(f32, f32)| xf.doc_to_screen(x, y);
+        match g {
+            SelGesture::Drag {
+                shape,
+                pts,
+                start,
+                end,
+                ..
+            } => {
+                let path: Vec<egui::Pos2> = match shape {
+                    SelShape::Rect => select_mask::rect_path(*start, *end)
+                        .iter()
+                        .map(to_screen)
+                        .collect(),
+                    SelShape::Ellipse => select_mask::ellipse_path(*start, *end)
+                        .iter()
+                        .map(to_screen)
+                        .collect(),
+                    SelShape::Freehand | SelShape::Polygon => pts.iter().map(to_screen).collect(),
+                };
+                gesture_path(&painter, &path, true);
+            }
+            SelGesture::Polygon { pts, pressed, .. } => {
+                let mut path: Vec<egui::Pos2> = pts.iter().map(to_screen).collect();
+                let hover = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .filter(|p| rect.contains(*p));
+                // Between clicks the next edge rubber-bands to the pointer.
+                if let (false, Some(h)) = (*pressed, hover) {
+                    path.push(h);
+                }
+                gesture_path(&painter, &path, true);
+                for p in pts.iter().map(to_screen) {
+                    painter.circle_filled(p, 2.5, Color32::WHITE);
+                    painter.circle_stroke(p, 2.5, Stroke::new(1.0, Color32::from_black_alpha(200)));
+                }
+                // Ring the first corner when a click there would close it.
+                let close = crate::tools::selection::HANDLE_PX * 1.5;
+                if let (Some(first), Some(h)) = (pts.first().map(to_screen), hover) {
+                    if pts.len() >= 3 && first.distance(h) <= close {
+                        painter.circle_stroke(first, close, Stroke::new(1.5, theme::ACCENT));
+                    }
+                }
+            }
         }
     }
 
@@ -3923,6 +4096,62 @@ fn image_quad(painter: &egui::Painter, tex: egui::TextureId, corners: [egui::Pos
     painter.add(egui::Shape::mesh(mesh));
 }
 
+/// Two-tone animated dashes around a closed loop of screen points — the
+/// marching ants. Black and white offset by one dash, so they read over any
+/// artwork.
+fn marching_ants(painter: &egui::Painter, pts: &[egui::Pos2], phase: f32) {
+    if pts.len() < 2 {
+        return;
+    }
+    let mut closed = pts.to_vec();
+    closed.push(pts[0]);
+    painter.add(egui::Shape::dashed_line_with_offset(
+        &closed,
+        Stroke::new(1.6, Color32::from_black_alpha(190)),
+        &[6.0],
+        &[6.0],
+        phase,
+    ));
+    painter.add(egui::Shape::dashed_line_with_offset(
+        &closed,
+        Stroke::new(1.6, Color32::WHITE),
+        &[6.0],
+        &[6.0],
+        phase + 6.0,
+    ));
+}
+
+/// A selection shape being drawn: a two-tone line, readable over both ink and
+/// empty canvas, plus a faint chord back to the start when `closing`, so it's
+/// obvious the loop seals itself.
+fn gesture_path(painter: &egui::Painter, pts: &[egui::Pos2], closing: bool) {
+    if pts.len() < 2 {
+        return;
+    }
+    painter.add(egui::Shape::line(
+        pts.to_vec(),
+        Stroke::new(2.2, Color32::from_black_alpha(180)),
+    ));
+    painter.add(egui::Shape::line(pts.to_vec(), Stroke::new(1.0, Color32::WHITE)));
+    if closing {
+        let (first, last) = (pts[0], pts[pts.len() - 1]);
+        painter.line_segment([last, first], Stroke::new(2.2, Color32::from_black_alpha(120)));
+        painter.line_segment([last, first], Stroke::new(1.0, theme::white_alpha(140)));
+    }
+}
+
+/// The selection mode a held modifier asks for, if any.
+pub(crate) fn held_sel_op(state: &AppState, i: &egui::InputState) -> Option<SelOp> {
+    [
+        (Action::SelModeAdd, SelOp::Add),
+        (Action::SelModeSubtract, SelOp::Subtract),
+        (Action::SelModeIntersect, SelOp::Intersect),
+    ]
+    .into_iter()
+    .find(|(a, _)| state.shortcuts.get(*a).is_some_and(|c| c.mods_held(i)))
+    .map(|(_, op)| op)
+}
+
 /// Screen-space corners (TL, TR, BR, BL) of a cell of size `cw`×`ch` placed by
 /// `t` on a `pw`×`ph` canvas, then mapped through the canvas view `xf`.
 fn layer_screen_corners(
@@ -4067,6 +4296,22 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
             let c = pos + egui::vec2(9.0, -9.0);
             painter.circle_stroke(c, 5.0, Stroke::new(1.6, black));
             painter.circle_stroke(c, 5.0, Stroke::new(0.9, white));
+            // What the next drag does to the selection: add, remove or
+            // intersect. Replace needs no badge.
+            let op = ui.input(|i| held_sel_op(state, i)).unwrap_or(state.sel_op);
+            let badge = match op {
+                SelOp::Replace => None,
+                SelOp::Add => Some("+"),
+                SelOp::Subtract => Some("−"),
+                SelOp::Intersect => Some("∩"),
+            };
+            if let Some(b) = badge {
+                let at = pos + egui::vec2(9.0, 10.0);
+                let font = egui::FontId::proportional(13.0);
+                for (d, col) in [(egui::vec2(1.0, 1.0), black), (egui::Vec2::ZERO, white)] {
+                    painter.text(at + d, egui::Align2::CENTER_CENTER, b, font.clone(), col);
+                }
+            }
         }
         ActiveTool::Perspective => {
             // Plain crosshair: the handles are the real feedback.
@@ -4585,12 +4830,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             .button(theme::icon_text(ic::ERASER, "Clear current cell"))
             .clicked()
         {
-            if let Some(id) = state.project.resolved_current() {
-                if let Some(c) = state.project.cell_mut(id) {
-                    c.clear();
-                }
-                state.mark_dirty(id);
-            }
+            state.clear_active();
             ui.close_menu();
         }
         ui.separator();

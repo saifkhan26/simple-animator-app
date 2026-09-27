@@ -19,7 +19,9 @@
 
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::CellId;
+use crate::doc::transform::Transform;
 use crate::tools::lasso::Mask;
+use crate::tools::select_mask::SelectionMask;
 
 /// Half-size of a transform handle, in *screen* pixels. Shared with the overlay
 /// so the square that gets drawn is the square that can be grabbed.
@@ -250,10 +252,35 @@ impl Pose {
     }
 }
 
+/// Where a cell sat in the document when a float was cut from it: the layer
+/// transform plus the cell and canvas sizes that
+/// [`crate::doc::transform::Transform::cell_to_doc`] needs. Landing the float
+/// maps its shape back into the document selection through this.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub xf: Transform,
+    pub cw: u32,
+    pub ch: u32,
+    pub pw: f32,
+    pub ph: f32,
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Self {
+            xf: Transform::default(),
+            cw: 0,
+            ch: 0,
+            pw: 0.0,
+            ph: 0.0,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Selection {
-    /// Cell the pixels were lifted from. A selection never outlives its cell:
-    /// changing frame or layer commits it first.
+    /// Cell the pixels were lifted from. A float never outlives its cell:
+    /// changing frame or layer lands it first.
     pub cell: CellId,
     pub mask: Mask,
     /// RGBA of the masked region, `mask.w * mask.h * 4`, straight alpha with
@@ -263,18 +290,35 @@ pub struct Selection {
     pub pixels: Vec<u8>,
     /// Where the floating pixels currently sit relative to the lift.
     pub pose: Pose,
-    /// The lasso path, kept in cell space as it was drawn. Run it through
-    /// [`Selection::path_point`] to draw the outline under the current pose.
-    pub path: Vec<(f32, f32)>,
+    /// The mask's outline as closed loops in cell space, as lifted. Run each
+    /// point through [`Selection::path_point`] to draw it under the current
+    /// pose.
+    pub outline: Vec<Vec<(f32, f32)>>,
     /// Whether the source pixels have been erased yet. Deferred until the first
     /// move so that selecting and then deselecting changes nothing.
     pub lifted: bool,
+    /// The cell's place in the document at the lift.
+    pub placement: Placement,
+}
+
+/// Outline loops of a cell-space mask, via the document mask's contour
+/// tracer.
+fn outline_of(mask: &Mask) -> Vec<Vec<(f32, f32)>> {
+    SelectionMask {
+        x: mask.x as i32,
+        y: mask.y as i32,
+        w: mask.w,
+        h: mask.h,
+        cov: mask.cov.clone(),
+        outside: 0,
+    }
+    .contours()
 }
 
 impl Selection {
     /// Copy the masked pixels out of `canvas`. The source is left intact —
     /// see [`Selection::lift_source`].
-    pub fn new(cell: CellId, canvas: &Canvas, mask: Mask, path: Vec<(f32, f32)>) -> Self {
+    pub fn new(cell: CellId, canvas: &Canvas, mask: Mask, placement: Placement) -> Self {
         let (mw, mh) = (mask.w, mask.h);
         let mut pixels = vec![0u8; (mw * mh * 4) as usize];
         for my in 0..mh {
@@ -303,11 +347,26 @@ impl Selection {
         }
         Self {
             cell,
+            outline: outline_of(&mask),
             mask,
             pixels,
             pose: Pose::default(),
-            path,
             lifted: false,
+            placement,
+        }
+    }
+
+    /// A float made from clipboard pixels rather than cut from `cell`: already
+    /// lifted, since there is no source region to erase.
+    pub fn from_clip(cell: CellId, mask: Mask, pixels: Vec<u8>, placement: Placement) -> Self {
+        Self {
+            cell,
+            outline: outline_of(&mask),
+            mask,
+            pixels,
+            pose: Pose::default(),
+            lifted: true,
+            placement,
         }
     }
 
@@ -342,8 +401,8 @@ impl Selection {
         self.pose.corners(&self.mask)
     }
 
-    /// Map a point of `path` (cell space, as drawn) through the current pose,
-    /// so the outline tracks a scaled or rotated box.
+    /// Map a point of `outline` (cell space, as lifted) through the current
+    /// pose, so the outline tracks a scaled or rotated box.
     pub fn path_point(&self, x: f32, y: f32) -> (f32, f32) {
         self.buf_to_cell(x - self.mask.x as f32, y - self.mask.y as f32)
     }
@@ -351,6 +410,7 @@ impl Selection {
     /// True when cell-space point `(x, y)` lands on covered pixels — the test
     /// for "is this drag a move, or a new lasso". Goes through the pose, so it
     /// follows a rotated or scaled box.
+    #[cfg(test)]
     pub fn hit(&self, x: f32, y: f32) -> bool {
         let (u, v) = self.cell_to_buf(x, y);
         // `Mask::contains` works in the cell space the mask was cut from, so
@@ -362,63 +422,58 @@ impl Selection {
     }
 
     /// Which part of the transform box cell-space point `(x, y)` lands on.
-    /// `tol` is the handle's half-size in *cell* pixels, so the hit area stays
-    /// a constant size on screen at any zoom.
-    ///
-    /// Tested in buffer space, where the box is always the plain mask rect —
-    /// that keeps one set of comparisons correct under any rotation.
+    /// See [`grab_at`].
     pub fn grab_at(&self, x: f32, y: f32, tol: f32) -> Option<Grab> {
-        let (u, v) = self.cell_to_buf(x, y);
-        let (w, h) = (self.mask.w as f32, self.mask.h as f32);
-        // Buffer space is pre-scale, so a fixed on-screen tolerance is worth
-        // more buffer pixels on a shrunken axis than on a stretched one. Capped
-        // so the handles of a small selection cannot swallow its whole inside.
-        let tu = (tol / self.pose.scale.0.abs().max(1e-6)).min(w * 0.4);
-        let tv = (tol / self.pose.scale.1.abs().max(1e-6)).min(h * 0.4);
+        grab_at(&self.mask, &self.pose, x, y, tol)
+    }
 
-        let (near_l, near_r) = (u.abs() <= tu, (u - w).abs() <= tu);
-        let (near_t, near_b) = (v.abs() <= tv, (v - h).abs() <= tv);
-        let on_box = u >= -tu && u <= w + tu && v >= -tv && v <= h + tv;
-
-        if on_box {
-            let corner = match (near_l, near_t, near_r, near_b) {
-                (true, true, _, _) => Some(0),
-                (_, true, true, _) => Some(1),
-                (_, _, true, true) => Some(2),
-                (true, _, _, true) => Some(3),
-                _ => None,
-            };
-            if let Some(c) = corner {
-                return Some(Grab::Scale(c));
+    /// The selection coverage as it now sits in the cell, box origin first —
+    /// what the document selection becomes when this float lands. Exact for a
+    /// pixel-aligned pose; resampled through the pose otherwise.
+    pub fn posed_cov(&self) -> (i32, i32, u32, u32, Vec<u8>) {
+        if self.pose.is_pixel_aligned() {
+            let (ox, oy) = self.origin();
+            return (ox, oy, self.mask.w, self.mask.h, self.mask.cov.clone());
+        }
+        let (x0, y0, x1, y1) = self.dest_bounds();
+        let (w, h) = ((x1 - x0).max(0) as u32, (y1 - y0).max(0) as u32);
+        if w as u64 * h as u64 > 64 << 20 {
+            return (x0, y0, 0, 0, Vec::new());
+        }
+        let n = self.supersample();
+        let step = 1.0 / n as f32;
+        let inv = 1.0 / (n * n) as f32;
+        let (mw, mh) = (self.mask.w as i32, self.mask.h as i32);
+        let tap = |ix: i32, iy: i32| -> f32 {
+            if ix < 0 || iy < 0 || ix >= mw || iy >= mh {
+                0.0
+            } else {
+                self.mask.cov[(iy * mw + ix) as usize] as f32
             }
-            if near_t {
-                return Some(Grab::Scale(4));
-            }
-            if near_r {
-                return Some(Grab::Scale(5));
-            }
-            if near_b {
-                return Some(Grab::Scale(6));
-            }
-            if near_l {
-                return Some(Grab::Scale(7));
+        };
+        let mut cov = vec![0u8; (w * h) as usize];
+        for dy in 0..h {
+            for dx in 0..w {
+                let mut acc = 0.0;
+                for sy in 0..n {
+                    for sx in 0..n {
+                        let fx = (x0 + dx as i32) as f32 + (sx as f32 + 0.5) * step;
+                        let fy = (y0 + dy as i32) as f32 + (sy as f32 + 0.5) * step;
+                        let (u, v) = self.cell_to_buf(fx, fy);
+                        let (u, v) = (u - 0.5, v - 0.5);
+                        let (u0, v0) = (u.floor(), v.floor());
+                        let (tu, tv) = (u - u0, v - v0);
+                        let (iu, iv) = (u0 as i32, v0 as i32);
+                        let top = tap(iu, iv) + (tap(iu + 1, iv) - tap(iu, iv)) * tu;
+                        let bot =
+                            tap(iu, iv + 1) + (tap(iu + 1, iv + 1) - tap(iu, iv + 1)) * tu;
+                        acc += top + (bot - top) * tv;
+                    }
+                }
+                cov[(dy * w + dx) as usize] = (acc * inv).round().clamp(0.0, 255.0) as u8;
             }
         }
-
-        // Rotate ring: diagonally outside a corner, so an edge drag still means
-        // a one-axis scale.
-        if (u < 0.0 || u > w) && (v < 0.0 || v > h) {
-            let cu = if u < 0.0 { 0.0 } else { w };
-            let cv = if v < 0.0 { 0.0 } else { h };
-            if (u - cu).abs() <= tu * 3.0 && (v - cv).abs() <= tv * 3.0 {
-                return Some(Grab::Rotate);
-            }
-        }
-
-        if self.hit(x, y) {
-            return Some(Grab::Move);
-        }
-        None
+        (x0, y0, w, h, cov)
     }
 
     /// Composite the floating pixels back into `canvas` under the current pose.
@@ -641,6 +696,74 @@ impl Selection {
     }
 }
 
+/// Which part of the transform box of `mask` under `pose` cell-space
+/// point `(x, y)` lands on. A free function so a press can be tested
+/// against the document selection before any pixels are lifted.
+///
+/// `tol` is the handle's half-size in *cell* pixels, so the hit area stays
+/// a constant size on screen at any zoom.
+///
+/// Tested in buffer space, where the box is always the plain mask rect —
+/// that keeps one set of comparisons correct under any rotation.
+pub fn grab_at(mask: &Mask, pose: &Pose, x: f32, y: f32, tol: f32) -> Option<Grab> {
+    let (u, v) = pose.cell_to_buf(mask, x, y);
+    let (w, h) = (mask.w as f32, mask.h as f32);
+    // Buffer space is pre-scale, so a fixed on-screen tolerance is worth
+    // more buffer pixels on a shrunken axis than on a stretched one. Capped
+    // so the handles of a small selection cannot swallow its whole inside.
+    let tu = (tol / pose.scale.0.abs().max(1e-6)).min(w * 0.4);
+    let tv = (tol / pose.scale.1.abs().max(1e-6)).min(h * 0.4);
+
+    let (near_l, near_r) = (u.abs() <= tu, (u - w).abs() <= tu);
+    let (near_t, near_b) = (v.abs() <= tv, (v - h).abs() <= tv);
+    let on_box = u >= -tu && u <= w + tu && v >= -tv && v <= h + tv;
+
+    if on_box {
+        let corner = match (near_l, near_t, near_r, near_b) {
+            (true, true, _, _) => Some(0),
+            (_, true, true, _) => Some(1),
+            (_, _, true, true) => Some(2),
+            (true, _, _, true) => Some(3),
+            _ => None,
+        };
+        if let Some(c) = corner {
+            return Some(Grab::Scale(c));
+        }
+        if near_t {
+            return Some(Grab::Scale(4));
+        }
+        if near_r {
+            return Some(Grab::Scale(5));
+        }
+        if near_b {
+            return Some(Grab::Scale(6));
+        }
+        if near_l {
+            return Some(Grab::Scale(7));
+        }
+    }
+
+    // Rotate ring: diagonally outside a corner, so an edge drag still means
+    // a one-axis scale.
+    if (u < 0.0 || u > w) && (v < 0.0 || v > h) {
+        let cu = if u < 0.0 { 0.0 } else { w };
+        let cv = if v < 0.0 { 0.0 } else { h };
+        if (u - cu).abs() <= tu * 3.0 && (v - cv).abs() <= tv * 3.0 {
+            return Some(Grab::Rotate);
+        }
+    }
+
+    // Inside the covered pixels. `Mask::contains` works in the cell space
+    // the mask was cut from, so put the buffer coordinates back on it.
+    if mask.contains(
+        u.floor() as i32 + mask.x as i32,
+        v.floor() as i32 + mask.y as i32,
+    ) {
+        return Some(Grab::Move);
+    }
+    None
+}
+
 /// Straight-alpha src-over of one source sample onto `canvas` at `(px, py)`.
 /// `src` is unpremultiplied RGB in `0..=1`, `sa` its alpha.
 fn blend_over(canvas: &mut Canvas, px: i32, py: i32, src: [f32; 3], sa: f32) {
@@ -672,16 +795,6 @@ fn clip_rect(b: (i32, i32, i32, i32), cw: i32, ch: i32) -> Option<(i32, i32, i32
     }
 }
 
-/// The mask's bounding box as a closed path.
-///
-/// Used for a pasted selection, where the original lasso path is long gone —
-/// the outline then marks the region rather than tracing the artwork.
-pub fn outline_rect(mask: &Mask) -> Vec<(f32, f32)> {
-    let (x0, y0) = (mask.x as f32, mask.y as f32);
-    let (x1, y1) = (x0 + mask.w as f32, y0 + mask.h as f32);
-    vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,7 +814,7 @@ mod tests {
 
     fn sel_on(canvas: &Canvas, path: Vec<(f32, f32)>) -> Selection {
         let mask = lasso::coverage(&path, canvas.width, canvas.height).expect("mask");
-        Selection::new(0, canvas, mask, path)
+        Selection::new(0, canvas, mask, Placement::default())
     }
 
     fn rgba(c: &Canvas, x: u32, y: u32) -> [u8; 4] {
@@ -1122,5 +1235,36 @@ mod tests {
         let i = (((mask.h / 2) * mask.w + mask.w / 2) * 4) as usize;
         assert_eq!(pixels[i + 3], 255);
         assert!(pixels[i].abs_diff(90) <= 1);
+    }
+
+    /// Landing a plain move must hand back exactly the lifted coverage, moved.
+    #[test]
+    fn posed_coverage_is_the_mask_moved_when_aligned() {
+        let canvas = filled(30, 30, [9, 9, 9, 255]);
+        let mut sel = sel_on(&canvas, square(4.0, 5.0, 12.0, 9.0));
+        sel.pose.offset = (6.0, -2.0);
+        let (x, y, w, h, cov) = sel.posed_cov();
+        assert_eq!((x, y), (sel.mask.x as i32 + 6, sel.mask.y as i32 - 2));
+        assert_eq!((w, h), (sel.mask.w, sel.mask.h));
+        assert_eq!(cov, sel.mask.cov);
+    }
+
+    /// A quarter turn swaps the posed coverage's width and height.
+    #[test]
+    fn posed_coverage_follows_a_quarter_turn() {
+        let canvas = filled(40, 40, [9, 9, 9, 255]);
+        let mut sel = sel_on(&canvas, square(10.0, 16.0, 30.0, 24.0));
+        sel.pose.rot = std::f32::consts::FRAC_PI_2;
+        let (_, _, w, h, cov) = sel.posed_cov();
+        assert!(h > w, "{w}x{h}");
+        let solid = cov.iter().filter(|&&c| c >= 128).count();
+        assert!((140..=180).contains(&solid), "{solid} covered pixels");
+    }
+
+    #[test]
+    fn a_new_float_outlines_its_mask() {
+        let canvas = filled(20, 20, [9, 9, 9, 255]);
+        let sel = sel_on(&canvas, square(3.0, 3.0, 12.0, 10.0));
+        assert_eq!(sel.outline.len(), 1);
     }
 }

@@ -6,6 +6,7 @@ pub mod lasso;
 pub mod perspective;
 pub mod paper;
 pub mod ribbon;
+pub mod select_mask;
 pub mod selection;
 pub mod shape;
 pub mod stroke;
@@ -19,8 +20,8 @@ pub enum ActiveTool {
     Shape,
     /// Stabilization tracker — places per-frame tracking points, draws nothing.
     Tracker,
-    /// Freehand lasso; everything inside the closed path is erased from the
-    /// active layer's cell on pointer-up.
+    /// Selection — freehand, rectangle, ellipse or polygon. Draws nothing
+    /// itself; while a selection exists, every paint edit stays inside it.
     Lasso,
     /// Perspective grids — edits the viewport guides, draws nothing.
     Perspective,

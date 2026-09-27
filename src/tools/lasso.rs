@@ -1,8 +1,9 @@
-//! Lasso erase — freehand polygon selection; everything inside is deleted.
+//! Lasso coverage — rasterising a closed selection path, and erasing through
+//! the result.
 //!
 //! The drawn path is closed implicitly (last point back to the first) and
 //! filled with the **nonzero winding** rule, so a loop that crosses itself
-//! still erases solid instead of punching an even-odd hole in the middle.
+//! still selects solid instead of punching an even-odd hole in the middle.
 //!
 //! Coverage is computed by scanline: `SUB` sample rows per pixel row, each
 //! intersected against every edge, the resulting spans accumulated with
@@ -60,12 +61,29 @@ impl Mask {
 ///
 /// Scanline with `SUB` sample rows per pixel row and nonzero winding, so a path
 /// that crosses itself stays solid instead of punching an even-odd hole.
+#[cfg(test)]
 pub fn coverage(pts: &[(f32, f32)], cw: u32, ch: u32) -> Option<Mask> {
+    let (x, y, w, h, cov) = coverage_rect(pts, (0, 0, cw as i32, ch as i32))?;
+    Some(Mask {
+        x: x as u32,
+        y: y as u32,
+        w,
+        h,
+        cov,
+    })
+}
+
+/// [`coverage`] clipped to an arbitrary integer rect `(x0, y0, x1, y1)`,
+/// max exclusive, which may start below zero. This is what rasterises a
+/// selection in document space, where there is no cell edge to stop at.
+/// Returns the covered box's origin and size plus its coverage bytes.
+pub fn coverage_rect(
+    pts: &[(f32, f32)],
+    clip: (i32, i32, i32, i32),
+) -> Option<(i32, i32, u32, u32, Vec<u8>)> {
     if pts.len() < 3 {
         return None;
     }
-    let w = cw as i32;
-    let h = ch as i32;
 
     let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
     let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
@@ -75,10 +93,10 @@ pub fn coverage(pts: &[(f32, f32)], cw: u32, ch: u32) -> Option<Mask> {
         min_y = min_y.min(y);
         max_y = max_y.max(y);
     }
-    let x0 = (min_x.floor() as i32).clamp(0, w);
-    let y0 = (min_y.floor() as i32).clamp(0, h);
-    let x1 = (max_x.ceil() as i32 + 1).clamp(0, w);
-    let y1 = (max_y.ceil() as i32 + 1).clamp(0, h);
+    let x0 = (min_x.floor() as i32).clamp(clip.0, clip.2);
+    let y0 = (min_y.floor() as i32).clamp(clip.1, clip.3);
+    let x1 = (max_x.ceil() as i32 + 1).clamp(clip.0, clip.2);
+    let y1 = (max_y.ceil() as i32 + 1).clamp(clip.1, clip.3);
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
@@ -139,13 +157,7 @@ pub fn coverage(pts: &[(f32, f32)], cw: u32, ch: u32) -> Option<Mask> {
         }
     }
 
-    Some(Mask {
-        x: x0 as u32,
-        y: y0 as u32,
-        w: mw as u32,
-        h: mh as u32,
-        cov: out,
-    })
+    Some((x0, y0, mw as u32, mh as u32, out))
 }
 
 /// Erase through an existing mask: alpha scales by `1 - coverage`, RGB is left

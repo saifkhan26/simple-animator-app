@@ -25,8 +25,9 @@ threads except export.
   *Hold* deletes a key so the previous one persists ("on 2s/3s" workflow).
 - **Tools** — Pencil, Ink, Eraser, Flood Fill, Shape, Lasso select, Tracker.
   Each tool ships with a default pressure curve and brush settings.
-- **Lasso selection** — move, cut, copy and paste a region of pixels between
-  frames and layers.
+- **Selections, Krita-style** — lasso, box, ellipse or polygon; add to,
+  remove from or intersect them; every stroke and fill stays inside. Move,
+  cut, copy and paste the selected pixels between frames and layers.
 - **Flip the view** horizontally or vertically as a drawing check. Never
   touches the document.
 - **Pinned colour swatches**, remembered across runs.
@@ -128,33 +129,76 @@ roll.
 This is a view transform only. Strokes land under the cursor as usual, and
 exports are never mirrored.
 
-## Lasso selection
+## Selection
 
-Draw a loop with the Lasso tool (`Y`) to select; the path closes itself on
-release. Then:
+The Lasso tool (`Y`) makes a selection that works like Krita's: it stays up
+until you deselect, and **every stroke, erase, shape and fill stays inside
+it** — on any tool, any layer and any frame. It belongs to the canvas, not to
+a drawing, so you can scrub to the next frame or switch to the colour layer
+and keep painting inside the same shape. On a moved, scaled or rotated layer
+it clips where the marching ants are on screen.
 
-- **Drag inside it** to move the pixels, or nudge a pixel at a time with the
-  arrow keys. Moves are pixel-snapped, so a move alone never resamples.
-- **Drag a handle** on the box around the selection to scale it — corners take
-  both axes, edges take one, and `Shift` keeps it uniform. **Drag just outside
-  a corner** to rotate, with `Shift` snapping to 15°.
-- The lifted pixels are only resampled once, when the selection commits.
-  Scaling out and back, or rotating twice, is no softer than doing it once,
-  because every pose is resolved from the pixels as they were lifted. A
-  selection left square and on whole pixels still takes the exact blit.
-- **`Delete`** erases the selected pixels.
-- **`Ctrl+X` / `Ctrl+C` / `Ctrl+V`** cut, copy and paste — a paste lands on
-  whatever cell is active, so it crosses frames and layers.
-- **`Ctrl+D`** drops the selection in place.
+**Making one.** Pick a shape in the Lasso panel: freehand, rectangle, ellipse
+or polygon. A polygon takes a corner per click; `Enter`, a double-click or a
+click back on the first corner closes it, `Backspace` takes back the last
+corner and `Esc` abandons it.
 
-Changing frame, changing layer, switching tools or starting a new lasso all
-commit a floating selection first. Lifting and committing are two undo steps:
-one undo puts the pixels back where you picked them up, a second restores the
-hole.
+**Adding and removing.** Hold a modifier as the drag starts, or set the mode
+with the Lasso panel's buttons:
 
-Pasting an image from the system clipboard as a new layer moved to
-`Ctrl+Shift+V`, since `Ctrl+V` now pastes a selection. An existing
-`shortcuts.toml` is migrated automatically.
+| Held while dragging | Mode |
+|---|---|
+| (nothing) | Replace |
+| `Ctrl+Shift` | Add to the selection |
+| `Ctrl+Alt` | Remove from the selection |
+| `Shift+Alt` | Intersect with the selection |
+
+Shift and Alt on their own still pan and rotate the canvas. All three are
+rebindable in **Settings → Shortcuts**, and a selection mode bound to the same
+keys as a canvas gesture wins while the Lasso is active. On Windows with more
+than one keyboard layout installed, left `Alt+Shift` (and optionally
+`Ctrl+Shift`) may also switch layout when released; rebind them if that gets
+in the way.
+
+A plain click outside the selection deselects.
+
+**Moving pixels.** Drag inside the selection to move what's under it, or
+nudge with the arrow keys. Drag a handle on the box around it to scale:
+corners take both axes, edges take one, and `Shift` keeps it uniform. Drag
+just outside a corner to rotate, with `Shift` snapping to 15°.
+
+- Moves are pixel-snapped, so a move alone never resamples. A scaled or
+  rotated selection is resampled once, when it lands, from the pixels as they
+  were lifted — scaling out and back is no softer than doing it once.
+- `Enter` puts the pixels down and keeps the selection where they landed.
+  Changing frame, layer or tool, or starting a stroke, puts them down too.
+- One `Ctrl+Z` while pixels are floating puts them back where they were
+  picked up. Once they have landed, the move — pixels and selection
+  together — is a single undo step.
+
+**Commands.**
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+A` | Select all |
+| `Ctrl+Shift+I` | Invert the selection |
+| `Esc` / `Ctrl+D` | Deselect |
+| `Delete` | Erase inside the selection (the selection stays) |
+| `Backspace` | Clear the drawing — only inside the selection when there is one |
+| `Shift+Backspace` | Fill the selection with the brush colour |
+| `Ctrl+X` / `Ctrl+C` / `Ctrl+V` | Cut, copy and paste — a paste lands on whatever cell is active, so it crosses frames and layers |
+
+The Lasso panel also has **Grow**, **Shrink** and **Feather** by a number of
+pixels, and **Tint outside selection**, which dims everything that isn't
+selected. Every selection change is an undo step. The selection isn't saved
+with the project.
+
+While painting, the short live tip of a stroke and a shape being dragged are
+previews and can show past the selection edge; what lands in the drawing is
+always clipped.
+
+Pasting an image from the system clipboard as a new layer is
+`Ctrl+Shift+V`, since `Ctrl+V` pastes a selection.
 
 ## Frames, layers, X-sheet
 
@@ -424,6 +468,9 @@ lists the current binding for each one. A few of the defaults:
 | O                         | Toggle onion skin             |
 | F / Shift+F               | Flip view H / V               |
 | Ctrl+X / C / V            | Selection cut / copy / paste  |
+| Ctrl+A / Ctrl+Shift+I     | Select all / invert selection |
+| Esc / Ctrl+D              | Deselect                      |
+| Ctrl+Shift / Ctrl+Alt / Shift+Alt (held) | Add to / remove from / intersect the selection |
 | Alt+X / C / V             | Drawing cut / copy / paste    |
 | Ctrl+Z / Ctrl+Y           | Undo / redo                   |
 | Ctrl+S / Ctrl+Shift+S     | Save / Save As                |

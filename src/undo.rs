@@ -7,6 +7,7 @@ use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer};
 use crate::doc::project::Project;
+use crate::tools::select_mask::{PackedMask, SelectionMask};
 
 /// Bounded undo capacity — prevents memory blow-up on long sessions.
 const MAX_HISTORY: usize = 80;
@@ -21,6 +22,10 @@ pub enum Touched {
     /// every texture is still good — on a big layer, re-uploading them all is
     /// what made undo stall.
     Structure,
+    /// The selection became this.
+    Selection(Option<SelectionMask>),
+    /// Several of the above, from a [`Command::Compound`].
+    Many(Vec<Touched>),
 }
 
 /// Snapshot of the timeline structure (exposures + cursors), excluding the
@@ -103,6 +108,16 @@ pub enum Command {
         after_size: (u32, u32),
         before: Vec<(CellId, Canvas)>,
     },
+    /// The selection changed. Only the selection: the pixels it covers are
+    /// untouched, so this restores no cell.
+    Selection {
+        before: Option<PackedMask>,
+        after: Option<PackedMask>,
+    },
+    /// Several commands that undo and redo as one step — a float landing is
+    /// its pixels *and* the selection that moved with them. Applied in order
+    /// on redo, in reverse on undo.
+    Compound(Vec<Command>),
 }
 
 pub struct History {
@@ -133,6 +148,11 @@ impl History {
     }
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
+    }
+
+    #[cfg(test)]
+    pub fn undo_len(&self) -> usize {
+        self.undo_stack.len()
     }
 
     /// Undo the last command. Returns what was touched (so the caller can
@@ -230,6 +250,23 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
             }
             Touched::Cells(project.layer_cell_ids(*layer))
         }
+        Command::Selection { before, after } => {
+            let m = if forward { after } else { before };
+            Touched::Selection(m.as_ref().map(PackedMask::unpack))
+        }
+        Command::Compound(cmds) => {
+            let mut out = Vec::with_capacity(cmds.len());
+            if forward {
+                for c in cmds {
+                    out.push(apply(project, c, true));
+                }
+            } else {
+                for c in cmds.iter().rev() {
+                    out.push(apply(project, c, false));
+                }
+            }
+            Touched::Many(out)
+        }
     }
 }
 
@@ -255,4 +292,80 @@ pub fn snapshot_subrect(canvas: &Canvas, x: u32, y: u32, w: u32, h: u32) -> Vec<
             .copy_from_slice(&canvas.pixels[src_off..src_off + row_bytes]);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::select_mask::SelectionMask;
+
+    fn rect(x: i32, w: u32) -> SelectionMask {
+        SelectionMask {
+            x,
+            y: 0,
+            w,
+            h: 1,
+            cov: vec![255; w as usize],
+            outside: 0,
+        }
+    }
+
+    fn selection_of(t: Option<Touched>) -> Option<SelectionMask> {
+        match t {
+            Some(Touched::Selection(m)) => m,
+            _ => panic!("not a selection change"),
+        }
+    }
+
+    #[test]
+    fn a_selection_step_undoes_and_redoes() {
+        let mut p = Project::new(8, 8, 12.0);
+        let mut h = History::default();
+        h.push(Command::Selection {
+            before: None,
+            after: Some(rect(2, 3).pack()),
+        });
+        assert_eq!(selection_of(h.undo(&mut p)), None);
+        assert_eq!(selection_of(h.redo(&mut p)), Some(rect(2, 3)));
+    }
+
+    /// A compound undoes its parts last-first, so a later part that depends on
+    /// an earlier one is always taken back before it.
+    #[test]
+    fn a_compound_undoes_in_reverse() {
+        let mut p = Project::new(8, 8, 12.0);
+        let id = p.ensure_active_cell();
+        let mut h = History::default();
+        h.push(Command::Compound(vec![
+            Command::PixelPatch {
+                cell: id,
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+                before: vec![0, 0, 0, 0],
+                after: vec![9, 9, 9, 255],
+            },
+            Command::Selection {
+                before: Some(rect(0, 1).pack()),
+                after: Some(rect(5, 1).pack()),
+            },
+        ]));
+        match h.undo(&mut p) {
+            Some(Touched::Many(v)) => {
+                assert!(matches!(&v[0], Touched::Selection(Some(m)) if m.x == 0));
+                assert!(matches!(v[1], Touched::Cell(c) if c == id));
+            }
+            _ => panic!("expected a compound"),
+        }
+        assert_eq!(&p.cells[id].pixels[..4], &[0, 0, 0, 0]);
+        match h.redo(&mut p) {
+            Some(Touched::Many(v)) => {
+                assert!(matches!(v[0], Touched::Cell(_)));
+                assert!(matches!(&v[1], Touched::Selection(Some(m)) if m.x == 5));
+            }
+            _ => panic!("expected a compound"),
+        }
+        assert_eq!(&p.cells[id].pixels[..4], &[9, 9, 9, 255]);
+    }
 }

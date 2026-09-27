@@ -20,8 +20,11 @@
 //! The rasterize/composite split is deliberate: a wgpu compute port replaces
 //! the internals of this module without touching the stroke input model.
 
+use std::sync::Arc;
+
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::tools::dab::Dab;
+use crate::tools::lasso::Mask;
 use crate::tools::paper::paper;
 use crate::tools::{BrushMode, BrushSettings};
 
@@ -83,6 +86,11 @@ pub struct StrokeWorkspace {
     grain_scale: f32,
     /// How a new stamp combines with the coverage already there.
     build_up: bool,
+    /// The selection, in this canvas's pixel space, that the stroke is held
+    /// to — `None` paints freely. Set after `begin()`, which clears it, and
+    /// constant for the whole stroke: that is what keeps incremental
+    /// compositing exact under a clip.
+    clip: Option<Arc<Mask>>,
 }
 
 impl StrokeWorkspace {
@@ -97,6 +105,7 @@ impl StrokeWorkspace {
             grain: 0.0,
             grain_scale: 1.5,
             build_up: false,
+            clip: None,
         }
     }
 
@@ -119,6 +128,37 @@ impl StrokeWorkspace {
         self.grain = brush.grain.clamp(0.0, 1.0);
         self.grain_scale = brush.grain_scale.max(0.05);
         self.build_up = brush.mode == BrushMode::Dab;
+        self.clip = None;
+    }
+
+    /// Hold the stroke begun by the last `begin()` to `clip`. An empty mask
+    /// (`w == 0`) means nothing on this canvas may change.
+    pub fn set_clip(&mut self, clip: Option<Arc<Mask>>) {
+        self.clip = clip;
+    }
+
+    /// `rect` cut down to the clip's box — outside it nothing is composited,
+    /// so those pixels still equal `pre`. `None` when nothing is left.
+    fn clipped(&self, rect: DirtyRect) -> Option<DirtyRect> {
+        let Some(m) = &self.clip else {
+            return Some(rect);
+        };
+        let r = DirtyRect {
+            min_x: rect.min_x.max(m.x),
+            min_y: rect.min_y.max(m.y),
+            max_x: rect.max_x.min(m.x + m.w),
+            max_y: rect.max_y.min(m.y + m.h),
+        };
+        (r.max_x > r.min_x && r.max_y > r.min_y).then_some(r)
+    }
+
+    /// Selection coverage at a pixel as a 0..=1 factor on the stroke's alpha.
+    #[inline]
+    fn clip_at(&self, x: u32, y: u32) -> f32 {
+        match &self.clip {
+            None => 1.0,
+            Some(m) => m.at(x, y) as f32 / 255.0,
+        }
     }
 
     /// Falloff mask for distance `d` from the spine given the local outer
@@ -366,6 +406,9 @@ impl StrokeWorkspace {
     ) {
         let opacity = opacity.clamp(0.0, 1.0);
         let (br, bg, bb) = (color[0] as f32, color[1] as f32, color[2] as f32);
+        let Some(rect) = self.clipped(rect) else {
+            return;
+        };
         for y in rect.min_y..rect.max_y.min(self.h) {
             let row = (y * self.w) as usize;
             for x in rect.min_x..rect.max_x.min(self.w) {
@@ -378,7 +421,11 @@ impl StrokeWorkspace {
                     // first — see `restore_pre`.
                     continue;
                 }
-                let a_src = cov as f32 / 65535.0 * opacity;
+                let k = self.clip_at(x, y);
+                if k <= 0.0 {
+                    continue;
+                }
+                let a_src = cov as f32 / 65535.0 * opacity * k;
                 let a_pre = pre[idx + 3] as f32 / 255.0;
                 let a_out = a_src + a_pre * (1.0 - a_src);
                 let dst = &mut canvas.pixels[idx..idx + 4];
@@ -406,6 +453,9 @@ impl StrokeWorkspace {
         strength: f32,
     ) {
         let strength = strength.clamp(0.0, 1.0);
+        let Some(rect) = self.clipped(rect) else {
+            return;
+        };
         for y in rect.min_y..rect.max_y.min(self.h) {
             let row = (y * self.w) as usize;
             for x in rect.min_x..rect.max_x.min(self.w) {
@@ -414,8 +464,12 @@ impl StrokeWorkspace {
                 if cov == 0 {
                     continue;
                 }
+                let k = self.clip_at(x, y);
+                if k <= 0.0 {
+                    continue;
+                }
                 let a_pre = pre[idx + 3] as f32 / 255.0;
-                let a_out = a_pre * (1.0 - cov as f32 / 65535.0 * strength);
+                let a_out = a_pre * (1.0 - cov as f32 / 65535.0 * strength * k);
                 let a8 = (a_out * 255.0).round() as u8;
                 let dst = &mut canvas.pixels[idx..idx + 4];
                 if a8 == 0 {
@@ -802,5 +856,137 @@ mod tests {
         ws.begin(64, 64, &brush);
         ws.raster_dot(node(28.0, 27.0, 10.0, 1.0));
         assert_eq!(ws.cov[30 * 64 + 34], from_here);
+    }
+
+    /// A left-half selection on a 64x64 canvas: coverage `k` for x < 32.
+    fn half_clip(k: u8) -> Arc<Mask> {
+        Arc::new(Mask {
+            x: 0,
+            y: 0,
+            w: 32,
+            h: 64,
+            cov: vec![k; 32 * 64],
+        })
+    }
+
+    /// Paint a dot through `clip` onto a transparent canvas and return it.
+    fn painted_through(clip: Option<Arc<Mask>>) -> Canvas {
+        let mut canvas = Canvas::new(64, 64);
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        ws.set_clip(clip);
+        let r = ws.raster_dot(node(32.0, 32.0, 12.0, 1.0)).expect("dot");
+        ws.composite_paint(&mut canvas, &pre, r, [200, 10, 10, 255], 1.0);
+        canvas
+    }
+
+    fn alpha(c: &Canvas, x: u32, y: u32) -> u8 {
+        c.pixels[((y * c.width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn a_selection_holds_paint_to_its_inside() {
+        let c = painted_through(Some(half_clip(255)));
+        assert_eq!(alpha(&c, 26, 32), 255, "inside the selection");
+        assert_eq!(alpha(&c, 38, 32), 0, "outside the selection");
+    }
+
+    #[test]
+    fn a_full_selection_paints_like_no_selection() {
+        let free = painted_through(None);
+        let all = painted_through(Some(Arc::new(Mask {
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 64,
+            cov: vec![255; 64 * 64],
+        })));
+        assert_eq!(free.pixels, all.pixels);
+    }
+
+    #[test]
+    fn a_half_selected_pixel_takes_half_the_paint() {
+        let c = painted_through(Some(half_clip(128)));
+        let a = alpha(&c, 26, 32) as i32;
+        assert!((a - 128).abs() <= 2, "got {a}");
+    }
+
+    #[test]
+    fn an_empty_selection_changes_nothing() {
+        let c = painted_through(Some(Arc::new(Mask {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+            cov: Vec::new(),
+        })));
+        assert!(c.pixels.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn the_eraser_is_held_to_the_selection_too() {
+        let mut canvas = Canvas::new(64, 64);
+        for px in canvas.pixels.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0, 0, 0, 255]);
+        }
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        ws.set_clip(Some(half_clip(255)));
+        let r = ws.raster_dot(node(32.0, 32.0, 12.0, 1.0)).expect("dot");
+        ws.composite_erase(&mut canvas, &pre, r, 1.0);
+        assert_eq!(alpha(&canvas, 26, 32), 0, "erased inside");
+        assert_eq!(alpha(&canvas, 38, 32), 255, "kept outside");
+    }
+
+    #[test]
+    fn begin_forgets_the_last_strokes_selection() {
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        ws.set_clip(Some(half_clip(255)));
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        assert!(ws.clip.is_none());
+    }
+
+    /// Compositing each flush's rect as it comes must land exactly where one
+    /// composite of the whole stroke does, clip or no clip.
+    #[test]
+    fn clipped_incremental_compositing_matches_one_shot() {
+        let spine = [
+            node(8.0, 10.0, 5.0, 1.0),
+            node(30.0, 34.0, 7.0, 0.8),
+            node(56.0, 20.0, 4.0, 1.0),
+        ];
+        let clip = Arc::new(Mask {
+            x: 10,
+            y: 0,
+            w: 40,
+            h: 64,
+            cov: (0..40 * 64).map(|i| ((i % 40) * 6) as u8).collect(),
+        });
+
+        let mut inc = Canvas::new(64, 64);
+        let pre = inc.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(0.6, 0.0));
+        ws.set_clip(Some(clip.clone()));
+        let mut all = None;
+        for seg in spine.windows(2) {
+            if let Some(r) = ws.raster_capsule(seg[0], seg[1]) {
+                ws.composite_paint(&mut inc, &pre, r, [0, 90, 200, 255], 0.9);
+                all = Some(union_rect(all, r));
+            }
+        }
+
+        let mut once = Canvas::new(64, 64);
+        let mut ws2 = StrokeWorkspace::new();
+        ws2.begin(64, 64, &ribbon(0.6, 0.0));
+        ws2.set_clip(Some(clip));
+        for seg in spine.windows(2) {
+            ws2.raster_capsule(seg[0], seg[1]);
+        }
+        ws2.composite_paint(&mut once, &pre, all.expect("rect"), [0, 90, 200, 255], 0.9);
+        assert_eq!(inc.pixels, once.pixels);
     }
 }

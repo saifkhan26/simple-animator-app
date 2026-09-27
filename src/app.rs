@@ -1,8 +1,13 @@
 //! Top-level application state. Wires project (timeline + layers), tools, UI.
 
+mod select;
+
+pub use select::SelGesture;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +30,7 @@ use crate::timeline::playback::Playback;
 use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
 use crate::tools::perspective::{self, GridGrab, PerspectiveConfig};
+use crate::tools::select_mask::{SelOp, SelShape, SelectionMask};
 use crate::tools::selection::{Grab, Pose, Selection};
 use crate::tools::stroke::StrokeBuilder;
 use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
@@ -236,6 +242,15 @@ impl Default for View {
     }
 }
 
+/// The dimming wash over everything outside the selection.
+pub struct SelTint {
+    /// The `sel_ver` it was built for.
+    pub ver: u64,
+    /// Where it sits in the document: x0, y0, x1, y1.
+    pub rect: (f32, f32, f32, f32),
+    pub tex: TextureHandle,
+}
+
 /// Which non-drawing canvas gesture an in-flight drag is performing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NavKind {
@@ -303,6 +318,13 @@ struct UiPrefs {
     krita_path: Option<PathBuf>,
     /// Saved New project presets, in the order the artist made them.
     project_presets: Vec<ProjectPreset>,
+    /// What a selection drag draws, and the px a Grow / Shrink / Feather
+    /// takes. Workspace preferences, like the tool brushes.
+    sel_shape: SelShape,
+    sel_amount: u32,
+    /// Dim everything outside the selection. The switch persists, like the
+    /// other view guides.
+    tint_outside: bool,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -385,6 +407,9 @@ impl Default for UiPrefs {
             fade: FadeOthers::default(),
             krita_path: None,
             project_presets: Vec::new(),
+            sel_shape: SelShape::Freehand,
+            sel_amount: 4,
+            tint_outside: false,
         }
     }
 }
@@ -643,9 +668,37 @@ pub struct AppState {
     blank_cache: HashMap<CellId, bool>,
     /// Blank scans still allowed this frame; see `cell_is_blank`.
     blank_scans_left: u32,
-    /// Floating lasso selection, if any. Bound to one cell: changing frame or
-    /// layer commits it first.
+    /// The selection, in document space: what every paint edit is clipped to.
+    /// Belongs to no drawing, so it survives frame and layer changes. `None`
+    /// when nothing is selected. Session-only; see `app::select`.
+    pub sel_mask: Option<SelectionMask>,
+    /// Bumped whenever `sel_mask` changes; keys everything derived from it.
+    pub sel_ver: u64,
+    /// Marching-ants loops of `sel_mask`, in document space.
+    pub sel_outline: Vec<Vec<(f32, f32)>>,
+    /// The active cell's view of `sel_mask`, and what it was built for.
+    clip_cache: Option<(select::ClipKey, Arc<Mask>)>,
+    /// Selection gesture in progress (lasso, box, ellipse, polygon).
+    pub sel_gesture: Option<SelGesture>,
+    /// Sticky selection mode; a held modifier overrides it for one drag.
+    pub sel_op: SelOp,
+    /// What a selection drag draws.
+    pub sel_shape: SelShape,
+    /// Pixels a Grow / Shrink / Feather takes.
+    pub sel_amount: u32,
+    /// Dim everything outside the selection.
+    pub tint_outside: bool,
+    /// The tint texture over what is not selected.
+    pub sel_tint: Option<SelTint>,
+    /// Floating pixels lifted through the selection, if any. Bound to one
+    /// cell: changing frame or layer lands them first.
     pub selection: Option<Selection>,
+    /// The float's cell as it was before the lift, so landing records lift
+    /// and stamp as one step and an undo while floating can put it back.
+    float_pre: Vec<u8>,
+    float_pre_live: bool,
+    /// Where the lift erased.
+    float_lift_rect: Option<DirtyRect>,
     /// In-flight drag on the selection's transform box, or `None`.
     sel_drag: Option<SelDrag>,
     /// Selection clipboard: mask plus lifted pixels.
@@ -663,9 +716,6 @@ pub struct AppState {
     pub stroke_target: Option<CellId>,
     /// In-progress Shape-tool drag (preview only until pointer-up).
     pub shape_drag: Option<ShapeDrag>,
-    /// In-progress Lasso path in active-cell pixel space. Preview only; the
-    /// enclosed pixels are erased on pointer-up.
-    pub lasso: Option<Vec<(f32, f32)>>,
     /// Shift state, sampled once a frame. Pointer handlers run off tablet
     /// packets rather than egui events, so they have no `InputState` of their
     /// own to ask; a selection scale reads this for its uniform constraint.
@@ -963,7 +1013,20 @@ impl AppState {
             track_timing_n: 2,
             blank_cache: HashMap::new(),
             blank_scans_left: 0,
+            sel_mask: None,
+            sel_ver: 0,
+            sel_outline: Vec::new(),
+            clip_cache: None,
+            sel_gesture: None,
+            sel_op: SelOp::Replace,
+            sel_shape: prefs.sel_shape,
+            sel_amount: prefs.sel_amount.max(1),
+            tint_outside: prefs.tint_outside,
+            sel_tint: None,
             selection: None,
+            float_pre: Vec::new(),
+            float_pre_live: false,
+            float_lift_rect: None,
             sel_drag: None,
             pixel_clip: None,
             sel_tex_stale: false,
@@ -972,7 +1035,6 @@ impl AppState {
             stroke: None,
             stroke_target: None,
             shape_drag: None,
-            lasso: None,
             shift_held: false,
             perspective: prefs.perspective,
             grid_drag: None,
@@ -1087,7 +1149,7 @@ impl AppState {
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
-        self.lasso = None;
+        self.clear_selection_state();
         self.view = View::default();
         // Republished by the canvas next frame; kept in step with `view` so a
         // reset never leaves a stale scale behind for one frame of input.
@@ -1342,6 +1404,12 @@ impl AppState {
                     self.mark_dirty(id);
                 }
             }
+            Some(undo::Touched::Selection(m)) => self.set_mask(m, false),
+            Some(undo::Touched::Many(all)) => {
+                for t in all {
+                    self.apply_touched(Some(t));
+                }
+            }
             Some(undo::Touched::Structure) | None => {}
         }
     }
@@ -1365,6 +1433,8 @@ impl AppState {
     /// All other structural edits leave the cell pool intact, so a cheap
     /// `TimelineState` snapshot is enough.
     pub fn structural_edit(&mut self, capture_cells: bool, edit: impl FnOnce(&mut Project)) {
+        // Floating pixels belong to a cell that may be about to move.
+        self.land_float();
         // Keys may move under the track selection; the track edits that want
         // one re-select after this returns.
         self.track_sel.clear();
@@ -2073,6 +2143,8 @@ impl AppState {
         if self.active_layer_locked() {
             return;
         }
+        // The float's cell is about to be re-padded under it.
+        self.land_float();
         // Each cell is one GPU texture; a side past the device limit can't be
         // uploaded at all.
         let (w, h) = (w.clamp(1, self.max_tex), h.clamp(1, self.max_tex));
@@ -2573,6 +2645,7 @@ impl AppState {
             _ => {}
         }
 
+        self.sync_tint(ctx);
         self.sync_ghosts(ctx, now);
         self.enforce_texture_budget();
     }
@@ -2764,11 +2837,12 @@ impl AppState {
         a.clamp(0.0, 1.0)
     }
 
-    pub fn pointer_down(&mut self, sample: PointerSample) {
-        self.playback.stop();
+    /// The cell a paint edit on the active slot should write to, allocating
+    /// it if the slot is empty. `None` on a locked or reference layer.
+    fn begin_edit_cell(&mut self) -> Option<CellId> {
         if let Some(layer) = self.project.layers.get(self.project.current_layer) {
             if layer.locked || layer.reference {
-                return;
+                return None;
             }
         }
         // Auto-key: break the hold first, so the stroke starts a drawing of
@@ -2790,7 +2864,17 @@ impl AppState {
                 });
             }
         }
-        let target = self.project.ensure_active_cell();
+        Some(self.project.ensure_active_cell())
+    }
+
+    pub fn pointer_down(&mut self, sample: PointerSample) {
+        self.playback.stop();
+        // Put floating pixels down first: a stroke is held to the selection
+        // where it now is, and must not paint under pixels about to land.
+        self.land_float();
+        let Some(target) = self.begin_edit_cell() else {
+            return;
+        };
         self.stroke_target = Some(target);
 
         // Snapshot pre-stroke state so undo can roll back the dirty sub-rect.
@@ -2809,49 +2893,23 @@ impl AppState {
                 (c.width, c.height)
             };
             let boundary = self.fill_boundary(self.project.current_layer, cw, ch);
+            let clip = self.active_cell_clip();
             if let Some(c) = self.project.cell_mut(target) {
-                crate::tools::fill::flood(
+                crate::tools::fill::flood_clipped(
                     c,
                     boundary.as_ref(),
                     sample.x.round() as i32,
                     sample.y.round() as i32,
                     opts,
+                    clip.as_deref(),
                 );
             }
-            self.commit_undo(target);
             self.mark_dirty(target);
-            self.painted(target);
+            if self.commit_undo(target) {
+                self.painted(target);
+            }
             self.stroke = None;
             self.stroke_target = None;
-            return;
-        }
-
-        if self.tool == ActiveTool::Lasso {
-            // Pressing on the transform box scales or rotates, inside it moves,
-            // anywhere else commits it and starts a new lasso. The handle
-            // tolerance is a fixed screen size divided back out by the view, so
-            // handles stay the same size to grab at any zoom.
-            let tol = crate::tools::selection::HANDLE_PX / self.cell_view_scale();
-            let grabbed = self
-                .selection
-                .as_ref()
-                .and_then(|s| s.grab_at(sample.x, sample.y, tol).map(|g| (g, s.pose)));
-            if let Some((grab, pose)) = grabbed {
-                self.sel_drag = Some(SelDrag {
-                    grab,
-                    start: (sample.x, sample.y),
-                    pose,
-                });
-                self.stroke = None;
-                self.stroke_pre_live = false;
-                return;
-            }
-            self.commit_selection();
-            // Collect the path; the enclosed pixels become a selection on
-            // pointer-up. Preview is drawn by egui shapes in `paint_canvas`.
-            self.lasso = Some(vec![(sample.x, sample.y)]);
-            self.stroke = None;
-            self.stroke_pre_live = false;
             return;
         }
 
@@ -2873,6 +2931,8 @@ impl AppState {
         };
         self.stroke_ws
             .begin(cw, ch, &self.brush);
+        let clip = self.active_cell_clip();
+        self.stroke_ws.set_clip(clip);
 
         // Resolve the radius and the view scale once, here: a stroke must not
         // change width or smoothing behaviour partway through if the view moves.
@@ -2901,22 +2961,6 @@ impl AppState {
             drag.end = (sample.x, sample.y);
             return;
         }
-        if let Some(drag) = self.sel_drag {
-            self.drag_selection(drag, sample.x, sample.y);
-            return;
-        }
-        if let Some(path) = &mut self.lasso {
-            // Decimate: a pen emits far more samples than the polygon needs,
-            // and every extra vertex costs an edge test on every scanline.
-            let far = path
-                .last()
-                .map(|&(x, y)| (sample.x - x).hypot(sample.y - y) >= 1.0)
-                .unwrap_or(true);
-            if far {
-                path.push((sample.x, sample.y));
-            }
-            return;
-        }
         let Some(builder) = &mut self.stroke else {
             return;
         };
@@ -2933,28 +2977,16 @@ impl AppState {
     }
 
     pub fn pointer_up(&mut self) {
-        // The transform-box drag ends with the press that started it. Leaving
-        // it set would let the next drag — with any tool — keep posing the
-        // selection that is still floating.
-        self.sel_drag = None;
         self.grid_drag = None;
         self.snap_lock = None;
         let Some(target) = self.stroke_target.take() else {
             self.stroke = None;
             self.shape_drag = None;
-            self.lasso = None;
             self.stroke_pre_live = false;
             self.preview_upload_rect = None;
             return;
         };
-        if let Some(path) = self.lasso.take() {
-            // The lasso now *selects* rather than erasing outright — Delete on
-            // the selection is the erase.
-            self.stroke_pre_live = false;
-            self.preview_upload_rect = None;
-            self.begin_selection(target, path);
-            return;
-        }
+        let mut paints = false;
         if let Some(drag) = self.shape_drag.take() {
             // Rasterise the final shape now; undo records the dirty rect below.
             let mut brush = self.brush.clone();
@@ -2964,6 +2996,8 @@ impl AppState {
                 (c.width, c.height)
             };
             self.stroke_ws.begin(cw, ch, &brush);
+            let clip = self.active_cell_clip();
+            self.stroke_ws.set_clip(clip);
             if let (Some(pre), Some(c)) = (
                 self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
                 self.project.cell_mut(target),
@@ -2979,7 +3013,7 @@ impl AppState {
                 );
             }
             self.mark_dirty(target);
-            self.painted(target);
+            paints = true;
         } else if let Some(mut builder) = self.stroke.take() {
             if let (Some(pre), Some(c)) = (
                 self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
@@ -2988,14 +3022,16 @@ impl AppState {
                 builder.finish(c, &mut self.stroke_ws, pre);
             }
             self.mark_dirty(target);
-            if self.tool != ActiveTool::Eraser {
-                self.painted(target);
-            }
+            paints = self.tool != ActiveTool::Eraser;
         }
         // Any pending partial upload is superseded by the stroke's own rect,
         // which the dirty mark above uploads now that the stroke ended.
         self.preview_upload_rect = None;
-        self.commit_undo(target);
+        // Only a stroke that changed something marks the drawing as painted:
+        // one the selection clipped away entirely left the cell as it was.
+        if self.commit_undo(target) && paints {
+            self.painted(target);
+        }
     }
 
     /// Snapshot `cell`'s pixels as they are before an edit, for the stroke
@@ -3010,20 +3046,30 @@ impl AppState {
     }
 
     /// Push a PixelPatch covering the dirty rect accumulated since the last
-    /// `stroke_pre_pixels` snapshot.
-    fn commit_undo(&mut self, cell: CellId) {
+    /// `stroke_pre_pixels` snapshot. `true` if anything changed.
+    fn commit_undo(&mut self, cell: CellId) -> bool {
+        match self.take_patch(cell) {
+            Some(cmd) => {
+                self.history.push(cmd);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The PixelPatch `commit_undo` would push, for a caller that records it
+    /// as part of something larger. `None` when the edit changed nothing.
+    fn take_patch(&mut self, cell: CellId) -> Option<undo::Command> {
         if !std::mem::take(&mut self.stroke_pre_live) {
-            return;
+            return None;
         }
         let pre = &self.stroke_pre_pixels;
-        let canvas = &self.project.cells[cell];
-        let Some(rect) = canvas.dirty else {
-            return;
-        };
+        let canvas = self.project.cells.get(cell)?;
+        let rect = canvas.dirty?;
         let w = rect.max_x.saturating_sub(rect.min_x);
         let h = rect.max_y.saturating_sub(rect.min_y);
         if w == 0 || h == 0 {
-            return;
+            return None;
         }
 
         let before = subrect_from_buffer(pre, canvas.width, rect.min_x, rect.min_y, w, h);
@@ -3031,10 +3077,10 @@ impl AppState {
 
         // Skip recording no-op strokes (before == after).
         if before == after {
-            return;
+            return None;
         }
 
-        self.history.push(undo::Command::PixelPatch {
+        Some(undo::Command::PixelPatch {
             cell,
             x: rect.min_x,
             y: rect.min_y,
@@ -3042,7 +3088,7 @@ impl AppState {
             h,
             before,
             after,
-        });
+        })
     }
 
     /// Enter live screen-pick mode, arming so the press that opened the mode is
@@ -3066,9 +3112,9 @@ impl AppState {
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
-        self.lasso = None;
+        self.cancel_gesture();
         self.preview_upload_rect = None;
-        self.commit_selection();
+        self.land_float();
     }
 
     /// Leave screen-pick mode. Does not change the colour, tool or backdrop —
@@ -3179,9 +3225,6 @@ impl AppState {
 
     /// Run a track edit as one undo step, then select what it hands back.
     fn track_edit(&mut self, edit: impl FnOnce(&mut Project) -> Vec<(usize, usize)>) {
-        // Same as a paste: floating pixels belong to a cell that may be about
-        // to move.
-        self.commit_selection();
         let mut selected = Vec::new();
         self.structural_edit(false, |p| selected = edit(p));
         self.track_sel = selected.into_iter().collect();
@@ -3278,120 +3321,6 @@ impl AppState {
             .get(self.project.current_layer)
             .map(|l| l.reference)
             .unwrap_or(false)
-    }
-
-    // --- Lasso selection ---
-
-    /// Write a floating selection back into its cell and drop it. Safe to call
-    /// when there is nothing selected.
-    ///
-    /// One undo entry: the stamp is snapshotted and committed on its own, so an
-    /// undo of a move puts the pixels back where the lift left them, and a
-    /// second undo restores the lift.
-    pub fn commit_selection(&mut self) {
-        let Some(sel) = self.selection.take() else {
-            return;
-        };
-        self.sel_drag = None;
-        if let Some(old) = self.selection_tex.take() {
-            self.retired_textures.push(old);
-        }
-        // Never lifted means never moved: the cell was left untouched, so there
-        // is nothing to write back and nothing to record.
-        if !sel.lifted {
-            return;
-        }
-        let cell = sel.cell;
-        if self.project.cell(cell).is_none() {
-            return;
-        }
-        self.snapshot_pre(cell);
-        if let Some(c) = self.project.cell_mut(cell) {
-            c.dirty = None;
-            sel.stamp(c);
-        }
-        self.mark_dirty(cell);
-        self.commit_undo(cell);
-    }
-
-    /// Start a selection from a finished lasso path on `cell`.
-    fn begin_selection(&mut self, cell: CellId, path: Vec<(f32, f32)>) {
-        let Some(canvas) = self.project.cell(cell) else {
-            return;
-        };
-        let Some(mask) = crate::tools::lasso::coverage(&path, canvas.width, canvas.height) else {
-            return;
-        };
-        self.selection = Some(Selection::new(cell, canvas, mask, path));
-        self.sel_tex_stale = true;
-    }
-
-    /// Erase the selected pixels and drop the selection.
-    pub fn delete_selection(&mut self) {
-        let Some(sel) = self.selection.take() else {
-            return;
-        };
-        self.sel_drag = None;
-        if let Some(old) = self.selection_tex.take() {
-            self.retired_textures.push(old);
-        }
-        // Already lifted: the pixels left the cell when the move started, so
-        // dropping the float *is* the delete, and the lift's own undo entry
-        // covers it.
-        if sel.lifted {
-            return;
-        }
-        let cell = sel.cell;
-        if self.project.cell(cell).is_none() {
-            return;
-        }
-        self.snapshot_pre(cell);
-        if let Some(c) = self.project.cell_mut(cell) {
-            c.dirty = None;
-            crate::tools::lasso::erase_masked(c, &sel.mask);
-        }
-        self.mark_dirty(cell);
-        self.commit_undo(cell);
-    }
-
-    /// Copy the floating pixels to the selection clipboard.
-    ///
-    /// A scaled or rotated selection is baked first: what the user is looking
-    /// at is what they expect to paste. A pixel-aligned one keeps its pristine
-    /// buffer, so an ordinary copy still costs nothing and loses nothing.
-    pub fn copy_selection(&mut self) {
-        if let Some(sel) = &self.selection {
-            self.pixel_clip = Some(
-                sel.bake()
-                    .unwrap_or_else(|| (sel.mask.clone(), sel.pixels.clone())),
-            );
-        }
-    }
-
-    /// Drop the clipboard pixels onto the current cell as a new floating
-    /// selection, so it can be positioned before it commits. Works across
-    /// frames and layers, since it targets whatever cell is active now.
-    pub fn paste_selection(&mut self) {
-        let Some((mask, pixels)) = self.pixel_clip.clone() else {
-            return;
-        };
-        if self.active_layer_locked() || self.active_layer_is_reference() {
-            return;
-        }
-        self.commit_selection();
-        let cell = self.project.ensure_active_cell();
-        let path = crate::tools::selection::outline_rect(&mask);
-        // Already lifted: these pixels came from the clipboard, not from this
-        // cell, so there is no source region to erase.
-        self.selection = Some(Selection {
-            cell,
-            mask,
-            pixels,
-            pose: Pose::default(),
-            path,
-            lifted: true,
-        });
-        self.sel_tex_stale = true;
     }
 
     /// Give the perspective tool something to edit: selecting it with every
@@ -3508,98 +3437,6 @@ impl AppState {
             }
         };
         perspective::project(lock.start, dir, p)
-    }
-
-    /// Nudge a floating selection by whole pixels (arrow keys, and the plain
-    /// drag). Stays integral, so a move alone never reaches the resampler.
-    pub fn nudge_selection(&mut self, dx: i32, dy: i32) {
-        let Some(sel) = self.selection.as_mut() else {
-            return;
-        };
-        sel.pose.offset.0 += dx as f32;
-        sel.pose.offset.1 += dy as f32;
-        self.touch_selection();
-    }
-
-    /// Apply a transform-box drag to the floating selection.
-    ///
-    /// A move accumulates in whole pixels, exactly as it always has — the drag
-    /// anchor walks with the pointer and sub-pixel remainders are dropped, so
-    /// dragging a selection around is still lossless. A scale or rotation is
-    /// re-solved from the pose recorded at the press, so it depends only on
-    /// where the pointer is now.
-    fn drag_selection(&mut self, drag: SelDrag, x: f32, y: f32) {
-        if let Grab::Move = drag.grab {
-            let (dx, dy) = (
-                (x - drag.start.0).round() as i32,
-                (y - drag.start.1).round() as i32,
-            );
-            if dx == 0 && dy == 0 {
-                return;
-            }
-            if let Some(d) = self.sel_drag.as_mut() {
-                d.start = (x, y);
-            }
-            self.nudge_selection(dx, dy);
-            return;
-        }
-        let uniform = self.shift_held;
-        let Some(sel) = self.selection.as_mut() else {
-            return;
-        };
-        let pose = drag
-            .pose
-            .dragged(&sel.mask, drag.grab, drag.start, (x, y), uniform);
-        if pose == sel.pose {
-            return;
-        }
-        sel.pose = pose;
-        self.touch_selection();
-    }
-
-    /// Note that the floating selection has been posed, erasing the source
-    /// behind it the first time that happens. Shared by every gesture, so a
-    /// first *rotate* lifts exactly like a first move does.
-    fn touch_selection(&mut self) {
-        let Some(sel) = self.selection.as_ref() else {
-            return;
-        };
-        if sel.lifted {
-            return;
-        }
-        let cell = sel.cell;
-        self.lift_selection_source(cell);
-    }
-
-    /// Erase the source region behind a selection and record it, once.
-    fn lift_selection_source(&mut self, cell: CellId) {
-        if self.project.cell(cell).is_none() {
-            return;
-        }
-        self.snapshot_pre(cell);
-        let mut sel = match self.selection.take() {
-            Some(s) => s,
-            None => return,
-        };
-        if let Some(c) = self.project.cell_mut(cell) {
-            c.dirty = None;
-            sel.lift_source(c);
-        }
-        self.selection = Some(sel);
-        self.mark_dirty(cell);
-        self.commit_undo(cell);
-    }
-
-    /// Commit a floating selection whose cell is no longer the active one —
-    /// scrubbing to another frame must not leave pixels hovering over a
-    /// drawing they do not belong to.
-    fn commit_selection_if_orphaned(&mut self) {
-        let Some(sel) = &self.selection else {
-            return;
-        };
-        if self.project.resolved_current() != Some(sel.cell) {
-            self.commit_selection();
-        }
     }
 
     /// Most swatches kept. Past this the oldest is dropped, so the strip stays
@@ -3756,27 +3593,10 @@ impl AppState {
 
     pub fn dispatch(&mut self, action: Action) {
         match action {
-            Action::ToolPencil => {
-                self.commit_selection();
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::Pencil;
-                self.brush = self.tool_brushes[ActiveTool::Pencil.idx()].clone();
-            }
-            Action::ToolInk => {
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::Ink;
-                self.brush = self.tool_brushes[ActiveTool::Ink.idx()].clone();
-            }
-            Action::ToolEraser => {
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::Eraser;
-                self.brush = self.tool_brushes[ActiveTool::Eraser.idx()].clone();
-            }
-            Action::ToolFill => {
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::Fill;
-                self.brush = self.tool_brushes[ActiveTool::Fill.idx()].clone();
-            }
+            Action::ToolPencil => self.set_tool(ActiveTool::Pencil),
+            Action::ToolInk => self.set_tool(ActiveTool::Ink),
+            Action::ToolEraser => self.set_tool(ActiveTool::Eraser),
+            Action::ToolFill => self.set_tool(ActiveTool::Fill),
             // Retired: the in-canvas eyedropper was folded into PickScreenColor,
             // which samples the canvas as well as everything behind the window.
             // The variant survives only so an old shortcuts.toml still parses.
@@ -3788,28 +3608,10 @@ impl AppState {
                     self.begin_screen_pick();
                 }
             }
-            Action::ToolShape => {
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::Shape;
-                self.brush = self.tool_brushes[ActiveTool::Shape.idx()].clone();
-            }
-            Action::ToolTracker => {
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::Tracker;
-                self.brush = self.tool_brushes[ActiveTool::Tracker.idx()].clone();
-            }
-            Action::ToolLasso => {
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::Lasso;
-                self.brush = self.tool_brushes[ActiveTool::Lasso.idx()].clone();
-            }
-            Action::ToolPerspective => {
-                self.commit_selection();
-                self.tool_brushes[self.tool.idx()] = self.brush.clone();
-                self.tool = ActiveTool::Perspective;
-                self.brush = self.tool_brushes[ActiveTool::Perspective.idx()].clone();
-                self.ensure_perspective_grid();
-            }
+            Action::ToolShape => self.set_tool(ActiveTool::Shape),
+            Action::ToolTracker => self.set_tool(ActiveTool::Tracker),
+            Action::ToolLasso => self.set_tool(ActiveTool::Lasso),
+            Action::ToolPerspective => self.set_tool(ActiveTool::Perspective),
             Action::TogglePerspectiveGrid => {
                 self.perspective.show = !self.perspective.show;
             }
@@ -3890,14 +3692,7 @@ impl AppState {
             }
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
-            Action::ClearCell => {
-                if let Some(id) = self.project.resolved_current() {
-                    if let Some(c) = self.project.cell_mut(id) {
-                        c.clear();
-                    }
-                    self.mark_dirty(id);
-                }
-            }
+            Action::ClearCell => self.clear_active(),
             Action::PasteImage => self.paste_image_as_background(),
             Action::ToggleCheckerBg => self.show_checker = !self.show_checker,
             Action::TogglePanels => self.show_panels = !self.show_panels,
@@ -3926,7 +3721,10 @@ impl AppState {
             Action::SelectionDelete => self.delete_selection(),
             Action::TrackClear => self.clear_track_selection(),
             Action::TrackCloseGap => self.close_track_selection(),
-            Action::SelectionDeselect => self.commit_selection(),
+            Action::SelectionDeselect => self.deselect(),
+            Action::SelectAll => self.select_all(),
+            Action::SelectInvert => self.select_invert(),
+            Action::SelectionFill => self.fill_selection(),
             Action::SaveProject => self.save_project(),
             Action::SaveProjectAs => self.save_project_as(),
             Action::OpenProject => match crate::io::project_file::load_dialog() {
@@ -3936,7 +3734,12 @@ impl AppState {
             },
             // Canvas nav gestures are modifier-only drag binds, handled directly
             // in the canvas input code — never dispatched as press actions.
-            Action::CanvasZoom | Action::CanvasPan | Action::CanvasRotate => {}
+            Action::CanvasZoom
+            | Action::CanvasPan
+            | Action::CanvasRotate
+            | Action::SelModeAdd
+            | Action::SelModeSubtract
+            | Action::SelModeIntersect => {}
             Action::LayerTransformToggle => self.layer_xform = !self.layer_xform,
             Action::TransformKeyAdd => self.add_transform_key(),
             Action::TransformKeyDelete => self.delete_transform_key(),
@@ -4069,7 +3872,7 @@ impl AppState {
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
-        self.lasso = None;
+        self.clear_selection_state();
         self.stroke_pre_live = false;
         self.preview_upload_rect = None;
         self.history = History::default();
@@ -4089,12 +3892,29 @@ impl AppState {
 
     pub fn undo(&mut self) {
         self.track_sel.clear();
+        // Back out of whatever is in hand before touching the history: a
+        // polygon loses its newest corner, and floating pixels go back where
+        // they were picked up — nothing about them is recorded yet.
+        if self.polygon_back() {
+            return;
+        }
+        self.cancel_gesture();
+        if self.cancel_float() {
+            return;
+        }
         let touched = self.history.undo(&mut self.project);
         self.apply_touched(touched);
     }
 
     pub fn redo(&mut self) {
         self.track_sel.clear();
+        self.cancel_gesture();
+        // Landing a float is a new edit, and like any other it ends the redo
+        // chain; there is nothing left to redo after it.
+        if self.selection.is_some() {
+            self.land_float();
+            return;
+        }
         let touched = self.history.redo(&mut self.project);
         self.apply_touched(touched);
     }
@@ -4209,38 +4029,68 @@ impl AppState {
             // allowed through so the user can recover panels if focus is stuck.
             if ctx.memory(|m| m.focused()).is_none() {
                 let actions = self.shortcuts.poll_actions(ctx);
-                // Delete is both the pixel selection's erase and the tracks'
-                // delete. Decided once, before either runs: the erase drops
-                // the pixel selection, which would otherwise let the tracks'
-                // delete fire on the same press.
-                let pixel_sel = self.selection.is_some();
+                // Delete is both the selection's erase and the tracks'
+                // delete. Decided once, before either runs: drawings selected
+                // in the tracks claim it, and otherwise the selection does —
+                // a selection can now stay up for as long as the user likes,
+                // so it cannot be the one to win whenever it exists.
+                let tracks_own_delete = !self.track_sel.is_empty();
+                // Backspace takes back a polygon corner while one is being
+                // placed, rather than clearing the drawing under it.
+                let polygon = self.polygon_active();
                 for a in actions {
-                    if pixel_sel && a == Action::TrackClear {
-                        continue;
+                    match a {
+                        Action::TrackClear if !tracks_own_delete => continue,
+                        Action::SelectionDelete if tracks_own_delete => continue,
+                        Action::ClearCell if polygon => {
+                            self.polygon_back();
+                            continue;
+                        }
+                        _ => {}
                     }
                     self.dispatch(a);
                 }
-                // Esc backs out of the tracks one step at a time: a drag in
-                // progress first, then the selection.
-                if ctx.input(|i| i.key_pressed(egui::Key::Escape))
-                    && self.track_drag.take().is_none()
-                {
-                    self.track_sel.clear();
-                }
-                // Arrow keys nudge a floating selection by a pixel. Not bound
-                // actions: they only mean anything while something is selected,
-                // and stealing the arrows outright would be worse.
-                if self.selection.is_some() {
-                    let (mut dx, mut dy) = (0, 0);
-                    ctx.input(|i| {
-                        dx += i.key_pressed(egui::Key::ArrowRight) as i32;
-                        dx -= i.key_pressed(egui::Key::ArrowLeft) as i32;
-                        dy += i.key_pressed(egui::Key::ArrowDown) as i32;
-                        dy -= i.key_pressed(egui::Key::ArrowUp) as i32;
-                    });
-                    if dx != 0 || dy != 0 {
-                        self.nudge_selection(dx, dy);
+                let (enter, escape) = ctx.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Enter),
+                        i.key_pressed(egui::Key::Escape),
+                    )
+                });
+                // Enter closes a polygon, or puts floating pixels down.
+                if enter {
+                    if self.polygon_active() {
+                        self.polygon_finish();
+                    } else {
+                        self.land_float();
                     }
+                }
+                // Esc backs out one step at a time: a polygon in progress, a
+                // drag in the tracks, the drawings selected there, and last
+                // the canvas selection.
+                if escape && !self.screen_pick {
+                    if self.cancel_gesture() || self.track_drag.take().is_some() {
+                    } else if !self.track_sel.is_empty() {
+                        self.track_sel.clear();
+                    } else {
+                        self.deselect();
+                    }
+                }
+                // Arrow keys nudge floating pixels by one. Not bound actions:
+                // they only mean anything while something is selected, and
+                // stealing the arrows outright would be worse. With only a
+                // selection, the Lasso lifts it first — as a drag inside would.
+                let (mut dx, mut dy) = (0, 0);
+                ctx.input(|i| {
+                    dx += i.key_pressed(egui::Key::ArrowRight) as i32;
+                    dx -= i.key_pressed(egui::Key::ArrowLeft) as i32;
+                    dy += i.key_pressed(egui::Key::ArrowDown) as i32;
+                    dy -= i.key_pressed(egui::Key::ArrowUp) as i32;
+                });
+                if (dx != 0 || dy != 0)
+                    && (self.selection.is_some()
+                        || (self.tool == ActiveTool::Lasso && self.make_float()))
+                {
+                    self.nudge_selection(dx, dy);
                 }
             } else {
                 if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
@@ -4312,6 +4162,9 @@ impl eframe::App for AppState {
                 fade: self.fade,
                 krita_path: self.krita_path.clone(),
                 project_presets: self.project_presets.clone(),
+                sel_shape: self.sel_shape,
+                sel_amount: self.sel_amount,
+                tint_outside: self.tint_outside,
             },
         );
     }
@@ -4391,7 +4244,7 @@ impl eframe::App for AppState {
 
         // Keep the active layer's transform edit buffer synced while scrubbing.
         self.sync_active_transform_buffer();
-        self.commit_selection_if_orphaned();
+        self.sync_selection();
         self.sync_camera_buffer();
 
         // Advance background import jobs / preview fetches without blocking.

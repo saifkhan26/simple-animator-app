@@ -70,6 +70,13 @@ pub enum Action {
     SelectionPaste,
     SelectionDelete,
     SelectionDeselect,
+    SelectAll,
+    SelectInvert,
+    SelectionFill,
+    // Selection modes (modifier-only binds: held as a selection drag starts).
+    SelModeAdd,
+    SelModeSubtract,
+    SelModeIntersect,
     // Timeline tracks: the drawings selected there.
     TrackClear,
     TrackCloseGap,
@@ -143,6 +150,12 @@ impl Action {
         Action::SelectionPaste,
         Action::SelectionDelete,
         Action::SelectionDeselect,
+        Action::SelectAll,
+        Action::SelectInvert,
+        Action::SelectionFill,
+        Action::SelModeAdd,
+        Action::SelModeSubtract,
+        Action::SelModeIntersect,
         Action::TrackClear,
         Action::TrackCloseGap,
         Action::SaveProject,
@@ -213,6 +226,12 @@ impl Action {
             Action::SelectionPaste => "Selection: paste",
             Action::SelectionDelete => "Selection: delete",
             Action::SelectionDeselect => "Selection: deselect",
+            Action::SelectAll => "Selection: select all",
+            Action::SelectInvert => "Selection: invert",
+            Action::SelectionFill => "Selection: fill with brush colour",
+            Action::SelModeAdd => "Selection: add to (drag)",
+            Action::SelModeSubtract => "Selection: remove from (drag)",
+            Action::SelModeIntersect => "Selection: intersect with (drag)",
             Action::TrackClear => "Timeline: delete drawings (leave blank)",
             Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
             Action::SaveProject => "Save project",
@@ -230,7 +249,33 @@ impl Action {
             Action::CameraLookThrough => "Look through camera",
         }
     }
+
+    /// Bound to a bare modifier combo held while a canvas drag starts, rather
+    /// than to a key press: the canvas gestures and the selection modes.
+    pub fn is_drag_modifier(self) -> bool {
+        matches!(
+            self,
+            Action::CanvasZoom
+                | Action::CanvasPan
+                | Action::CanvasRotate
+                | Action::SelModeAdd
+                | Action::SelModeSubtract
+                | Action::SelModeIntersect
+        )
+    }
 }
+
+/// Every bare-modifier combo a drag gesture can be bound to, in the order the
+/// settings picker lists them.
+pub const DRAG_MODIFIERS: [(bool, bool, bool); 7] = [
+    (true, false, false),
+    (false, true, false),
+    (false, false, true),
+    (true, true, false),
+    (true, false, true),
+    (false, true, true),
+    (true, true, true),
+];
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub struct KeyCombo {
@@ -471,6 +516,17 @@ impl Default for ShortcutMap {
         b.insert(Action::SelectionPaste, KeyCombo::ctrl(K::V));
         b.insert(Action::SelectionDelete, KeyCombo::plain(K::Delete));
         b.insert(Action::SelectionDeselect, KeyCombo::ctrl(K::D));
+        b.insert(Action::SelectAll, KeyCombo::ctrl(K::A));
+        b.insert(Action::SelectInvert, KeyCombo::ctrl_shift(K::I));
+        // Shift+ the Clear cell key: `matches` compares modifiers exactly, so
+        // this never also clears.
+        b.insert(Action::SelectionFill, KeyCombo::shift(K::Backspace));
+        // Selection modes, held as a selection drag starts. Shift alone pans
+        // and Alt alone rotates, so these take the combos nothing else uses;
+        // Shift+Alt intersecting is Krita's own.
+        b.insert(Action::SelModeAdd, KeyCombo::modifier_only(true, true, false));
+        b.insert(Action::SelModeSubtract, KeyCombo::modifier_only(true, false, true));
+        b.insert(Action::SelModeIntersect, KeyCombo::modifier_only(false, true, true));
         // Delete shares its key with the pixel selection's erase; a live pixel
         // selection claims the press (see the dispatch loop in `app`).
         b.insert(Action::TrackClear, KeyCombo::plain(K::Delete));
@@ -611,5 +667,72 @@ pub fn save(map: &ShortcutMap) {
             }
         }
         Err(e) => log::warn!("shortcut serialize failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The selection's bindings must not collide with anything else's — a
+    /// shared press fires both actions, and a shared held combo makes a
+    /// selection drag also pan or zoom.
+    #[test]
+    fn selection_defaults_clash_with_nothing() {
+        let map = ShortcutMap::default();
+        let ours = [
+            Action::SelectAll,
+            Action::SelectInvert,
+            Action::SelectionFill,
+            Action::SelModeAdd,
+            Action::SelModeSubtract,
+            Action::SelModeIntersect,
+        ];
+        for a in ours {
+            let c = map.get(a).expect("bound");
+            for (&b, &other) in &map.bindings {
+                if b != a {
+                    assert_ne!(c, other, "{a:?} and {b:?} share {}", c.display());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selection_modes_are_drag_modifiers_and_never_fire_as_presses() {
+        let map = ShortcutMap::default();
+        for a in [Action::SelModeAdd, Action::SelModeSubtract, Action::SelModeIntersect] {
+            assert!(a.is_drag_modifier());
+            assert!(map.get(a).is_some_and(|c| c.key.is_none()));
+        }
+        assert!(!Action::SelectAll.is_drag_modifier());
+    }
+
+    /// Shift+Backspace fills; it must not also clear the drawing it just
+    /// filled, which a loose modifier match would do.
+    #[test]
+    fn fill_selection_does_not_also_clear() {
+        let map = ShortcutMap::default();
+        let ctx = egui::Context::default();
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let mut fired = Vec::new();
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Backspace,
+                    physical_key: Some(egui::Key::Backspace),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: shift,
+                }],
+                modifiers: shift,
+                ..Default::default()
+            },
+            |ctx| fired = map.poll_actions(ctx),
+        );
+        assert_eq!(fired, vec![Action::SelectionFill]);
     }
 }

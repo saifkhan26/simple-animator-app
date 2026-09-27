@@ -12,6 +12,7 @@
 use std::collections::VecDeque;
 
 use crate::doc::canvas::Canvas;
+use crate::tools::lasso::Mask;
 
 /// Upper bound on the expand radius, matching the UI slider.
 const MAX_EXPAND: i32 = 8;
@@ -37,8 +38,26 @@ pub struct FillOptions {
 /// Note that with `expand > 0` the grown ring overwrites whatever is already on
 /// `canvas` within that many pixels of the region edge. That is the intended
 /// trade — the overwritten band normally sits underneath the line art.
+#[cfg(test)]
 pub fn flood(canvas: &mut Canvas, boundary: Option<&Canvas>, x: i32, y: i32, opts: FillOptions) {
+    flood_clipped(canvas, boundary, x, y, opts, None);
+}
+
+/// [`flood`] held to a selection: only pixels `clip` covers are written, a
+/// partly covered one is blended toward the fill colour by its coverage, and
+/// a click outside the selection does nothing.
+pub fn flood_clipped(
+    canvas: &mut Canvas,
+    boundary: Option<&Canvas>,
+    x: i32,
+    y: i32,
+    opts: FillOptions,
+    clip: Option<&Mask>,
+) {
     if x < 0 || y < 0 || x >= canvas.width as i32 || y >= canvas.height as i32 {
+        return;
+    }
+    if clip.is_some_and(|m| m.at(x as u32, y as u32) == 0) {
         return;
     }
     let w = canvas.width as i32;
@@ -80,8 +99,13 @@ pub fn flood(canvas: &mut Canvas, boundary: Option<&Canvas>, x: i32, y: i32, opt
     for yi in bbox.1..=bbox.3 {
         let row = yi * w;
         for xi in bbox.0..=bbox.2 {
-            if mask[(row + xi) as usize] {
-                write_px(canvas, xi, yi, opts.color);
+            if !mask[(row + xi) as usize] {
+                continue;
+            }
+            match clip.map(|m| m.at(xi as u32, yi as u32)) {
+                None | Some(255) => write_px(canvas, xi, yi, opts.color),
+                Some(0) => {}
+                Some(k) => blend_toward(canvas, xi, yi, opts.color, k as f32 / 255.0),
             }
         }
     }
@@ -91,6 +115,53 @@ pub fn flood(canvas: &mut Canvas, boundary: Option<&Canvas>, x: i32, y: i32, opt
         bbox.1 as u32,
         (bbox.2 - bbox.0 + 1) as u32,
         (bbox.3 - bbox.1 + 1) as u32,
+    );
+}
+
+/// Fill everything `mask` covers with `color` — Fill selection. Fully covered
+/// pixels are replaced, as the bucket does; a feathered edge blends. Returns
+/// whether anything was inside the canvas to fill.
+pub fn fill_masked(canvas: &mut Canvas, mask: &Mask, color: [u8; 4]) -> bool {
+    let (x1, y1) = (
+        (mask.x + mask.w).min(canvas.width),
+        (mask.y + mask.h).min(canvas.height),
+    );
+    if x1 <= mask.x || y1 <= mask.y {
+        return false;
+    }
+    for y in mask.y..y1 {
+        for x in mask.x..x1 {
+            match mask.at(x, y) {
+                0 => {}
+                255 => write_px(canvas, x as i32, y as i32, color),
+                k => blend_toward(canvas, x as i32, y as i32, color, k as f32 / 255.0),
+            }
+        }
+    }
+    canvas.mark_dirty(mask.x, mask.y, x1 - mask.x, y1 - mask.y);
+    true
+}
+
+/// Move a pixel `t` of the way toward `color`, lerping premultiplied so a
+/// half-covered pixel over transparency keeps the fill's own colour rather
+/// than going muddy.
+fn blend_toward(canvas: &mut Canvas, x: i32, y: i32, color: [u8; 4], t: f32) {
+    let p = read_px(canvas, x, y);
+    let (a0, a1) = (p[3] as f32 / 255.0, color[3] as f32 / 255.0);
+    let a = a0 + (a1 - a0) * t;
+    if a <= 0.0 {
+        write_px(canvas, x, y, [0, 0, 0, 0]);
+        return;
+    }
+    let ch = |i: usize| {
+        let v = (p[i] as f32 * a0 * (1.0 - t) + color[i] as f32 * a1 * t) / a;
+        v.round().clamp(0.0, 255.0) as u8
+    };
+    write_px(
+        canvas,
+        x,
+        y,
+        [ch(0), ch(1), ch(2), (a * 255.0).round().clamp(0.0, 255.0) as u8],
     );
 }
 
@@ -337,5 +408,51 @@ mod tests {
         target.dirty = None;
         flood(&mut target, None, 1, 1, opts(0));
         assert!(target.dirty.is_none(), "no-op fill must not dirty the cell");
+    }
+
+    /// Left half of a 16x16 canvas selected at coverage `k`.
+    fn left_half(k: u8) -> Mask {
+        Mask {
+            x: 0,
+            y: 0,
+            w: 8,
+            h: 16,
+            cov: vec![k; 8 * 16],
+        }
+    }
+
+    #[test]
+    fn a_selection_holds_the_fill_inside_it() {
+        let mut target = Canvas::new(16, 16);
+        flood_clipped(&mut target, None, 2, 8, opts(0), Some(&left_half(255)));
+        assert!(filled_at(&target, 7, 3));
+        assert!(!filled_at(&target, 8, 3), "past the selection edge");
+        assert_eq!(read_px(&target, 12, 3)[3], 0);
+    }
+
+    #[test]
+    fn a_click_outside_the_selection_fills_nothing() {
+        let mut target = Canvas::new(16, 16);
+        target.dirty = None;
+        flood_clipped(&mut target, None, 12, 8, opts(0), Some(&left_half(255)));
+        assert!(target.pixels.iter().all(|&b| b == 0));
+        assert!(target.dirty.is_none());
+    }
+
+    #[test]
+    fn a_feathered_selection_blends_the_fill() {
+        let mut target = Canvas::new(16, 16);
+        flood_clipped(&mut target, None, 2, 8, opts(0), Some(&left_half(128)));
+        let p = read_px(&target, 3, 3);
+        assert!((p[3] as i32 - 128).abs() <= 1, "alpha {}", p[3]);
+        assert_eq!(&p[..3], &RED[..3], "colour stays the fill's own");
+    }
+
+    #[test]
+    fn fill_selection_paints_only_the_mask() {
+        let mut target = Canvas::new(16, 16);
+        assert!(fill_masked(&mut target, &left_half(255), RED));
+        assert!(filled_at(&target, 0, 0) && filled_at(&target, 7, 15));
+        assert_eq!(read_px(&target, 8, 0)[3], 0);
     }
 }
