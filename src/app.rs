@@ -3962,110 +3962,16 @@ impl AppState {
         let touched = self.history.redo(&mut self.project);
         self.apply_touched(touched);
     }
-}
 
-impl eframe::App for AppState {
-    /// Called by eframe on exit and every `auto_save_interval` (30s). Panel
-    /// geometry and collapse state are saved separately via
-    /// `persist_egui_memory`, which defaults to true.
-    /// Last call before the process goes away. A save runs on a worker thread
-    /// now, so closing the window mid-write would drop it silently — wait for
-    /// it instead.
-    fn on_exit(&mut self) {
-        self.finish_pending_save();
-    }
-
-    /// Put back the Ctrl+C / X / V presses egui-winit turned into clipboard
-    /// events, so the selection shortcuts can see them.
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        crate::input::clipboard_keys::inject(raw_input);
-    }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(
-            storage,
-            UI_PREFS_KEY,
-            &UiPrefs {
-                show_panels: self.show_panels,
-                show_mini_timeline: self.show_mini_timeline,
-                frame_step: self.frame_step,
-                show_camera_guide: self.show_camera_guide,
-                dim_outside_camera: self.dim_outside_camera,
-                show_layer_bounds: self.show_layer_bounds,
-                lock_brush_to_view: self.lock_brush_to_view,
-                onion: self.onion,
-                auto_key_transform: self.auto_key_transform,
-                auto_key_draw: self.auto_key_draw,
-                invert_timeline_scroll: self.invert_timeline_scroll,
-                loop_timeline: self.loop_timeline,
-                smoothing: self.smoothing,
-                tool_brushes: Some(self.tool_brushes.to_vec()),
-                palette: self.palette.clone(),
-                track_frame_w: self.track_frame_w,
-                perspective: self.perspective.clone(),
-                fade: self.fade,
-                krita_path: self.krita_path.clone(),
-            },
-        );
-    }
-
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        let a = self.bg_opacity.clamp(0.0, 1.0);
-        [
-            self.bg_color[0] * a,
-            self.bg_color[1] * a,
-            self.bg_color[2] * a,
-            a,
-        ]
-    }
-
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Pick up any layer selection made last frame, whatever moved it.
-        self.track_layer_change();
-        self.blank_scans_left = Self::BLANK_SCANS_PER_FRAME;
-
-        // Resolve any deferred preview-texture free now, before drawing, so the
-        // freed textures are never referenced by this frame's paint list.
-        if self.preview_clear_pending {
-            self.preview_tex.clear();
-            self.preview_clear_pending = false;
-        }
-
-        // First frame: maximize. Done here rather than at build time because the
-        // creation-time flag doesn't survive on a frameless window (see the
-        // `startup_maximize` field). Also keeps us on the monitor work area, so
-        // an undecorated window can't end up covering the taskbar.
-        //
-        // Deliberately *after* the first frame lays panels out, not before: the
-        // panel `default_pos` values are absolute and tuned for the un-maximized
-        // size, so they're only correct on that first small frame. Maximizing
-        // then produces a resize, and the edge re-stick in `ui::shell::draw`
-        // carries the panels out to the new edges. Maximize before frame one and
-        // there is no resize to react to, leaving them stranded mid-screen.
-        if self.startup_maximize {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-            self.startup_maximize = false;
-        }
-
-        // First frame: re-apply the OS rounded corners + border to our frameless
-        // window (Windows only). Done once, after the window handle exists.
-        #[cfg(target_os = "windows")]
-        if !self.window_styled {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            if let Ok(h) = frame.window_handle() {
-                if let RawWindowHandle::Win32(w) = h.as_raw() {
-                    crate::platform::round_window(w.hwnd.get());
-                }
-            }
-            self.window_styled = true;
-        }
-        #[cfg(not(target_os = "windows"))]
-        let _ = (&frame, self.window_styled);
-
-        self.pen.poll(ctx.input(|i| i.pointer.any_down()));
-        // Sampled here rather than in the pointer handlers: those run off
-        // tablet packets and never see an `InputState`.
-        self.shift_held = ctx.input(|i| i.modifiers.shift);
+    /// Rebind capture and shortcut dispatch for this frame's key presses.
+    ///
+    /// Returns whether a Tab press found nothing focused. Tab is our panel
+    /// toggle, but egui also reads it as "focus the next widget" and hands
+    /// focus to the first one drawn after it; `drop_stray_focus` takes that
+    /// back once the frame is drawn.
+    pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) -> bool {
+        let tab_focus = ctx.input(|i| i.key_pressed(egui::Key::Tab))
+            && ctx.memory(|m| m.focused()).is_none();
 
         // Shortcut rebind capture: when an Action is "rebinding", the next
         // key press becomes its new combo and rebind mode ends.
@@ -4209,6 +4115,129 @@ impl eframe::App for AppState {
                 }
             }
         }
+        tab_focus
+    }
+
+    /// Clear keyboard focus nothing should be holding: any at all while the
+    /// panels are hidden, and whatever a Tab press handed out (see
+    /// `handle_keys`). A focused widget gates off every shortcut but Tab and
+    /// `, so Tabbing the panels back would otherwise leave the first panel
+    /// button focused and the shortcuts dead until the next click.
+    pub(crate) fn drop_stray_focus(&self, ctx: &egui::Context, tab_focus: bool) {
+        if !self.show_panels || tab_focus {
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+        }
+    }
+}
+
+impl eframe::App for AppState {
+    /// Called by eframe on exit and every `auto_save_interval` (30s). Panel
+    /// geometry and collapse state are saved separately via
+    /// `persist_egui_memory`, which defaults to true.
+    /// Last call before the process goes away. A save runs on a worker thread
+    /// now, so closing the window mid-write would drop it silently — wait for
+    /// it instead.
+    fn on_exit(&mut self) {
+        self.finish_pending_save();
+    }
+
+    /// Put back the Ctrl+C / X / V presses egui-winit turned into clipboard
+    /// events, so the selection shortcuts can see them.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::input::clipboard_keys::inject(raw_input);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(
+            storage,
+            UI_PREFS_KEY,
+            &UiPrefs {
+                show_panels: self.show_panels,
+                show_mini_timeline: self.show_mini_timeline,
+                frame_step: self.frame_step,
+                show_camera_guide: self.show_camera_guide,
+                dim_outside_camera: self.dim_outside_camera,
+                show_layer_bounds: self.show_layer_bounds,
+                lock_brush_to_view: self.lock_brush_to_view,
+                onion: self.onion,
+                auto_key_transform: self.auto_key_transform,
+                auto_key_draw: self.auto_key_draw,
+                invert_timeline_scroll: self.invert_timeline_scroll,
+                loop_timeline: self.loop_timeline,
+                smoothing: self.smoothing,
+                tool_brushes: Some(self.tool_brushes.to_vec()),
+                palette: self.palette.clone(),
+                track_frame_w: self.track_frame_w,
+                perspective: self.perspective.clone(),
+                fade: self.fade,
+                krita_path: self.krita_path.clone(),
+            },
+        );
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let a = self.bg_opacity.clamp(0.0, 1.0);
+        [
+            self.bg_color[0] * a,
+            self.bg_color[1] * a,
+            self.bg_color[2] * a,
+            a,
+        ]
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Pick up any layer selection made last frame, whatever moved it.
+        self.track_layer_change();
+        self.blank_scans_left = Self::BLANK_SCANS_PER_FRAME;
+
+        // Resolve any deferred preview-texture free now, before drawing, so the
+        // freed textures are never referenced by this frame's paint list.
+        if self.preview_clear_pending {
+            self.preview_tex.clear();
+            self.preview_clear_pending = false;
+        }
+
+        // First frame: maximize. Done here rather than at build time because the
+        // creation-time flag doesn't survive on a frameless window (see the
+        // `startup_maximize` field). Also keeps us on the monitor work area, so
+        // an undecorated window can't end up covering the taskbar.
+        //
+        // Deliberately *after* the first frame lays panels out, not before: the
+        // panel `default_pos` values are absolute and tuned for the un-maximized
+        // size, so they're only correct on that first small frame. Maximizing
+        // then produces a resize, and the edge re-stick in `ui::shell::draw`
+        // carries the panels out to the new edges. Maximize before frame one and
+        // there is no resize to react to, leaving them stranded mid-screen.
+        if self.startup_maximize {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            self.startup_maximize = false;
+        }
+
+        // First frame: re-apply the OS rounded corners + border to our frameless
+        // window (Windows only). Done once, after the window handle exists.
+        #[cfg(target_os = "windows")]
+        if !self.window_styled {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(h) = frame.window_handle() {
+                if let RawWindowHandle::Win32(w) = h.as_raw() {
+                    crate::platform::round_window(w.hwnd.get());
+                }
+            }
+            self.window_styled = true;
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = (&frame, self.window_styled);
+
+        self.pen.poll(ctx.input(|i| i.pointer.any_down()));
+        // Sampled here rather than in the pointer handlers: those run off
+        // tablet packets and never see an `InputState`.
+        self.shift_held = ctx.input(|i| i.modifiers.shift);
+
+        let tab_focus = self.handle_keys(ctx);
 
         let now = ctx.input(|i| i.time);
         if self
@@ -4242,15 +4271,7 @@ impl eframe::App for AppState {
         self.sync_textures(ctx);
         ui::shell::draw(self, ctx);
 
-        // If panels are hidden, clear any stale keyboard focus so shortcuts
-        // (especially Tab → TogglePanels) work on the next press.
-        if !self.show_panels {
-            ctx.memory_mut(|m| {
-                if let Some(id) = m.focused() {
-                    m.surrender_focus(id);
-                }
-            });
-        }
+        self.drop_stray_focus(ctx, tab_focus);
     }
 }
 
@@ -4742,6 +4763,51 @@ fn subrect_from_buffer(buf: &[u8], full_w: u32, x: u32, y: u32, w: u32, h: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tab back out of the mini-timeline mode leaves the shortcuts live. egui
+    /// also reads that Tab as "focus the next widget", which on that frame is
+    /// the first panel button, and a focused widget gates off the shortcuts.
+    #[test]
+    fn tabbing_the_panels_back_leaves_the_shortcuts_live() {
+        let mut st = AppState::for_test();
+        st.shortcuts = ShortcutMap::default();
+        st.show_panels = false;
+        st.show_mini_timeline = true;
+        st.dispatch(Action::ToolInk);
+        let ctx = egui::Context::default();
+        // One frame the way `update` runs it, with `key` pressed.
+        let frame = |st: &mut AppState, key: Option<egui::Key>| {
+            let events = key
+                .map(|key| egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .into_iter()
+                .collect();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                let tab_focus = st.handle_keys(ctx);
+                ui::shell::draw(st, ctx);
+                st.drop_stray_focus(ctx, tab_focus);
+            });
+        };
+        frame(&mut st, None);
+        frame(&mut st, Some(egui::Key::Tab));
+        assert!(st.show_panels);
+        assert_eq!(ctx.memory(|m| m.focused()), None, "Tab left a panel widget focused");
+        frame(&mut st, Some(egui::Key::Q));
+        assert_eq!(st.tool, ActiveTool::Pencil);
+    }
 
     /// The Krita link end to end on a real file, minus Krita: send, a "Krita
     /// save" (our own writer standing in — the reader is proven against
