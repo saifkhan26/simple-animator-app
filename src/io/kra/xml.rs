@@ -5,7 +5,16 @@
 
 use std::fmt::Write;
 
-/// One `<layer>` element. Only paint layers are ever written.
+/// One entry of the layer stack.
+pub enum Item<'a> {
+    /// A paint layer of ours.
+    Layer(LayerXml<'a>),
+    /// A `<layer>` element copied verbatim from a Krita file (see
+    /// `super::Carried`).
+    Raw(&'a str),
+}
+
+/// One `<layer>` element of ours. Only paint layers are ever written.
 pub struct LayerXml<'a> {
     pub filename: &'a str,
     pub name: &'a str,
@@ -49,7 +58,7 @@ pub const PROFILE: &str = "sRGB built-in";
 const KRITA_VERSION: &str = "5.0.0";
 
 /// `layers` is in XML order: **top of the stack first**.
-pub fn maindoc(image: &str, width: u32, height: u32, layers: &[LayerXml]) -> String {
+pub fn maindoc(image: &str, width: u32, height: u32, layers: &[Item]) -> String {
     let mut s = String::new();
     s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     s.push_str("<!DOCTYPE DOC PUBLIC '-//KDE//DTD krita 2.0//EN' 'http://www.calligra.org/DTD/krita-2.0.dtd'>\n");
@@ -63,7 +72,14 @@ pub fn maindoc(image: &str, width: u32, height: u32, layers: &[LayerXml]) -> Str
         attr(image)
     );
     s.push_str("  <layers>\n");
-    for l in layers {
+    for item in layers {
+        let l = match item {
+            Item::Layer(l) => l,
+            Item::Raw(xml) => {
+                let _ = writeln!(s, "   {xml}");
+                continue;
+            }
+        };
         let _ = writeln!(
             s,
             "   <layer nodetype=\"paintlayer\" filename=\"{}\" name=\"{}\" uuid=\"{}\" opacity=\"{}\" visible=\"{}\" locked=\"{}\" x=\"0\" y=\"0\" compositeop=\"normal\" colorspacename=\"RGBA\" channelflags=\"\" channellockflags=\"\" collapsed=\"0\" colorlabel=\"0\" onionskin=\"0\" intimeline=\"1\" keyframes=\"{}.keyframes.xml\"{}/>",
@@ -134,7 +150,7 @@ mod tests {
 
     #[test]
     fn maindoc_parses_and_marks_selection() {
-        let layers = [LayerXml {
+        let layers = [Item::Layer(LayerXml {
             filename: "layer1",
             name: "Ink & \"line\"",
             uuid: "{00000000-0000-4000-8000-000000000001}",
@@ -142,7 +158,7 @@ mod tests {
             visible: true,
             locked: false,
             selected: true,
-        }];
+        })];
         let xml = maindoc("image", 640, 360, &layers);
         let doc = parse(&xml).unwrap();
         let layer = doc.descendants().find(|n| n.has_tag_name("layer")).unwrap();

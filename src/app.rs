@@ -19,7 +19,7 @@ use crate::input::pointer::PointerSample;
 use crate::input::shortcuts::{self, Action, ShortcutMap};
 use crate::input::tablet::{PenInput, PenPacket};
 use crate::io::kra::{self, KraDoc};
-use crate::krita_link::{self, Baseline, KritaLink, Pulled, Stamp};
+use crate::krita_link::{self, KritaLink, Pulled};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep};
 use crate::timeline::playback::Playback;
 use crate::tools::lasso::Mask;
@@ -31,11 +31,39 @@ use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
 use crate::ui;
 use crate::undo::{self, History};
 
-#[derive(Clone)]
 pub struct NewProjectConfig {
     pub width: u32,
     pub height: u32,
     pub fps: f32,
+    /// The "save as preset" name box.
+    pub preset_name: String,
+    /// In-progress inline rename of a saved preset.
+    pub preset_rename: Option<LayerRename>,
+}
+
+/// A saved New project size. A workspace preference, not project data: the
+/// sizes an artist keeps coming back to follow them between files.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ProjectPreset {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    /// New project opens on this one. At most one preset has it set.
+    pub is_default: bool,
+}
+
+impl Default for ProjectPreset {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            width: 1920,
+            height: 1080,
+            fps: 24.0,
+            is_default: false,
+        }
+    }
 }
 
 /// libx264 presets offered in the MP4 export dialog, fastest → smallest.
@@ -273,6 +301,8 @@ struct UiPrefs {
     fade: FadeOthers,
     /// Where Krita is installed, once found or picked for Edit in Krita.
     krita_path: Option<PathBuf>,
+    /// Saved New project presets, in the order the artist made them.
+    project_presets: Vec<ProjectPreset>,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -354,6 +384,7 @@ impl Default for UiPrefs {
             perspective: PerspectiveConfig::default(),
             fade: FadeOthers::default(),
             krita_path: None,
+            project_presets: Vec::new(),
         }
     }
 }
@@ -444,6 +475,8 @@ impl Default for NewProjectConfig {
             width: 1920,
             height: 1080,
             fps: 24.0,
+            preset_name: String::new(),
+            preset_rename: None,
         }
     }
 }
@@ -505,10 +538,12 @@ pub struct SaveJob {
 
 /// The worker writing the `.kra` for Edit in Krita.
 struct KritaSend {
-    rx: Receiver<Result<(Baseline, Option<Stamp>)>>,
+    rx: Receiver<Result<krita_link::Sent>>,
     /// Krita to start once the file is on disk; `None` when the Krita we
     /// launched earlier is still open.
     launch: Option<PathBuf>,
+    /// Layers of ours left out (reference, `-x`), named in the toast.
+    kept_out: Vec<String>,
 }
 
 /// In-progress inline layer rename: which layer, the edit buffer, and
@@ -580,6 +615,8 @@ pub struct AppState {
     /// Pinned swatches, most recently added last. Capped at
     /// [`AppState::MAX_SWATCHES`].
     pub palette: Vec<[u8; 3]>,
+    /// Saved New project presets. Like `palette`, a new project keeps them.
+    pub project_presets: Vec<ProjectPreset>,
     /// Drawing clipboard: one cell's pixels, cut or copied from a slot. Held
     /// as a `Canvas` rather than a `CellId` so it survives the undo of the cut
     /// that produced it.
@@ -916,6 +953,7 @@ impl AppState {
             brush: restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()]
                 .clone(),
             palette: prefs.palette,
+            project_presets: prefs.project_presets,
             cell_clip: None,
             track_sel: BTreeSet::new(),
             track_anchor: None,
@@ -1072,7 +1110,12 @@ impl AppState {
         // `show_panels` / `show_mini_timeline` are deliberately not reset here.
         // They're preferences that persist across runs, like `shortcuts` — a new
         // project shouldn't shove hidden panels back on screen.
-        self.new_project_cfg = NewProjectConfig { width, height, fps };
+        self.new_project_cfg = NewProjectConfig {
+            width,
+            height,
+            fps,
+            ..Default::default()
+        };
         self.show_export = false;
         self.show_import_range = false;
         self.import_range = None;
@@ -1095,6 +1138,99 @@ impl AppState {
         self.bg_label = None;
         self.preview_tex.clear();
         self.preview_rx = None;
+    }
+
+    /// Open the New project dialog on the starred preset, or on the current
+    /// project's size when none is starred.
+    pub fn open_new_project(&mut self) {
+        let (width, height, fps) = match self.project_presets.iter().find(|p| p.is_default) {
+            Some(p) => (p.width, p.height, p.fps),
+            None => (self.project.width, self.project.height, self.project.fps),
+        };
+        self.new_project_cfg = NewProjectConfig {
+            width,
+            height,
+            fps,
+            ..Default::default()
+        };
+        self.show_new_project = true;
+    }
+
+    /// The saved preset called `name`, ignoring case and surrounding space.
+    pub fn preset_named(&self, name: &str) -> Option<usize> {
+        let name = name.trim().to_lowercase();
+        self.project_presets
+            .iter()
+            .position(|p| p.name.to_lowercase() == name)
+    }
+
+    /// Save the dialog's size under the name in its name box. A name already
+    /// in use is replaced in place, keeping its place in the list and its
+    /// star. False for a blank name.
+    pub fn save_preset(&mut self) -> bool {
+        let name = self.new_project_cfg.preset_name.trim().to_string();
+        if name.is_empty() {
+            return false;
+        }
+        let cfg = &self.new_project_cfg;
+        let (width, height, fps) = (cfg.width.max(1), cfg.height.max(1), cfg.fps.max(1.0));
+        match self.preset_named(&name) {
+            Some(i) => {
+                let p = &mut self.project_presets[i];
+                (p.name, p.width, p.height, p.fps) = (name, width, height, fps);
+            }
+            None => self.project_presets.push(ProjectPreset {
+                name,
+                width,
+                height,
+                fps,
+                is_default: false,
+            }),
+        }
+        self.new_project_cfg.preset_name.clear();
+        true
+    }
+
+    /// Fill the dialog from a saved preset exactly as saved — unlike the
+    /// built-in sizes, it keeps the orientation it was saved in.
+    pub fn apply_preset(&mut self, i: usize) {
+        if let Some(p) = self.project_presets.get(i) {
+            let cfg = &mut self.new_project_cfg;
+            (cfg.width, cfg.height, cfg.fps) = (p.width, p.height, p.fps);
+        }
+    }
+
+    /// Rename a saved preset. False for a blank name or one another preset
+    /// already has; changing only the case of its own name is fine.
+    pub fn rename_preset(&mut self, i: usize, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || i >= self.project_presets.len() {
+            return false;
+        }
+        if self.preset_named(name).is_some_and(|j| j != i) {
+            return false;
+        }
+        self.project_presets[i].name = name.to_string();
+        true
+    }
+
+    pub fn delete_preset(&mut self, i: usize) {
+        if i < self.project_presets.len() {
+            self.project_presets.remove(i);
+            // The rename's index may now point at a different preset.
+            self.new_project_cfg.preset_rename = None;
+        }
+    }
+
+    /// Star a preset so New project opens on it, unstarring any other.
+    /// Starring the starred one clears it.
+    pub fn toggle_default_preset(&mut self, i: usize) {
+        let Some(on) = self.project_presets.get(i).map(|p| !p.is_default) else {
+            return;
+        };
+        for (j, p) in self.project_presets.iter_mut().enumerate() {
+            p.is_default = on && j == i;
+        }
     }
 
     /// A sample at a cell-space position, taking pressure and tilt from the
@@ -4175,6 +4311,7 @@ impl eframe::App for AppState {
                 perspective: self.perspective.clone(),
                 fade: self.fade,
                 krita_path: self.krita_path.clone(),
+                project_presets: self.project_presets.clone(),
             },
         );
     }
@@ -4395,8 +4532,11 @@ impl AppState {
     const KRITA_WARN: Duration = Duration::from_secs(9);
 
     fn krita_notice(&mut self, msg: impl Into<String>, warn: bool) {
-        let ttl = if warn { Self::KRITA_WARN } else { Self::KRITA_NOTE };
-        self.krita_toast = Some((msg.into(), warn, Instant::now() + ttl));
+        let msg = msg.into();
+        // Long enough to read: ~60 ms a character, within bounds.
+        let floor = if warn { Self::KRITA_WARN } else { Self::KRITA_NOTE };
+        let ttl = floor.max(Duration::from_millis(msg.len() as u64 * 60)).min(Duration::from_secs(15));
+        self.krita_toast = Some((msg, warn, Instant::now() + ttl));
     }
 
     /// Krita's executable: the remembered or usual location, else ask. What
@@ -4412,12 +4552,14 @@ impl AppState {
     }
 
     /// File ▸ Edit in Krita, and the layer menu's (with that layer selected
-    /// in Krita). Writes the whole project as an animated `.kra` on a worker,
-    /// then opens it in Krita. With a link already live it rewrites the same
-    /// file instead. Krita 5 neither watches files nor has a Revert/Reload
-    /// command, so the toast says to close the file there and reopen it.
+    /// in Krita). The first time, writes the project as an animated `.kra`
+    /// and opens it in Krita. With a link live it starts a re-send round (see
+    /// [`krita_link::Round`]): Krita's latest save comes in first, then the
+    /// file is rewritten — and with the helper plugin enabled in Krita, Krita
+    /// reloads it in place. Without it, Krita (which neither watches files
+    /// nor has a Reload command) needs the file closed and reopened there.
     pub fn edit_in_krita(&mut self, selected: usize) {
-        if self.krita_send.is_some() {
+        if self.krita_send.is_some() || self.krita.as_ref().is_some_and(|k| k.round.is_some()) {
             return;
         }
         let running = self.krita.as_mut().is_some_and(KritaLink::krita_running);
@@ -4429,23 +4571,92 @@ impl AppState {
                 None => return,
             }
         };
+        self.begin_send(selected, launch);
+    }
+
+    /// [`Self::edit_in_krita`] once Krita's whereabouts are settled. Tests
+    /// come in here, so no real Krita is ever started.
+    fn begin_send(&mut self, selected: usize, launch: Option<PathBuf>) {
+        let Some(link) = self.krita.as_mut().filter(|k| k.baseline.is_some()) else {
+            // First send: there's nothing in Krita to bring in or reload.
+            self.start_send(selected, launch);
+            return;
+        };
+        let helper = link.use_helper.unwrap_or_else(crate::krita_helper::installed);
+        let mut round = krita_link::Round {
+            seq: 0,
+            stage: krita_link::Stage::Sync,
+            selected,
+            launch,
+            helper_ready: false,
+            helper_silent: false,
+            note: String::new(),
+        };
+        if helper {
+            link.helper_seq += 1;
+            round.seq = link.helper_seq;
+            match crate::krita_helper::tell(&link.path, round.seq, "request") {
+                Ok(()) => {
+                    round.stage = krita_link::Stage::AwaitReady { until: Instant::now() + link.ready_timeout };
+                }
+                Err(e) => log::warn!("Krita helper mailbox: {e:#}"),
+            }
+        }
+        link.round = Some(round);
+    }
+
+    /// Write the project as the linked `.kra` on a worker; `poll_krita`
+    /// picks up the result.
+    fn start_send(&mut self, selected: usize, launch: Option<PathBuf>) {
         let temp = KritaLink::temp_path(self.project_path.as_deref());
         let link = self.krita.get_or_insert_with(|| KritaLink::new(temp));
         // A read in flight was matched against the baseline this send
         // replaces; polling waits for the new one.
         link.pending = None;
         link.baseline = None;
-        for l in &self.project.layers {
-            link.uuids.entry(l.uid).or_insert_with(krita_link::new_uuid);
+        // Reference and `-x` layers stay here: not sent, and unlinked if they
+        // were linked before.
+        let keep: Vec<bool> = self.project.layers.iter().map(|l| !krita_link::stays_here(l)).collect();
+        let mut uuids = Vec::new();
+        let mut kept_out = Vec::new();
+        for (l, &k) in self.project.layers.iter().zip(&keep) {
+            if k {
+                uuids.push(link.uuids.entry(l.uid).or_insert_with(krita_link::new_uuid).clone());
+            } else {
+                link.uuids.remove(&l.uid);
+                kept_out.push(l.name.clone());
+            }
         }
-        let uuids: Vec<String> = self.project.layers.iter().map(|l| link.uuids[&l.uid].clone()).collect();
+        let selected = keep
+            .get(selected)
+            .copied()
+            .unwrap_or(false)
+            .then(|| keep[..selected].iter().filter(|&&k| k).count());
         let path = link.path.clone();
         let project = self.project.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = tx.send(krita_link::send(&project, &uuids, selected, &path));
+            let _ = tx.send(krita_link::send(project, &keep, &uuids, selected, &path));
         });
-        self.krita_send = Some(KritaSend { rx, launch });
+        self.krita_send = Some(KritaSend { rx, launch, kept_out });
+    }
+
+    /// File ▸ Install Krita helper: put the plugin in Krita's plugin folder.
+    pub fn install_krita_helper(&mut self) {
+        match crate::krita_helper::install() {
+            Ok(dir) => self.krita_notice(
+                format!(
+                    "Krita helper installed in {}. Now in Krita: Settings ▸ Configure Krita ▸ \
+                     Python Plugin Manager, tick \u{201c}Animator Link\u{201d}, then restart Krita.",
+                    dir.display()
+                ),
+                false,
+            ),
+            Err(e) => {
+                log::error!("Installing the Krita helper failed: {e:#}");
+                self.krita_notice(format!("Couldn't install the Krita helper: {e:#}"), true);
+            }
+        }
     }
 
     /// End the link. The temp `.kra` stays on disk, so a save made in Krita
@@ -4460,30 +4671,68 @@ impl AppState {
         self.krita.is_some()
     }
 
-    /// Per frame: land a finished send, start a read once Krita has saved,
-    /// and fold a finished read into the project.
+    /// Per frame: land a finished send, move a re-send round along, start a
+    /// read once Krita has saved, and fold a finished read into the project.
     fn poll_krita(&mut self, ctx: &egui::Context) {
         if let Some(send) = self.krita_send.take() {
             match send.rx.try_recv() {
                 Err(TryRecvError::Empty) => self.krita_send = Some(send),
-                Ok(Ok((base, stamp))) => {
+                Ok(Ok(sent)) => {
                     let Some(link) = self.krita.as_mut() else { return };
-                    link.baseline = Some(base);
-                    link.mark_seen(stamp);
-                    match send.launch {
+                    link.baseline = Some(sent.baseline);
+                    link.mark_seen(sent.stamp);
+                    let mut note = String::new();
+                    if !send.kept_out.is_empty() {
+                        note.push_str(&format!(" Kept out: {}.", send.kept_out.join(", ")));
+                    }
+                    if !sent.kept.is_empty() {
+                        note.push_str(&format!(" Krita-only layers kept: {}.", sent.kept.join(", ")));
+                    }
+                    // A re-send the helper is waiting on: tell it the file is
+                    // there, and let its answer make the toast.
+                    let mut silent = false;
+                    let mut resend = false;
+                    if let Some(round) = link.round.as_mut().filter(|r| r.stage == krita_link::Stage::Sending) {
+                        resend = true;
+                        if round.helper_ready {
+                            match crate::krita_helper::tell(&link.path, round.seq, "sent") {
+                                Ok(()) => {
+                                    round.stage =
+                                        krita_link::Stage::AwaitReloaded { until: Instant::now() + link.reload_timeout };
+                                    round.note = note;
+                                    return;
+                                }
+                                Err(e) => log::warn!("Krita helper mailbox: {e:#}"),
+                            }
+                        }
+                        silent = round.helper_silent;
+                        link.round = None;
+                    }
+                    let (mut msg, warn) = match send.launch {
                         Some(exe) => match link.launch(&exe) {
-                            Ok(()) => self.krita_notice("Opened in Krita. Save there to bring changes back.", false),
+                            Ok(()) => ("Opened in Krita. Save there to bring changes back.".to_string(), false),
                             Err(e) => {
                                 log::error!("Starting Krita failed: {e:#}");
-                                self.krita_notice(format!("Couldn't start Krita: {e:#}"), true);
+                                (format!("Couldn't start Krita: {e:#}"), true)
                             }
                         },
-                        None => self.krita_notice(
+                        None => (
                             "Sent to Krita again. Krita doesn't reload open files: close it there \
-                             without saving, then reopen it from File ▸ Open Recent.",
+                             without saving, then reopen it from File ▸ Open Recent."
+                                .to_string(),
                             false,
                         ),
+                    };
+                    msg.push_str(&note);
+                    if silent {
+                        msg.push_str(
+                            " The Krita helper didn't answer: tick \u{201c}Animator Link\u{201d} in Krita's \
+                             Settings ▸ Configure Krita ▸ Python Plugin Manager and restart Krita.",
+                        );
+                    } else if resend && !crate::krita_helper::installed() {
+                        msg.push_str(" File ▸ Install Krita helper makes this automatic.");
                     }
+                    self.krita_notice(msg, warn);
                 }
                 Ok(Err(e)) => {
                     log::error!("Sending to Krita failed: {e:#}");
@@ -4524,18 +4773,83 @@ impl AppState {
             }
             return;
         }
-        let Some(stamp) = link.poll(Instant::now()) else {
+        if link.round.is_some() {
+            self.drive_round();
             return;
-        };
-        let Some(base) = link.baseline.clone() else {
-            return;
-        };
-        let path = link.path.clone();
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = tx.send(krita_link::pull(&path, &base));
-        });
-        link.pending = Some((stamp, rx));
+        }
+        if let Some(stamp) = link.poll(Instant::now()) {
+            link.start_pull(stamp, krita_link::present(&self.project, &link.uuids));
+        }
+    }
+
+    /// One step of a re-send round (see [`krita_link::Round`]).
+    fn drive_round(&mut self) {
+        use crate::krita_helper::Reply;
+        use krita_link::Stage;
+        let Some(link) = self.krita.as_mut() else { return };
+        let Some(mut round) = link.round.take() else { return };
+        let now = Instant::now();
+        let mut send = None;
+        let mut done: Option<(String, bool)> = None;
+        match round.stage {
+            Stage::AwaitReady { until } => match crate::krita_helper::reply(&link.path) {
+                Some(Reply::Ready { seq, .. }) if seq == round.seq => {
+                    // Krita is open on the file and will reload it itself.
+                    round.helper_ready = true;
+                    round.launch = None;
+                    round.stage = Stage::Sync;
+                }
+                Some(Reply::Error { seq, text }) if seq == round.seq => {
+                    log::warn!("Krita helper: {text}");
+                    round.helper_silent = true;
+                    round.stage = Stage::Sync;
+                }
+                _ if now >= until => {
+                    round.helper_silent = true;
+                    round.stage = Stage::Sync;
+                }
+                _ => {}
+            },
+            Stage::Sync => {
+                // Krita's latest save comes in before the file is rewritten,
+                // or the rewrite would bury it. (With the helper, that's the
+                // save it just made.)
+                if let Some(at) = link.unseen_change() {
+                    link.start_pull(at, krita_link::present(&self.project, &link.uuids));
+                } else {
+                    round.stage = Stage::Sending;
+                    send = Some((round.selected, round.launch.take()));
+                }
+            }
+            Stage::Sending => {}
+            Stage::AwaitReloaded { until } => {
+                done = match crate::krita_helper::reply(&link.path) {
+                    Some(Reply::Reloaded { seq }) if seq == round.seq => {
+                        Some((format!("Updated in Krita.{}", round.note), false))
+                    }
+                    Some(Reply::Error { seq, text }) if seq == round.seq => Some((
+                        format!("Sent, but Krita couldn't reload it ({text}): close and reopen it there."),
+                        true,
+                    )),
+                    _ if now >= until => Some((
+                        "Sent, but Krita didn't confirm the reload. If it still shows the old \
+                         version, close and reopen it there."
+                            .to_string(),
+                        true,
+                    )),
+                    _ => None,
+                };
+            }
+        }
+        if done.is_none() {
+            link.round = Some(round);
+        }
+        if let Some((selected, launch)) = send {
+            self.start_send(selected, launch);
+        }
+        if let Some((msg, warn)) = done {
+            self.krita_notice(msg, warn);
+        }
     }
 
     /// Fold a read Krita save into the project as one undo step.
@@ -4556,6 +4870,7 @@ impl AppState {
         };
         let warnings = plan.warnings.join("; ");
         let next = plan.next.clone();
+        let unlink = plan.unlink.clone();
         let summary = (!plan.is_noop()).then(|| plan.report.summary());
         if summary.is_some() {
             self.playback.stop();
@@ -4567,6 +4882,7 @@ impl AppState {
         }
         if let Some(link) = self.krita.as_mut() {
             link.baseline = Some(next);
+            link.uuids.retain(|uid, _| !unlink.contains(uid));
         }
         match (summary, warnings.is_empty()) {
             (Some(s), true) => self.krita_notice(format!("Updated from Krita: {s}"), false),
@@ -4590,7 +4906,7 @@ impl AppState {
         thread::spawn(move || {
             let res = std::fs::read(&path)
                 .with_context(|| format!("reading {}", path.display()))
-                .and_then(kra::read);
+                .and_then(|b| kra::read_filtered(b, &krita_link::comes_back));
             let _ = tx.send(res);
         });
         self.bg_job = Some(BgJob::KraImport(rx));
@@ -4655,7 +4971,12 @@ impl AppState {
             });
         }
         if layers.is_empty() {
-            self.krita_notice("That Krita file has no paint layers to import.", true);
+            let why = if doc.held.is_empty() {
+                "That Krita file has no paint layers to import."
+            } else {
+                "Every paint layer in that Krita file is Krita-only (named …-x); nothing imported."
+            };
+            self.krita_notice(why, true);
             return;
         }
         let n = layers.len();
@@ -4688,7 +5009,11 @@ impl AppState {
         if clipped > 0 {
             warnings.push(format!("{clipped} drawing(s) had paint outside the Krita canvas (clipped)"));
         }
-        let msg = format!("Imported {n} layer{} from Krita", if n == 1 { "" } else { "s" });
+        let mut msg = format!("Imported {n} layer{} from Krita", if n == 1 { "" } else { "s" });
+        if !doc.held.is_empty() {
+            let h = doc.held.len();
+            msg.push_str(&format!(" ({h} Krita-only -x layer{} skipped)", if h == 1 { "" } else { "s" }));
+        }
         if warnings.is_empty() {
             self.krita_notice(msg, false);
         } else {
@@ -4720,7 +5045,7 @@ impl AppState {
         let project = self.project.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let res = kra::write(&project, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: selected })
+            let res = kra::write(&project, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: selected, carried: &[] })
                 .and_then(|bytes| std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display())))
                 .map(|()| name);
             let _ = tx.send(res);
@@ -4812,7 +5137,8 @@ mod tests {
     /// The Krita link end to end on a real file, minus Krita: send, a "Krita
     /// save" (our own writer standing in — the reader is proven against
     /// Krita's output in `io::kra`), the watcher noticing it, the worker
-    /// reading it, and the pull landing as one undo step.
+    /// reading it, and the pull landing as one undo step. A reference
+    /// background rides along to check it never leaves this app.
     #[test]
     fn krita_save_lands_as_one_undo_step() {
         let mut st = AppState::for_test();
@@ -4820,17 +5146,33 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("animator-krita-test-{}", std::process::id()));
         let path = dir.join("link.kra");
 
+        // A reference background under the drawing layer.
+        let bg = st.project.add_background_layer("BG");
+        st.project.layers[bg].reference = true;
+        let bg_cell = st.project.cells.len();
+        st.project.cells.push(Canvas::new(st.project.width, st.project.height));
+        st.project.layers[bg].set_key(0, bg_cell);
+        let bg_before = st.project.layers[bg].exposures.clone();
+        let ink = 1;
+
         let mut link = KritaLink::new(path.clone());
         link.poll_every = Duration::ZERO;
         link.settle = Duration::ZERO;
-        for l in &st.project.layers {
-            link.uuids.insert(l.uid, krita_link::new_uuid());
-        }
-        let uuids: Vec<String> = st.project.layers.iter().map(|l| link.uuids[&l.uid].clone()).collect();
-        let (base, stamp) = krita_link::send(&st.project, &uuids, 0, &path).unwrap();
+        let keep: Vec<bool> = st.project.layers.iter().map(|l| !krita_link::stays_here(l)).collect();
+        assert_eq!(keep, [false, true]);
+        let ink_uuid = krita_link::new_uuid();
+        link.uuids.insert(st.project.layers[ink].uid, ink_uuid.clone());
+        let uuids = vec![ink_uuid];
+        let krita_link::Sent { baseline: base, stamp, .. } =
+            krita_link::send(st.project.clone(), &keep, &uuids, Some(0), &path).unwrap();
         link.baseline = Some(base);
         link.mark_seen(stamp);
         st.krita = Some(link);
+
+        // The background never reached the file.
+        let sent = kra::read(std::fs::read(&path).unwrap()).unwrap();
+        let names: Vec<&str> = sent.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, [st.project.layers[ink].name.as_str()]);
 
         // Nothing changed on disk: polling does nothing.
         for _ in 0..3 {
@@ -4838,11 +5180,13 @@ mod tests {
         }
         assert!(!st.history.can_undo());
 
-        // "Krita" paints on the first drawing and saves.
+        // "Krita" paints on the drawing and saves; what Krita holds is the
+        // ink layer alone.
         let mut k = st.project.clone();
+        k.layers.remove(bg);
         let id = k.layers[0].exposures[0].unwrap();
         k.cells[id].pixels[0..4].copy_from_slice(&[255, 0, 0, 255]);
-        let bytes = kra::write(&k, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: 0 }).unwrap();
+        let bytes = kra::write(&k, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: 0, carried: &[] }).unwrap();
         std::fs::write(&path, bytes).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -4850,19 +5194,202 @@ mod tests {
             st.poll_krita(&ctx);
             std::thread::sleep(Duration::from_millis(5));
         }
-        let now = st.project.layers[0].exposures[0].unwrap();
+        let now = st.project.layers[ink].exposures[0].unwrap();
         assert_ne!(now, id, "the pull should have landed");
         assert_eq!(&st.project.cells[now].pixels[0..4], &[255, 0, 0, 255]);
         assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.starts_with("Updated from Krita")));
+        // The background is where it was, untouched, still not linked.
+        assert_eq!(st.project.layers[bg].name, "BG");
+        assert_eq!(st.project.layers[bg].exposures, bg_before);
 
         // The same save seen again changes nothing.
         for _ in 0..3 {
             st.poll_krita(&ctx);
         }
         st.undo();
-        assert_eq!(st.project.layers[0].exposures[0], Some(id));
+        assert_eq!(st.project.layers[ink].exposures[0], Some(id));
         assert!(!st.history.can_undo());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live link on a temp file, as a first send leaves it — without
+    /// starting Krita — and with zero poll delays.
+    fn linked(tag: &str) -> (AppState, PathBuf, PathBuf) {
+        let mut st = AppState::for_test();
+        let dir = std::env::temp_dir().join(format!("animator-round-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("link.kra");
+        let mut link = KritaLink::new(path.clone());
+        link.poll_every = Duration::ZERO;
+        link.settle = Duration::ZERO;
+        st.krita = Some(link);
+        st.begin_send(0, None);
+        pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
+        (st, dir, path)
+    }
+
+    /// Run the app's per-frame Krita step until `done`, or fail after 10 s.
+    fn pump(st: &mut AppState, done: impl Fn(&AppState) -> bool) {
+        let ctx = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(st) {
+            assert!(Instant::now() < deadline, "timed out");
+            st.poll_krita(&ctx);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn to_krita(path: &std::path::Path) -> (String, String) {
+        let m = crate::krita_helper::read_msg(&crate::krita_helper::to_krita(path)).unwrap_or_default();
+        (m.get("seq").cloned().unwrap_or_default(), m.get("msg").cloned().unwrap_or_default())
+    }
+
+    fn stage(st: &AppState) -> Option<krita_link::Stage> {
+        st.krita.as_ref().and_then(|k| k.round.as_ref()).map(|r| r.stage)
+    }
+
+    /// "Krita" (the file on disk) as it would save `k`, under the link's uuids.
+    fn krita_saves(st: &AppState, k: &Project, path: &std::path::Path) {
+        let link = st.krita.as_ref().unwrap();
+        let uuids: Vec<String> = k.layers.iter().map(|l| link.uuids[&l.uid].clone()).collect();
+        std::fs::write(path, kra::write(k, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: 0, carried: &[] }).unwrap())
+            .unwrap();
+    }
+
+    /// Pixel 0 of layer 0's first drawing in the `.kra` on disk.
+    fn first_pixel_on_disk(st: &AppState, path: &std::path::Path) -> [u8; 4] {
+        let doc = kra::read(std::fs::read(path).unwrap()).unwrap();
+        let l = &doc.layers[0];
+        let (pw, ph) = (st.project.width, st.project.height);
+        let (x, y) = kra::cell_origin(pw, ph, pw, ph);
+        let (c, _) = l.drawings[l.keys[0].1].place(x, y, pw, ph);
+        [c.pixels[0], c.pixels[1], c.pixels[2], c.pixels[3]]
+    }
+
+    /// The helper answers "ready", the new file goes out, "sent" is posted,
+    /// and the helper's "reloaded" makes the toast — no closing in Krita.
+    #[test]
+    fn helper_round_reloads_in_place() {
+        let (mut st, dir, path) = linked("clean");
+        st.krita.as_mut().unwrap().use_helper = Some(true);
+        st.project.layers[0].name = "Ink here".into();
+
+        st.begin_send(0, None);
+        assert_eq!(to_krita(&path), ("1".into(), "request".into()));
+        for _ in 0..5 {
+            st.poll_krita(&egui::Context::default());
+        }
+        assert!(matches!(stage(&st), Some(krita_link::Stage::AwaitReady { .. })), "waits for the helper");
+
+        crate::krita_helper::tests::plugin_says(&path, &[("seq", "1"), ("msg", "ready"), ("saved", "0")]);
+        pump(&mut st, |_| to_krita(&path).1 == "sent");
+        let doc = kra::read(std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc.layers[0].name, "Ink here");
+        assert!(matches!(stage(&st), Some(krita_link::Stage::AwaitReloaded { .. })));
+
+        crate::krita_helper::tests::plugin_says(&path, &[("seq", "1"), ("msg", "reloaded")]);
+        pump(&mut st, |st| stage(st).is_none());
+        assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.starts_with("Updated in Krita") && !t.1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unsaved Krita edits: the helper saves them, they land here as an undo
+    /// step *before* the file is rewritten, and the reloaded file has both
+    /// sides' changes.
+    #[test]
+    fn helper_saves_krita_edits_first() {
+        let (mut st, dir, path) = linked("saved");
+        st.krita.as_mut().unwrap().use_helper = Some(true);
+        let mut k = st.project.clone(); // what Krita has: the sent version…
+        st.project.layers[0].name = "Ink here".into(); // …while we rename here
+        let id = k.layers[0].exposures[0].unwrap();
+        k.cells[id].pixels[0..4].copy_from_slice(&[255, 0, 0, 255]); // …and Krita paints
+
+        st.begin_send(0, None);
+        krita_saves(&st, &k, &path);
+        crate::krita_helper::tests::plugin_says(&path, &[("seq", "1"), ("msg", "ready"), ("saved", "1")]);
+        pump(&mut st, |_| to_krita(&path).1 == "sent");
+
+        assert!(st.history.can_undo(), "Krita's save came in as an undo step");
+        let doc = kra::read(std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc.layers[0].name, "Ink here");
+        assert_eq!(first_pixel_on_disk(&st, &path), [255, 0, 0, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Installed but not enabled (or Krita closed): no answer, so it falls
+    /// back to a plain send and says how to turn the helper on.
+    #[test]
+    fn silent_helper_falls_back_to_a_plain_send() {
+        let (mut st, dir, path) = linked("silent");
+        {
+            let l = st.krita.as_mut().unwrap();
+            l.use_helper = Some(true);
+            l.ready_timeout = Duration::ZERO;
+        }
+        st.project.layers[0].name = "Ink here".into();
+        st.begin_send(0, None);
+        pump(&mut st, |st| stage(st).is_none() && st.krita_send.is_none());
+        assert_eq!(to_krita(&path).1, "request", "no \"sent\" without a ready helper");
+        let doc = kra::read(std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc.layers[0].name, "Ink here");
+        assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.contains("helper didn't answer")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save caught half-written (or any unreadable file) is reported and
+    /// changes nothing; the next good save still comes in.
+    #[test]
+    fn unreadable_krita_save_changes_nothing_then_recovers() {
+        let (mut st, dir, path) = linked("corrupt");
+        let good = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &good[..good.len() / 2]).unwrap();
+        pump(&mut st, |st| st.krita_toast.as_ref().is_some_and(|t| t.0.contains("Couldn't read")));
+        assert!(!st.history.can_undo());
+
+        let mut k = st.project.clone();
+        let id = k.layers[0].exposures[0].unwrap();
+        k.cells[id].pixels[0..4].copy_from_slice(&[9, 9, 9, 255]);
+        krita_saves(&st, &k, &path);
+        pump(&mut st, |st| st.history.can_undo());
+        assert_eq!(first_pixel_on_disk(&st, &path), [9, 9, 9, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Clicking Send again while a round is under way does nothing — no
+    /// second request, no Krita lookup.
+    #[test]
+    fn a_second_send_during_a_round_is_ignored() {
+        let (mut st, dir, path) = linked("twice");
+        st.krita.as_mut().unwrap().use_helper = Some(true);
+        st.begin_send(0, None);
+        st.edit_in_krita(0);
+        st.edit_in_krita(0);
+        assert_eq!(to_krita(&path), ("1".into(), "request".into()));
+        assert_eq!(st.krita.as_ref().unwrap().helper_seq, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without the helper, a re-send still brings in a Krita save the
+    /// watcher hasn't read yet before rewriting the file over it.
+    #[test]
+    fn resend_brings_in_an_unread_krita_save_first() {
+        let (mut st, dir, path) = linked("unread");
+        {
+            let l = st.krita.as_mut().unwrap();
+            l.use_helper = Some(false);
+            l.poll_every = Duration::from_secs(3600); // the watcher won't see it
+        }
+        let mut k = st.project.clone();
+        let id = k.layers[0].exposures[0].unwrap();
+        k.cells[id].pixels[0..4].copy_from_slice(&[0, 255, 0, 255]);
+        krita_saves(&st, &k, &path);
+
+        st.begin_send(0, None);
+        pump(&mut st, |st| stage(st).is_none() && st.krita_send.is_none());
+        assert!(st.history.can_undo());
+        assert_eq!(first_pixel_on_disk(&st, &path), [0, 255, 0, 255]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5127,6 +5654,106 @@ mod tests {
         let old: UiPrefs = toml::from_str("[onion]\nprev = 3\n").unwrap();
         assert_eq!(old.onion.prev, 3);
         assert_eq!((old.onion.prev_hidden, old.onion.next_hidden), (0, 0));
+    }
+
+    /// Put `w`×`h` @ `fps` in the New project dialog and save it as `name`.
+    fn save_as(st: &mut AppState, name: &str, w: u32, h: u32, fps: f32) -> bool {
+        let cfg = &mut st.new_project_cfg;
+        (cfg.width, cfg.height, cfg.fps) = (w, h, fps);
+        cfg.preset_name = name.to_string();
+        st.save_preset()
+    }
+
+    #[test]
+    fn saving_a_preset_needs_a_name_and_replaces_one_it_matches() {
+        let mut st = AppState::for_test();
+        assert!(!save_as(&mut st, "   ", 1080, 1920, 12.0));
+        assert!(st.project_presets.is_empty());
+
+        assert!(save_as(&mut st, " Phone ", 1080, 1920, 12.0));
+        assert!(save_as(&mut st, "Square", 1080, 1080, 24.0));
+        assert_eq!(st.project_presets[0].name, "Phone", "trimmed");
+        assert!(st.new_project_cfg.preset_name.is_empty(), "name box cleared");
+
+        // Same name, any case: overwritten in place, star kept.
+        st.toggle_default_preset(0);
+        assert!(save_as(&mut st, "PHONE", 720, 1280, 30.0));
+        assert_eq!(st.project_presets.len(), 2);
+        let p = &st.project_presets[0];
+        assert_eq!((p.name.as_str(), p.width, p.height, p.fps), ("PHONE", 720, 1280, 30.0));
+        assert!(p.is_default);
+    }
+
+    #[test]
+    fn renaming_a_preset_rejects_blank_and_taken_names() {
+        let mut st = AppState::for_test();
+        save_as(&mut st, "Phone", 1080, 1920, 12.0);
+        save_as(&mut st, "Square", 1080, 1080, 24.0);
+        assert!(!st.rename_preset(0, "  "));
+        assert!(!st.rename_preset(0, "square"));
+        assert!(st.rename_preset(0, "phone"), "own name, new case");
+        assert!(st.rename_preset(1, " Insta "));
+        let names: Vec<_> = st.project_presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["phone", "Insta"]);
+    }
+
+    #[test]
+    fn only_one_preset_is_starred() {
+        let mut st = AppState::for_test();
+        save_as(&mut st, "A", 100, 100, 24.0);
+        save_as(&mut st, "B", 200, 200, 24.0);
+        let starred = |st: &AppState| -> Vec<bool> {
+            st.project_presets.iter().map(|p| p.is_default).collect()
+        };
+        st.toggle_default_preset(0);
+        st.toggle_default_preset(1);
+        assert_eq!(starred(&st), [false, true]);
+        st.toggle_default_preset(1);
+        assert_eq!(starred(&st), [false, false], "starring the starred one clears it");
+        st.toggle_default_preset(0);
+        st.delete_preset(0);
+        assert_eq!(starred(&st), [false]);
+    }
+
+    #[test]
+    fn new_project_opens_on_the_starred_preset_as_saved() {
+        let mut st = AppState::for_test();
+        save_as(&mut st, "Phone", 1080, 1920, 12.0);
+        // Nothing starred: the current project's size, as before presets.
+        st.open_new_project();
+        let cfg = &st.new_project_cfg;
+        assert_eq!((cfg.width, cfg.height, cfg.fps), (st.project.width, st.project.height, st.project.fps));
+        assert!(st.show_new_project);
+
+        st.toggle_default_preset(0);
+        st.open_new_project();
+        let cfg = &st.new_project_cfg;
+        assert_eq!((cfg.width, cfg.height, cfg.fps), (1080, 1920, 12.0), "portrait stays portrait");
+
+        // Applying from a landscape dialog keeps the preset's orientation too.
+        st.new_project_cfg.width = 3840;
+        st.new_project_cfg.height = 2160;
+        st.apply_preset(0);
+        assert_eq!((st.new_project_cfg.width, st.new_project_cfg.height), (1080, 1920));
+    }
+
+    #[test]
+    fn presets_round_trip_and_default_to_none_when_missing() {
+        let prefs = UiPrefs {
+            project_presets: vec![ProjectPreset {
+                name: "Phone".into(),
+                width: 1080,
+                height: 1920,
+                fps: 12.0,
+                is_default: true,
+            }],
+            ..Default::default()
+        };
+        let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(back.project_presets, prefs.project_presets);
+        // Prefs saved before presets existed load with none.
+        let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
+        assert!(old.project_presets.is_empty());
     }
 
     #[test]

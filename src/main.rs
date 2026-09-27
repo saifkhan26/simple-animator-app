@@ -10,7 +10,10 @@ mod app;
 mod doc;
 mod input;
 mod io;
+mod krita_helper;
 mod krita_link;
+#[cfg(test)]
+mod krita_stress;
 #[cfg(target_os = "windows")]
 mod platform;
 mod timeline;

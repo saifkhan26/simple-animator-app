@@ -47,6 +47,115 @@ pub struct WriteOpts<'a> {
     pub layer_uuids: &'a [String],
     /// The layer Krita opens with selected.
     pub selected_layer: usize,
+    /// Layers of the file being replaced that go back in untouched (see
+    /// [`carry`]).
+    pub carried: &'a [Carried],
+}
+
+/// Our layers' file names: `anim1`, `anim2`, … Krita names its own
+/// `layer<N>`, so layers carried over from a Krita save (which keep Krita's
+/// names) can never clash with ours.
+const OUR_PREFIX: &str = "anim";
+
+/// A layer — or a whole group — of a Krita file, carried untouched into a
+/// rewrite of that file: its `<layer>` element exactly as Krita wrote it, and
+/// every file under `layers/` it names (pixels, frames, keyframes, profile,
+/// vector shapes, masks…). Nothing is decoded, so any layer type survives.
+pub struct Carried {
+    pub name: String,
+    xml: String,
+    /// `(path under layers/, bytes)`.
+    files: Vec<(String, Vec<u8>)>,
+    /// Uuids of the paint layers under it in Krita's stack, nearest first:
+    /// it goes back in just above the first of them the rewrite still has.
+    below: Vec<String>,
+}
+
+/// The layers of a Krita file that `keep(name, groups)` rejects — the same
+/// filter as [`read_filtered`] — lifted out whole, ready for
+/// [`WriteOpts::carried`]. A rejected group comes out as one piece.
+pub fn carry(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> Result<Vec<Carried>> {
+    let zip = ZipArchive::new(Cursor::new(bytes)).context("not a zip file")?;
+    let mut r = Reader { zip };
+    let maindoc = r.text("maindoc.xml")?;
+    let doc = xml::parse(&maindoc).context("parsing maindoc.xml")?;
+    let image = doc
+        .descendants()
+        .find(|n| n.has_tag_name("IMAGE"))
+        .context("maindoc.xml has no IMAGE")?;
+    let dir = format!("{}/layers/", image.attribute("name").unwrap_or(""));
+
+    // The stack top first, as the XML lists it: each rejected subtree once,
+    // and the paint layers that stay, in order.
+    enum Seen {
+        Carried(usize),
+        Paint(String),
+    }
+    struct Walk<'a> {
+        keep: &'a dyn Fn(&str, &[String]) -> bool,
+        src: &'a str,
+        groups: Vec<String>,
+        seen: Vec<Seen>,
+        out: Vec<(String, String, Vec<String>)>,
+    }
+    fn walk(layers: roxmltree::Node, w: &mut Walk) {
+        for n in layers.children().filter(|n| n.has_tag_name("layer")) {
+            let name = n.attribute("name").unwrap_or("").to_string();
+            if !(w.keep)(&name, &w.groups) {
+                let files =
+                    n.descendants().filter_map(|d| d.attribute("filename")).map(str::to_string).collect();
+                w.out.push((name, w.src[n.range()].to_string(), files));
+                w.seen.push(Seen::Carried(w.out.len() - 1));
+                continue;
+            }
+            match n.attribute("nodetype").unwrap_or("") {
+                "paintlayer" => w.seen.push(Seen::Paint(n.attribute("uuid").unwrap_or("").to_string())),
+                "grouplayer" => {
+                    if let Some(inner) = n.children().find(|c| c.has_tag_name("layers")) {
+                        w.groups.push(name);
+                        walk(inner, w);
+                        w.groups.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let top = image
+        .children()
+        .find(|n| n.has_tag_name("layers"))
+        .context("maindoc.xml has no layers")?;
+    let mut w = Walk { keep, src: &maindoc, groups: Vec::new(), seen: Vec::new(), out: Vec::new() };
+    walk(top, &mut w);
+    let Walk { seen, out, .. } = w;
+
+    let entries: Vec<String> = r.zip.file_names().map(str::to_string).collect();
+    let mut carried = Vec::with_capacity(out.len());
+    for (i, (name, xml, filenames)) in out.into_iter().enumerate() {
+        let at = seen.iter().position(|s| matches!(s, Seen::Carried(j) if *j == i)).unwrap_or(0);
+        let below = seen[at + 1..]
+            .iter()
+            .filter_map(|s| match s {
+                Seen::Paint(u) => Some(u.clone()),
+                Seen::Carried(_) => None,
+            })
+            .collect();
+        // A layer named `layer5` owns `layer5`, `layer5.f3`,
+        // `layer5.keyframes.xml`, `layer5.shapelayer/…` — not `layer50`.
+        let owns = |rel: &str| {
+            filenames.iter().any(|f| {
+                rel == f || rel.strip_prefix(f.as_str()).is_some_and(|t| t.starts_with('.') || t.starts_with('/'))
+            })
+        };
+        let mut files = Vec::new();
+        for e in &entries {
+            if let Some(rel) = e.strip_prefix(&dir).filter(|rel| owns(rel)) {
+                files.push((rel.to_string(), r.bytes(e)?));
+            }
+        }
+        carried.push(Carried { name, xml, files, below });
+    }
+    Ok(carried)
 }
 
 /// Top-left, in frame coordinates, of a `cw`×`ch` cell under the identity
@@ -77,13 +186,29 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
     zip.start_file("mimetype", stored)?;
     zip.write_all(MIMETYPE)?;
 
-    let names: Vec<String> = (0..project.layers.len()).map(|i| format!("layer{}", i + 1)).collect();
-    let layers_xml: Vec<xml::LayerXml> = project
-        .layers
-        .iter()
-        .enumerate()
-        .rev()
-        .map(|(i, l)| xml::LayerXml {
+    // Our file names, stepping over any a carried layer already owns — a
+    // Krita save names its own `layerN`, but nothing else guarantees it.
+    let taken = |name: &str| {
+        opts.carried.iter().flat_map(|c| &c.files).any(|(rel, _)| {
+            rel == name || rel.strip_prefix(name).is_some_and(|t| t.starts_with('.') || t.starts_with('/'))
+        })
+    };
+    let mut names: Vec<String> = Vec::with_capacity(project.layers.len());
+    let mut n = 0;
+    while names.len() < project.layers.len() {
+        n += 1;
+        let name = format!("{OUR_PREFIX}{n}");
+        if !taken(&name) {
+            names.push(name);
+        }
+    }
+    // Carried layers go back above the nearest layer under them that is
+    // still here; with none left, at the bottom.
+    let anchor = |c: &Carried| c.below.iter().find_map(|u| opts.layer_uuids.iter().position(|x| x == u));
+    let mut stack: Vec<xml::Item> = Vec::new();
+    for (i, l) in project.layers.iter().enumerate().rev() {
+        stack.extend(opts.carried.iter().filter(|c| anchor(c) == Some(i)).map(|c| xml::Item::Raw(&c.xml)));
+        stack.push(xml::Item::Layer(xml::LayerXml {
             filename: &names[i],
             name: &l.name,
             uuid: &opts.layer_uuids[i],
@@ -91,10 +216,11 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
             visible: l.visible,
             locked: l.locked,
             selected: i == opts.selected_layer,
-        })
-        .collect();
+        }));
+    }
+    stack.extend(opts.carried.iter().filter(|c| anchor(c).is_none()).map(|c| xml::Item::Raw(&c.xml)));
     zip.start_file("maindoc.xml", deflated)?;
-    zip.write_all(xml::maindoc(IMAGE, pw, ph, &layers_xml).as_bytes())?;
+    zip.write_all(xml::maindoc(IMAGE, pw, ph, &stack).as_bytes())?;
     zip.start_file("documentinfo.xml", deflated)?;
     zip.write_all(xml::documentinfo().as_bytes())?;
 
@@ -153,6 +279,13 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
         zip.write_all(SRGB_ICC)?;
         zip.start_file(format!("{IMAGE}/layers/{base}.keyframes.xml"), deflated)?;
         zip.write_all(xml::keyframes(&keys).as_bytes())?;
+    }
+    let mut copied = std::collections::HashSet::new();
+    for (rel, bytes) in opts.carried.iter().flat_map(|c| &c.files) {
+        if copied.insert(rel.as_str()) {
+            zip.start_file(format!("{IMAGE}/layers/{rel}"), deflated)?;
+            zip.write_all(bytes)?;
+        }
     }
     zip.start_file(format!("{IMAGE}/annotations/icc"), deflated)?;
     zip.write_all(SRGB_ICC)?;
@@ -256,6 +389,9 @@ pub struct KraDoc {
     /// Things read but not carried over — unsupported layer types, blend
     /// modes, masks — worded for a toast.
     pub warnings: Vec<String>,
+    /// `(uuid, name)` of paint layers the caller's filter kept out (see
+    /// [`read_filtered`]). Not decoded.
+    pub held: Vec<(String, String)>,
 }
 
 struct Reader {
@@ -306,8 +442,18 @@ fn attr_i32(n: roxmltree::Node, name: &str) -> i32 {
     n.attribute(name).and_then(|v| v.trim().parse().ok()).unwrap_or(0)
 }
 
-/// Read a `.kra`.
+/// Read a `.kra`, every layer. The app always reads through a filter (see
+/// `krita_link::comes_back`); this is the unfiltered view tests check against.
+#[cfg(test)]
 pub fn read(bytes: Vec<u8>) -> Result<KraDoc> {
+    read_filtered(bytes, &|_, _| true)
+}
+
+/// Read a `.kra`, keeping only the layers `keep(name, groups)` accepts —
+/// `groups` being the names of the groups it sits in, outermost first. A
+/// group `keep` rejects takes everything inside it along. Rejected layers
+/// are listed in [`KraDoc::held`], never decoded, and raise no warnings.
+pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> Result<KraDoc> {
     let zip = ZipArchive::new(Cursor::new(bytes)).context("not a zip file")?;
     let mut r = Reader { zip };
     let maindoc = r.text("maindoc.xml")?;
@@ -340,24 +486,26 @@ pub fn read(bytes: Vec<u8>) -> Result<KraDoc> {
         y: i32,
         keyframes: Option<String>,
     }
-    let mut found: Vec<Found> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-    fn walk(
-        layers: roxmltree::Node,
-        visible: bool,
-        dx: i32,
-        dy: i32,
-        found: &mut Vec<Found>,
-        warnings: &mut Vec<String>,
-    ) -> Result<()> {
+    struct Walk<'a> {
+        keep: &'a dyn Fn(&str, &[String]) -> bool,
+        groups: Vec<String>,
+        found: Vec<Found>,
+        warnings: Vec<String>,
+        held: Vec<(String, String)>,
+    }
+    fn walk(layers: roxmltree::Node, visible: bool, holding: bool, dx: i32, dy: i32, w: &mut Walk) -> Result<()> {
         for n in layers.children().filter(|n| n.has_tag_name("layer")) {
             let name = n.attribute("name").unwrap_or("").to_string();
             let vis = visible && n.attribute("visible") != Some("0");
             let (x, y) = (dx + attr_i32(n, "x"), dy + attr_i32(n, "y"));
-            if n.children().any(|c| c.has_tag_name("masks")) {
-                warnings.push(format!("masks on \"{name}\" ignored"));
+            let hold = holding || !(w.keep)(&name, &w.groups);
+            if !hold && n.children().any(|c| c.has_tag_name("masks")) {
+                w.warnings.push(format!("masks on \"{name}\" ignored"));
             }
             match n.attribute("nodetype").unwrap_or("") {
+                "paintlayer" if hold => {
+                    w.held.push((n.attribute("uuid").unwrap_or("").to_string(), name));
+                }
                 "paintlayer" => {
                     let cs = n.attribute("colorspacename").unwrap_or("RGBA");
                     if cs != "RGBA" {
@@ -368,9 +516,9 @@ pub fn read(bytes: Vec<u8>) -> Result<KraDoc> {
                     }
                     let op = n.attribute("compositeop").unwrap_or("normal");
                     if op != "normal" {
-                        warnings.push(format!("\"{name}\" blend mode {op} ignored"));
+                        w.warnings.push(format!("\"{name}\" blend mode {op} ignored"));
                     }
-                    found.push(Found {
+                    w.found.push(Found {
                         uuid: n.attribute("uuid").unwrap_or("").to_string(),
                         filename: n.attribute("filename").context("layer without filename")?.to_string(),
                         opacity: attr_i32(n, "opacity").clamp(0, 255) as u8,
@@ -383,14 +531,17 @@ pub fn read(bytes: Vec<u8>) -> Result<KraDoc> {
                     });
                 }
                 "grouplayer" => {
-                    if attr_i32(n, "opacity") != 255 {
-                        warnings.push(format!("group \"{name}\" opacity ignored"));
+                    if !hold && attr_i32(n, "opacity") != 255 {
+                        w.warnings.push(format!("group \"{name}\" opacity ignored"));
                     }
                     if let Some(inner) = n.children().find(|c| c.has_tag_name("layers")) {
-                        walk(inner, vis, x, y, found, warnings)?;
+                        w.groups.push(name);
+                        walk(inner, vis, hold, x, y, w)?;
+                        w.groups.pop();
                     }
                 }
-                other => warnings.push(format!("\"{name}\" ({other}) skipped")),
+                _ if hold => {}
+                other => w.warnings.push(format!("\"{name}\" ({other}) skipped")),
             }
         }
         Ok(())
@@ -399,7 +550,9 @@ pub fn read(bytes: Vec<u8>) -> Result<KraDoc> {
         .children()
         .find(|n| n.has_tag_name("layers"))
         .context("maindoc.xml has no layers")?;
-    walk(top, true, 0, 0, &mut found, &mut warnings)?;
+    let mut w = Walk { keep, groups: Vec::new(), found: Vec::new(), warnings: Vec::new(), held: Vec::new() };
+    walk(top, true, false, 0, 0, &mut w)?;
+    let Walk { found, mut warnings, held, .. } = w;
 
     let mut layers = Vec::with_capacity(found.len());
     for f in found.into_iter().rev() {
@@ -476,7 +629,7 @@ pub fn read(bytes: Vec<u8>) -> Result<KraDoc> {
         }
     }
 
-    Ok(KraDoc { width, height, fps, range_end, layers, warnings })
+    Ok(KraDoc { width, height, fps, range_end, layers, warnings, held })
 }
 
 #[cfg(test)]
@@ -535,7 +688,7 @@ pub(crate) mod tests {
     #[test]
     fn write_then_read_keeps_keys_holds_repeats_and_pixels() {
         let p = sample_project();
-        let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(2), selected_layer: 1 }).unwrap();
+        let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(2), selected_layer: 1, carried: &[] }).unwrap();
         let doc = read(bytes).unwrap();
         assert_eq!((doc.width, doc.height), (100, 60));
         assert_eq!(doc.fps, Some(12.0));
@@ -630,6 +783,125 @@ pub(crate) mod tests {
         assert_eq!(ink.keys[0].1, ink.keys[2].1);
     }
 
+    /// Carry a layer out of a file Krita itself wrote — Krita's folder name,
+    /// Krita's `layerN` file names, LZF tiles — into a rewrite that doesn't
+    /// have it: it goes back in the same place, drawing for drawing.
+    #[test]
+    fn carries_a_krita_written_layer_into_a_rewrite() {
+        let krita = include_bytes!("testdata/krita-5.2.9-resaved.kra").to_vec();
+        // Pretend "Big" is Krita-only.
+        let keep = |name: &str, _: &[String]| name != "Big";
+        let carried = carry(krita.clone(), &keep).unwrap();
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].name, "Big");
+        assert!(carried[0].files.iter().any(|(f, _)| f.ends_with(".keyframes.xml")));
+        assert_eq!(carried[0].below, [uuids(3)[0].clone()], "Ink is under it");
+
+        // The rewrite from this app: Ink and Solo only, under our own names.
+        let mut q = fixture_project();
+        q.layers.remove(1);
+        let u = uuids(3);
+        let qu = [u[0].clone(), u[2].clone()];
+        let out = write(&q, &WriteOpts { layer_uuids: &qu, selected_layer: 0, carried: &carried }).unwrap();
+
+        let back = read(out).unwrap();
+        let names: Vec<&str> = back.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Ink", "Big", "Solo"]);
+        let orig = read(krita).unwrap();
+        let (a, b) = (&orig.layers[1], &back.layers[1]);
+        assert_eq!(a.uuid, b.uuid);
+        assert_eq!(a.keys.iter().map(|k| k.0).collect::<Vec<_>>(), b.keys.iter().map(|k| k.0).collect::<Vec<_>>());
+        for (ka, kb) in a.keys.iter().zip(&b.keys) {
+            let (da, db) = (&a.drawings[ka.1], &b.drawings[kb.1]);
+            assert_eq!((da.x, da.y, da.w, da.h), (db.x, db.y, db.w, db.h));
+            assert_eq!(da.pixels, db.pixels);
+        }
+    }
+
+    /// A rejected group comes out whole — any layer type inside — with the
+    /// files its layers name, and only those (`layer9…`, not `layer90`).
+    #[test]
+    fn carries_a_whole_group_with_its_files() {
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        let o = SimpleFileOptions::default();
+        zip.start_file("maindoc.xml", o).unwrap();
+        zip.write_all(
+            br#"<DOC><IMAGE name="Unnamed" width="4" height="4" colorspacename="RGBA"><layers>
+                 <layer nodetype="grouplayer" name="refs-x" filename="layer8" uuid="{g}"><layers>
+                   <layer nodetype="shapelayer" name="notes" filename="layer9" uuid="{v}"/>
+                 </layers></layer>
+                 <layer nodetype="paintlayer" name="Ink" filename="layer2" uuid="{ink}"/>
+               </layers></IMAGE></DOC>"#,
+        )
+        .unwrap();
+        for (f, b) in [
+            ("Unnamed/layers/layer9.shapelayer/content.svg", &b"<svg/>"[..]),
+            ("Unnamed/layers/layer90", b"not ours"),
+            ("Unnamed/layers/layer2", b"ink"),
+        ] {
+            zip.start_file(f, o).unwrap();
+            zip.write_all(b).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        let keep = |name: &str, _: &[String]| !name.ends_with("-x");
+        let c = carry(bytes, &keep).unwrap();
+        assert_eq!(c.len(), 1);
+        assert!(c[0].xml.starts_with("<layer nodetype=\"grouplayer\"") && c[0].xml.contains("name=\"notes\""));
+        let files: Vec<&str> = c[0].files.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(files, ["layer9.shapelayer/content.svg"]);
+        assert_eq!(c[0].below, ["{ink}"]);
+    }
+
+    const SKETCH_UUID: &str = "{00000000-0000-4000-8000-00000000abcd}";
+
+    /// `fixture_project` with a Krita-only `sketch-x` layer between Ink and
+    /// Big, and the uuids to write it with (`uuids(3)` for the fixture's own
+    /// layers, in order, so a rewrite without the sketch lines up).
+    fn with_sketch() -> (Project, Vec<String>) {
+        let mut p = fixture_project();
+        let mut sketch = Layer::new("sketch-x", p.frame_count);
+        let id = p.cells.len();
+        let mut c = Canvas::new(100, 60);
+        for y in 5..20 {
+            for x in 5..95 {
+                let o = ((y * 100 + x) * 4) as usize;
+                c.pixels[o..o + 4].copy_from_slice(&[220, 40, 160, 255]);
+            }
+        }
+        p.cells.push(c);
+        sketch.exposures[1] = Some(id);
+        p.layers.insert(1, sketch);
+        let u = uuids(3);
+        (p, vec![u[0].clone(), SKETCH_UUID.to_string(), u[1].clone(), u[2].clone()])
+    }
+
+    /// Not a unit test: step 1 of the carry check — writes `carry_src.kra`
+    /// (the project with `sketch-x`) into `$KRA_FIXTURE_DIR`. Then
+    /// `krita --export --export-filename carry_krita.kra carry_src.kra`.
+    #[test]
+    #[ignore]
+    fn kra_carry_src() {
+        let dir = std::path::PathBuf::from(std::env::var("KRA_FIXTURE_DIR").unwrap());
+        let (p, u) = with_sketch();
+        let bytes = write(&p, &WriteOpts { layer_uuids: &u, selected_layer: 0, carried: &[] }).unwrap();
+        std::fs::write(dir.join("carry_src.kra"), bytes).unwrap();
+    }
+
+    /// Not a unit test: step 2 — carries `sketch-x` out of Krita's
+    /// `carry_krita.kra` into a rewrite of the project *without* it,
+    /// `carry_out.kra`. Krita should render that exactly like `carry_src.kra`.
+    #[test]
+    #[ignore]
+    fn kra_carry_out() {
+        let dir = std::path::PathBuf::from(std::env::var("KRA_FIXTURE_DIR").unwrap());
+        let krita = std::fs::read(dir.join("carry_krita.kra")).unwrap();
+        let keep = |name: &str, _: &[String]| !name.ends_with("-x");
+        let carried = carry(krita, &keep).unwrap();
+        let p = fixture_project();
+        let opts = WriteOpts { layer_uuids: &uuids(3), selected_layer: 0, carried: &carried };
+        std::fs::write(dir.join("carry_out.kra"), write(&p, &opts).unwrap()).unwrap();
+    }
+
     /// Not a unit test: writes `ours.kra` plus our own flattened frames
     /// (`ours_NNNN.png`) into `$KRA_FIXTURE_DIR`, to check the writer against
     /// a real Krita (`krita --export-sequence`, `krita --export`).
@@ -638,7 +910,7 @@ pub(crate) mod tests {
     fn kra_fixture() {
         let dir = std::path::PathBuf::from(std::env::var("KRA_FIXTURE_DIR").unwrap());
         let p = fixture_project();
-        let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(p.layers.len()), selected_layer: 1 }).unwrap();
+        let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(p.layers.len()), selected_layer: 1, carried: &[] }).unwrap();
         std::fs::write(dir.join("ours.kra"), bytes).unwrap();
         for f in 0..p.frame_count {
             let flat = composite::flatten_frame(&p, f);
@@ -656,9 +928,9 @@ pub(crate) mod tests {
     #[test]
     fn first_drawing_lives_in_the_main_file_next_to_a_profile() {
         let p = sample_project();
-        let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(2), selected_layer: 0 }).unwrap();
+        let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(2), selected_layer: 0, carried: &[] }).unwrap();
         let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
-        for n in ["layer1", "layer2"] {
+        for n in ["anim1", "anim2"] {
             let mut kf = String::new();
             zip.by_name(&format!("image/layers/{n}.keyframes.xml")).unwrap().read_to_string(&mut kf).unwrap();
             let doc = xml::parse(&kf).unwrap();
@@ -668,9 +940,9 @@ pub(crate) mod tests {
             zip.by_name(&format!("image/layers/{n}.icc")).unwrap().read_to_end(&mut icc).unwrap();
             assert_eq!(icc, SRGB_ICC);
         }
-        // Ink's first drawing sits in `layer1` itself.
+        // Ink's first drawing sits in `anim1` itself.
         let mut main = Vec::new();
-        zip.by_name("image/layers/layer1").unwrap().read_to_end(&mut main).unwrap();
+        zip.by_name("image/layers/anim1").unwrap().read_to_end(&mut main).unwrap();
         assert!(tiles::decode(&main, [0; 4]).unwrap().is_some());
     }
 
@@ -680,6 +952,33 @@ pub(crate) mod tests {
         let (c, clipped) = d.place(0, 0, 1, 1);
         assert!(clipped);
         assert_eq!(&c.pixels, &[4, 5, 6, 255]);
+    }
+
+    /// A group the filter rejects takes its layers along: they come back as
+    /// `held`, undecoded — this file has no pixel data for them at all.
+    #[test]
+    fn a_rejected_group_holds_its_layers_undecoded() {
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("maindoc.xml", SimpleFileOptions::default()).unwrap();
+        zip.write_all(
+            br#"<DOC><IMAGE name="x" width="4" height="4" colorspacename="RGBA"><layers>
+                 <layer nodetype="grouplayer" name="refs-x" opacity="128" filename="g"><layers>
+                   <layer nodetype="paintlayer" name="photo" uuid="{p}" filename="missing"/>
+                   <layer nodetype="vectorlayer" name="notes" filename="v"/>
+                 </layers></layer>
+               </layers></IMAGE></DOC>"#,
+        )
+        .unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        // Shaped like the link's filter: the layer's own name, and its groups'.
+        let keep = |name: &str, groups: &[String]| {
+            !name.ends_with("-x") && !groups.iter().any(|g| g.ends_with("-x"))
+        };
+        let doc = read_filtered(bytes, &keep).unwrap();
+        assert!(doc.layers.is_empty());
+        assert_eq!(doc.held, [("{p}".to_string(), "photo".to_string())]);
+        // No "skipped" / "opacity ignored" noise for what was kept out on purpose.
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
     }
 
     #[test]

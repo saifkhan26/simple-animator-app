@@ -2281,7 +2281,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         resp.context_menu(|ui| {
                                             if ui
                                                 .button(theme::icon_text(ic::PAINT_BRUSH, krita_label))
-                                                .on_hover_text("Opens the whole project in Krita with this layer selected")
+                                                .on_hover_text("Opens the project in Krita with this layer selected")
                                                 .clicked()
                                             {
                                                 krita_edit = Some(i);
@@ -4413,10 +4413,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             .button(theme::icon_text(ic::FILE_PLUS, "New project…"))
             .clicked()
         {
-            state.new_project_cfg.width = state.project.width;
-            state.new_project_cfg.height = state.project.height;
-            state.new_project_cfg.fps = state.project.fps;
-            state.show_new_project = true;
+            state.open_new_project();
             ui.close_menu();
         }
         ui.separator();
@@ -4464,9 +4461,10 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         if ui
             .button(theme::icon_text(ic::PAINT_BRUSH, krita_menu_label(state)))
             .on_hover_text(
-                "Opens the whole project in Krita as an animation. Each time you \
-                 save there, the drawings, timing and layers you changed come \
-                 back here as one undo step.",
+                "Opens the project in Krita as an animation. Each time you save \
+                 there, the drawings, timing and layers you changed come back \
+                 here as one undo step.\n\nReference layers and layers named …-x \
+                 stay here; Krita layers named …-x stay in Krita.",
             )
             .clicked()
         {
@@ -4480,6 +4478,25 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
                 .clicked()
         {
             state.stop_krita_link();
+            ui.close_menu();
+        }
+        let helper_label = if !crate::krita_helper::installed() {
+            "Install Krita helper…"
+        } else if crate::krita_helper::outdated() {
+            "Update Krita helper…"
+        } else {
+            "Reinstall Krita helper…"
+        };
+        if ui
+            .button(theme::icon_text(ic::PUZZLE_PIECE, helper_label))
+            .on_hover_text(
+                "Puts a small plugin in Krita's plugin folder so Send to Krita again \
+                 reloads the file in Krita by itself — no closing and reopening. \
+                 Enable \u{201c}Animator Link\u{201d} in Krita afterwards.",
+            )
+            .clicked()
+        {
+            state.install_krita_helper();
             ui.close_menu();
         }
         ui.separator();
@@ -4583,6 +4600,10 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
     });
 }
 
+/// How tall the saved-preset list may grow before it scrolls, in points —
+/// about six rows, so a long list never pushes Create off the screen.
+const PRESET_LIST_MAX_H: f32 = 170.0;
+
 fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
     if !state.show_new_project {
         return;
@@ -4590,6 +4611,15 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
     let mut open = true;
     let mut create = false;
     let mut cancel = false;
+    // Saved-preset actions, applied after the window closure like the
+    // create / cancel flags above.
+    let mut apply = None;
+    let mut star = None;
+    let mut delete = None;
+    let mut start_rename = None;
+    let mut rename_commit = false;
+    let mut rename_cancel = false;
+    let mut save = false;
     egui::Window::new(theme::icon_text(ic::FILE_PLUS, "New project"))
         .open(&mut open)
         .default_pos([400.0, 200.0])
@@ -4670,6 +4700,108 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
             });
 
             ui.add_space(8.0);
+            theme::section_header(ui, ic::BOOKMARK_SIMPLE, "My presets");
+            let replacing = state.preset_named(&state.new_project_cfg.preset_name).is_some();
+            let (presets, cfg) = (&state.project_presets, &mut state.new_project_cfg);
+            if presets.is_empty() {
+                ui.label(
+                    egui::RichText::new("Name the size above and save it to reuse it.")
+                        .color(theme::TEXT_MUTED)
+                        .size(11.0),
+                );
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("project_presets")
+                .max_height(PRESET_LIST_MAX_H)
+                .show(ui, |ui| {
+                    for (i, p) in presets.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let star_color = if p.is_default {
+                                theme::ACCENT
+                            } else {
+                                theme::TEXT_MUTED
+                            };
+                            let tip = if p.is_default {
+                                "New project opens on this preset. Click to stop."
+                            } else {
+                                "Open New project on this preset"
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(ic::STAR).size(15.0).color(star_color),
+                                    )
+                                    .min_size(egui::vec2(28.0, 22.0)),
+                                )
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                star = Some(i);
+                            }
+                            // Name: click applies, double-click renames inline.
+                            let editing = matches!(cfg.preset_rename.as_ref(), Some(r) if r.index == i);
+                            if editing {
+                                let r = cfg.preset_rename.as_mut().unwrap();
+                                let te = ui.add(
+                                    egui::TextEdit::singleline(&mut r.buf).desired_width(160.0),
+                                );
+                                if !r.focused {
+                                    te.request_focus();
+                                    r.focused = true;
+                                }
+                                if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
+                                    rename_cancel = true;
+                                } else if te.lost_focus() {
+                                    // Covers Enter and clicking away.
+                                    rename_commit = true;
+                                }
+                            } else {
+                                let current =
+                                    (cfg.width, cfg.height, cfg.fps) == (p.width, p.height, p.fps);
+                                let resp = ui
+                                    .selectable_label(
+                                        current,
+                                        format!("{}   {}×{} · {} fps", p.name, p.width, p.height, p.fps),
+                                    )
+                                    .on_hover_text("Click to use, double-click to rename");
+                                if resp.double_clicked() {
+                                    start_rename = Some(i);
+                                } else if resp.clicked() {
+                                    apply = Some(i);
+                                }
+                            }
+                            if theme::icon_button(ui, ic::TRASH, "Delete preset").clicked() {
+                                delete = Some(i);
+                            }
+                        });
+                    }
+                });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let te = ui.add(
+                    egui::TextEdit::singleline(&mut cfg.preset_name)
+                        .hint_text("Preset name")
+                        .desired_width(160.0),
+                );
+                let entered = te.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+                let named = !cfg.preset_name.trim().is_empty();
+                let (label, tip) = if replacing {
+                    ("Replace preset", "Overwrite the saved preset with this name")
+                } else {
+                    ("Save preset", "Save the size and FPS above under this name")
+                };
+                if ui
+                    .add_enabled(named, egui::Button::new(theme::icon_text(ic::FLOPPY_DISK, label)))
+                    .on_hover_text(tip)
+                    .on_disabled_hover_text("Type a name first")
+                    .clicked()
+                    || (named && entered)
+                {
+                    save = true;
+                }
+            });
+
+            ui.add_space(8.0);
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button(theme::icon_text(ic::CHECK, "Create")).clicked() {
@@ -4682,6 +4814,30 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
         });
 
     // Process the result outside the egui closure to avoid borrow conflicts.
+    if rename_cancel {
+        state.new_project_cfg.preset_rename = None;
+    } else if rename_commit {
+        if let Some(r) = state.new_project_cfg.preset_rename.take() {
+            // A blank or clashing name keeps the old one, like a layer rename.
+            state.rename_preset(r.index, &r.buf);
+        }
+    } else if let Some(i) = start_rename {
+        state.new_project_cfg.preset_rename = Some(crate::app::LayerRename {
+            index: i,
+            buf: state.project_presets[i].name.clone(),
+            focused: false,
+        });
+    }
+    if let Some(i) = delete {
+        state.delete_preset(i);
+    } else if let Some(i) = star {
+        state.toggle_default_preset(i);
+    } else if let Some(i) = apply {
+        state.apply_preset(i);
+    }
+    if save {
+        state.save_preset();
+    }
     if create {
         let (w, h, f) = (
             state.new_project_cfg.width.max(1),
@@ -5769,5 +5925,49 @@ mod stroke_source_tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, pos2(8.0, 6.0));
         assert!(out[0].1.is_none());
+    }
+}
+
+/// The New project dialog's saved presets, drawn headless.
+#[cfg(test)]
+mod new_project_tests {
+    use super::*;
+    use crate::app::{LayerRename, ProjectPreset};
+
+    fn preset(name: &str, width: u32, height: u32, is_default: bool) -> ProjectPreset {
+        ProjectPreset {
+            name: name.into(),
+            width,
+            height,
+            fps: 24.0,
+            is_default,
+        }
+    }
+
+    #[test]
+    fn dialog_draws_saved_presets_and_a_rename_in_progress() {
+        let mut state = AppState::for_test();
+        state.project_presets = vec![
+            preset("Phone", 1080, 1920, true),
+            preset("Square", 1080, 1080, false),
+            preset("Cinema", 2048, 858, false),
+        ];
+        state.open_new_project();
+        state.new_project_cfg.preset_rename = Some(LayerRename {
+            index: 1,
+            buf: "Square".into(),
+            focused: false,
+        });
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| new_project_dialog(&mut state, ctx));
+        }
+        assert!(state.show_new_project);
+        assert_eq!(state.project_presets.len(), 3);
+        let r = state.new_project_cfg.preset_rename.as_ref().expect("rename still open");
+        assert!(r.focused, "rename box took focus");
+        // Opened on the starred preset, which the list shows as current.
+        let cfg = &state.new_project_cfg;
+        assert_eq!((cfg.width, cfg.height), (1080, 1920));
     }
 }

@@ -357,22 +357,58 @@ folds the save back in as **one undo step**, touching only what Krita changed:
 Layer transforms, the camera, tracker points and the light-table flag stay
 here — Krita edits the drawings, this app keeps the staging.
 
+**Layers that stay on one side.** A name ending in **`-x`** (any case,
+`sketch-x`, `BG -X`) keeps a layer in the app it's in:
+
+- Here, `-x` layers and **reference** (lightbulb) layers are never sent — a
+  video background stays out of Krita once you click its lightbulb or rename
+  it `bg-x`. The send toast lists what was kept out.
+- In Krita, an `-x` layer — or any layer inside a group named `…-x` — never
+  comes back. Use it for Krita-side sketches and guides.
+- Renaming a synced layer to `…-x` in Krita, or making one reference / `-x`
+  here, just ends its link: both copies stay as they are and nothing is
+  deleted on either side.
+- **Send to Krita again** only updates the layers that come from this app.
+  Krita's `-x` layers and groups are carried into the new file untouched —
+  copied as Krita saved them, so any layer type survives — and go back in the
+  same place in the stack, just above the layer they sat on.
+
 The link lasts until you quit, start a new project, open another, or choose
 **Stop Krita link**. While linked, the menu item becomes **Send to Krita
-again**: it rewrites the file, but Krita doesn't reload a file it has open, so
-close it in Krita without saving and reopen it (*File → Open Recent*). Save in
-Krita *before* sending again if it has changes you want — they come back here;
-saving the old copy after a re-send would overwrite your newer edits here (Ctrl+Z
-recovers them). Krita is found under Program Files, in
-`/Applications`, or on `PATH`; otherwise the app asks once and remembers.
+again**. Any Krita save the app hasn't read yet comes in first, then the file
+is rewritten. Krita is found under Program Files, in `/Applications`, or on
+`PATH`; otherwise the app asks once and remembers.
+
+### Krita helper (reload in place)
+
+Krita doesn't reload a file it has open and has no Reload command, so without
+help you'd close the file there and reopen it after every **Send to Krita
+again**. **File → Install Krita helper…** puts a small plugin, *Animator
+Link*, in Krita's plugin folder (`%APPDATA%\krita\pykrita` on Windows). Enable
+it once — Krita: *Settings → Configure Krita → Python Plugin Manager*, tick
+*Animator Link*, restart Krita — and from then on Send to Krita again:
+
+1. asks Krita to get ready; if the Krita document has unsaved edits, the
+   helper saves them and they come in here first, as one undo step;
+2. writes the new file;
+3. has Krita swap it into the same window — same frame, active layer, zoom,
+   rotation and mirror (the view recenters: Krita's scripting can't set the
+   pan) — and show *Updated from Animator*.
+
+If the helper doesn't answer within a few seconds (not enabled, or Krita is
+closed), the send goes ahead as before and the toast says what to check. The
+two sides talk through two small text files next to the linked `.kra`
+(`.to-krita`, `.to-app`); the protocol is in
+`krita-plugin/animator_link/mailbox.py`, tested with
+`python -m unittest discover -s krita-plugin/tests`.
 
 What doesn't come back, with a note saying so: vector, filter, fill, clone
 and file layers, masks, blend modes other than Normal, animated opacity.
 Groups are flattened into plain layers. The file must stay 8-bit RGBA.
 
 **File → Import .kra…** adds a Krita document's paint layers under the
-active layer; **File → Export .kra…** writes the project as an animated `.kra`
-without linking. Import is also how to recover a Krita save made after the
+active layer (skipping `-x` ones, as the link would); **File → Export .kra…**
+writes the whole project, every layer, as an animated `.kra` without linking. Import is also how to recover a Krita save made after the
 app closed — the temp file stays on disk.
 
 ## Keyboard shortcuts

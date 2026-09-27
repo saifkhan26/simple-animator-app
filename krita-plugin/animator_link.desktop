@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=animator_link
+X-Python-2-Compatible=false
+X-Animator-Version=1
+Name=Animator Link
+Comment=Reloads a document in place when Animator sends it again, saving your unsaved Krita edits back to Animator first.

@@ -49,6 +49,29 @@ pub fn cell_hash(c: &Canvas) -> u64 {
     h.finish()
 }
 
+/// How a pull that would leave no layers is refused.
+pub const EVERYTHING_DELETED: &str = "Krita's save deletes every layer here";
+
+/// A name that keeps a layer in the app it's in: it ends in "-x", ignoring
+/// case and trailing spaces ("sketch-x", "BG -X "). The same rule both ways:
+/// such a layer here is never sent, one in Krita is never brought back.
+pub fn stays_put(name: &str) -> bool {
+    let n = name.trim_end();
+    n.len() > 2 && n.is_char_boundary(n.len() - 2) && n[n.len() - 2..].eq_ignore_ascii_case("-x")
+}
+
+/// A layer of ours that never goes to Krita: a reference (light-table) layer,
+/// or one named to [`stays_put`].
+pub fn stays_here(l: &Layer) -> bool {
+    l.reference || stays_put(&l.name)
+}
+
+/// Whether a Krita layer comes back here: not named to [`stays_put`], and not
+/// inside a group that is. The filter for [`kra::read_filtered`].
+pub fn comes_back(name: &str, groups: &[String]) -> bool {
+    !stays_put(name) && !groups.iter().any(|g| stays_put(g))
+}
+
 fn is_blank(c: &Canvas) -> bool {
     c.pixels.iter().all(|&b| b == 0)
 }
@@ -100,9 +123,19 @@ pub struct Baseline {
     pub range_end: usize,
     /// Bottom first, in Krita's stack order.
     pub layers: Vec<LayerBase>,
+    /// Krita layers whose link ended from this side (the layer here became
+    /// reference or `-x`): never brought back, until the next send rewrites
+    /// Krita's file without them.
+    pub ignored: HashSet<String>,
 }
 
 impl Baseline {
+    /// Nothing sent yet (the stress harness starts from here).
+    #[cfg(test)]
+    pub fn empty(pw: u32, ph: u32) -> Self {
+        Self { pw, ph, range_end: 0, layers: Vec::new(), ignored: HashSet::new() }
+    }
+
     /// Record `project` as sent, `uuids[i]` naming layer `i`.
     pub fn capture(project: &Project, uuids: &[String]) -> Self {
         let (pw, ph) = (project.width, project.height);
@@ -137,7 +170,7 @@ impl Baseline {
                 b
             })
             .collect();
-        Self { pw, ph, range_end: project.frame_count.saturating_sub(1), layers }
+        Self { pw, ph, range_end: project.frame_count.saturating_sub(1), layers, ignored: HashSet::new() }
     }
 
     fn layer(&self, uuid: &str) -> Option<&LayerBase> {
@@ -180,10 +213,20 @@ pub struct Pulled {
     pub layers: Vec<PulledLayer>,
     pub range_end: Option<usize>,
     pub warnings: Vec<String>,
+    /// `(uuid, name)` of Krita layers that stay in Krita (see [`comes_back`]).
+    pub held: Vec<(String, String)>,
 }
 
-/// Rasterize and match every drawing in `doc` (worker side).
-pub fn prepare(doc: KraDoc, base: &Baseline) -> Pulled {
+/// The Krita uuids of the layers here that are linked — see [`prepare`].
+pub fn present(project: &Project, links: &HashMap<u64, String>) -> HashSet<String> {
+    project.layers.iter().filter_map(|l| links.get(&l.uid)).cloned().collect()
+}
+
+/// Rasterize and match every drawing in `doc` (worker side). `present` are
+/// the uuids linked to a layer here ([`present`]): a Krita layer without one
+/// comes back whole, as Krita has it, so its pixels are kept even where they
+/// match — the matching cell here may have been edited since, or deleted.
+pub fn prepare(doc: KraDoc, base: &Baseline, present: &HashSet<String>) -> Pulled {
     let (pw, ph) = (base.pw, base.ph);
     let mut warnings = doc.warnings;
     if (doc.width, doc.height) != (pw, ph) {
@@ -201,6 +244,7 @@ pub fn prepare(doc: KraDoc, base: &Baseline) -> Pulled {
         .into_iter()
         .map(|kl| {
             let b = base.layer(&kl.uuid);
+            let whole = !present.contains(&kl.uuid);
             // Every size this layer's drawings had at the last sync; almost
             // always just one.
             let mut sizes: Vec<(u32, u32)> = Vec::new();
@@ -228,7 +272,8 @@ pub fn prepare(doc: KraDoc, base: &Baseline) -> Pulled {
                         let (c, clip) = place(s);
                         let h = cell_hash(&c);
                         if let Some(&id) = b.and_then(|b| b.by_hash.get(&h)) {
-                            return PulledDrawing { hash: h, size: s, matched: Some(id), blank: is_blank(&c), canvas: None };
+                            let blank = is_blank(&c);
+                            return PulledDrawing { hash: h, size: s, matched: Some(id), blank, canvas: whole.then_some(c) };
                         }
                         tried.push((s, c, clip, h));
                     }
@@ -272,7 +317,7 @@ pub fn prepare(doc: KraDoc, base: &Baseline) -> Pulled {
             if clipped == 1 { "" } else { "s" }
         ));
     }
-    Pulled { layers, range_end: doc.range_end, warnings }
+    Pulled { layers, range_end: doc.range_end, warnings, held: doc.held }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,6 +429,10 @@ pub struct PullPlan {
     pub next: Baseline,
     pub report: Report,
     pub warnings: Vec<String>,
+    /// [`Layer::uid`]s whose link ends with this pull: renamed to stay in
+    /// Krita there, or made reference / `-x` here. Their layers stay as they
+    /// are; only the link goes. Applies even to a no-op plan.
+    pub unlink: Vec<u64>,
 }
 
 impl PullPlan {
@@ -445,12 +494,39 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
     let krita_uuids: HashSet<String> = pulled.layers.iter().map(|l| l.uuid.clone()).collect();
 
     let uuid_of = |l: &Layer| links.get(&l.uid);
+
+    // Links that end here, in both directions: a Krita layer renamed to stay
+    // in Krita, and a layer here made reference / `-x` since the send. Neither
+    // side is touched — the Krita layer isn't added back, ours isn't removed.
+    let mut ignore: HashSet<String> = pulled.held.iter().map(|(u, _)| u.clone()).collect();
+    ignore.extend(base.ignored.iter().cloned());
+    let mut ignored = base.ignored.clone();
+    let mut unlink: Vec<u64> = Vec::new();
+    let mut warnings = pulled.warnings;
+    for l in &project.layers {
+        let Some(u) = uuid_of(l) else { continue };
+        let linked = base_uuids.contains(u.as_str());
+        if stays_here(l) {
+            ignore.insert(u.clone());
+            ignored.insert(u.clone());
+            unlink.push(l.uid);
+            if linked {
+                warnings.push(format!("\"{}\" stays here now, no longer synced", l.name));
+            }
+        } else if let Some((_, kname)) = pulled.held.iter().find(|(h, _)| h == u) {
+            unlink.push(l.uid);
+            if linked {
+                warnings.push(format!("\"{kname}\" now stays in Krita; \"{}\" kept here as it was", l.name));
+            }
+        }
+    }
+
     // The local layer standing for each linked uuid — the first one carrying
     // it, should a layer ever have been copied along with its uid.
     let mut local_of: HashMap<String, usize> = HashMap::new();
     for (i, l) in project.layers.iter().enumerate() {
         if let Some(u) = uuid_of(l) {
-            if base_uuids.contains(u.as_str()) {
+            if base_uuids.contains(u.as_str()) && !ignore.contains(u) {
                 local_of.entry(u.clone()).or_insert(i);
             }
         }
@@ -476,6 +552,9 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
     let mut decided: Vec<(String, Slot)> = Vec::new();
     let mut next_layers: Vec<LayerBase> = Vec::new();
     for mut pl in pulled.layers {
+        if ignore.contains(&pl.uuid) {
+            continue;
+        }
         let b = base.layer(&pl.uuid);
         let key_hashes = pl.key_hashes();
         let keys_changed = b.map_or(true, |b| b.keys != key_hashes);
@@ -510,11 +589,22 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
                     None => {
                         let d = &mut pl.drawings[di];
                         let r = match d.matched {
-                            Some(id) => CellRef::Old(id),
-                            None => {
-                                new_cells.push(d.canvas.take().context("unmatched drawing without pixels")?);
-                                CellRef::New(new_cells.len() - 1)
-                            }
+                            // A layer that's here keeps its cells: edits made
+                            // here survive where Krita didn't change the drawing.
+                            Some(id) if keep => CellRef::Old(id),
+                            // A layer coming back (new, or deleted here) is
+                            // Krita's exactly: a cell is reused only while it
+                            // still holds that very content.
+                            Some(id) if project.cell(id).is_some_and(|c| cell_hash(c) == d.hash) => CellRef::Old(id),
+                            matched => match d.canvas.take() {
+                                Some(c) => {
+                                    new_cells.push(c);
+                                    CellRef::New(new_cells.len() - 1)
+                                }
+                                // Pixels weren't kept (`present` said the layer
+                                // was here): the old cell is the best there is.
+                                None => CellRef::Old(matched.context("unmatched drawing without pixels")?),
+                            },
                         };
                         refs[di] = Some(r);
                         r
@@ -602,7 +692,8 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
         decided.push((pl.uuid, slot));
     }
 
-    // Linked layers Krita deleted.
+    // Linked layers Krita deleted. (`local_of` already leaves out the ones
+    // whose link just ended.)
     let removed: HashSet<usize> = local_of
         .iter()
         .filter(|(u, _)| !krita_uuids.contains(*u))
@@ -696,7 +787,12 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
         push_local(&mut stack, anchored.get(&Some(u)));
     }
     if stack.is_empty() {
-        bail!("The Krita file has no paint layers — nothing to bring back.");
+        // Krita deleted every layer here and brings none back. A project
+        // needs a layer, and wiping the whole thing from one save is the
+        // wrong default — refuse, and say how to go on.
+        bail!(
+            "{EVERYTHING_DELETED}: nothing was changed here. Send to Krita again to put them              back there, or delete them here yourself."
+        );
     }
 
     if frame_count > project.frame_count {
@@ -708,6 +804,7 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
         ph: base.ph,
         range_end: pulled.range_end.unwrap_or(base.range_end),
         layers: next_layers,
+        ignored,
     };
     Ok(PullPlan {
         new_cells,
@@ -717,7 +814,8 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
         noop: !changed,
         next,
         report,
-        warnings: pulled.warnings,
+        warnings,
+        unlink,
     })
 }
 
@@ -729,6 +827,12 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
 const SETTLE: Duration = Duration::from_millis(500);
 /// How often the file is stat'ed.
 const POLL: Duration = Duration::from_secs(1);
+/// How long the helper plugin gets to say it's ready (it ticks every 400 ms,
+/// and may have a save to make first).
+const READY_TIMEOUT: Duration = Duration::from_secs(4);
+/// How long it gets to reload — reopening a big animated document takes a
+/// while.
+const RELOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Modification time and length: enough to notice a save.
 pub type Stamp = (SystemTime, u64);
@@ -736,6 +840,37 @@ pub type Stamp = (SystemTime, u64);
 pub fn stamp(path: &Path) -> Option<Stamp> {
     let m = std::fs::metadata(path).ok()?;
     Some((m.modified().ok()?, m.len()))
+}
+
+/// One "Send to Krita again": get Krita's latest onto disk and in here,
+/// write the new file, and — with the helper plugin — have Krita reload it.
+pub struct Round {
+    /// Mailbox sequence number; 0 when the helper isn't in play.
+    pub seq: u64,
+    pub stage: Stage,
+    /// The layer Krita should open on.
+    pub selected: usize,
+    /// Krita to start if it has to be (no helper answered, Krita closed).
+    pub launch: Option<PathBuf>,
+    /// The helper said it's ready, so it will reload the file itself.
+    pub helper_ready: bool,
+    /// The helper is installed but didn't answer — worth a hint.
+    pub helper_silent: bool,
+    /// What the send toast would have said (layers kept out here, Krita-only
+    /// layers kept there), for the toast once Krita confirms the reload.
+    pub note: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// Asked the helper to get ready (saving Krita's edits if it has any).
+    AwaitReady { until: Instant },
+    /// Bring in any Krita save not pulled yet, then send.
+    Sync,
+    /// The send worker is writing the file.
+    Sending,
+    /// Told the helper the file is there; waiting for it to reload.
+    AwaitReloaded { until: Instant },
 }
 
 pub struct KritaLink {
@@ -757,6 +892,16 @@ pub struct KritaLink {
     /// before it is read. Fields so tests can run them at zero.
     pub poll_every: Duration,
     pub settle: Duration,
+    /// The re-send in progress, if any.
+    pub round: Option<Round>,
+    /// Last mailbox sequence number used.
+    pub helper_seq: u64,
+    /// Whether to go through the helper plugin. `None` = if it's installed;
+    /// tests pin it.
+    pub use_helper: Option<bool>,
+    /// How long to wait for the helper to answer, and to reload.
+    pub ready_timeout: Duration,
+    pub reload_timeout: Duration,
 }
 
 impl KritaLink {
@@ -772,7 +917,33 @@ impl KritaLink {
             pending: None,
             poll_every: POLL,
             settle: SETTLE,
+            round: None,
+            helper_seq: 0,
+            use_helper: None,
+            ready_timeout: READY_TIMEOUT,
+            reload_timeout: RELOAD_TIMEOUT,
         }
+    }
+
+    /// The file's stamp if it changed since we last read or wrote it — a
+    /// Krita save not pulled yet.
+    pub fn unseen_change(&self) -> Option<Stamp> {
+        stamp(&self.path).filter(|s| Some(*s) != self.last_seen)
+    }
+
+    /// Read the file on a worker, now, against the current baseline. `false`
+    /// when there's no baseline to match against (a send in flight).
+    pub fn start_pull(&mut self, at: Stamp, present: HashSet<String>) -> bool {
+        let Some(base) = self.baseline.clone() else {
+            return false;
+        };
+        let path = self.path.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(pull(&path, &base, &present));
+        });
+        self.pending = Some((at, rx));
+        true
     }
 
     /// The temp file for this app instance.
@@ -860,20 +1031,63 @@ pub fn find_krita(pref: Option<&Path>) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Worker side of a send: write the `.kra` and record the baseline.
-pub fn send(project: &Project, uuids: &[String], selected: usize, path: &Path) -> Result<(Baseline, Option<Stamp>)> {
-    let bytes = kra::write(project, &kra::WriteOpts { layer_uuids: uuids, selected_layer: selected })?;
+/// What a send wrote.
+pub struct Sent {
+    pub baseline: Baseline,
+    pub stamp: Option<Stamp>,
+    /// Krita-only (`-x`) layers carried over from the file it replaced.
+    pub kept: Vec<String>,
+}
+
+/// Worker side of a send: write the `.kra` and record the baseline. Only the
+/// layers `keep` marks go; `uuids` and `selected` count those layers alone.
+/// Takes the worker's own copy, so leaving layers out clones no cells.
+///
+/// Krita's own `-x` layers in the file being replaced are carried into the
+/// new one untouched, in their place in the stack — the rewrite updates what
+/// came from here and nothing else.
+pub fn send(
+    mut project: Project,
+    keep: &[bool],
+    uuids: &[String],
+    selected: Option<usize>,
+    path: &Path,
+) -> Result<Sent> {
+    let mut i = 0;
+    project.layers.retain(|_| {
+        i += 1;
+        keep.get(i - 1).copied().unwrap_or(false)
+    });
+    let project = &project;
+    let carried = match std::fs::read(path) {
+        Ok(bytes) => kra::carry(bytes, &comes_back).unwrap_or_else(|e| {
+            // Better a send that loses Krita-only layers than no send at all.
+            log::warn!("Couldn't read Krita-only layers from {}: {e:#}", path.display());
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    };
+    let opts = kra::WriteOpts {
+        layer_uuids: uuids,
+        selected_layer: selected.unwrap_or(usize::MAX),
+        carried: &carried,
+    };
+    let bytes = kra::write(project, &opts)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
-    Ok((Baseline::capture(project, uuids), stamp(path)))
+    Ok(Sent {
+        baseline: Baseline::capture(project, uuids),
+        stamp: stamp(path),
+        kept: carried.into_iter().map(|c| c.name).collect(),
+    })
 }
 
 /// Worker side of a pull: read, decode and match a Krita save.
-pub fn pull(path: &Path, base: &Baseline) -> Result<Pulled> {
+pub fn pull(path: &Path, base: &Baseline, present: &HashSet<String>) -> Result<Pulled> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(prepare(kra::read(bytes)?, base))
+    Ok(prepare(kra::read_filtered(bytes, &comes_back)?, base, present))
 }
 
 #[cfg(test)]
@@ -929,8 +1143,8 @@ mod tests {
     fn pull_from(p: &Project, base: &Baseline, links: &mut Links, krita: &Project) -> PullPlan {
         let uuids: Vec<String> =
             krita.layers.iter().map(|l| links.entry(l.uid).or_insert_with(new_uuid).clone()).collect();
-        let bytes = kra::write(krita, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: 0 }).unwrap();
-        let pulled = prepare(kra::read(bytes).unwrap(), base);
+        let bytes = kra::write(krita, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: 0, carried: &[] }).unwrap();
+        let pulled = prepare(kra::read_filtered(bytes, &comes_back).unwrap(), base, &present(p, links));
         plan(p, base, links, pulled).unwrap()
     }
 
@@ -948,7 +1162,7 @@ mod tests {
         let links: Links = p.layers.iter().map(|l| l.uid).zip(uuids.iter().cloned()).collect();
         let base = Baseline::capture(&p, &uuids);
         let doc = kra::read(include_bytes!("io/kra/testdata/krita-5.2.9-resaved.kra").to_vec()).unwrap();
-        let plan = plan(&p, &base, &links, prepare(doc, &base)).unwrap();
+        let plan = plan(&p, &base, &links, prepare(doc, &base, &present(&p, &links))).unwrap();
         assert!(plan.is_noop(), "{:?}", plan.report);
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     }
@@ -1163,5 +1377,186 @@ mod tests {
         assert_ne!(now, id);
         assert_eq!((p.cells[now].width, p.cells[now].height), (60, 51));
         assert_eq!(p.cells[now].pixels, k.cells[id].pixels);
+    }
+
+    #[test]
+    fn stays_put_is_a_trailing_dash_x() {
+        for yes in ["sketch-x", "BG -X ", "a-x", "notes-X"] {
+            assert!(stays_put(yes), "{yes:?}");
+        }
+        for no in ["x", "-x", "box", "ax", "sketch-x2", "-x-y", ""] {
+            assert!(!stays_put(no), "{no:?}");
+        }
+        assert!(comes_back("Ink", &[]));
+        assert!(!comes_back("Ink", &["refs-x".into()]));
+        assert!(!comes_back("sketch-x", &[]));
+    }
+
+    /// A project whose bottom layer is a reference and top layer is named -x:
+    /// only "Ink" goes.
+    fn project_with_stay_here_layers() -> Project {
+        let mut p = project();
+        p.layers[1].reference = true; // Color
+        let mut notes = Layer::new("notes-x", 6);
+        let id = p.cells.len();
+        p.cells.push(cell(40, 30, 7));
+        notes.exposures[0] = Some(id);
+        p.layers.push(notes);
+        p
+    }
+
+    fn send_linked(p: &Project) -> (Links, Baseline, Vec<u8>) {
+        let keep: Vec<bool> = p.layers.iter().map(|l| !stays_here(l)).collect();
+        let mut links = Links::new();
+        let mut uuids = Vec::new();
+        for (l, &k) in p.layers.iter().zip(&keep) {
+            if k {
+                let u = new_uuid();
+                links.insert(l.uid, u.clone());
+                uuids.push(u);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("animator-stay-{}-{}", std::process::id(), new_uuid()));
+        let path = dir.join("s.kra");
+        let base = send(p.clone(), &keep, &uuids, Some(0), &path).unwrap().baseline;
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        (links, base, bytes)
+    }
+
+    #[test]
+    fn reference_and_dash_x_layers_are_not_sent() {
+        let p = project_with_stay_here_layers();
+        let (links, base, bytes) = send_linked(&p);
+        let doc = kra::read(bytes.clone()).unwrap();
+        let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Ink"]);
+        assert_eq!(base.layers.len(), 1);
+        // Pulling the untouched file changes nothing here.
+        let pulled = prepare(kra::read_filtered(bytes, &comes_back).unwrap(), &base, &present(&p, &links));
+        let plan = plan(&p, &base, &links, pulled).unwrap();
+        assert!(plan.is_noop(), "{:?}", plan.report);
+        assert!(plan.unlink.is_empty() && plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn a_dash_x_layer_made_in_krita_stays_there() {
+        let p = project();
+        let (mut links, base) = link(&p);
+        let mut k = p.clone();
+        let mut sketch = Layer::new("sketch-x", 6);
+        let id = k.cells.len();
+        k.cells.push(cell(40, 30, 9));
+        sketch.exposures[0] = Some(id);
+        k.layers.push(sketch);
+        let plan = pull_from(&p, &base, &mut links, &k);
+        assert!(plan.is_noop(), "{:?}", plan.report);
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn renamed_dash_x_in_krita_stops_syncing_and_keeps_ours() {
+        let p = project();
+        let (mut links, base) = link(&p);
+        let before = p.layers[0].exposures.clone();
+        let mut k = p.clone();
+        k.layers[0].name = "Ink-x".into();
+        let b = k.layers[0].exposures[2].unwrap();
+        paint(&mut k, b, 99); // and Krita changes it too
+        let plan = pull_from(&p, &base, &mut links, &k);
+        assert!(plan.is_noop(), "{:?}", plan.report);
+        assert_eq!(plan.unlink, [p.layers[0].uid]);
+        assert!(plan.warnings.iter().any(|w| w.contains("now stays in Krita")), "{:?}", plan.warnings);
+        assert!(plan.next.layers.iter().all(|l| l.name != "Ink-x" && l.name != "Ink"));
+
+        // What the app does with it: drop the link, keep the new baseline.
+        // Krita keeps its own uuids, so remember them before the link goes.
+        let krita_uuids: Vec<String> = k.layers.iter().map(|l| links[&l.uid].clone()).collect();
+        links.retain(|uid, _| !plan.unlink.contains(uid));
+        let next = plan.next.clone();
+        let mut p2 = p.clone();
+        plan.apply(&mut p2);
+        assert_eq!(p2.layers[0].name, "Ink");
+        assert_eq!(p2.layers[0].exposures, before);
+
+        // The same Krita file again: quiet.
+        let bytes = kra::write(&k, &kra::WriteOpts { layer_uuids: &krita_uuids, selected_layer: 0, carried: &[] }).unwrap();
+        let pulled = prepare(kra::read_filtered(bytes, &comes_back).unwrap(), &next, &present(&p2, &links));
+        let again = super::plan(&p2, &next, &links, pulled).unwrap();
+        assert!(again.is_noop() && again.unlink.is_empty() && again.warnings.is_empty(), "{:?}", again.warnings);
+    }
+
+    /// Quotes, markup characters and non-Latin scripts in layer names go out
+    /// and come back unchanged, both ways.
+    #[test]
+    fn odd_layer_names_survive_the_round_trip() {
+        let mut p = project();
+        p.layers[0].name = r#"Ink "&<>' 线稿"#.into();
+        p.layers[1].name = "Hair -X2".into(); // ends in X2, not -x: synced
+        let (mut links, base) = link(&p);
+        assert!(pull_from(&p, &base, &mut links, &p.clone()).is_noop());
+
+        let mut k = p.clone();
+        k.layers[1].name = "スケッチ «final»".into();
+        let mut p2 = p.clone();
+        pull_from(&p, &base, &mut links, &k).apply(&mut p2);
+        assert_eq!(p2.layers[0].name, p.layers[0].name);
+        assert_eq!(p2.layers[1].name, "スケッチ «final»");
+    }
+
+    /// Krita adds `sketch-x` between two synced layers and saves; the next
+    /// send from here rewrites the file but leaves the sketch in its place.
+    #[test]
+    fn resend_keeps_krita_only_layers_in_place() {
+        let p = project();
+        let keep = vec![true; p.layers.len()];
+        let uuids: Vec<String> = p.layers.iter().map(|_| new_uuid()).collect();
+        let dir = std::env::temp_dir().join(format!("animator-keep-{}-{}", std::process::id(), new_uuid()));
+        let path = dir.join("k.kra");
+        assert!(send(p.clone(), &keep, &uuids, Some(0), &path).unwrap().kept.is_empty());
+
+        // Krita's save: the sketch sits between Ink and Color.
+        let mut k = p.clone();
+        let mut sketch = Layer::new("sketch-x", 6);
+        let id = k.cells.len();
+        k.cells.push(cell(40, 30, 9));
+        sketch.exposures[0] = Some(id);
+        k.layers.insert(1, sketch);
+        let ku = vec![uuids[0].clone(), new_uuid(), uuids[1].clone()];
+        std::fs::write(&path, kra::write(&k, &kra::WriteOpts { layer_uuids: &ku, selected_layer: 0, carried: &[] }).unwrap())
+            .unwrap();
+
+        // Send again from here, where the sketch never existed.
+        let mut p2 = p.clone();
+        p2.layers[1].name = "Paint".into();
+        let sent = send(p2, &keep, &uuids, Some(0), &path).unwrap();
+        assert_eq!(sent.kept, ["sketch-x"]);
+        let doc = kra::read(std::fs::read(&path).unwrap()).unwrap();
+        let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Ink", "sketch-x", "Paint"]);
+        let sk = &doc.layers[1];
+        let (c, _) = sk.drawings[sk.keys[0].1].place(0, 0, 40, 30);
+        assert_eq!(c.pixels, cell(40, 30, 9).pixels);
+        // Baseline: only what came from here.
+        assert_eq!(sent.baseline.layers.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_layer_made_reference_here_after_the_send_unlinks() {
+        let mut p = project();
+        let (mut links, base) = link(&p);
+        let mut k = p.clone();
+        p.layers[1].reference = true; // Color, here, after the send
+        let c = k.layers[1].exposures[0].unwrap();
+        paint(&mut k, c, 99); // Krita edits it anyway
+        let before = p.layers[1].exposures.clone();
+        let plan = pull_from(&p, &base, &mut links, &k);
+        assert!(plan.is_noop(), "{:?}", plan.report);
+        assert_eq!(plan.unlink, [p.layers[1].uid]);
+        assert_eq!(plan.report.added, 0);
+        plan.apply(&mut p);
+        assert_eq!(p.layers.len(), 2);
+        assert_eq!(p.layers[1].exposures, before);
     }
 }
