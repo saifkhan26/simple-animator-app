@@ -18,7 +18,7 @@ use egui_phosphor::regular as ic;
 
 use crate::app::AppState;
 use crate::doc::layer::CellId;
-use crate::doc::project::{layer_retime, Block};
+use crate::doc::project::{layer_retime, ripple_move, Block, CellReq};
 use crate::input::shortcuts::Action;
 use crate::ui::shell::{combo_text, DIAG_BAD, KEY_CAMERA, KEY_LAYER};
 use crate::ui::theme;
@@ -206,13 +206,14 @@ fn drag_target(state: &AppState, g: &Geo, drag: TrackDrag, p: Pos2, copy: bool) 
             let min_l = sel.iter().map(|s| s.0).min()? as isize;
             let max_l = sel.iter().map(|s| s.0).max()? as isize;
             let min_f = sel.iter().map(|s| s.1).min()? as isize;
-            let max_f = sel.iter().map(|s| s.1).max()? as isize;
             // Clamped so the selection stops at the sheet's edges instead of
-            // turning red there.
+            // turning red there. The drawings land back to back from the
+            // first one, so only it has to stay on the sheet — and one frame
+            // past the end, in the slack, appends them.
             let dl = (g.layer_on_sheet(p.y) as isize - grab.0 as isize)
                 .clamp(-min_l, g.n_layers as isize - 1 - max_l);
-            let df = (g.frame_on_sheet(p.x) as isize - grab.1 as isize)
-                .clamp(-min_f, g.frame_count as isize - 1 - max_f);
+            let df = (g.frame_at(p.x) - grab.1 as isize)
+                .clamp(-min_f, g.frame_count as isize - min_f);
             let moved = copy || dl != 0 || df != 0;
             Some(Target::Body {
                 dl,
@@ -914,6 +915,27 @@ fn paint(
     );
     painter.rect_filled(column, 0.0, theme::ACCENT.gamma_multiply(0.08));
 
+    // A move previews its whole result on a copy of the layers: gaps closing,
+    // drawings sliding along, the timeline growing into the slack.
+    let move_preview = match target {
+        Some(Target::Body {
+            dl,
+            df,
+            moved: true,
+            ok: true,
+            ..
+        }) => {
+            let mut layers = state.project.layers.clone();
+            let sel = state.track_selection();
+            let (_, landed) = ripple_move(&mut layers, fc, &sel, dl, df, copy, |req| match req {
+                CellReq::Moved { id, .. } => id,
+                CellReq::Blank { .. } => PREVIEW_BLANK,
+            });
+            Some((layers, landed))
+        }
+        _ => None,
+    };
+
     // Gather first: `cell_is_blank` needs the state mutably.
     let mut todo: Vec<BarPaint> = Vec::new();
     for layer in 0..g.n_layers {
@@ -926,7 +948,12 @@ fn paint(
                 layer_retime(&mut l, fc, block, new_len, || PREVIEW_BLANK);
                 Some(l.exposures)
             }
-            _ => None,
+            // Only the rows the move changes read as a preview.
+            _ => move_preview
+                .as_ref()
+                .map(|(ls, _)| &ls[layer].exposures)
+                .filter(|e| **e != state.project.layers[layer].exposures)
+                .cloned(),
         };
         let is_preview = preview.is_some();
         let exposures = preview.unwrap_or_else(|| state.project.layers[layer].exposures.clone());
@@ -1057,28 +1084,36 @@ fn paint(
         }
     }
 
-    // Where a move would land.
-    if let Some(Target::Body {
-        dl,
-        df,
-        moved: true,
-        ok,
-        ..
-    }) = target
-    {
-        let color = if ok { theme::ACCENT } else { DIAG_BAD };
-        for b in state.project.blocks_keyed_at(&state.track_selection()) {
-            let tl = (b.layer as isize + dl) as usize;
-            let ts = (b.start as isize + df) as usize;
-            let span = state.project.landing_span(tl, ts, b);
-            let rect = g.bar(tl, span.start, span.end).expand(1.5);
+    // Where a move lands: the moved drawings outlined in the previewed rows,
+    // or, when it can't land, a mark where the pointer is dropping it.
+    if let Some((layers, landed)) = &move_preview {
+        for &(tl, ts) in landed {
+            let l = &layers[tl];
+            let end = (ts + 1..l.exposures.len())
+                .find(|&f| l.is_key(f))
+                .unwrap_or(l.exposures.len());
+            let rect = g.bar(tl, ts, end).expand(1.5);
             painter.rect(
                 rect,
                 BAR_ROUNDING + 1.0,
-                color.gamma_multiply(0.15),
-                Stroke::new(1.5, color),
+                theme::ACCENT.gamma_multiply(0.15),
+                Stroke::new(1.5, theme::ACCENT),
             );
         }
+    } else if let Some(Target::Body {
+        cursor,
+        moved: true,
+        ok: false,
+        ..
+    }) = target
+    {
+        let rect = g.bar(cursor.0, cursor.1, cursor.1 + 1).expand(1.5);
+        painter.rect(
+            rect,
+            BAR_ROUNDING + 1.0,
+            DIAG_BAD.gamma_multiply(0.15),
+            Stroke::new(1.5, DIAG_BAD),
+        );
     }
 
     // The playhead itself, over everything.
@@ -1320,7 +1355,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.project = sheet(3, &[0, 1, 2]);
         drag(&mut state, at(0, 0), at(2, 0), egui::Modifiers::NONE);
-        assert_eq!(row(&state.project, 0), vec![0, 2, 1], "A moved onto C, blank behind");
+        assert_eq!(row(&state.project, 0), vec![2, 3, 1], "A lands on 2, B and C close up");
     }
 
     #[test]
@@ -1328,7 +1363,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.project = sheet(3, &[0, 1, 2]);
         drag(&mut state, at(0, 0), at(2, 0), egui::Modifiers::COMMAND);
-        assert_eq!(row(&state.project, 0), vec![1, 2, 1]);
+        assert_eq!(row(&state.project, 0), vec![1, 2, 1, 3], "C pushed along, not overwritten");
     }
 
     /// How many frames of `layer` show the drawing marked `mark`.
@@ -1430,6 +1465,6 @@ mod tests {
             step(&mut state, vec![egui::Event::PointerMoved(from + (to - from) * (i as f32 / 4.0))]);
         }
         step(&mut state, vec![button(to, false)]);
-        assert_eq!(row(&state.project, 0), vec![0, 2, 1]);
+        assert_eq!(row(&state.project, 0), vec![2, 3, 1], "it moved");
     }
 }
