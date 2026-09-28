@@ -1428,6 +1428,41 @@ mod tests {
         println!("wrote {path}");
     }
 
+    /// The airbrush preset sprays: one pass leaves a soft band that is
+    /// densest along the stroke, fades toward its edge, and is still far from
+    /// opaque — the rest comes from going over it again.
+    #[test]
+    fn the_airbrush_preset_builds_a_soft_translucent_band() {
+        let brush = BrushSettings::airbrush();
+        let mut canvas = Canvas::new(300, 100);
+        let pass = |canvas: &mut Canvas| {
+            let pre = canvas.pixels.clone();
+            let mut ws = StrokeWorkspace::new();
+            ws.begin(canvas.width, canvas.height, &brush);
+            let mut b =
+                StrokeBuilder::new(brush.clone(), ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+            for i in 0..=60 {
+                b.push(PointerSample {
+                    x: 40.0 + i as f32 * 3.5,
+                    y: 50.0,
+                    pressure: 1.0,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t: 0.0,
+                });
+                b.flush(canvas, &mut ws, &pre);
+            }
+            b.finish(canvas, &mut ws, &pre);
+        };
+        let alpha = |c: &Canvas, y: u32| c.pixels[((y * c.width + 150) * 4 + 3) as usize];
+        pass(&mut canvas);
+        let (core, mid, edge) = (alpha(&canvas, 50), alpha(&canvas, 65), alpha(&canvas, 76));
+        assert!(core > mid && mid > edge && edge > 0, "{core} {mid} {edge}");
+        assert!(core < 200, "one pass is far from opaque: {core}");
+        pass(&mut canvas);
+        assert!(alpha(&canvas, 50) > core, "a second pass builds on the first");
+    }
+
     /// One stroke for `brush_sheet`: a shallow S with pressure ramping in and
     /// out, plus a little tremor so grain and smoothing both have something to
     /// work on.

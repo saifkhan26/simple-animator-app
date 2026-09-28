@@ -315,6 +315,29 @@ impl BrushSettings {
         }
     }
 
+    /// After Krita's `Airbrush_Soft`: a wide dab with no hard core and very
+    /// little flow, so colour builds up over repeated passes. Pressure sets
+    /// how much lands, not how wide the spray is. No grain — a spray has no
+    /// tooth. Unlike Krita's, holding the pen still adds nothing.
+    ///
+    /// Softness stays at the plain smoothstep: any higher and the falloff,
+    /// already the whole radius at zero hardness, dies out well short of the
+    /// rim and the spray reads as a small soft brush instead.
+    pub fn airbrush() -> Self {
+        Self {
+            radius: 30.0,
+            flow: 0.06,
+            hardness: 0.0,
+            softness: 1.0,
+            spacing: 0.05,
+            grain: 0.0,
+            size: Dyn::new(0.15, 1.0),
+            flow_dyn: Dyn::new(0.9, 1.3),
+            mode: BrushMode::Dab,
+            ..Self::default()
+        }
+    }
+
     pub fn default_eraser() -> Self {
         Self {
             radius: 16.0,
@@ -375,6 +398,12 @@ impl BrushSettings {
             "G-Pen",
             "Opaque ink with a sharp pressure taper. After Krita's Ink-3_G-Pen.",
             BrushSettings::default_ink,
+        ),
+        (
+            "Airbrush",
+            "Soft, low-flow spray that builds up as you pass over it; pressure sets \
+             how much lands. After Krita's Airbrush_Soft.",
+            BrushSettings::airbrush,
         ),
     ];
 }
