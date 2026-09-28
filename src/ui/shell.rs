@@ -1271,7 +1271,31 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
     });
 
     ui.add_space(6.0);
-    crate::ui::tracks::show(state, ui);
+    // The tracks fill the panel, so they are the one body egui's resize
+    // arithmetic can push around — leave its shortfall unused.
+    let avail = ui.available_size();
+    let h = (avail.y - title_bar_shortfall(ctx, PanelId::Timeline)).max(0.0);
+    ui.allocate_ui(egui::vec2(avail.x, h), |ui| crate::ui::tracks::show(state, ui));
+}
+
+/// How much taller a panel's title bar is than egui budgets for.
+///
+/// While a window edge is dragged, egui 0.29 sizes the body as the dragged
+/// outer rect minus the frame and a title bar one Heading row tall — but the
+/// title bar it lays out is at least `interact_size.y` tall, which our theme
+/// makes taller than that row. A body that fills the height it is given then
+/// ends up that much taller than the rect being dragged, and since each
+/// frame's drag starts from the last frame's rect, a sideways drag grows the
+/// panel by this much every frame. Content that leaves it unused comes out
+/// exactly the size dragged.
+fn title_bar_shortfall(ctx: &egui::Context, id: PanelId) -> f32 {
+    let (icon, title) = panel_meta(id);
+    let style = ctx.style();
+    // Measured exactly as `Window` measures its title: a plain `RichText`,
+    // which `Window::new` falls back to the Heading style.
+    let text = egui::RichText::new(theme::icon_text(icon, title)).text_style(egui::TextStyle::Heading);
+    let budget = ctx.fonts(|f| text.font_height(f, &style));
+    (style.spacing.interact_size.y - budget).max(0.0)
 }
 
 /// Compact playback HUD shown when the floating panels are hidden (Tab).
@@ -6209,5 +6233,94 @@ mod new_project_tests {
         // Opened on the starred preset, which the list shows as current.
         let cfg = &state.new_project_cfg;
         assert_eq!((cfg.width, cfg.height), (1080, 1920));
+    }
+}
+
+/// The Timeline panel's edges through the real window, with the app's theme:
+/// its tracks fill the panel, so any slack in egui's resize arithmetic shows.
+#[cfg(test)]
+mod timeline_panel_tests {
+    use super::*;
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
+
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| draw(state, ctx));
+    }
+
+    fn panel(ctx: &egui::Context) -> Rect {
+        egui::AreaState::load(ctx, egui::Id::new(panel_key(PanelId::Timeline)))
+            .unwrap()
+            .rect()
+    }
+
+    /// Press at `from`, drag by `by` over several frames, release.
+    fn drag(ctx: &egui::Context, state: &mut AppState, from: Pos2, by: egui::Vec2) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, state, vec![egui::Event::PointerMoved(from)]);
+        frame(ctx, state, vec![button(from, true)]);
+        for i in 1..=12 {
+            let p = from + by * (i as f32 / 12.0);
+            frame(ctx, state, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame(ctx, state, vec![button(from + by, false)]);
+        frame(ctx, state, vec![]);
+    }
+
+    fn setup() -> (AppState, egui::Context) {
+        let mut state = AppState::for_test();
+        state.show_panels = true;
+        let ctx = egui::Context::default();
+        // The theme is what makes the title bar taller than egui budgets for.
+        crate::ui::theme::install(&ctx);
+        for _ in 0..4 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        (state, ctx)
+    }
+
+    #[test]
+    fn dragging_a_side_edge_keeps_the_height() {
+        let (mut state, ctx) = setup();
+        let before = panel(&ctx);
+        assert!(title_bar_shortfall(&ctx, PanelId::Timeline) > 0.0, "the case that grew");
+        // Edges follow the pointer, wherever on the grab zone it pressed.
+        let from = pos2(before.max.x - 1.0, before.center().y);
+        drag(&ctx, &mut state, from, vec2(60.0, 0.0));
+        let after = panel(&ctx);
+        assert!((after.max.x - (from.x + 60.0)).abs() < 1.0, "{before:?} → {after:?}");
+        assert!((after.height() - before.height()).abs() < 1.0, "{before:?} → {after:?}");
+        let from = pos2(after.min.x + 1.0, after.center().y);
+        drag(&ctx, &mut state, from, vec2(40.0, 0.0));
+        let after = panel(&ctx);
+        assert!((after.min.x - (from.x + 40.0)).abs() < 1.0, "{after:?}");
+        assert!((after.height() - before.height()).abs() < 1.0, "left edge too: {after:?}");
+    }
+
+    #[test]
+    fn dragging_the_top_or_bottom_edge_moves_just_that_edge() {
+        let (mut state, ctx) = setup();
+        let before = panel(&ctx);
+        let from = pos2(before.center().x, before.min.y + 1.0);
+        drag(&ctx, &mut state, from, vec2(0.0, -30.0));
+        let taller = panel(&ctx);
+        assert!((taller.min.y - (from.y - 30.0)).abs() < 1.0, "{before:?} → {taller:?}");
+        assert!((taller.max.y - before.max.y).abs() < 1.0, "the bottom stays put");
+        let from = pos2(taller.center().x, taller.max.y - 1.0);
+        drag(&ctx, &mut state, from, vec2(0.0, -50.0));
+        let shorter = panel(&ctx);
+        assert!((shorter.max.y - (from.y - 50.0)).abs() < 1.0, "{taller:?} → {shorter:?}");
+        assert!((shorter.min.y - taller.min.y).abs() < 1.0, "the top stays put");
     }
 }
