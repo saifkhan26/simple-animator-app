@@ -3335,6 +3335,20 @@ impl AppState {
         (self.project.width as f32, self.project.height as f32)
     }
 
+    /// Make the next visible grid after the active one active, wrapping
+    /// round — how to switch the grid strokes snap to without opening the
+    /// grid list. Hidden grids are skipped: nothing can snap to them.
+    pub fn cycle_perspective_grid(&mut self) {
+        let cfg = &mut self.perspective;
+        let n = cfg.grids.len();
+        if let Some(next) = (1..n)
+            .map(|k| (cfg.active + k) % n)
+            .find(|&i| cfg.grids[i].visible)
+        {
+            cfg.active = next;
+        }
+    }
+
     /// Perspective tool press at document point `p`. The active grid gets
     /// first pick; a press on another visible grid makes it active and grabs
     /// it. A locked grid is selected but never grabbed.
@@ -3680,6 +3694,7 @@ impl AppState {
             Action::TogglePerspectiveSnap => {
                 self.perspective.snap = !self.perspective.snap;
             }
+            Action::PerspectiveNextGrid => self.cycle_perspective_grid(),
             Action::PlayPause => {
                 let now = 0.0; // refreshed by playback.tick on next frame
                 let _ = now;
@@ -3726,7 +3741,9 @@ impl AppState {
                 self.structural_edit(wipes_pixels, Project::delete_frame);
             }
             Action::OnionToggle => self.onion.enabled = !self.onion.enabled,
-            Action::LayerAdd => self.structural_edit(false, Project::add_layer),
+            Action::LayerAdd => self.structural_edit(false, |p| {
+                p.add_layer_above_active();
+            }),
             Action::LayerDelete => self.structural_edit(false, Project::delete_layer),
             Action::LayerToggleVisible => {
                 if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
@@ -5630,6 +5647,29 @@ mod tests {
         state.brush.shape_kind = ShapeKind::Rect;
         state.snap_begin([150.0, 150.0]);
         assert_eq!(state.snap_doc([190.0, 165.0]), [190.0, 165.0]);
+    }
+
+    #[test]
+    fn next_grid_cycles_the_visible_grids_and_wraps() {
+        let mut state = AppState::for_test();
+        let g = state.perspective.grids[0].clone();
+        state.perspective.grids = vec![g.clone(), g.clone(), g.clone(), g];
+        state.perspective.grids[2].visible = false;
+        state.perspective.active = 0;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            state.dispatch(Action::PerspectiveNextGrid);
+            seen.push(state.perspective.active);
+        }
+        assert_eq!(seen, [1, 3, 0, 1], "hidden grid 2 skipped, wraps to 0");
+        // With every other grid hidden, it stays where it is.
+        for i in [0, 2, 3] {
+            state.perspective.grids[i].visible = false;
+        }
+        state.dispatch(Action::PerspectiveNextGrid);
+        assert_eq!(state.perspective.active, 1);
+        state.perspective.grids.clear();
+        state.dispatch(Action::PerspectiveNextGrid);
     }
 
     #[test]

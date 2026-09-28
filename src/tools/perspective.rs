@@ -250,6 +250,51 @@ impl PerspectiveGrid {
     pub fn rotate(&mut self, angle: f32) {
         self.corners = rotate(&self.corners, angle);
     }
+
+    // The pose below is what the grid's X / Y / Scale / Rotation fields show.
+    // It is read off the corners rather than stored, so a corner drag and a
+    // field edit can never disagree. All of it is frame-relative, like the
+    // corners: offsets in frame heights, from the frame centre.
+
+    /// Where the grid sits: its corner centroid, from the frame centre.
+    pub fn centre(&self) -> P {
+        centroid(&self.corners)
+    }
+
+    pub fn translate(&mut self, d: P) {
+        self.corners = self.corners.map(|c| add(c, d));
+    }
+
+    /// Size relative to a fresh grid, which reads 1.
+    pub fn scale(&self) -> f32 {
+        spread(&self.corners) / spread(&Self::default().corners)
+    }
+
+    /// Scale by `k` about the centroid. Ignores a `k` that would collapse or
+    /// flip the grid.
+    pub fn scale_by(&mut self, k: f32) {
+        if !(k.is_finite() && k > 1e-4) {
+            return;
+        }
+        let o = self.centre();
+        self.corners = self.corners.map(|c| add(o, sub(c, o).map(|x| x * k)));
+    }
+
+    /// Heading of the grid, in radians: from the middle of its left edge to
+    /// the middle of its right. A fresh grid reads 0, and [`Self::rotate`]
+    /// turns it by exactly its angle.
+    pub fn angle(&self) -> f32 {
+        let mid = |a: P, b: P| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+        let c = &self.corners;
+        let d = sub(mid(c[1], c[2]), mid(c[0], c[3]));
+        d[1].atan2(d[0])
+    }
+}
+
+/// Mean distance of the corners from their centroid.
+fn spread(c: &[P; 4]) -> f32 {
+    let o = centroid(c);
+    c.iter().map(|&p| len(sub(p, o))).sum::<f32>() / 4.0
 }
 
 pub fn to_doc(n: P, w: f32, h: f32) -> P {
@@ -871,6 +916,40 @@ mod tests {
             centroid(&small),
             [centroid(&c)[0] / 2.0, centroid(&c)[1] / 2.0]
         ));
+    }
+
+    #[test]
+    fn a_fresh_grid_is_unscaled_and_level() {
+        let g = PerspectiveGrid::default();
+        assert!((g.scale() - 1.0).abs() < 1e-6);
+        assert!(g.angle().abs() < 1e-6);
+        assert!(g.centre()[0].abs() < 1e-6, "centred across the frame");
+    }
+
+    #[test]
+    fn each_pose_edit_moves_only_its_own_value() {
+        let mut g = PerspectiveGrid::default();
+        let (c0, s0, a0) = (g.centre(), g.scale(), g.angle());
+
+        g.translate([0.1, -0.2]);
+        assert!(close(g.centre(), [c0[0] + 0.1, c0[1] - 0.2]));
+        assert!((g.scale() - s0).abs() < 1e-5 && (g.angle() - a0).abs() < 1e-5);
+
+        let c1 = g.centre();
+        g.scale_by(2.5);
+        assert!((g.scale() - 2.5 * s0).abs() < 1e-4);
+        assert!(close(g.centre(), c1) && (g.angle() - a0).abs() < 1e-5);
+
+        g.rotate(0.4);
+        assert!((g.angle() - (a0 + 0.4)).abs() < 1e-5);
+        assert!(close(g.centre(), c1) && (g.scale() - 2.5 * s0).abs() < 1e-4);
+
+        // A collapsing or flipping scale is refused.
+        let before = g.corners;
+        g.scale_by(0.0);
+        g.scale_by(-1.0);
+        g.scale_by(f32::NAN);
+        assert_eq!(g.corners, before);
     }
 
     #[test]

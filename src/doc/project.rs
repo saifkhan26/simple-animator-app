@@ -405,17 +405,27 @@ impl Project {
         }
     }
 
-    /// Keep `lines_from` links valid after layers `a` and `b` swap places.
-    fn relink_after_swap(&mut self, a: usize, b: usize) {
+    /// Keep `lines_from` links valid after the layers were reordered, with
+    /// `to_new(old)` giving each layer's new index.
+    fn relink(&mut self, to_new: impl Fn(usize) -> usize) {
         for layer in &mut self.layers {
             if let Some(src) = layer.lines_from {
-                if src == a {
-                    layer.lines_from = Some(b);
-                } else if src == b {
-                    layer.lines_from = Some(a);
-                }
+                layer.lines_from = Some(to_new(src));
             }
         }
+    }
+
+    /// Keep `lines_from` links valid after layers `a` and `b` swap places.
+    fn relink_after_swap(&mut self, a: usize, b: usize) {
+        self.relink(|i| {
+            if i == a {
+                b
+            } else if i == b {
+                a
+            } else {
+                i
+            }
+        });
     }
 
     pub fn add_layer(&mut self) {
@@ -423,6 +433,43 @@ impl Project {
         let layer = Layer::new(name, self.frame_count);
         self.layers.push(layer);
         self.current_layer = self.layers.len() - 1;
+    }
+
+    /// Insert a fresh, full-length layer directly *above* the active layer
+    /// and select it — where a new layer is wanted while drawing, rather than
+    /// at the top of the stack. Returns the new layer's index.
+    pub fn add_layer_above_active(&mut self) -> usize {
+        let idx = (self.current_layer + 1).min(self.layers.len());
+        let name = format!("Layer {}", self.layers.len() + 1);
+        self.layers.insert(idx, Layer::new(name, self.frame_count));
+        self.relink_after_insert(idx);
+        self.current_layer = idx;
+        idx
+    }
+
+    /// Move layer `from` so it ends up at index `to`, the others closing up
+    /// behind it, and select it. Out-of-range indices are a no-op.
+    pub fn move_layer(&mut self, from: usize, to: usize) {
+        let n = self.layers.len();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+        let layer = self.layers.remove(from);
+        self.layers.insert(to, layer);
+        self.relink(|i| {
+            if i == from {
+                to
+            } else {
+                // Close the gap it left, then open the one it lands in.
+                let i = if i > from { i - 1 } else { i };
+                if i >= to {
+                    i + 1
+                } else {
+                    i
+                }
+            }
+        });
+        self.current_layer = to;
     }
 
     /// Grow the timeline to at least `n` frames, padding every layer with holds
@@ -1042,6 +1089,62 @@ mod tests {
         assert_eq!((at(1, 1), at(2, 1), at(1, 2), at(2, 2)), (1, 2, 3, 4));
         assert_eq!(at(0, 0), 0, "pad is transparent");
         assert_eq!(out.pixels.len(), 4 * 4 * 4);
+    }
+
+    fn names(p: &Project) -> Vec<&str> {
+        p.layers.iter().map(|l| l.name.as_str()).collect()
+    }
+
+    /// Three layers named A (bottom), B, C (top); C's fills read B's lines.
+    fn abc() -> Project {
+        let mut p = Project::new(8, 8, 12.0);
+        for (l, name) in p.layers.iter_mut().zip(["A"]) {
+            l.name = name.into();
+        }
+        for name in ["B", "C"] {
+            p.add_layer();
+            p.layers[p.current_layer].name = name.into();
+        }
+        p.layers[2].lines_from = Some(1);
+        p.layers[0].lines_from = Some(2);
+        p
+    }
+
+    #[test]
+    fn a_new_layer_goes_just_above_the_selected_one() {
+        let mut p = abc();
+        p.current_layer = 0;
+        let i = p.add_layer_above_active();
+        assert_eq!(i, 1);
+        assert_eq!(p.current_layer, 1);
+        assert_eq!(names(&p)[0], "A");
+        assert_eq!(names(&p)[2..], ["B", "C"]);
+        // Links follow the layers they point at.
+        assert_eq!(p.layers[3].lines_from, Some(2), "C still reads B");
+        assert_eq!(p.layers[0].lines_from, Some(3), "A still reads C");
+        // Selected at the top, it lands on top.
+        p.current_layer = 3;
+        assert_eq!(p.add_layer_above_active(), 4);
+    }
+
+    #[test]
+    fn moving_a_layer_closes_up_behind_it_and_keeps_links() {
+        let mut p = abc();
+        p.move_layer(0, 2);
+        assert_eq!(names(&p), ["B", "C", "A"]);
+        assert_eq!(p.current_layer, 2, "the moved layer is selected");
+        assert_eq!(p.layers[1].lines_from, Some(0), "C still reads B");
+        assert_eq!(p.layers[2].lines_from, Some(1), "A still reads C");
+
+        p.move_layer(1, 0);
+        assert_eq!(names(&p), ["C", "B", "A"]);
+        assert_eq!(p.layers[0].lines_from, Some(1));
+        assert_eq!(p.layers[2].lines_from, Some(0));
+
+        // Nowhere to go: nothing changes.
+        p.move_layer(1, 1);
+        p.move_layer(0, 9);
+        assert_eq!(names(&p), ["C", "B", "A"]);
     }
 
     /// Input mapping sizes an unkeyed slot by the layer's own cell size, not

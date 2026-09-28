@@ -2161,11 +2161,34 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
 /// running off the bottom of a laptop screen.
 const LAYER_LIST_MAX_H: f32 = 320.0;
 
+/// Drag-and-drop payload for a layer row: the dragged layer's index.
+struct LayerDrag(usize);
+
+/// Where layer `from` ends up when dropped just above (`above`) or just below
+/// layer `target` in the stack — its final index, as `Project::move_layer`
+/// takes it. Dropped onto itself, or into the slot it already sits in, it
+/// stays put.
+fn drop_index(from: usize, target: usize, above: bool) -> usize {
+    if from == target {
+        return from;
+    }
+    // Taking `from` out first shifts everything above it down one.
+    match (above, from < target) {
+        (true, true) => target,
+        (true, false) => target + 1,
+        (false, true) => target - 1,
+        (false, false) => target,
+    }
+}
+
 fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
             ui.horizontal(|ui| {
-                if theme::icon_button(ui, ic::PLUS, "Add layer").clicked() {
-                    state.structural_edit(false, |p| p.add_layer());
+                let add = tip(state, Action::LayerAdd, "Add layer above the selected one");
+                if theme::icon_button(ui, ic::PLUS, &add).clicked() {
+                    state.structural_edit(false, |p| {
+                        p.add_layer_above_active();
+                    });
                 }
                 if theme::icon_button(ui, ic::MINUS, "Delete layer").clicked() {
                     state.structural_edit(false, |p| p.delete_layer());
@@ -2195,17 +2218,23 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             });
             // How faint the other layers go. Dragging either slider switches
             // the fade on — adjusting an amount you can't see is guesswork.
-            let fade_help = "How visible the other layers stay while faded. \
-                             View only: layer opacity and export are unaffected.";
-            let above = ui
-                .add(egui::Slider::new(&mut state.fade.above, 0.0..=1.0).text("fade above"))
-                .on_hover_text(fade_help);
-            let below = ui
-                .add(egui::Slider::new(&mut state.fade.below, 0.0..=1.0).text("fade below"))
-                .on_hover_text(fade_help);
-            if above.changed() || below.changed() {
-                state.fade_others = true;
-            }
+            // Folded away with the rest: the toggle above is what gets used.
+            egui::CollapsingHeader::new(theme::icon_text(ic::CIRCLE_HALF, "Fade other layers"))
+                .id_salt("layers_fade")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let fade_help = "How visible the other layers stay while faded. \
+                                     View only: layer opacity and export are unaffected.";
+                    let above = ui
+                        .add(egui::Slider::new(&mut state.fade.above, 0.0..=1.0).text("fade above"))
+                        .on_hover_text(fade_help);
+                    let below = ui
+                        .add(egui::Slider::new(&mut state.fade.below, 0.0..=1.0).text("fade below"))
+                        .on_hover_text(fade_help);
+                    if above.changed() || below.changed() {
+                        state.fade_others = true;
+                    }
+                });
             ui.add_space(4.0);
             ui.separator();
 
@@ -2216,6 +2245,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut rename_commit = false;
             let mut rename_cancel = false;
             let mut krita_edit: Option<usize> = None;
+            let mut drop: Option<(usize, usize)> = None;
             let krita_label = krita_menu_label(state);
             // Owned copy: the "lines from" combo lists every layer's name while
             // a single layer is mutably borrowed below.
@@ -2246,7 +2276,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                         let layer = &mut layers[i];
                         let selected = i == cur;
 
-                        Frame::none()
+                        let row = Frame::none()
                             .fill(if selected {
                                 theme::ACCENT_DIM
                             } else {
@@ -2312,12 +2342,23 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             rename_commit = true;
                                         }
                                     } else {
+                                        // The name is also the drag handle. A drag
+                                        // only starts once the pointer moves, so a
+                                        // click still selects and a double-click
+                                        // still renames. One widget senses both:
+                                        // a drag-only one laid over the label
+                                        // would win the hit test and eat clicks.
                                         let resp = ui
                                             .add(egui::SelectableLabel::new(
                                                 selected,
                                                 egui::RichText::new(&layer.name).strong(),
                                             ))
-                                            .on_hover_text("Double-click to rename");
+                                            .interact(Sense::click_and_drag())
+                                            .on_hover_text("Double-click to rename, drag to reorder");
+                                        resp.dnd_set_drag_payload(LayerDrag(i));
+                                        if resp.dragged() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                        }
                                         if resp.double_clicked() {
                                             start_rename = Some(i);
                                         } else if resp.clicked() {
@@ -2365,10 +2406,33 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                     "Flood fill on this layer stops at the linked layer's strokes, \
                                      so colour can be painted under line art.",
                                 );
-                            });
+                            })
+                            .response;
+                        // Every row is a drop target: the top half drops the
+                        // dragged layer above this one, the bottom half below.
+                        if let Some(from) = row.dnd_hover_payload::<LayerDrag>() {
+                            let above = ui
+                                .input(|inp| inp.pointer.interact_pos())
+                                .is_some_and(|p| p.y < row.rect.center().y);
+                            let to = drop_index(from.0, i, above);
+                            if to != from.0 {
+                                let y = if above { row.rect.top() } else { row.rect.bottom() };
+                                ui.painter()
+                                    .hline(row.rect.x_range(), y, Stroke::new(2.0, theme::ACCENT));
+                            }
+                            if row.dnd_release_payload::<LayerDrag>().is_some() {
+                                drop = Some((from.0, to));
+                            }
+                        }
                         ui.add_space(2.0);
                     }
             });
+            if let Some((from, to)) = drop.filter(|(from, to)| from != to) {
+                // One undo step. Both edit buffers below are keyed by index.
+                state.structural_edit(false, |p| p.move_layer(from, to));
+                state.layer_rename = None;
+                state.expand_cfg = None;
+            }
             if rename_cancel {
                 state.layer_rename = None;
             } else if rename_commit {
@@ -2397,209 +2461,221 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
 
             // --- Layer transform ---
             ui.add_space(6.0);
-            ui.separator();
-            theme::section_header(ui, ic::RECTANGLE, "Transform");
-
-            ui.checkbox(&mut state.layer_xform, "Transform mode");
-            ui.checkbox(&mut state.auto_key_transform, "Auto-key transform")
-                .on_hover_text(
-                    "Moving, scaling or rotating the active layer sets a \
-                     transform key on the current frame, so the change animates \
-                     from here instead of shifting the layer on every \
-                     frame.\n\nOff (default): the layer moves as a whole until \
-                     you add a key yourself.",
-                );
-            let toggle = combo_text(state, Action::LayerTransformToggle);
-            ui.label(
-                egui::RichText::new(format!(
-                    "Toggle ({toggle}), then drag with your canvas gesture keys: zoom-key = scale, pan-key = move, rotate-key = rotate the active layer.",
-                ))
-                .color(theme::TEXT_MUTED)
-                .size(10.5),
-            );
-            ui.add_space(4.0);
-
-            let cf = state.project.current_frame;
-            let li = state.project.current_layer;
-            // Set once an edit *settles*, never on every `changed()`: keying
-            // mid-drag would push one undo entry per mouse-move.
-            let mut xform_settled = false;
-            if let Some(l) = state.project.layers.get_mut(li) {
-                let mut settle = |r: &egui::Response| {
-                    if r.drag_stopped() || r.lost_focus() {
-                        xform_settled = true;
-                    }
-                };
-                ui.horizontal(|ui| {
-                    ui.label("X");
-                    settle(&ui.add(egui::DragValue::new(&mut l.transform.tx).speed(1.0)));
-                    ui.label("Y");
-                    settle(&ui.add(egui::DragValue::new(&mut l.transform.ty).speed(1.0)));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Scale");
-                    settle(&ui.add(
-                        egui::DragValue::new(&mut l.transform.scale)
-                            .speed(0.01)
-                            .range(0.01..=100.0),
-                    ));
-                    ui.label("Rot°");
-                    let mut deg = l.transform.rot.to_degrees();
-                    let r = ui.add(egui::DragValue::new(&mut deg).speed(0.5));
-                    if r.changed() {
-                        l.transform.rot = deg.to_radians();
-                    }
-                    settle(&r);
-                });
-                let nkeys = l.transform_keys.len();
-                let here = l.has_transform_key(cf);
-                let status = if nkeys == 0 {
-                    "no keys (static)".to_string()
-                } else {
-                    format!(
-                        "{nkeys} key(s){}",
-                        if here { " — keyed on this frame" } else { "" }
-                    )
-                };
-                ui.label(
-                    egui::RichText::new(status)
-                        .color(theme::TEXT_MUTED)
-                        .size(10.5),
-                );
-            }
-            if xform_settled && state.auto_key_transform {
-                state.add_transform_key();
-            }
-
-            // Ease of the key on this frame, same contract as the camera's: it
-            // shapes the segment running *from* this key to the next.
-            let here = state
-                .project
-                .layers
-                .get(li)
-                .map(|l| l.has_transform_key(cf))
-                .unwrap_or(false);
-            let mut ease = state
-                .project
-                .layers
-                .get(li)
-                .and_then(|l| l.transform_keys.iter().find(|k| k.frame == cf))
-                .map(|k| k.ease)
-                .unwrap_or_default();
-            ui.add_enabled_ui(here, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Ease out of key");
-                    let mut changed = false;
-                    egui::ComboBox::from_id_salt("layer_ease")
-                        .selected_text(ease.label())
-                        .show_ui(ui, |ui| {
-                            for e in Ease::ALL {
-                                changed |= ui.selectable_value(&mut ease, e, e.label()).changed();
-                            }
-                        });
-                    if changed {
-                        state.set_transform_key_ease(ease);
-                    }
-                });
-            });
-
-            ui.horizontal(|ui| {
-                let add = combo_text(state, Action::TransformKeyAdd);
-                if ui
-                    .button(theme::icon_text(ic::PLUS_SQUARE, &format!("Add key ({add})")))
-                    .clicked()
-                {
-                    state.add_transform_key();
-                }
-                if ui.button(theme::icon_text(ic::X, "Del key")).clicked() {
-                    state.delete_transform_key();
-                }
-                if ui
-                    .button(theme::icon_text(ic::ARROW_COUNTER_CLOCKWISE, "Reset"))
-                    .clicked()
-                {
-                    state.reset_active_layer_transform();
-                }
-            });
+            egui::CollapsingHeader::new(theme::icon_text(ic::RECTANGLE, "Transform"))
+                .id_salt("layers_transform")
+                .default_open(false)
+                .show(ui, |ui| layer_transform_section(state, ui));
 
             // --- Layer canvas ---
             //
             // Strokes are clipped to the cell buffer, so a layer parked off to
             // the side of the camera still only gets a frame-sized sheet to
             // draw on until it's expanded here.
-            ui.add_space(6.0);
-            ui.separator();
-            theme::section_header(ui, ic::FRAME_CORNERS, "Layer canvas");
-            let (cur_w, cur_h) = state.active_layer_cell_size();
-            let li = state.project.current_layer;
-            // One texture per cell, so no side may exceed what the GPU holds
-            // in one texture — past it the upload fails outright.
-            let max = state.max_tex;
-            let (mut ew, mut eh) = match state.expand_cfg {
-                Some((l, w, h)) if l == li => (w, h),
-                _ => (cur_w, cur_h),
-            };
-            let size_tip = "Size in pixels. Takes arithmetic: 3840*3, (1920+64)*2.\n\n\
-                            Start with an operator to change what's there: *3 triples it, \
-                            +512 adds 512, /2 halves it. Enter applies it.";
-            ui.horizontal(|ui| {
-                /// A pixel-size field that takes arithmetic, as the frame
-                /// field does. The base is frozen before the widget is built:
-                /// a relative expression measures from where the edit started.
-                fn size_field(value: &mut u32, max: u32) -> egui::DragValue<'_> {
-                    let base = *value as f64;
-                    egui::DragValue::new(value)
-                        .speed(8.0)
-                        .range(1..=max)
-                        .update_while_editing(false)
-                        .custom_parser(move |s| expr::eval(s, base).map(f64::round))
-                }
-                ui.label("W");
-                ui.add(size_field(&mut ew, max)).on_hover_text(size_tip);
-                ui.label("H");
-                ui.add(size_field(&mut eh, max)).on_hover_text(size_tip);
-            });
-            state.expand_cfg = Some((li, ew, eh));
-            ui.horizontal(|ui| {
-                for (label, mul) in [("2×", 2u32), ("3×", 3)] {
-                    if ui.small_button(label).clicked() {
-                        let (w, h) = (state.project.width * mul, state.project.height * mul);
-                        state.expand_cfg = Some((li, w.min(max), h.min(max)));
-                    }
-                }
-                if ui.small_button("Frame").clicked() {
-                    state.expand_cfg = Some((li, state.project.width, state.project.height));
-                }
-            });
-            let cells = state.active_layer_cell_count().max(1);
-            let mb = (ew as u64 * eh as u64 * 4 * cells as u64) as f64 / (1024.0 * 1024.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "now {cur_w}×{cur_h} · {cells} cell(s) · resize costs {mb:.0} MB"
-                ))
+            egui::CollapsingHeader::new(theme::icon_text(ic::FRAME_CORNERS, "Layer canvas"))
+                .id_salt("layers_canvas")
+                .default_open(false)
+                .show(ui, |ui| layer_canvas_section(state, ui));
+    }
+}
+
+/// The Layers panel's Transform section: the active layer's pose, its
+/// transform keys and their ease.
+fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.checkbox(&mut state.layer_xform, "Transform mode");
+    ui.checkbox(&mut state.auto_key_transform, "Auto-key transform")
+        .on_hover_text(
+            "Moving, scaling or rotating the active layer sets a \
+             transform key on the current frame, so the change animates \
+             from here instead of shifting the layer on every \
+             frame.\n\nOff (default): the layer moves as a whole until \
+             you add a key yourself.",
+        );
+    let toggle = combo_text(state, Action::LayerTransformToggle);
+    ui.label(
+        egui::RichText::new(format!(
+            "Toggle ({toggle}), then drag with your canvas gesture keys: zoom-key = scale, pan-key = move, rotate-key = rotate the active layer.",
+        ))
+        .color(theme::TEXT_MUTED)
+        .size(10.5),
+    );
+    ui.add_space(4.0);
+
+    let cf = state.project.current_frame;
+    let li = state.project.current_layer;
+    // Set once an edit *settles*, never on every `changed()`: keying
+    // mid-drag would push one undo entry per mouse-move.
+    let mut xform_settled = false;
+    if let Some(l) = state.project.layers.get_mut(li) {
+        let mut settle = |r: &egui::Response| {
+            if r.drag_stopped() || r.lost_focus() {
+                xform_settled = true;
+            }
+        };
+        ui.horizontal(|ui| {
+            ui.label("X");
+            settle(&ui.add(egui::DragValue::new(&mut l.transform.tx).speed(1.0)));
+            ui.label("Y");
+            settle(&ui.add(egui::DragValue::new(&mut l.transform.ty).speed(1.0)));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Scale");
+            settle(&ui.add(
+                egui::DragValue::new(&mut l.transform.scale)
+                    .speed(0.01)
+                    .range(0.01..=100.0),
+            ));
+            ui.label("Rot°");
+            let mut deg = l.transform.rot.to_degrees();
+            let r = ui.add(egui::DragValue::new(&mut deg).speed(0.5));
+            if r.changed() {
+                l.transform.rot = deg.to_radians();
+            }
+            settle(&r);
+        });
+        let nkeys = l.transform_keys.len();
+        let here = l.has_transform_key(cf);
+        let status = if nkeys == 0 {
+            "no keys (static)".to_string()
+        } else {
+            format!(
+                "{nkeys} key(s){}",
+                if here { " — keyed on this frame" } else { "" }
+            )
+        };
+        ui.label(
+            egui::RichText::new(status)
                 .color(theme::TEXT_MUTED)
                 .size(10.5),
-            );
-            if ew == max || eh == max {
-                ui.label(
-                    egui::RichText::new(format!("GPU limit: {max} px per side"))
-                        .color(theme::TEXT_MUTED)
-                        .size(10.5),
-                );
+        );
+    }
+    if xform_settled && state.auto_key_transform {
+        state.add_transform_key();
+    }
+
+    // Ease of the key on this frame, same contract as the camera's: it
+    // shapes the segment running *from* this key to the next.
+    let here = state
+        .project
+        .layers
+        .get(li)
+        .map(|l| l.has_transform_key(cf))
+        .unwrap_or(false);
+    let mut ease = state
+        .project
+        .layers
+        .get(li)
+        .and_then(|l| l.transform_keys.iter().find(|k| k.frame == cf))
+        .map(|k| k.ease)
+        .unwrap_or_default();
+    ui.add_enabled_ui(here, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Ease out of key");
+            let mut changed = false;
+            egui::ComboBox::from_id_salt("layer_ease")
+                .selected_text(ease.label())
+                .show_ui(ui, |ui| {
+                    for e in Ease::ALL {
+                        changed |= ui.selectable_value(&mut ease, e, e.label()).changed();
+                    }
+                });
+            if changed {
+                state.set_transform_key_ease(ease);
             }
-            let changed = (ew, eh) != (cur_w, cur_h);
-            if ui
-                .add_enabled(
-                    changed,
-                    egui::Button::new(theme::icon_text(ic::ARROWS_OUT, "Resize layer canvas")),
-                )
-                .on_hover_text(
-                    "Re-pads every cell on this layer, keeping the artwork centred. Undoable.",
-                )
-                .clicked()
-            {
-                state.expand_active_layer_canvas(ew, eh);
+        });
+    });
+
+    ui.horizontal(|ui| {
+        let add = combo_text(state, Action::TransformKeyAdd);
+        if ui
+            .button(theme::icon_text(ic::PLUS_SQUARE, &format!("Add key ({add})")))
+            .clicked()
+        {
+            state.add_transform_key();
+        }
+        if ui.button(theme::icon_text(ic::X, "Del key")).clicked() {
+            state.delete_transform_key();
+        }
+        if ui
+            .button(theme::icon_text(ic::ARROW_COUNTER_CLOCKWISE, "Reset"))
+            .clicked()
+        {
+            state.reset_active_layer_transform();
+        }
+    });
+}
+
+/// The Layers panel's Layer canvas section: grow the active layer's cells
+/// past the frame.
+fn layer_canvas_section(state: &mut AppState, ui: &mut egui::Ui) {
+    let (cur_w, cur_h) = state.active_layer_cell_size();
+    let li = state.project.current_layer;
+    // One texture per cell, so no side may exceed what the GPU holds
+    // in one texture — past it the upload fails outright.
+    let max = state.max_tex;
+    let (mut ew, mut eh) = match state.expand_cfg {
+        Some((l, w, h)) if l == li => (w, h),
+        _ => (cur_w, cur_h),
+    };
+    let size_tip = "Size in pixels. Takes arithmetic: 3840*3, (1920+64)*2.\n\n\
+                    Start with an operator to change what's there: *3 triples it, \
+                    +512 adds 512, /2 halves it. Enter applies it.";
+    ui.horizontal(|ui| {
+        /// A pixel-size field that takes arithmetic, as the frame
+        /// field does. The base is frozen before the widget is built:
+        /// a relative expression measures from where the edit started.
+        fn size_field(value: &mut u32, max: u32) -> egui::DragValue<'_> {
+            let base = *value as f64;
+            egui::DragValue::new(value)
+                .speed(8.0)
+                .range(1..=max)
+                .update_while_editing(false)
+                .custom_parser(move |s| expr::eval(s, base).map(f64::round))
+        }
+        ui.label("W");
+        ui.add(size_field(&mut ew, max)).on_hover_text(size_tip);
+        ui.label("H");
+        ui.add(size_field(&mut eh, max)).on_hover_text(size_tip);
+    });
+    state.expand_cfg = Some((li, ew, eh));
+    ui.horizontal(|ui| {
+        for (label, mul) in [("2×", 2u32), ("3×", 3)] {
+            if ui.small_button(label).clicked() {
+                let (w, h) = (state.project.width * mul, state.project.height * mul);
+                state.expand_cfg = Some((li, w.min(max), h.min(max)));
             }
+        }
+        if ui.small_button("Frame").clicked() {
+            state.expand_cfg = Some((li, state.project.width, state.project.height));
+        }
+    });
+    let cells = state.active_layer_cell_count().max(1);
+    let mb = (ew as u64 * eh as u64 * 4 * cells as u64) as f64 / (1024.0 * 1024.0);
+    ui.label(
+        egui::RichText::new(format!(
+            "now {cur_w}×{cur_h} · {cells} cell(s) · resize costs {mb:.0} MB"
+        ))
+        .color(theme::TEXT_MUTED)
+        .size(10.5),
+    );
+    if ew == max || eh == max {
+        ui.label(
+            egui::RichText::new(format!("GPU limit: {max} px per side"))
+                .color(theme::TEXT_MUTED)
+                .size(10.5),
+        );
+    }
+    let changed = (ew, eh) != (cur_w, cur_h);
+    if ui
+        .add_enabled(
+            changed,
+            egui::Button::new(theme::icon_text(ic::ARROWS_OUT, "Resize layer canvas")),
+        )
+        .on_hover_text(
+            "Re-pads every cell on this layer, keeping the artwork centred. Undoable.",
+        )
+        .clicked()
+    {
+        state.expand_active_layer_canvas(ew, eh);
     }
 }
 
@@ -2989,6 +3065,8 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     );
 
     ui.add_space(4.0);
+    // Grids are stored in frame heights; the X / Y fields show document px.
+    let frame_h = (state.project.height as f32).max(1.0);
     let cfg = &mut state.perspective;
     let mut remove = None;
     for i in 0..cfg.grids.len() {
@@ -3065,6 +3143,43 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
         ui.add(egui::DragValue::new(&mut g.cols).range(1..=MAX_DIVISIONS));
         ui.label("Rows");
         ui.add(egui::DragValue::new(&mut g.rows).range(1..=MAX_DIVISIONS));
+    });
+    // The grid's pose, laid out like a layer's: X / Y from the frame centre,
+    // scale against a fresh grid, heading in degrees. Read off the corners
+    // each frame, and an edit applies as the change from what was read.
+    ui.add_enabled_ui(!g.locked, |ui| {
+        ui.horizontal(|ui| {
+            let c = g.centre();
+            let (mut x, mut y) = (c[0] * frame_h, c[1] * frame_h);
+            ui.label("X");
+            let rx = ui.add(egui::DragValue::new(&mut x).speed(1.0).max_decimals(1));
+            ui.label("Y");
+            let ry = ui.add(egui::DragValue::new(&mut y).speed(1.0).max_decimals(1));
+            if rx.changed() || ry.changed() {
+                g.translate([x / frame_h - c[0], y / frame_h - c[1]]);
+            }
+        });
+        ui.horizontal(|ui| {
+            let s0 = g.scale();
+            let mut s = s0;
+            ui.label("Scale");
+            if ui
+                .add(egui::DragValue::new(&mut s).speed(0.01).max_decimals(2))
+                .changed()
+            {
+                // A scale at or below zero is refused by `scale_by`.
+                g.scale_by(s / s0);
+            }
+            let d0 = g.angle().to_degrees();
+            let mut d = d0;
+            ui.label("Rot°");
+            if ui
+                .add(egui::DragValue::new(&mut d).speed(0.5).max_decimals(1))
+                .changed()
+            {
+                g.rotate((d - d0).to_radians());
+            }
+        });
     });
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!g.locked, |ui| {
@@ -3792,8 +3907,13 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
         let Some(plane) = Plane::new(corners) else {
             continue;
         };
-        // Inactive grids recede while one is being edited.
-        let fade = if editing && !active { 0.45 } else { 1.0 };
+        // Inactive grids recede while one is being edited, and while strokes
+        // snap — so the grid they snap to is the one that stands out.
+        let fade = if (editing || state.perspective.snap) && !active {
+            0.45
+        } else {
+            1.0
+        };
         let alpha = (g.opacity.clamp(0.0, 1.0) * fade * 255.0) as u8;
         let color = theme::premul(g.color[0], g.color[1], g.color[2], alpha);
         let thin = Stroke::new(g.weight.max(0.25), color);
@@ -6367,5 +6487,165 @@ mod timeline_panel_tests {
         let shorter = panel(&ctx);
         assert!((shorter.max.y - (from.y - 50.0)).abs() < 1.0, "{taller:?} → {shorter:?}");
         assert!((shorter.min.y - taller.min.y).abs() < 1.0, "the top stays put");
+    }
+}
+
+/// The Layers panel through the real window: drag-and-drop reordering, and
+/// the sections folded into collapsing headers.
+#[cfg(test)]
+mod layers_panel_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    // Tall enough that the Timeline, which a fresh layout opens tall, sits
+    // below the Layers panel instead of over its rows.
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1280.0, 1400.0));
+    const NAMES: [&str; 3] = ["Alpha", "Bravo", "Charlie"];
+
+    /// Run a frame; returns what it painted.
+    fn frame(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| draw(state, ctx)).shapes
+    }
+
+    /// Alpha (bottom), Bravo, Charlie (top), with the panels up and themed.
+    /// Returns the last frame's shapes too.
+    fn setup() -> (AppState, egui::Context, Vec<egui::epaint::ClippedShape>) {
+        let mut state = AppState::for_test();
+        state.show_panels = true;
+        state.project.layers[0].name = NAMES[0].into();
+        for name in &NAMES[1..] {
+            state.project.add_layer();
+            let i = state.project.current_layer;
+            state.project.layers[i].name = (*name).into();
+        }
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = frame(&ctx, &mut state, vec![]);
+        }
+        (state, ctx, shapes)
+    }
+
+    fn names(state: &AppState) -> Vec<&str> {
+        state.project.layers.iter().map(|l| l.name.as_str()).collect()
+    }
+
+    /// Where `name` was painted inside the Layers panel — the layer's name
+    /// label, which is also its drag handle. (The Timeline lists the names
+    /// too, so the search is held to the panel.)
+    fn name_rect(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], name: &str) -> Rect {
+        fn find(shape: &egui::Shape, name: &str, panel: Rect, out: &mut Option<Rect>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| find(s, name, panel, out)),
+                egui::Shape::Text(t) if t.galley.text() == name => {
+                    let r = t.visual_bounding_rect();
+                    if panel.contains_rect(r) {
+                        *out = Some(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let panel = egui::AreaState::load(ctx, egui::Id::new(panel_key(PanelId::Layers)))
+            .expect("Layers panel laid out")
+            .rect();
+        let mut out = None;
+        for s in shapes {
+            find(&s.shape, name, panel, &mut out);
+        }
+        out.unwrap_or_else(|| panic!("{name} not painted in the Layers panel"))
+    }
+
+    fn button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn drop_index_lands_just_above_or_below_the_target() {
+        // Up the stack: taking the layer out first shifts the target down.
+        assert_eq!(drop_index(0, 2, true), 2);
+        assert_eq!(drop_index(0, 2, false), 1);
+        // Down the stack.
+        assert_eq!(drop_index(3, 1, true), 2);
+        assert_eq!(drop_index(3, 1, false), 1);
+        // Onto itself, or into the slot it already fills: no move.
+        assert_eq!(drop_index(2, 2, true), 2);
+        assert_eq!(drop_index(2, 2, false), 2);
+        assert_eq!(drop_index(1, 2, false), 1);
+        assert_eq!(drop_index(2, 1, true), 2);
+    }
+
+    #[test]
+    fn dragging_a_layer_name_onto_another_row_reorders_in_one_undo() {
+        let (mut state, ctx, shapes) = setup();
+        state.project.current_layer = 1;
+        let from = name_rect(&ctx, &shapes, "Alpha").center();
+        // The name sits in the top half of its row: drop Alpha above Charlie.
+        let to = name_rect(&ctx, &shapes, "Charlie").center();
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from)]);
+        frame(&ctx, &mut state, vec![button(from, true)]);
+        for k in 1..=8 {
+            let p = from + (to - from) * (k as f32 / 8.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame(&ctx, &mut state, vec![button(to, false)]);
+        frame(&ctx, &mut state, vec![]);
+
+        assert_eq!(names(&state), ["Bravo", "Charlie", "Alpha"]);
+        assert_eq!(state.project.current_layer, 2, "the dropped layer is selected");
+        state.undo();
+        assert_eq!(names(&state), NAMES);
+    }
+
+    #[test]
+    fn a_click_on_a_name_still_selects_and_a_double_click_renames() {
+        let (mut state, ctx, shapes) = setup();
+        state.project.current_layer = 2;
+        let at = name_rect(&ctx, &shapes, "Alpha").center();
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(at), button(at, true)]);
+        frame(&ctx, &mut state, vec![button(at, false)]);
+        frame(&ctx, &mut state, vec![]);
+        assert_eq!(state.project.current_layer, 0);
+        assert_eq!(names(&state), NAMES, "a click is not a drag");
+
+        frame(&ctx, &mut state, vec![button(at, true)]);
+        frame(&ctx, &mut state, vec![button(at, false), button(at, true)]);
+        frame(&ctx, &mut state, vec![button(at, false)]);
+        assert!(
+            state.layer_rename.as_ref().is_some_and(|r| r.index == 0),
+            "double-click opens the rename box"
+        );
+    }
+
+    #[test]
+    fn the_folded_sections_still_draw() {
+        let (mut state, ctx, _) = setup();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(SCREEN),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    layer_transform_section(&mut state, ui);
+                    layer_canvas_section(&mut state, ui);
+                });
+            },
+        );
     }
 }

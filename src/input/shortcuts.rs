@@ -29,6 +29,9 @@ pub enum Action {
     ToolPerspective,
     TogglePerspectiveGrid,
     TogglePerspectiveSnap,
+    /// Make the next visible perspective grid the active one — the one
+    /// strokes snap to.
+    PerspectiveNextGrid,
     PlayPause,
     FramePrev,
     FrameNext,
@@ -111,6 +114,7 @@ impl Action {
         Action::ToolPerspective,
         Action::TogglePerspectiveGrid,
         Action::TogglePerspectiveSnap,
+        Action::PerspectiveNextGrid,
         Action::PlayPause,
         Action::FramePrev,
         Action::FrameNext,
@@ -187,6 +191,7 @@ impl Action {
             Action::ToolPerspective => "Tool: Perspective grid",
             Action::TogglePerspectiveGrid => "Show perspective grids",
             Action::TogglePerspectiveSnap => "Snap strokes to perspective grid",
+            Action::PerspectiveNextGrid => "Next perspective grid",
             Action::PlayPause => "Play / Pause",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
@@ -460,6 +465,7 @@ impl Default for ShortcutMap {
         b.insert(Action::ToolPerspective, KeyCombo::shift(K::G));
         b.insert(Action::TogglePerspectiveGrid, KeyCombo::ctrl(K::G));
         b.insert(Action::TogglePerspectiveSnap, KeyCombo::ctrl_shift(K::G));
+        b.insert(Action::PerspectiveNextGrid, KeyCombo::alt(K::G));
         // Frame navigation: A / S.
         b.insert(Action::FramePrev, KeyCombo::plain(K::A));
         b.insert(Action::FrameNext, KeyCombo::plain(K::S));
@@ -694,6 +700,18 @@ mod tests {
                 if b != a {
                     assert_ne!(c, other, "{a:?} and {b:?} share {}", c.display());
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn next_grid_is_alt_g_and_clashes_with_nothing() {
+        let map = ShortcutMap::default();
+        let c = map.get(Action::PerspectiveNextGrid).expect("bound");
+        assert_eq!(c, KeyCombo::alt(egui::Key::G));
+        for (&b, &other) in &map.bindings {
+            if b != Action::PerspectiveNextGrid {
+                assert_ne!(c, other, "shares {} with {b:?}", c.display());
             }
         }
     }
