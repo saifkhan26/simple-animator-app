@@ -838,6 +838,16 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                     shape_kind_toggle(ui, state, ShapeKind::Rect, ic::RECTANGLE, "Rectangle");
                     shape_kind_toggle(ui, state, ShapeKind::Ellipse, ic::CIRCLE, "Ellipse");
                 });
+                if state.shapes_on_grid() {
+                    let n = state.perspective.active + 1;
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "On perspective grid {n} — Shift once dragging: square / circle"
+                        ))
+                        .color(theme::TEXT_MUTED)
+                        .size(11.0),
+                    );
+                }
                 brush_size_lock(state, ui);
                 let label = if state.lock_brush_to_view {
                     "Thickness (screen px)"
@@ -2965,8 +2975,9 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
         egui::Checkbox::new(&mut state.perspective.snap, format!("Snap strokes ({snap})")),
     )
     .on_hover_text(
-        "Pencil, ink and eraser strokes lock to the active grid, toward whichever \
-         vanishing point the stroke starts out heading for.",
+        "Pencil, ink, eraser and shape lines lock to the active grid, toward whichever \
+         vanishing point the stroke starts out heading for. Rectangles and ellipses lie \
+         on it; hold Shift once dragging for a square or circle.",
     );
     ui.add_enabled(
         state.perspective.show && state.perspective.snap,
@@ -3457,34 +3468,24 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         let col = Color32::from_rgb(c[0], c[1], c[2]);
         let thick = (state.effective_radius() * 2.0 * scale * layer_scale).max(1.0);
         let stroke = Stroke::new(thick, col);
-        let (sx, sy) = drag.start;
-        let (ex, ey) = drag.end;
-        match drag.kind {
-            ShapeKind::Line => {
-                painter.line_segment([cell_to_screen(sx, sy), cell_to_screen(ex, ey)], stroke);
+        // The same outline pointer-up rasterises, grid and Shift included.
+        let mut pts: Vec<egui::Pos2> = state
+            .shape_outline(&drag)
+            .into_iter()
+            .map(|(x, y)| cell_to_screen(x, y))
+            .collect();
+        match (drag.kind, pts.len()) {
+            (_, 0) => {}
+            (_, 1) => {
+                painter.circle_filled(pts[0], thick * 0.5, col);
             }
-            ShapeKind::Rect => {
-                let (x0, y0) = (sx.min(ex), sy.min(ey));
-                let (x1, y1) = (sx.max(ex), sy.max(ey));
-                let pts = vec![
-                    cell_to_screen(x0, y0),
-                    cell_to_screen(x1, y0),
-                    cell_to_screen(x1, y1),
-                    cell_to_screen(x0, y1),
-                ];
-                painter.add(egui::Shape::closed_line(pts, stroke));
+            (ShapeKind::Line, _) => {
+                painter.add(egui::Shape::line(pts, stroke));
             }
-            ShapeKind::Ellipse => {
-                let cx = (sx + ex) * 0.5;
-                let cy = (sy + ey) * 0.5;
-                let rx = (ex - sx).abs() * 0.5;
-                let ry = (ey - sy).abs() * 0.5;
-                let n = 48;
-                let mut pts = Vec::with_capacity(n);
-                for i in 0..n {
-                    let t = i as f32 / n as f32 * std::f32::consts::TAU;
-                    pts.push(cell_to_screen(cx + rx * t.cos(), cy + ry * t.sin()));
-                }
+            (ShapeKind::Rect | ShapeKind::Ellipse, _) => {
+                // Closed outlines repeat their first point; `closed_line`
+                // joins the ends itself.
+                pts.pop();
                 painter.add(egui::Shape::closed_line(pts, stroke));
             }
         }
@@ -5817,6 +5818,50 @@ mod perspective_tests {
             frame(&ctx, &mut state, vec![]);
             frame(&ctx, &mut state, vec![]);
         }
+    }
+
+    #[test]
+    fn a_rect_dragged_on_the_canvas_lies_on_the_grid() {
+        let mut state = state();
+        let (w, h) = (state.project.width as f32, state.project.height as f32);
+        // One-point floor whose columns meet at (150, 66.7).
+        state.perspective.grids[0].set_doc_corners(
+            [[140.0, 100.0], [160.0, 100.0], [250.0, 400.0], [50.0, 400.0]],
+            w,
+            h,
+        );
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = ShapeKind::Rect;
+        state.brush.radius = 3.0;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let xf = Xform::new(&state, SCREEN);
+        let from = xf.doc_to_screen(120.0, 380.0);
+        let to = xf.doc_to_screen(180.0, 200.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 4.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+        }
+        // Mid-drag, the preview paints from the grid outline.
+        assert!(state.shape_drag.is_some_and(|d| d.plane.is_some()));
+        frame(&ctx, &mut state, vec![button(to, false)]);
+        frame(&ctx, &mut state, vec![]);
+
+        let id = state.project.resolved_current().expect("the shape drew a cell");
+        let c = state.project.cell(id).unwrap();
+        let alpha = |x: u32, y: u32| c.pixels[((y * c.width + x) * 4 + 3) as usize];
+        // Near edge out to the leaning column (x ≈ 220), flat corner bare.
+        assert!(alpha(210, 380) > 200);
+        assert_eq!(alpha(120, 200), 0);
     }
 }
 

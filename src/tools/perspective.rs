@@ -38,6 +38,11 @@ fn normalize(a: P) -> Option<P> {
     (l > 1e-9).then(|| [a[0] / l, a[1] / l])
 }
 
+/// How far in front of the vanishing line a point must be, as a homogeneous
+/// `w`, to count as on the plane. The corners sit at `w` around 1; right at
+/// the line a point is infinitely far out along the plane.
+const FRONT_EPS: f64 = 1e-6;
+
 /// Projective map from the unit square onto a quad: `(u, v)` → document
 /// point. Row-major 3×3, applied to `(u, v, 1)`.
 #[derive(Clone, Copy, Debug)]
@@ -98,6 +103,43 @@ impl Homography {
     pub fn map(&self, u: f32, v: f32) -> P {
         let [x, y, w] = self.apply(u as f64, v as f64, 1.0);
         [(x / w) as f32, (y / w) as f32]
+    }
+
+    /// [`map`](Self::map), but `None` for a `(u, v)` on or past the plane's
+    /// vanishing line — behind the viewer, where the map folds the plane
+    /// back over the picture upside down. The corners of a convex quad are
+    /// always in front.
+    pub fn map_front(&self, u: f32, v: f32) -> Option<P> {
+        let [x, y, w] = self.apply(u as f64, v as f64, 1.0);
+        (w > FRONT_EPS).then(|| [(x / w) as f32, (y / w) as f32])
+    }
+
+    /// The inverse: document point → `(u, v)`. `None` for a point on or past
+    /// the vanishing line (above a floor's horizon), which no point of the
+    /// plane in front of the viewer lands on.
+    pub fn unmap(&self, p: P) -> Option<[f32; 2]> {
+        let m = &self.m;
+        // Rows of the inverse, from the cofactors.
+        let inv = [
+            m[4] * m[8] - m[5] * m[7],
+            m[2] * m[7] - m[1] * m[8],
+            m[1] * m[5] - m[2] * m[4],
+            m[5] * m[6] - m[3] * m[8],
+            m[0] * m[8] - m[2] * m[6],
+            m[2] * m[3] - m[0] * m[5],
+            m[3] * m[7] - m[4] * m[6],
+            m[1] * m[6] - m[0] * m[7],
+            m[0] * m[4] - m[1] * m[3],
+        ];
+        let det = m[0] * inv[0] + m[1] * inv[3] + m[2] * inv[6];
+        let (x, y) = (p[0] as f64, p[1] as f64);
+        let u = (inv[0] * x + inv[1] * y + inv[2]) / det;
+        let v = (inv[3] * x + inv[4] * y + inv[5]) / det;
+        let w = (inv[6] * x + inv[7] * y + inv[8]) / det;
+        // Mapping `(u, v)` forward gives a `w` of `1 / w` here: the point is
+        // in front exactly when this one is positive. The divide by `det`
+        // (not just the adjugate) is what keeps that sign honest.
+        (w.is_finite() && w > FRONT_EPS).then(|| [(u / w) as f32, (v / w) as f32])
     }
 
     /// Where the image of a direction in the square ends up: a finite
@@ -588,6 +630,33 @@ mod tests {
         let (d0, d1) = (sub(QUAD[2], QUAD[0]), sub(QUAD[3], QUAD[1]));
         assert!(cross(d0, sub(c, QUAD[0])).abs() < 1e-2 * len(d0));
         assert!(cross(d1, sub(c, QUAD[1])).abs() < 1e-2 * len(d1));
+    }
+
+    #[test]
+    fn unmap_inverts_map() {
+        for c in [QUAD, TRAP] {
+            let h = Homography::square_to_quad(&c).unwrap();
+            for (u, v) in [(0.0, 0.0), (1.0, 1.0), (0.3, 0.7), (-0.5, 2.0), (1.5, -0.2)] {
+                let Some(p) = h.map_front(u, v) else {
+                    continue;
+                };
+                let [u2, v2] = h.unmap(p).unwrap();
+                assert!((u2 - u).abs() < 1e-3 && (v2 - v).abs() < 1e-3, "{c:?} {u},{v}");
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_past_the_horizon_is_on_the_plane() {
+        // TRAP's floor recedes up to the vanishing point at (50, -25).
+        let h = Homography::square_to_quad(&TRAP).unwrap();
+        assert!(h.unmap([50.0, -10.0]).is_some(), "below the horizon");
+        assert!(h.unmap([50.0, -40.0]).is_none(), "above it");
+        assert!(h.unmap([500.0, -40.0]).is_none(), "above it, off to the side");
+        // Receding (v → −∞) the floor approaches the horizon but never
+        // crosses it; the other way, past the viewer, it wraps round behind.
+        assert!(h.map_front(0.5, -1e4).is_some());
+        assert!(h.map_front(0.5, 2.0).is_none());
     }
 
     #[test]
