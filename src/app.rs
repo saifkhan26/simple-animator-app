@@ -33,6 +33,7 @@ use crate::tools::perspective::{self, GridGrab, PerspectiveConfig};
 use crate::tools::select_mask::{SelOp, SelShape, SelectionMask};
 use crate::tools::selection::{Grab, Pose, Selection};
 use crate::tools::stroke::StrokeBuilder;
+use crate::tools::shape::GridPlane;
 use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
 use crate::ui;
 use crate::undo::{self, History};
@@ -178,6 +179,9 @@ pub struct ShapeDrag {
     pub kind: ShapeKind,
     pub start: (f32, f32),
     pub end: (f32, f32),
+    /// The perspective grid the shape lies on, in the target cell's pixels —
+    /// taken at press, so toggling snap mid-drag can't change the shape.
+    pub plane: Option<GridPlane>,
 }
 
 /// An in-progress drag on the floating selection's transform box.
@@ -2920,6 +2924,7 @@ impl AppState {
                 kind: self.brush.shape_kind,
                 start: (sample.x, sample.y),
                 end: (sample.x, sample.y),
+                plane: self.shape_plane(target),
             });
             self.stroke = None;
             return;
@@ -2989,6 +2994,7 @@ impl AppState {
         let mut paints = false;
         if let Some(drag) = self.shape_drag.take() {
             // Rasterise the final shape now; undo records the dirty rect below.
+            let outline = self.shape_outline(&drag);
             let mut brush = self.brush.clone();
             brush.radius = self.effective_radius();
             let (cw, ch) = {
@@ -3002,15 +3008,7 @@ impl AppState {
                 self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
                 self.project.cell_mut(target),
             ) {
-                crate::tools::shape::rasterize(
-                    c,
-                    &mut self.stroke_ws,
-                    pre,
-                    drag.kind,
-                    drag.start,
-                    drag.end,
-                    &brush,
-                );
+                crate::tools::shape::rasterize(c, &mut self.stroke_ws, pre, &outline, &brush);
             }
             self.mark_dirty(target);
             paints = true;
@@ -3386,12 +3384,76 @@ impl AppState {
         }
     }
 
-    /// Whether strokes should snap to the active grid right now.
-    fn snapping(&self) -> bool {
+    /// Whether the active grid is up for snapping to: switched on, shown, and
+    /// not hidden itself.
+    fn grid_snap_on(&self) -> bool {
         self.perspective.snap
             && self.perspective.show
-            && matches!(self.tool, ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser)
             && self.perspective.active_grid().is_some_and(|g| g.visible)
+    }
+
+    /// Whether strokes should snap to a grid direction right now. A shape
+    /// line counts as a stroke; rectangles and ellipses lie on the plane
+    /// instead (see [`Self::shape_plane`]).
+    fn snapping(&self) -> bool {
+        let stroke_tool = match self.tool {
+            ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser => true,
+            ActiveTool::Shape => self.brush.shape_kind == ShapeKind::Line,
+            _ => false,
+        };
+        stroke_tool && self.grid_snap_on()
+    }
+
+    /// Whether a shape drag started now would lie on the active grid — the
+    /// Shape tool options show it.
+    pub fn shapes_on_grid(&self) -> bool {
+        self.tool == ActiveTool::Shape
+            && self.brush.shape_kind != ShapeKind::Line
+            && self.grid_snap_on()
+    }
+
+    /// The active grid's plane in cell `target`'s pixels, for a shape drag
+    /// starting now, or `None` when the shape is drawn flat. The layer
+    /// transform is a similarity, so the grid's corners carried through it
+    /// still span a plane — and the drag never has to leave cell space.
+    fn shape_plane(&self, target: CellId) -> Option<GridPlane> {
+        if !self.shapes_on_grid() {
+            return None;
+        }
+        let g = self.perspective.active_grid()?;
+        let (pw, ph) = self.frame_size();
+        let c = &self.project.cells[target];
+        let (cw, ch) = (c.width as f32, c.height as f32);
+        let t = self.display_transform(self.project.current_layer, self.project.current_frame);
+        let corners = g.doc_corners(pw, ph).map(|p| {
+            let (x, y) = t.doc_to_cell(p[0], p[1], cw, ch, pw, ph);
+            [x, y]
+        });
+        Some(GridPlane {
+            h: perspective::Homography::square_to_quad(&corners)?,
+            rows: g.rows,
+            cols: g.cols,
+        })
+    }
+
+    /// The polyline a shape drag draws, in cell pixels: on its grid when it
+    /// has one and the box stays in front of the horizon, flat otherwise.
+    /// Shift, held once the drag is under way, squares it up on the grid.
+    /// Preview and pixels both come from here, so they always agree.
+    pub fn shape_outline(&self, drag: &ShapeDrag) -> Vec<(f32, f32)> {
+        let radius = self.effective_radius();
+        drag.plane
+            .and_then(|plane| {
+                crate::tools::shape::outline_on_plane(
+                    drag.kind,
+                    drag.start,
+                    drag.end,
+                    &plane,
+                    self.shift_held,
+                    radius,
+                )
+            })
+            .unwrap_or_else(|| crate::tools::shape::outline(drag.kind, drag.start, drag.end, radius))
     }
 
     /// Start of a stroke at document point `p`. Arms perspective snap when it
@@ -5458,6 +5520,116 @@ mod tests {
         state.snap_begin([170.0, 400.0]);
         let p = state.snap_doc([170.0, 300.0]);
         assert!((p[0] - 170.0).abs() < 1e-3, "{p:?}");
+    }
+
+    /// One-point floor whose columns meet at (150, 66.7).
+    const FLOOR: [[f32; 2]; 4] = [[140.0, 100.0], [160.0, 100.0], [250.0, 400.0], [50.0, 400.0]];
+
+    /// The Shape tool drawing `kind` with snap on, over the `FLOOR` grid.
+    fn shape_state(kind: ShapeKind) -> AppState {
+        let mut state = perspective_state();
+        let (w, h) = state.frame_size();
+        state.perspective.grids[0].set_doc_corners(FLOOR, w, h);
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = kind;
+        state.brush.radius = 3.0;
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        state
+    }
+
+    /// Press at cell point `a`, drag to `b`, release.
+    fn drag_shape(state: &mut AppState, a: (f32, f32), b: (f32, f32)) {
+        state.pointer_down(state.make_sample(a.0, a.1, 0.0));
+        state.pointer_move(state.make_sample(b.0, b.1, 0.1));
+        state.pointer_up();
+    }
+
+    fn alpha(state: &AppState, p: (f32, f32)) -> u8 {
+        let id = state.project.resolved_current().unwrap();
+        let c = state.project.cell(id).unwrap();
+        let (x, y) = (p.0.round() as u32, p.1.round() as u32);
+        c.pixels[((y * c.width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn a_rect_lies_on_the_grid_when_snap_is_on() {
+        let mut state = shape_state(ShapeKind::Rect);
+        drag_shape(&mut state, (120.0, 380.0), (180.0, 200.0));
+        // The near edge runs out to the column through the cursor, which
+        // leans out to x ≈ 220 down here...
+        assert!(alpha(&state, (210.0, 380.0)) > 200, "near edge, past the flat rect");
+        assert!(alpha(&state, (200.0, 290.0)) > 200, "right side, leaning to the VP");
+        // ...and the flat rect's far-left corner is left bare.
+        assert_eq!(alpha(&state, (120.0, 200.0)), 0);
+    }
+
+    #[test]
+    fn with_snap_off_a_rect_stays_flat() {
+        let mut state = shape_state(ShapeKind::Rect);
+        state.perspective.snap = false;
+        drag_shape(&mut state, (120.0, 380.0), (180.0, 200.0));
+        assert!(alpha(&state, (120.0, 200.0)) > 200);
+        assert_eq!(alpha(&state, (210.0, 380.0)), 0);
+    }
+
+    #[test]
+    fn a_rect_lies_on_the_grid_on_a_transformed_layer_too() {
+        let mut state = shape_state(ShapeKind::Rect);
+        let li = state.project.current_layer;
+        let t = &mut state.project.layers[li].transform;
+        (t.scale, t.rot, t.tx) = (2.0, 0.3, 25.0);
+        let t = *t;
+        let (pw, ph) = state.frame_size();
+        let (cw, ch) = state.project.draw_cell_size(li, state.project.current_frame);
+        let cell = |p: (f32, f32)| t.doc_to_cell(p.0, p.1, cw as f32, ch as f32, pw, ph);
+        // The same drag as above, as the pointer would feed it on this layer.
+        drag_shape(&mut state, cell((120.0, 380.0)), cell((180.0, 200.0)));
+        // Where it lands on screen matches the untransformed case.
+        assert!(alpha(&state, cell((210.0, 380.0))) > 0, "near edge");
+        assert!(alpha(&state, cell((200.0, 290.0))) > 0, "right side");
+        assert_eq!(alpha(&state, cell((120.0, 200.0))), 0);
+    }
+
+    #[test]
+    fn shift_squares_a_rect_up_in_grid_cells() {
+        let mut state = shape_state(ShapeKind::Rect);
+        state.pointer_down(state.make_sample(120.0, 380.0, 0.0));
+        state.pointer_move(state.make_sample(180.0, 200.0, 0.1));
+        state.shift_held = true;
+        let drag = state.shape_drag.unwrap();
+        let plane = drag.plane.expect("snap on: the drag lies on the grid");
+        let o = state.shape_outline(&drag);
+        let [u0, v0] = plane.h.unmap([o[0].0, o[0].1]).unwrap();
+        let [u1, v1] = plane.h.unmap([o[2].0, o[2].1]).unwrap();
+        let (cols, rows) = (plane.cols as f32, plane.rows as f32);
+        assert!(((u1 - u0).abs() * cols - (v1 - v0).abs() * rows).abs() < 1e-3);
+        state.shift_held = false;
+        let o = state.shape_outline(&drag);
+        let [u1b, v1b] = plane.h.unmap([o[2].0, o[2].1]).unwrap();
+        assert!(((u1b - u0).abs() * cols - (v1b - v0).abs() * rows).abs() > 0.1, "free again");
+    }
+
+    #[test]
+    fn a_shape_line_snaps_like_a_stroke() {
+        let mut state = shape_state(ShapeKind::Line);
+        let (w, h) = state.frame_size();
+        let sq = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]];
+        state.perspective.grids[0].set_doc_corners(sq, w, h);
+        // What the canvas does: snap in document space, then feed the cell.
+        let a = state.snap_begin([150.0, 150.0]);
+        state.pointer_down(state.make_sample(a[0], a[1], 0.0));
+        let b = state.snap_doc([190.0, 165.0]);
+        assert!(near(b, [190.0, 150.0]), "locked to the row: {b:?}");
+        state.pointer_move(state.make_sample(b[0], b[1], 0.1));
+        assert!(state.shape_drag.unwrap().plane.is_none(), "lines don't lie on the plane");
+        state.pointer_up();
+        assert!(alpha(&state, (185.0, 150.0)) > 200);
+        assert_eq!(alpha(&state, (185.0, 163.0)), 0);
+        // Rectangles lie on the plane rather than locking to a direction.
+        state.brush.shape_kind = ShapeKind::Rect;
+        state.snap_begin([150.0, 150.0]);
+        assert_eq!(state.snap_doc([190.0, 165.0]), [190.0, 165.0]);
     }
 
     #[test]
