@@ -62,6 +62,38 @@ fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
 
+/// The pose that moves another drawing — cut through mask `mk`, placed at `pk`
+/// — the way `sel` moved on screen.
+///
+/// Usually the drawing sits exactly where the float's did, so its mask is the
+/// same and the pose carries over as it is; a plain move then stays a lossless
+/// whole-pixel blit. Where the layer is keyed to a different transform on that
+/// frame, or the drawing's canvas is another size, the mask box's centre is
+/// sent through the float's motion in document space and back, and the pose is
+/// rebuilt around it. Rotation and uniform scale carry over exactly; a
+/// non-uniform scale is only exact while the two frames share a layer rotation,
+/// since the pose can only scale along the drawing's own axes.
+fn pose_for(sel: &Selection, pk: &Placement, mk: &Mask) -> Pose {
+    let p0 = &sel.placement;
+    let m0 = &sel.mask;
+    if pk == p0 && (mk.x, mk.y, mk.w, mk.h) == (m0.x, m0.y, m0.w, m0.h) {
+        return sel.pose;
+    }
+    let ck = (mk.x as f32 + mk.w as f32 * 0.5, mk.y as f32 + mk.h as f32 * 0.5);
+    let doc = pk.xf.cell_to_doc(ck.0, ck.1, pk.cw as f32, pk.ch as f32, pk.pw, pk.ph);
+    let c0 = p0.xf.doc_to_cell(doc.0, doc.1, p0.cw as f32, p0.ch as f32, p0.pw, p0.ph);
+    let moved0 = sel.path_point(c0.0, c0.1);
+    let moved = p0.xf.cell_to_doc(moved0.0, moved0.1, p0.cw as f32, p0.ch as f32, p0.pw, p0.ph);
+    let target = pk.xf.doc_to_cell(moved.0, moved.1, pk.cw as f32, pk.ch as f32, pk.pw, pk.ph);
+    let mut offset = (target.0 - ck.0, target.1 - ck.1);
+    // A whole-pixel move between drawings that differ only by where they sit
+    // is still a whole-pixel move: keep it on the lossless path.
+    if sel.pose.is_pixel_aligned() && pk.xf.rot == p0.xf.rot && pk.xf.scale == p0.xf.scale {
+        offset = (offset.0.round(), offset.1.round());
+    }
+    Pose { offset, ..sel.pose }
+}
+
 impl AppState {
     // --- Where things are ---
 
@@ -693,7 +725,8 @@ impl AppState {
             self.float_pre_live = false;
             return;
         }
-        if std::mem::take(&mut self.float_pre_live) {
+        let from_lift = std::mem::take(&mut self.float_pre_live);
+        if from_lift {
             // The "before" is the cell as it was before the pixels left it.
             std::mem::swap(&mut self.stroke_pre_pixels, &mut self.float_pre);
             self.stroke_pre_live = true;
@@ -714,6 +747,12 @@ impl AppState {
         self.mark_dirty(cell);
 
         let mut parts: Vec<undo::Command> = self.take_patch(cell).into_iter().collect();
+        // All frames: the same move, through the same selection, on every other
+        // drawing of the layer — while `sel_mask` still says where the pixels
+        // were picked up. Pasted pixels came from no drawing, so they stay put.
+        if self.sel_all_frames && from_lift {
+            parts.extend(self.land_on_other_drawings(&sel));
+        }
         let (x, y, w, h, cov) = sel.posed_cov();
         let p = sel.placement;
         let after = SelectionMask::from_cell(x, y, w, h, &cov, &p.xf, p.cw, p.ch, p.pw, p.ph);
@@ -730,6 +769,71 @@ impl AppState {
             1 => self.history.push(parts.remove(0)),
             _ => self.history.push(undo::Command::Compound(parts)),
         }
+    }
+
+    /// Each distinct drawing on layer `li`, with the first frame it shows on.
+    /// A drawing held over several frames, or keyed twice, appears once — so
+    /// an edit applied to each lands once.
+    pub fn layer_drawings(&self, li: usize) -> Vec<(crate::doc::layer::CellId, usize)> {
+        let Some(layer) = self.project.layers.get(li) else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::HashSet::new();
+        layer
+            .exposures
+            .iter()
+            .enumerate()
+            .filter_map(|(f, e)| e.filter(|id| seen.insert(*id)).map(|id| (id, f)))
+            .collect()
+    }
+
+    /// Land `sel`'s move on every other drawing of its layer: each one is cut
+    /// through the same document-space selection and moved the same way on
+    /// screen. Returns their undo patches, for `land_float` to fold into its
+    /// one step.
+    fn land_on_other_drawings(&mut self, sel: &Selection) -> Vec<undo::Command> {
+        let Some(doc_mask) = self.sel_mask.clone() else {
+            return Vec::new();
+        };
+        // The float's own layer, which is not the active one when it is being
+        // landed because the user switched layer.
+        let Some(li) = (0..self.project.layers.len()).find(|&li| {
+            self.project.layers[li].exposures.contains(&Some(sel.cell))
+        }) else {
+            return Vec::new();
+        };
+        let (pw, ph) = (self.project.width as f32, self.project.height as f32);
+        let mut parts = Vec::new();
+        for (cell, f) in self.layer_drawings(li) {
+            if cell == sel.cell {
+                continue;
+            }
+            let Some(canvas) = self.project.cell(cell) else {
+                continue;
+            };
+            let pk = Placement {
+                xf: self.display_transform(li, f),
+                cw: canvas.width,
+                ch: canvas.height,
+                pw,
+                ph,
+            };
+            let mask = doc_mask.to_cell(&pk.xf, pk.cw, pk.ch, pw, ph);
+            if mask.w == 0 || mask.h == 0 {
+                continue;
+            }
+            let mut other = Selection::new(cell, canvas, mask, pk);
+            other.pose = pose_for(sel, &pk, &other.mask);
+            self.snapshot_pre(cell);
+            if let Some(c) = self.project.cell_mut(cell) {
+                c.dirty = None;
+                other.lift_source(c);
+                other.stamp(c);
+            }
+            self.mark_dirty(cell);
+            parts.extend(self.take_patch(cell));
+        }
+        parts
     }
 
     /// Put a float's pixels back where they were lifted from and forget it —
@@ -1055,6 +1159,153 @@ mod tests {
         assert_eq!(px(&st, 105, 120), [200, 0, 0, 255]);
         assert_eq!(px(&st, 165, 120)[3], 0);
         assert_eq!(at(&st, 95, 120), 255);
+    }
+
+    const RED: [u8; 4] = [200, 0, 0, 255];
+
+    /// Pixel of layer 0's drawing on frame `f`, in that drawing's own pixels.
+    fn px_on(st: &AppState, f: usize, x: u32, y: u32) -> [u8; 4] {
+        let id = st.project.layers[0].resolve(f).expect("a drawing on this frame");
+        let c = st.project.cell(id).unwrap();
+        let i = ((y * c.width + x) * 4) as usize;
+        [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+    }
+
+    /// Next frame, with a drawing of its own.
+    fn new_drawing(st: &mut AppState) {
+        st.structural_edit(false, |p| {
+            p.add_frame();
+            p.insert_blank_key_here();
+        });
+    }
+
+    /// Three drawings on frames 0-2 with a red square at 100..140 in each,
+    /// frame 3 holding the third; the playhead back on frame 0.
+    fn animated() -> AppState {
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        for _ in 0..2 {
+            new_drawing(&mut st);
+            paint(&mut st, (100, 100, 140, 140), RED);
+        }
+        st.structural_edit(false, |p| p.add_frame());
+        st.project.goto(0);
+        assert_eq!(st.layer_drawings(0).len(), 3, "the hold is not a drawing");
+        st
+    }
+
+    #[test]
+    fn all_frames_moves_every_drawing_once_in_one_undo() {
+        let mut st = animated();
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        st.sel_all_frames = true;
+        let steps = st.history.undo_len();
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        for f in 0..4 {
+            // Once, 30 px: 130..170. Twice would reach 160..200.
+            assert_eq!(px_on(&st, f, 135, 120), RED, "frame {f} moved");
+            assert_eq!(px_on(&st, f, 185, 120)[3], 0, "frame {f} moved once");
+            assert_eq!(px_on(&st, f, 105, 120)[3], 0, "frame {f} left a hole");
+        }
+        assert_eq!(st.history.undo_len(), steps + 1, "every drawing, one step");
+        st.undo();
+        for f in 0..4 {
+            assert_eq!(px_on(&st, f, 105, 120), RED, "frame {f} back");
+            assert_eq!(px_on(&st, f, 165, 120)[3], 0);
+        }
+        st.redo();
+        for f in 0..4 {
+            assert_eq!(px_on(&st, f, 165, 120), RED, "frame {f} redone");
+        }
+    }
+
+    #[test]
+    fn without_all_frames_only_this_drawing_moves() {
+        let mut st = animated();
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_eq!(px_on(&st, 0, 165, 120), RED);
+        for f in 1..4 {
+            assert_eq!(px_on(&st, f, 105, 120), RED, "frame {f} untouched");
+            assert_eq!(px_on(&st, f, 165, 120)[3], 0);
+        }
+    }
+
+    #[test]
+    fn pasted_pixels_land_on_one_drawing_even_with_all_frames() {
+        let mut st = animated();
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        st.copy_selection();
+        st.sel_all_frames = true;
+        st.paste_selection();
+        st.nudge_selection(60, 0);
+        st.land_float();
+        assert_eq!(px_on(&st, 0, 165, 120), RED, "pasted here");
+        assert_eq!(px_on(&st, 0, 105, 120), RED, "and the original stays");
+        assert_eq!(px_on(&st, 1, 165, 120)[3], 0, "nowhere else");
+    }
+
+    /// Frame 1's layer is keyed 15 px right, so its drawing's square sits at
+    /// 85..125 in its own pixels to show up where the others do. The move is
+    /// the same on screen: 30 px right in every drawing.
+    #[test]
+    fn a_keyed_layer_moves_the_same_on_screen() {
+        use crate::doc::transform::Transform;
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        new_drawing(&mut st);
+        paint(&mut st, (85, 100, 125, 140), RED);
+        let shifted = Transform { tx: 15.0, ..Transform::default() };
+        st.project.layers[0].set_transform_key(0, Transform::default());
+        st.project.layers[0].set_transform_key(1, shifted);
+        st.project.goto(0);
+        st.project.layers[0].transform = Transform::default();
+
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        st.sel_all_frames = true;
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_eq!(px_on(&st, 0, 135, 120), RED);
+        assert_eq!(px_on(&st, 1, 120, 120), RED, "frame 1: 115..155 in its pixels");
+        assert_eq!(px_on(&st, 1, 110, 120)[3], 0, "and not 15 px short of it");
+        assert_eq!(px_on(&st, 1, 160, 120)[3], 0, "nor past it");
+    }
+
+    #[test]
+    fn a_rotation_lands_identically_on_every_drawing() {
+        let mut st = animated();
+        // An L, so a quarter turn is visible.
+        for f in 0..3 {
+            st.project.goto(f);
+            paint(&mut st, (100, 100, 140, 140), [0, 0, 0, 0]);
+            paint(&mut st, (100, 100, 110, 140), RED);
+            paint(&mut st, (100, 130, 140, 140), RED);
+        }
+        st.project.goto(0);
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        st.sel_all_frames = true;
+        assert!(st.make_float());
+        if let Some(sel) = st.selection.as_mut() {
+            sel.pose.rot = std::f32::consts::FRAC_PI_2;
+        }
+        st.touch_selection();
+        st.land_float();
+        let cell = |f: usize| {
+            let id = st.project.layers[0].resolve(f).unwrap();
+            st.project.cell(id).unwrap().pixels.clone()
+        };
+        let first = cell(0);
+        assert_ne!(first, {
+            let mut before = lasso();
+            paint(&mut before, (100, 100, 110, 140), RED);
+            paint(&mut before, (100, 130, 140, 140), RED);
+            before.project.cells[0].pixels.clone()
+        }, "it did turn");
+        for f in 1..3 {
+            assert!(cell(f) == first, "frame {f} matches frame 0");
+        }
     }
 
     #[test]

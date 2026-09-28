@@ -3243,6 +3243,20 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
             }
         }
     });
+    ui.checkbox(&mut state.sel_all_frames, "All frames").on_hover_text(
+        "Moving, scaling or rotating the selection lands on every drawing on this \
+         layer, through the same selection. Draw it around the object's whole path — \
+         onion skin shows where it goes.",
+    );
+    if state.sel_all_frames {
+        let n = state.layer_drawings(state.project.current_layer).len();
+        let what = if n == 1 { "drawing" } else { "drawings" };
+        ui.label(
+            egui::RichText::new(format!("Applies to {n} {what} on this layer"))
+                .color(theme::TEXT_MUTED)
+                .size(11.0),
+        );
+    }
     ui.horizontal(|ui| {
         let all = tip(state, Action::SelectAll, "Select all");
         if theme::icon_button(ui, ic::SELECTION_ALL, &all).clicked() {
@@ -6646,6 +6660,61 @@ mod layers_panel_tests {
                     layer_canvas_section(&mut state, ui);
                 });
             },
+        );
+    }
+}
+
+/// The Lasso's options through the real window.
+#[cfg(test)]
+mod lasso_options_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    /// Every piece of text one frame painted.
+    fn texts(ctx: &egui::Context, state: &mut AppState) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                _ => {}
+            }
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1280.0, 1400.0))),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for s in ctx.run(raw, |ctx| draw(state, ctx)).shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn all_frames_is_offered_and_counts_the_drawings() {
+        let mut state = AppState::for_test();
+        state.show_panels = true;
+        state.set_tool(ActiveTool::Lasso);
+        state.project.ensure_active_cell();
+        for _ in 0..2 {
+            state.structural_edit(false, |p| {
+                p.add_frame();
+                p.insert_blank_key_here();
+            });
+            state.project.ensure_active_cell();
+        }
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        texts(&ctx, &mut state);
+        let t = texts(&ctx, &mut state);
+        assert!(t.iter().any(|s| s == "All frames"), "the checkbox");
+        assert!(!t.iter().any(|s| s.starts_with("Applies to")), "no count while off");
+
+        state.sel_all_frames = true;
+        let t = texts(&ctx, &mut state);
+        assert!(
+            t.iter().any(|s| s == "Applies to 3 drawings on this layer"),
+            "{t:?}"
         );
     }
 }

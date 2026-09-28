@@ -686,6 +686,10 @@ pub struct AppState {
     pub sel_gesture: Option<SelGesture>,
     /// Sticky selection mode; a held modifier overrides it for one drag.
     pub sel_op: SelOp,
+    /// Land a moved selection on every drawing of the active layer, not just
+    /// the one it was lifted from. Session-only: it starts off every launch,
+    /// so it can't quietly spread an edit next week.
+    pub sel_all_frames: bool,
     /// What a selection drag draws.
     pub sel_shape: SelShape,
     /// Pixels a Grow / Shrink / Feather takes.
@@ -1023,6 +1027,7 @@ impl AppState {
             clip_cache: None,
             sel_gesture: None,
             sel_op: SelOp::Replace,
+            sel_all_frames: false,
             sel_shape: prefs.sel_shape,
             sel_amount: prefs.sel_amount.max(1),
             tint_outside: prefs.tint_outside,
