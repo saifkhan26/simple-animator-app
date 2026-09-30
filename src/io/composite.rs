@@ -97,6 +97,36 @@ pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_shows_a_clipped_layer_only_over_its_base() {
+        let mut p = Project::new(8, 4, 12.0);
+        p.add_layer();
+        let mut base = Canvas::new(8, 4);
+        let mut top = Canvas::new(8, 4);
+        for y in 0..4u32 {
+            for x in 0..8u32 {
+                let i = ((y * 8 + x) * 4) as usize;
+                if x < 4 {
+                    base.pixels[i..i + 4].copy_from_slice(&[0, 0, 255, 255]);
+                }
+                top.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        let n = p.cells.len();
+        p.cells.push(base);
+        p.cells.push(top);
+        p.layers[0].set_key(0, n);
+        p.layers[1].set_key(0, n + 1);
+        p.layers[1].clip = true;
+        let flat = flatten_frame(&p, 0);
+        let px = |x: u32| &flat.pixels[(x * 4) as usize..(x * 4 + 4) as usize];
+        assert_eq!(px(1), &[255, 0, 0, 255], "red over the blue");
+        assert_eq!(px(6), &[0, 0, 0, 0], "nothing past the base");
+        // Unclipped, it covers the frame.
+        p.layers[1].clip = false;
+        assert_eq!(&flatten_frame(&p, 0).pixels[24..28], &[255, 0, 0, 255]);
+    }
     use crate::doc::camera::Camera;
 
     /// Paint one opaque red pixel at `(x, y)` of the project's only cell.

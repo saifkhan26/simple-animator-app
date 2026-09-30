@@ -46,6 +46,8 @@ pub enum Action {
     LayerToggleVisible,
     LayerLast,
     FadeOthersToggle,
+    LayerClipToggle,
+    LayerAlphaLockToggle,
     KeyBlank,
     KeyCopy,
     Hold,
@@ -129,6 +131,8 @@ impl Action {
         Action::LayerToggleVisible,
         Action::LayerLast,
         Action::FadeOthersToggle,
+        Action::LayerClipToggle,
+        Action::LayerAlphaLockToggle,
         Action::KeyBlank,
         Action::KeyCopy,
         Action::Hold,
@@ -206,6 +210,8 @@ impl Action {
             Action::LayerToggleVisible => "Toggle layer visibility",
             Action::LayerLast => "Go to last selected layer",
             Action::FadeOthersToggle => "Fade other layers",
+            Action::LayerClipToggle => "Clip layer to the one below",
+            Action::LayerAlphaLockToggle => "Lock layer alpha",
             Action::KeyBlank => "Insert blank key",
             Action::KeyCopy => "Insert duplicate key",
             Action::Hold => "Hold (delete key)",
@@ -487,6 +493,17 @@ impl Default for ShortcutMap {
         b.insert(Action::LayerLast, KeyCombo::plain(K::Z));
         // Shifted sibling of the layer jump: push every other layer back.
         b.insert(Action::FadeOthersToggle, KeyCombo::shift(K::Z));
+        // Photoshop's keys for both.
+        b.insert(
+            Action::LayerClipToggle,
+            KeyCombo {
+                key: Some(K::G),
+                ctrl: true,
+                shift: false,
+                alt: true,
+            },
+        );
+        b.insert(Action::LayerAlphaLockToggle, KeyCombo::plain(K::Slash));
         // X-sheet keys: 1 / 2 / 3 (numeric row, left side).
         b.insert(Action::KeyBlank, KeyCombo::plain(K::Num1));
         b.insert(Action::KeyCopy, KeyCombo::plain(K::Num2));

@@ -48,31 +48,62 @@ impl Placement {
     }
 }
 
-/// Clip pixel `(x, y)` with its alpha cut to the base's.
+/// `a` scaled by `k`, both 0..=255 fractions.
 #[inline]
-fn masked_px(clip: &Canvas, base: Option<&Canvas>, at: &Placement, aligned: bool, x: u32, y: u32) -> [u8; 4] {
-    let i = ((y * clip.width + x) * 4) as usize;
-    let a = clip.pixels[i + 3];
-    let k = match base {
-        _ if a == 0 => 0,
-        None => 0,
-        Some(b) if aligned => b.pixels[i + 3],
-        Some(b) => {
-            let (cw, ch) = (clip.width as f32, clip.height as f32);
-            let (pw, ph) = (at.pw as f32, at.ph as f32);
-            let (dx, dy) = at.xf.cell_to_doc(x as f32 + 0.5, y as f32 + 0.5, cw, ch, pw, ph);
-            let (bw, bh) = (b.width as f32, b.height as f32);
+fn mul(a: u8, k: u8) -> u8 {
+    ((a as u32 * k as u32 + 127) / 255) as u8
+}
+
+/// Where a clip-cell pixel centre lands in a base cell that sits elsewhere, as
+/// the bilinear sample position there: `u = ux·x + uy·y + u0`, likewise `v`.
+/// Both placements are similarities, so the whole chain is affine and three
+/// points pin it down.
+struct BaseMap {
+    ux: f32,
+    uy: f32,
+    u0: f32,
+    vx: f32,
+    vy: f32,
+    v0: f32,
+}
+
+impl BaseMap {
+    fn new(clip: &Canvas, base: &Canvas, at: &Placement) -> Self {
+        let (cw, ch) = (clip.width as f32, clip.height as f32);
+        let (bw, bh) = (base.width as f32, base.height as f32);
+        let (pw, ph) = (at.pw as f32, at.ph as f32);
+        let to = |x: f32, y: f32| {
+            let (dx, dy) = at.xf.cell_to_doc(x + 0.5, y + 0.5, cw, ch, pw, ph);
             let (u, v) = at.base_xf.doc_to_cell(dx, dy, bw, bh, pw, ph);
-            let (su, sv) = (u - 0.5, v - 0.5);
-            if su < -0.5 || sv < -0.5 || su > bw - 0.5 || sv > bh - 0.5 {
-                0
-            } else {
-                crate::io::composite::sample_bilinear(b, su, sv)[3]
-            }
+            (u - 0.5, v - 0.5)
+        };
+        let (o, ex, ey) = (to(0.0, 0.0), to(1.0, 0.0), to(0.0, 1.0));
+        Self {
+            ux: ex.0 - o.0,
+            uy: ey.0 - o.0,
+            u0: o.0,
+            vx: ex.1 - o.1,
+            vy: ey.1 - o.1,
+            v0: o.1,
         }
+    }
+}
+
+/// Bilinear alpha of `b` at `(u, v)`, 0 off its edge.
+#[inline]
+fn alpha_at(b: &Canvas, u: f32, v: f32) -> u8 {
+    let (w, h) = (b.width as i32, b.height as i32);
+    if u < -0.5 || v < -0.5 || u > w as f32 - 0.5 || v > h as f32 - 0.5 {
+        return 0;
+    }
+    let (x0, y0) = (u.floor() as i32, v.floor() as i32);
+    let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+    let a = |x: i32, y: i32| {
+        b.pixels[((y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) * 4 + 3) as usize] as f32
     };
-    let c = &clip.pixels[i..i + 4];
-    [c[0], c[1], c[2], ((a as u32 * k as u32 + 127) / 255) as u8]
+    let top = a(x0, y0) + (a(x0 + 1, y0) - a(x0, y0)) * fx;
+    let bot = a(x0, y0 + 1) + (a(x0 + 1, y0 + 1) - a(x0, y0 + 1)) * fx;
+    (top + (bot - top) * fy).round().clamp(0.0, 255.0) as u8
 }
 
 /// `rect` clamped to `clip`, as `(x0, y0, x1, y1)`.
@@ -81,30 +112,73 @@ fn inside(clip: &Canvas, rect: DirtyRect) -> (u32, u32, u32, u32) {
     (rect.min_x.min(w), rect.min_y.min(h), rect.max_x.min(w), rect.max_y.min(h))
 }
 
+/// Row `y`, columns `x0..x1`, of `clip` with its alpha cut to `base`'s, into
+/// `out` — exactly that many pixels.
+fn mask_row(
+    out: &mut [u8],
+    clip: &Canvas,
+    base: Option<&Canvas>,
+    map: Option<&BaseMap>,
+    y: u32,
+    x0: u32,
+    x1: u32,
+) {
+    let w = clip.width as usize;
+    let span = (y as usize * w + x0 as usize) * 4..(y as usize * w + x1 as usize) * 4;
+    let src = &clip.pixels[span.clone()];
+    out.copy_from_slice(src);
+    match (base, map) {
+        (None, _) => out.chunks_exact_mut(4).for_each(|o| o[3] = 0),
+        // Aligned: the base pixel under each clip pixel has the same index.
+        (Some(b), None) => {
+            for (o, k) in out.chunks_exact_mut(4).zip(b.pixels[span].chunks_exact(4)) {
+                o[3] = mul(o[3], k[3]);
+            }
+        }
+        (Some(b), Some(m)) => {
+            let (yf, xf) = (y as f32, x0 as f32);
+            let (mut u, mut v) = (m.u0 + m.uy * yf + m.ux * xf, m.v0 + m.vy * yf + m.vx * xf);
+            for o in out.chunks_exact_mut(4) {
+                if o[3] != 0 {
+                    o[3] = mul(o[3], alpha_at(b, u, v));
+                }
+                u += m.ux;
+                v += m.vx;
+            }
+        }
+    }
+}
+
 /// Write `clip`'s pixels, their alpha cut down to `base`'s, into `out` — a
 /// buffer the size of `clip` — over `rect` of the clip cell. Pixels outside
 /// `rect` are left alone. With no base drawing on the frame, everything is
 /// cut away.
-pub fn mask_into(out: &mut [u8], clip: &Canvas, base: Option<&Canvas>, at: &Placement, rect: DirtyRect) {
-    let aligned = base.is_some_and(|b| at.aligned(clip, b));
+pub fn mask_into(
+    out: &mut [u8],
+    clip: &Canvas,
+    base: Option<&Canvas>,
+    at: &Placement,
+    rect: DirtyRect,
+) {
+    let map = base.filter(|b| !at.aligned(clip, b)).map(|b| BaseMap::new(clip, b, at));
     let (x0, y0, x1, y1) = inside(clip, rect);
+    let w = clip.width as usize;
     for y in y0..y1 {
-        for x in x0..x1 {
-            let i = ((y * clip.width + x) * 4) as usize;
-            out[i..i + 4].copy_from_slice(&masked_px(clip, base, at, aligned, x, y));
-        }
+        let row = &mut out[(y as usize * w + x0 as usize) * 4..(y as usize * w + x1 as usize) * 4];
+        mask_row(row, clip, base, map.as_ref(), y, x0, x1);
     }
 }
 
 /// [`mask_into`] for just `rect`, packed into a buffer of its own — what a
 /// partial texture upload takes.
 pub fn mask_rect(clip: &Canvas, base: Option<&Canvas>, at: &Placement, rect: DirtyRect) -> Vec<u8> {
-    let aligned = base.is_some_and(|b| at.aligned(clip, b));
+    let map = base.filter(|b| !at.aligned(clip, b)).map(|b| BaseMap::new(clip, b, at));
     let (x0, y0, x1, y1) = inside(clip, rect);
-    let mut out = Vec::with_capacity(((x1 - x0) * (y1 - y0) * 4) as usize);
-    for y in y0..y1 {
-        for x in x0..x1 {
-            out.extend_from_slice(&masked_px(clip, base, at, aligned, x, y));
+    let stride = ((x1 - x0) * 4) as usize;
+    let mut out = vec![0u8; stride * (y1 - y0) as usize];
+    if stride > 0 {
+        for (y, row) in (y0..y1).zip(out.chunks_exact_mut(stride)) {
+            mask_row(row, clip, base, map.as_ref(), y, x0, x1);
         }
     }
     out
@@ -344,5 +418,47 @@ mod tests {
         assert_eq!(alpha(&p.cells[b], 6, 1), 255);
         // The base itself is untouched.
         assert_eq!(p.layers[0].resolve(3), Some(c0 + 1));
+    }
+
+    /// Cost at a 1080p frame, for the record: `cargo test --release
+    /// clip_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn clip_timing() {
+        use std::time::Instant;
+        let (w, h) = (1920u32, 1080u32);
+        let mut clip = Canvas::new(w, h);
+        let mut base = Canvas::new(w, h);
+        for (i, px) in clip.pixels.chunks_exact_mut(4).enumerate() {
+            px.copy_from_slice(&[200, 10, 10, 255]);
+            if (i as u32 % w) < w / 2 {
+                base.pixels[i * 4 + 3] = 255;
+            }
+        }
+        let whole = DirtyRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: w,
+            max_y: h,
+        };
+        let at = still(w, h);
+        let t = Instant::now();
+        let buf = mask_rect(&clip, Some(&base), &at, whole);
+        println!("whole cell, aligned: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        let mut moved = at;
+        moved.base_xf.tx = 12.0;
+        let t = Instant::now();
+        let buf2 = mask_rect(&clip, Some(&base), &moved, whole);
+        println!("whole cell, base moved: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        let stroke = DirtyRect {
+            min_x: 500,
+            min_y: 500,
+            max_x: 564,
+            max_y: 564,
+        };
+        let t = Instant::now();
+        let buf3 = mask_rect(&clip, Some(&base), &at, stroke);
+        println!("64 px stroke rect: {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
+        assert!(!buf.is_empty() && !buf2.is_empty() && !buf3.is_empty());
     }
 }

@@ -1034,6 +1034,32 @@ mod tests {
     }
 
     #[test]
+    fn an_alpha_locked_fill_recolours_only_what_is_painted() {
+        // Same-layer bucket: a translucent grey blob in an empty canvas.
+        let mut target = Canvas::new(16, 16);
+        for y in 4..8 {
+            for x in 4..8 {
+                write_px(&mut target, x, y, [90, 90, 90, 100]);
+            }
+        }
+        let o = FillOptions {
+            alpha_lock: true,
+            ..opts(0)
+        };
+        flood(&mut target, None, 5, 5, o);
+        assert_eq!(read_px(&target, 5, 5), [255, 0, 0, 100], "recoloured, alpha kept");
+        // Clicking the empty canvas around it fills nothing.
+        flood(&mut target, None, 0, 0, o);
+        assert_eq!(read_px(&target, 0, 0)[3], 0);
+        // Fill selection obeys it too.
+        let mut t2 = Canvas::new(16, 16);
+        write_px(&mut t2, 2, 2, [90, 90, 90, 60]);
+        assert!(fill_masked(&mut t2, &left_half(255), RED, true));
+        assert_eq!(read_px(&t2, 2, 2), [255, 0, 0, 60]);
+        assert_eq!(read_px(&t2, 3, 3)[3], 0);
+    }
+
+    #[test]
     fn a_selection_holds_the_fill_inside_it() {
         let mut target = Canvas::new(16, 16);
         flood_clipped(&mut target, None, 2, 8, opts(0), Some(&left_half(255)));

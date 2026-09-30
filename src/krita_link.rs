@@ -1046,6 +1046,12 @@ pub struct Sent {
 /// Krita's own `-x` layers in the file being replaced are carried into the
 /// new one untouched, in their place in the stack — the rewrite updates what
 /// came from here and nothing else.
+///
+/// Krita has no clipping to match ours, so clipped layers go cut to their base
+/// (see [`crate::doc::clip::bake_clipping`]). The baseline records the cut
+/// pixels, which is what Krita holds, but each one stands for the whole
+/// clipped drawing here: a round trip that leaves them alone changes nothing,
+/// and the layer stays clipped.
 pub fn send(
     mut project: Project,
     keep: &[bool],
@@ -1053,6 +1059,7 @@ pub fn send(
     selected: Option<usize>,
     path: &Path,
 ) -> Result<Sent> {
+    let origin = crate::doc::clip::bake_clipping(&mut project);
     let mut i = 0;
     project.layers.retain(|_| {
         i += 1;
@@ -1077,8 +1084,14 @@ pub fn send(
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    let mut baseline = Baseline::capture(project, uuids);
+    for id in baseline.layers.iter_mut().flat_map(|l| l.by_hash.values_mut()) {
+        if let Some(&clipped) = origin.get(id) {
+            *id = clipped;
+        }
+    }
     Ok(Sent {
-        baseline: Baseline::capture(project, uuids),
+        baseline,
         stamp: stamp(path),
         kept: carried.into_iter().map(|c| c.name).collect(),
     })
@@ -1350,6 +1363,46 @@ mod tests {
         // Krita saves again without changes.
         let again = pull_from(&p, &next, &mut links, &k);
         assert!(again.is_noop(), "{:?}", again.report);
+    }
+
+    /// A clipped layer goes to Krita cut to its base — one drawing per base
+    /// drawing under it — and an untouched round trip brings nothing back.
+    #[test]
+    fn a_clipped_layer_goes_cut_and_an_untouched_round_trip_is_a_noop() {
+        let mut p = project();
+        // Color, solid and held all the way, clipped to Ink, whose drawings
+        // cover the left half and then the right, changing at 2 and 4.
+        p.layers[1].clip = true;
+        let color = p.layers[1].exposures[0].unwrap();
+        let (a, b) = (p.layers[0].exposures[0].unwrap(), p.layers[0].exposures[2].unwrap());
+        for (id, left) in [(a, true), (b, false), (color, true)] {
+            let c = &mut p.cells[id];
+            for y in 0..c.height {
+                for x in 0..c.width {
+                    let i = ((y * c.width + x) * 4) as usize;
+                    let on = id == color || (x < c.width / 2) == left;
+                    c.pixels[i..i + 4].copy_from_slice(if on { &[9, 9, 9, 255] } else { &[0; 4] });
+                }
+            }
+        }
+        let links: Links = p.layers.iter().map(|l| (l.uid, new_uuid())).collect();
+        let uuids: Vec<String> = p.layers.iter().map(|l| links[&l.uid].clone()).collect();
+        let dir = std::env::temp_dir().join(format!("animator-clip-{}-{}", std::process::id(), new_uuid()));
+        let path = dir.join("c.kra");
+        let keep = vec![true; p.layers.len()];
+        let base = send(p.clone(), &keep, &uuids, Some(0), &path).unwrap().baseline;
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let color_base = base.layer(&uuids[1]).unwrap();
+        let times: Vec<usize> = color_base.keys.iter().map(|k| k.0).collect();
+        assert_eq!(times, [0, 2, 4], "a drawing per base drawing");
+        assert_ne!(color_base.keys[0].1, color_base.keys[1].1, "cut differently");
+        assert!(color_base.by_hash.values().all(|&id| id == color), "each stands for the whole drawing");
+
+        let pulled = prepare(kra::read_filtered(bytes, &comes_back).unwrap(), &base, &present(&p, &links));
+        let plan = plan(&p, &base, &links, pulled).unwrap();
+        assert!(plan.is_noop(), "{:?}", plan.report);
     }
 
     #[test]

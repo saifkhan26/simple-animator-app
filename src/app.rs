@@ -4151,6 +4151,16 @@ impl AppState {
             }
             Action::LayerLast => self.goto_last_layer(),
             Action::FadeOthersToggle => self.fade_others = !self.fade_others,
+            Action::LayerClipToggle => {
+                if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
+                    l.clip = !l.clip;
+                }
+            }
+            Action::LayerAlphaLockToggle => {
+                if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
+                    l.alpha_lock = !l.alpha_lock;
+                }
+            }
             Action::KeyBlank => {
                 self.structural_edit(false, |p| {
                     p.insert_blank_key_here();
@@ -5384,6 +5394,9 @@ impl AppState {
         let project = self.project.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
+            // Krita has no clipping to match ours: clipped layers go cut.
+            let mut project = project;
+            crate::doc::clip::bake_clipping(&mut project);
             let res = kra::write(&project, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: selected, carried: &[] })
                 .and_then(|bytes| std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display())))
                 .map(|()| name);
@@ -5576,6 +5589,62 @@ mod tests {
         let (_, d) = delta.set.iter().find(|(t, _)| *t == tex).expect("clip redone mid-stroke");
         assert!(d.pos.is_some(), "just the stroke's rect");
         st.pointer_up();
+    }
+
+    #[test]
+    fn merging_a_clipped_layer_down_keeps_only_what_showed() {
+        let mut st = clip_state();
+        st.project.current_layer = 1;
+        assert!(st.can_merge_down());
+        st.merge_layer_down();
+        assert_eq!(st.project.layers.len(), 1);
+        let id = st.project.layers[0].resolve(0).unwrap();
+        let c = st.project.cell(id).unwrap();
+        let w = st.project.width;
+        // Merged cells may be bigger than the frame, centred on it.
+        let (ox, oy) = ((c.width - w) / 2, (c.height - st.project.height) / 2);
+        let px = |x: u32, y: u32| {
+            let i = (((y + oy) * c.width + x + ox) * 4) as usize;
+            [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+        };
+        assert_eq!(px(10, 10), [255, 0, 0, 255], "red over the base");
+        assert_eq!(px(w - 10, 10)[3], 0, "the clipped-away part stays away");
+    }
+
+    #[test]
+    fn the_layer_shortcuts_toggle_clip_and_alpha_lock() {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.dispatch(Action::LayerClipToggle);
+        st.dispatch(Action::LayerAlphaLockToggle);
+        let l = &st.project.layers[st.project.current_layer];
+        assert!(l.clip && l.alpha_lock);
+        st.dispatch(Action::LayerClipToggle);
+        assert!(!st.project.layers[st.project.current_layer].clip);
+    }
+
+    #[test]
+    fn a_stroke_on_an_alpha_locked_layer_only_recolours() {
+        let mut st = clip_state();
+        // Paint on the base, locked: its left half is ink, its right bare.
+        st.project.layers[1].clip = false;
+        st.project.current_layer = 0;
+        st.project.layers[0].alpha_lock = true;
+        st.dispatch(Action::ToolInk);
+        st.brush.color = [0, 200, 0, 255];
+        st.brush.radius = 6.0;
+        let mid = (st.project.width / 2) as f32;
+        st.pointer_down(st.make_sample(mid - 40.0, 50.0, 0.0));
+        st.pointer_move(st.make_sample(mid + 40.0, 50.0, 0.1));
+        st.pointer_up();
+        let id = st.project.layers[0].resolve(0).unwrap();
+        let c = st.project.cell(id).unwrap();
+        let px = |x: f32| {
+            let i = ((50 * c.width + x as u32) * 4) as usize;
+            [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+        };
+        assert_eq!(px(mid - 30.0), [0, 200, 0, 255], "ink recoloured");
+        assert_eq!(px(mid + 30.0)[3], 0, "bare canvas still bare");
     }
 
     #[test]

@@ -913,6 +913,57 @@ mod tests {
         canvas
     }
 
+    /// A 64×64 canvas: left half opaque blue, a half-alpha blue column at
+    /// x = 40, bare elsewhere.
+    fn half_blue() -> Canvas {
+        let mut c = Canvas::new(64, 64);
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let a = if x < 32 { 255 } else if x == 40 { 128 } else { 0 };
+                let i = ((y * 64 + x) * 4) as usize;
+                if a > 0 {
+                    c.pixels[i..i + 4].copy_from_slice(&[0, 0, 255, a]);
+                }
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn alpha_lock_recolours_paint_and_leaves_bare_canvas_bare() {
+        let mut canvas = half_blue();
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        ws.set_alpha_lock(true);
+        let r = ws.raster_dot(node(32.0, 32.0, 14.0, 1.0)).expect("dot");
+        ws.composite_paint(&mut canvas, &pre, r, [200, 10, 10, 255], 1.0);
+        let px = |x: u32| {
+            let i = ((32 * 64 + x) * 4) as usize;
+            [canvas.pixels[i], canvas.pixels[i + 1], canvas.pixels[i + 2], canvas.pixels[i + 3]]
+        };
+        assert_eq!(px(28), [200, 10, 10, 255], "painted over: recoloured, alpha kept");
+        assert_eq!(px(40), [200, 10, 10, 128], "half alpha stays half");
+        assert_eq!(px(36), [0, 0, 0, 0], "bare canvas stays bare");
+    }
+
+    #[test]
+    fn alpha_lock_stops_the_eraser() {
+        let mut canvas = half_blue();
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        ws.set_alpha_lock(true);
+        let r = ws.raster_dot(node(30.0, 32.0, 10.0, 1.0)).expect("dot");
+        ws.composite_erase(&mut canvas, &pre, r, 1.0);
+        assert_eq!(canvas.pixels, pre);
+        // And `begin` lets go of it for the next stroke.
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        let r = ws.raster_dot(node(30.0, 32.0, 10.0, 1.0)).expect("dot");
+        ws.composite_erase(&mut canvas, &pre, r, 1.0);
+        assert_eq!(alpha(&canvas, 30, 32), 0);
+    }
+
     fn alpha(c: &Canvas, x: u32, y: u32) -> u8 {
         c.pixels[((y * c.width + x) * 4 + 3) as usize]
     }
