@@ -7,6 +7,7 @@ use egui_phosphor::regular as ic;
 use crate::app::{AppState, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
 use crate::doc::camera::Ease;
 use crate::doc::layer::CellId;
+use crate::input::button_drag::{self, ButtonDrag};
 use crate::input::shortcuts::{Action, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
@@ -124,7 +125,10 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             } else {
                 None
             };
-            let (nav_gesture, mid_down) = ui.input(|i| {
+            // What the middle or right button does, when one of those — not
+            // the left, which always uses the tool — is what went down.
+            let (middle, right) = (state.middle_drag, state.right_drag);
+            let (nav_gesture, button) = ui.input(|i| {
                 let g = if held_op.is_some() {
                     None
                 } else if zoom_bind.is_some_and(|c| c.mods_held(i)) {
@@ -136,23 +140,38 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 } else {
                     None
                 };
-                (g, i.pointer.button_down(egui::PointerButton::Middle))
+                let b = if i.pointer.primary_down() {
+                    None
+                } else if i.pointer.button_down(egui::PointerButton::Middle) {
+                    Some(middle)
+                } else if i.pointer.button_down(egui::PointerButton::Secondary) {
+                    Some(right)
+                } else {
+                    None
+                };
+                (g, b)
             });
 
             if resp.drag_started() {
                 // Pressing on the canvas hands the keyboard back to it: Delete
                 // stops meaning "delete the drawings selected in the tracks".
                 state.track_sel.clear();
-                // Decide once, on press, what this drag does. Configurable
-                // modifiers pick zoom/rotate/pan; middle-mouse always pans the
-                // canvas; otherwise draw. When layer-transform mode is on, the
-                // modifier gestures retarget the active layer instead of the
-                // view.
-                state.nav_drag = nav_gesture.or(if mid_down {
-                    Some(NavKind::Pan)
-                } else {
-                    None
-                });
+                // Decide once, on press, what this drag does. A middle or
+                // right button does what Settings binds it to, the view
+                // gestures among those through the navigation drag. Otherwise
+                // configurable modifiers pick zoom/rotate/pan, or the tool
+                // draws. When layer-transform mode is on, the modifier
+                // gestures retarget the active layer instead of the view.
+                let (button_nav, button_drag) = match button {
+                    Some(ButtonDrag::Pan) => (Some(NavKind::Pan), None),
+                    Some(ButtonDrag::Zoom) => (Some(NavKind::Zoom), None),
+                    Some(ButtonDrag::Rotate) => (Some(NavKind::Rotate), None),
+                    other => (None, other),
+                };
+                // Modifiers only reinterpret a left-button drag: Shift with a
+                // scrub means keys, not pan.
+                let nav_gesture = if button.is_some() { None } else { nav_gesture };
+                state.nav_drag = nav_gesture.or(button_nav);
                 state.nav_to_layer = state.layer_xform && nav_gesture.is_some();
                 state.nav_to_camera =
                     !state.nav_to_layer && state.camera_edit && nav_gesture.is_some();
@@ -160,6 +179,10 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     state.begin_layer_xform();
                 } else if state.nav_to_camera {
                     state.begin_camera_drag();
+                } else if let Some(b) = button_drag {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        state.begin_button_drag(b, pos);
+                    }
                 } else if state.nav_drag.is_none() {
                     // One complaint per stroke, not one per frame.
                     state.pen_outlier_logged = false;
@@ -289,6 +312,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                                 state.view.pan += cursor - after;
                             }
                         }
+                        None if state.button_drag.is_some() => {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                state.button_drag_to(pos);
+                            }
+                        }
                         None if state.tool == ActiveTool::Perspective => {
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 let (x, y) = canvas_to_doc(pos);
@@ -338,6 +366,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     state.commit_layer_xform();
                 } else if state.nav_to_camera {
                     state.commit_camera_drag();
+                } else if state.button_drag.is_some() {
+                    state.end_button_drag();
                 } else if state.nav_drag.is_none() {
                     // Both are no-ops when idle, so a tool change mid-drag
                     // cannot strand either.
@@ -360,14 +390,28 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
 
             // Tool cursor preview — only while drawing (not during nav gestures),
             // when the pointer is over the canvas and not over a floating panel.
-            if state.nav_drag.is_none() && (resp.hovered() || resp.dragged()) {
+            // A tool adjust holds the brush ring where the press landed, so the
+            // size can be judged against the drawing under it; the swatch pie
+            // shows the pointer instead.
+            let pie = state.button_drag.is_some_and(|d| d.kind == ButtonDrag::SwatchPie);
+            if state.nav_drag.is_none() && !pie && (resp.hovered() || resp.dragged()) {
                 let pos = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
                 if let Some(pos) = pos {
                     if canvas_rect.contains(pos) {
-                        draw_tool_cursor(state, ui, canvas_rect, pos);
+                        let ring = match state.button_drag {
+                            Some(d) if d.kind == ButtonDrag::ToolAdjust => d.anchor,
+                            _ => pos,
+                        };
+                        draw_tool_cursor(state, ui, canvas_rect, ring);
+                        if let Some(text) = state.button_drag_readout() {
+                            draw_readout(&ui.painter_at(canvas_rect), pos, text);
+                        }
                         ctx.set_cursor_icon(egui::CursorIcon::None);
                     }
                 }
+            }
+            if let Some(d) = state.button_drag.filter(|d| d.kind == ButtonDrag::SwatchPie) {
+                draw_swatch_pie(ctx, &state.palette, &d, state.brush.color);
             }
             } // end: if !state.screen_pick
         });
@@ -2911,6 +2955,31 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                      Each notch moves by the timeline's step size (×N).",
                 );
             ui.add_space(4.0);
+            // Pen barrel buttons arrive as these same two buttons.
+            egui::Grid::new("button_drags")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    for (label, slot) in [
+                        ("Middle button drag", &mut state.middle_drag),
+                        ("Right button drag", &mut state.right_drag),
+                    ] {
+                        ui.label(label);
+                        egui::ComboBox::from_id_salt(label)
+                            .selected_text(slot.label())
+                            .width(160.0)
+                            .show_ui(ui, |ui| {
+                                for b in ButtonDrag::ALL {
+                                    ui.selectable_value(slot, b, b.label())
+                                        .on_hover_text(b.hint());
+                                }
+                            })
+                            .response
+                            .on_hover_text(slot.hint());
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(4.0);
             ui.separator();
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -4365,6 +4434,103 @@ fn layer_screen_corners(
     out
 }
 
+/// A small value readout beside the pen at `pos`: white text on a dark
+/// backing, so it reads over any drawing.
+fn draw_readout(painter: &egui::Painter, pos: egui::Pos2, text: String) {
+    let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), Color32::WHITE);
+    let at = pos + Vec2::new(14.0, 12.0);
+    let back = Rect::from_min_size(at, galley.size()).expand2(Vec2::new(5.0, 2.0));
+    painter.rect_filled(back, 3.0, theme::premul(0, 0, 0, 170));
+    painter.galley(at, galley, Color32::WHITE);
+}
+
+/// The swatch pie around the press: the pinned swatches in two rings, the one
+/// under the pen pulled out, and the current colour in the cancel spot, so
+/// letting go there reads as "keep this one". On the foreground layer, above
+/// any panel the pen wanders over.
+fn draw_swatch_pie(
+    ctx: &egui::Context,
+    palette: &[[u8; 3]],
+    d: &crate::app::ButtonDragState,
+    current: [u8; 4],
+) {
+    use button_drag::{pie_rings, PIE_HOLE, PIE_OUTER, PIE_RING};
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("swatch_pie"),
+    ));
+    let c = d.anchor;
+    let (inner, outer) = pie_rings(palette.len());
+    let edge = if outer > 0 { PIE_OUTER } else { PIE_RING };
+    painter.circle_filled(c, edge + 4.0, theme::premul(20, 20, 22, 210));
+    let quiet = Stroke::new(1.0, theme::premul(0, 0, 0, 160));
+    let hot = Stroke::new(2.0, Color32::WHITE);
+    // A hair of space between wedges, as an angle at each ring's middle.
+    let spacing = |r: f32| 1.5 / r;
+    for (first, count, r0, r1) in [
+        (0, inner, PIE_HOLE + 3.0, PIE_RING - 1.5),
+        (inner, outer, PIE_RING + 1.5, PIE_OUTER),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        let step = std::f32::consts::TAU / count as f32;
+        let pad = spacing((r0 + r1) * 0.5);
+        for k in 0..count {
+            let i = first + k;
+            let on = d.pie_hover == Some(i);
+            let mid = k as f32 * step;
+            let [r, g, b] = palette[i];
+            pie_wedge(
+                &painter,
+                c,
+                (r0, r1 + if on { 8.0 } else { 0.0 }),
+                (mid - step * 0.5 + pad, mid + step * 0.5 - pad),
+                Color32::from_rgb(r, g, b),
+                if on { hot } else { quiet },
+            );
+        }
+    }
+    let [r, g, b, _] = current;
+    let keep = if d.pie_hover.is_none() { hot } else { quiet };
+    painter.circle_filled(c, PIE_HOLE - 4.0, Color32::from_rgb(r, g, b));
+    painter.circle_stroke(c, PIE_HOLE - 4.0, keep);
+    if palette.is_empty() {
+        draw_readout(&painter, c + Vec2::new(PIE_HOLE, -8.0), "No pinned swatches".into());
+    }
+}
+
+/// One ring wedge between radii `r.0..r.1` and headings `a.0..a.1` (0 up,
+/// clockwise) around `c`. A mesh, since egui only fills convex paths.
+fn pie_wedge(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    r: (f32, f32),
+    a: (f32, f32),
+    fill: Color32,
+    stroke: Stroke,
+) {
+    let n = (((a.1 - a.0) / 0.1).ceil() as usize).max(2);
+    let at = |rad: f32, j: usize| {
+        let h = a.0 + (a.1 - a.0) * j as f32 / n as f32;
+        egui::pos2(c.x + rad * h.sin(), c.y - rad * h.cos())
+    };
+    let mut mesh = egui::Mesh::default();
+    for j in 0..=n {
+        mesh.colored_vertex(at(r.0, j), fill);
+        mesh.colored_vertex(at(r.1, j), fill);
+        if j > 0 {
+            let v = 2 * j as u32;
+            mesh.add_triangle(v - 2, v - 1, v);
+            mesh.add_triangle(v - 1, v + 1, v);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    let mut edge: Vec<egui::Pos2> = (0..=n).map(|j| at(r.1, j)).collect();
+    edge.extend((0..=n).rev().map(|j| at(r.0, j)));
+    painter.add(egui::Shape::closed_line(edge, stroke));
+}
+
 /// Paint the active tool's cursor preview on top of the canvas.
 /// Pencil/Ink/Eraser → outline circle sized by brush radius (in doc px → screen
 /// px via current canvas scale). Eraser shown with a dashed inner ring.
@@ -4452,12 +4618,7 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
                     "Gap {} · Expand {}",
                     state.brush.fill_gap, state.brush.fill_expand
                 );
-                let galley =
-                    painter.layout_no_wrap(text, egui::FontId::proportional(12.0), Color32::WHITE);
-                let at = pos + Vec2::new(14.0, 12.0);
-                let back = Rect::from_min_size(at, galley.size()).expand2(Vec2::new(5.0, 2.0));
-                painter.rect_filled(back, 3.0, theme::premul(0, 0, 0, 170));
-                painter.galley(at, galley, Color32::WHITE);
+                draw_readout(&painter, pos, text);
             }
         }
         ActiveTool::Shape => {
@@ -6837,5 +6998,104 @@ mod fill_tests {
         frame(&ctx, &mut state, vec![]);
         assert!(!state.fill_dragging());
         assert_eq!(state.history.undo_len(), 1);
+    }
+}
+
+/// Middle- and right-button drags through the real canvas.
+#[cfg(test)]
+mod button_drag_tests {
+    use super::*;
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
+
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| draw(state, ctx));
+    }
+
+    fn state() -> AppState {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        while state.project.frame_count < 12 {
+            state.project.add_frame();
+        }
+        state.project.goto(0);
+        state
+    }
+
+    /// Press `button` at `from`, drag by `by` in a few moves, and let go.
+    fn drag(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        button: egui::PointerButton,
+        from: Pos2,
+        by: Vec2,
+    ) {
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, state, vec![egui::Event::PointerMoved(from), press(from, true)]);
+        for i in 1..=4 {
+            frame(ctx, state, vec![egui::Event::PointerMoved(from + by * (i as f32 / 4.0))]);
+        }
+        frame(ctx, state, vec![press(from + by, false)]);
+        frame(ctx, state, vec![]);
+    }
+
+    #[test]
+    fn a_middle_drag_scrubs_by_default_and_draws_nothing() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let cells = state.project.cells.len();
+        let pan = state.view.pan;
+        drag(&ctx, &mut state, egui::PointerButton::Middle, pos2(600.0, 400.0), vec2(35.0, 0.0));
+        assert_eq!(state.project.current_frame, 3);
+        assert_eq!(state.view.pan, pan, "no longer pans");
+        assert_eq!(state.project.cells.len(), cells);
+        assert!(state.button_drag.is_none() && state.stroke.is_none());
+    }
+
+    #[test]
+    fn a_right_drag_picks_from_the_pie_by_default() {
+        let mut state = state();
+        state.palette = (0..10u8).map(|i| [i * 20, 0, 0]).collect();
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let cells = state.project.cells.len();
+        drag(&ctx, &mut state, egui::PointerButton::Secondary, pos2(600.0, 400.0), vec2(50.0, 0.0));
+        assert_eq!(state.brush.color, [40, 0, 0, 255]);
+        assert_eq!(state.project.cells.len(), cells, "a right drag no longer draws");
+        assert_eq!(state.history.undo_len(), 0);
+    }
+
+    #[test]
+    fn a_button_bound_to_pan_still_pans() {
+        let mut state = state();
+        state.middle_drag = ButtonDrag::Pan;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let pan = state.view.pan;
+        drag(&ctx, &mut state, egui::PointerButton::Middle, pos2(600.0, 400.0), vec2(40.0, 20.0));
+        assert!((state.view.pan - pan - vec2(40.0, 20.0)).length() < 1.0, "{:?}", state.view.pan);
+        assert_eq!(state.project.current_frame, 0);
+    }
+
+    #[test]
+    fn settings_shows_the_button_pickers() {
+        let mut state = state();
+        state.show_settings = true;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        frame(&ctx, &mut state, vec![]);
     }
 }

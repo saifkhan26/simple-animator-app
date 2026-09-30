@@ -1,7 +1,9 @@
 //! Top-level application state. Wires project (timeline + layers), tools, UI.
 
+mod button_drag;
 mod select;
 
+pub use button_drag::ButtonDragState;
 pub use select::SelGesture;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -20,6 +22,7 @@ use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
 use crate::doc::project::{Block, Project};
 use crate::doc::transform::Transform;
+use crate::input::button_drag::ButtonDrag;
 use crate::input::pointer::PointerSample;
 use crate::input::shortcuts::{self, Action, ShortcutMap};
 use crate::input::tablet::{PenInput, PenPacket};
@@ -305,6 +308,10 @@ struct UiPrefs {
     /// down advances. A workspace preference — wheel direction is muscle
     /// memory carried from whatever editor the artist came from.
     invert_timeline_scroll: bool,
+    /// What a middle- and a right-button drag do on the canvas. Pen barrel
+    /// buttons arrive as those buttons, so this is muscle memory too.
+    middle_drag: ButtonDrag,
+    right_drag: ButtonDrag,
     /// Whether the timeline wraps. On (default): playback repeats the loop
     /// range and frame stepping wraps at both ends. Off: playback runs once
     /// and stops, and stepping clamps.
@@ -414,6 +421,8 @@ impl Default for UiPrefs {
             auto_key_transform: false,
             auto_key_draw: false,
             invert_timeline_scroll: false,
+            middle_drag: ButtonDrag::Scrub,
+            right_drag: ButtonDrag::SwatchPie,
             loop_timeline: true,
             smoothing: SmoothingOptions::default(),
             tool_brushes: None,
@@ -788,6 +797,12 @@ pub struct AppState {
     pub frame_step: usize,
     /// Invert the mouse-wheel scrub direction. Off: wheel down advances.
     pub invert_timeline_scroll: bool,
+    /// What a middle-button drag on the canvas does.
+    pub middle_drag: ButtonDrag,
+    /// What a right-button drag on the canvas does.
+    pub right_drag: ButtonDrag,
+    /// A middle- or right-button drag under way on the canvas.
+    pub button_drag: Option<ButtonDragState>,
     /// Line smoothing, latched into every new stroke. See `tools::Smoothing`.
     pub smoothing: SmoothingOptions,
     /// Whether the timeline wraps. Gates playback, wheel scrub and the frame
@@ -1075,6 +1090,9 @@ impl AppState {
             auto_key_draw: prefs.auto_key_draw,
             frame_step: prefs.frame_step,
             invert_timeline_scroll: prefs.invert_timeline_scroll,
+            middle_drag: prefs.middle_drag,
+            right_drag: prefs.right_drag,
+            button_drag: None,
             loop_timeline: prefs.loop_timeline,
             smoothing: prefs.smoothing,
             pen_outlier_logged: false,
@@ -3089,7 +3107,8 @@ impl AppState {
     /// Expand steps a pixel at a time. The gap climbs a ladder whose rungs
     /// spread out as it grows, so its whole range fits in a drag.
     pub fn fill_drag_to(&mut self, at: egui::Pos2) {
-        use crate::tools::fill::{drag_steps, step_gap, MAX_EXPAND};
+        use crate::input::button_drag::drag_steps;
+        use crate::tools::fill::{step_gap, MAX_EXPAND};
         let (Some(drag), Some(target)) = (&mut self.fill_drag, self.stroke_target) else {
             return;
         };
@@ -4290,10 +4309,12 @@ impl AppState {
                     }
                 }
                 // Esc backs out one step at a time: a Fill press still under
-                // the pen, a polygon in progress, a drag in the tracks, the
-                // drawings selected there, and last the canvas selection.
+                // the pen, a middle- or right-button drag, a polygon in
+                // progress, a drag in the tracks, the drawings selected
+                // there, and last the canvas selection.
                 if escape && !self.screen_pick {
                     if self.cancel_fill()
+                        || self.cancel_button_drag()
                         || self.cancel_gesture()
                         || self.track_drag.take().is_some()
                     {
@@ -4381,6 +4402,8 @@ impl eframe::App for AppState {
                 auto_key_transform: self.auto_key_transform,
                 auto_key_draw: self.auto_key_draw,
                 invert_timeline_scroll: self.invert_timeline_scroll,
+                middle_drag: self.middle_drag,
+                right_drag: self.right_drag,
                 loop_timeline: self.loop_timeline,
                 smoothing: self.smoothing,
                 tool_brushes: Some(self.tool_brushes.to_vec()),
