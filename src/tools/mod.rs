@@ -205,6 +205,12 @@ pub struct BrushSettings {
     /// tucks under the anti-aliased edge of lines living on another layer.
     /// Only used by the Fill tool.
     pub fill_expand: u8,
+    /// Treat breaks in the lines up to this many pixels wide as shut. Only
+    /// used by the Fill tool.
+    pub fill_gap: u8,
+    /// Read the lines from every visible layer at once, instead of the active
+    /// layer's own pixels or its `lines_from` link. Only used by the Fill tool.
+    pub fill_all_visible: bool,
     /// Outline shape to draw. Only used by the Shape tool.
     pub shape_kind: ShapeKind,
 }
@@ -232,6 +238,8 @@ impl Default for BrushSettings {
             cap: StrokeCap::Round,
             fill_tolerance: 16,
             fill_expand: 0,
+            fill_gap: 0,
+            fill_all_visible: false,
             shape_kind: ShapeKind::Line,
         }
     }

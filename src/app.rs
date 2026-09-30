@@ -184,6 +184,18 @@ pub struct ShapeDrag {
     pub plane: Option<GridPlane>,
 }
 
+/// A Fill press still under the pen. The bucket fills at pen-down; dragging
+/// before the pen lifts re-runs it with a new gap (sideways) or expand (up and
+/// down), and the whole press lands as one undo step on release.
+pub struct FillDrag {
+    pub session: crate::tools::fill::FillSession,
+    /// Where the press landed, in screen points. Drags count from here.
+    anchor: Option<egui::Pos2>,
+    /// The slider values at the press, which the drag steps away from.
+    base_gap: u8,
+    base_expand: u8,
+}
+
 /// An in-progress drag on the floating selection's transform box.
 ///
 /// `pose` is the selection's pose at the moment the handle was pressed, and a
@@ -724,6 +736,8 @@ pub struct AppState {
     pub stroke_target: Option<CellId>,
     /// In-progress Shape-tool drag (preview only until pointer-up).
     pub shape_drag: Option<ShapeDrag>,
+    /// In-progress Fill press, adjustable by dragging until pointer-up.
+    pub fill_drag: Option<FillDrag>,
     /// Shift state, sampled once a frame. Pointer handlers run off tablet
     /// packets rather than egui events, so they have no `InputState` of their
     /// own to ask; a selection scale reads this for its uniform constraint.
@@ -1044,6 +1058,7 @@ impl AppState {
             stroke: None,
             stroke_target: None,
             shape_drag: None,
+            fill_drag: None,
             shift_held: false,
             perspective: prefs.perspective,
             grid_drag: None,
@@ -1158,6 +1173,7 @@ impl AppState {
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
+        self.fill_drag = None;
         self.clear_selection_state();
         self.view = View::default();
         // Republished by the canvas next frame; kept in step with `view` so a
@@ -2895,30 +2911,48 @@ impl AppState {
                 tolerance: self.brush.fill_tolerance,
                 color: self.brush.color,
                 expand: self.brush.fill_expand,
+                gap: self.brush.fill_gap,
             };
             // Owned, so the immutable project borrow ends before `cell_mut`.
             let (cw, ch) = {
                 let c = &self.project.cells[target];
                 (c.width, c.height)
             };
-            let boundary = self.fill_boundary(self.project.current_layer, cw, ch);
+            let boundary = self.fill_source(self.project.current_layer, cw, ch);
             let clip = self.active_cell_clip();
-            if let Some(c) = self.project.cell_mut(target) {
-                crate::tools::fill::flood_clipped(
-                    c,
-                    boundary.as_ref(),
-                    sample.x.round() as i32,
-                    sample.y.round() as i32,
-                    opts,
-                    clip.as_deref(),
-                );
-            }
-            self.mark_dirty(target);
-            if self.commit_undo(target) {
-                self.painted(target);
-            }
+            let seed = (sample.x.round() as i32, sample.y.round() as i32);
             self.stroke = None;
-            self.stroke_target = None;
+            // Walls are read from the snapshot, never from the cell being
+            // painted, so re-running the fill mid-drag sees the lines as they
+            // were at the press.
+            let session = crate::tools::fill::FillSession::new(
+                &self.stroke_pre_pixels,
+                (cw, ch),
+                seed,
+                &opts,
+                boundary,
+                clip,
+            );
+            let Some(mut session) = session else {
+                self.stroke_target = None;
+                self.stroke_pre_live = false;
+                return;
+            };
+            let applied = self
+                .project
+                .cell_mut(target)
+                .and_then(|c| session.apply(c, &self.stroke_pre_pixels, opts.gap, opts.expand))
+                .is_some();
+            if applied {
+                self.mark_dirty(target);
+            }
+            // Undo is recorded on pointer-up, once the drag has settled.
+            self.fill_drag = Some(FillDrag {
+                session,
+                anchor: None,
+                base_gap: opts.gap,
+                base_expand: opts.expand,
+            });
             return;
         }
 
@@ -2989,6 +3023,9 @@ impl AppState {
     pub fn pointer_up(&mut self) {
         self.grid_drag = None;
         self.snap_lock = None;
+        if self.finish_fill() {
+            return;
+        }
         let Some(target) = self.stroke_target.take() else {
             self.stroke = None;
             self.shape_drag = None;
@@ -3035,6 +3072,93 @@ impl AppState {
         if self.commit_undo(target) && paints {
             self.painted(target);
         }
+    }
+
+    /// Remember where on screen a Fill press landed: its drag counts from here.
+    pub fn fill_anchor(&mut self, at: egui::Pos2) {
+        if let Some(d) = &mut self.fill_drag {
+            d.anchor = Some(at);
+        }
+    }
+
+    /// The pen, still down on a Fill press, is at screen point `at`. Sideways
+    /// sets the gap and up and down the expand, each in steps away from its
+    /// value at the press; a change re-runs the fill so the canvas follows.
+    /// The new values stay in the sliders.
+    pub fn fill_drag_to(&mut self, at: egui::Pos2) {
+        use crate::tools::fill::{drag_steps, MAX_EXPAND, MAX_GAP};
+        let (Some(drag), Some(target)) = (&mut self.fill_drag, self.stroke_target) else {
+            return;
+        };
+        let Some(anchor) = drag.anchor else {
+            return;
+        };
+        let step =
+            |base: u8, d: f32, max: u8| (base as i32 + drag_steps(d)).clamp(0, max as i32) as u8;
+        let gap = step(drag.base_gap, at.x - anchor.x, MAX_GAP);
+        // Screen y grows downward, and up means more.
+        let expand = step(drag.base_expand, anchor.y - at.y, MAX_EXPAND);
+        if gap == self.brush.fill_gap && expand == self.brush.fill_expand {
+            return;
+        }
+        self.brush.fill_gap = gap;
+        self.brush.fill_expand = expand;
+        // Only this step's pixels go up to the GPU; pointer-up widens the
+        // dirty rect back to the whole press for the undo record.
+        let applied = self.project.cell_mut(target).is_some_and(|c| {
+            c.dirty = None;
+            drag.session
+                .apply(c, &self.stroke_pre_pixels, gap, expand)
+                .is_some()
+        });
+        if applied {
+            self.mark_dirty(target);
+        }
+    }
+
+    /// Whether a Fill press is still under the pen.
+    pub fn fill_dragging(&self) -> bool {
+        self.fill_drag.is_some()
+    }
+
+    /// Land a Fill press as one undo step covering everything its drag
+    /// touched. `true` if there was one.
+    fn finish_fill(&mut self) -> bool {
+        let Some(drag) = self.fill_drag.take() else {
+            return false;
+        };
+        self.preview_upload_rect = None;
+        let Some(target) = self.stroke_target.take() else {
+            self.stroke_pre_live = false;
+            return true;
+        };
+        if let Some(c) = self.project.cell_mut(target) {
+            c.dirty = drag.session.touched();
+        }
+        if self.commit_undo(target) {
+            self.painted(target);
+        }
+        true
+    }
+
+    /// Abandon a Fill press still under the pen: the cell goes back to how it
+    /// was, and no undo step is left. `true` if there was one.
+    pub fn cancel_fill(&mut self) -> bool {
+        let Some(mut drag) = self.fill_drag.take() else {
+            return false;
+        };
+        if let Some(target) = self.stroke_target.take() {
+            let reverted = self.stroke_pre_live
+                && self.project.cell_mut(target).is_some_and(|c| {
+                    c.dirty = None;
+                    drag.session.revert(c, &self.stroke_pre_pixels).is_some()
+                });
+            if reverted {
+                self.mark_dirty(target);
+            }
+        }
+        self.stroke_pre_live = false;
+        true
     }
 
     /// Snapshot `cell`'s pixels as they are before an edit, for the stroke
@@ -3112,9 +3236,11 @@ impl AppState {
         self.screen_pick_arm = true;
         // Drop any in-flight stroke so the gesture that toggled the mode can't
         // leave ink.
+        self.cancel_fill();
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
+        self.fill_drag = None;
         self.cancel_gesture();
         self.preview_upload_rect = None;
         self.land_float();
@@ -3573,6 +3699,41 @@ impl AppState {
         }
     }
 
+    /// The pixels a Fill press on `layer_idx` reads its walls from, in the
+    /// *cell space* of that layer's own cell: every visible layer at once when
+    /// the Fill tool asks for that, else the `lines_from` link. `None` reads
+    /// the cell's own pixels.
+    fn fill_source(&self, layer_idx: usize, cell_w: u32, cell_h: u32) -> Option<Canvas> {
+        if self.brush.fill_all_visible {
+            self.visible_lines(layer_idx, cell_w, cell_h)
+        } else {
+            self.fill_boundary(layer_idx, cell_w, cell_h)
+        }
+    }
+
+    /// Every visible layer at the current frame, reference layers aside,
+    /// composited in document space at its own opacity — what the artist sees,
+    /// less the view's fades — then brought into the cell space of
+    /// `layer_idx`. Built once per press, and only when asked for.
+    fn visible_lines(&self, layer_idx: usize, cell_w: u32, cell_h: u32) -> Option<Canvas> {
+        let p = &self.project;
+        let frame = p.current_frame;
+        let dst_xform = p.layers.get(layer_idx)?.resolve_transform(frame);
+        let (pw, ph) = (p.width, p.height);
+        let mut doc = Canvas::new(pw, ph);
+        for layer in &p.layers {
+            if !layer.visible || layer.reference {
+                continue;
+            }
+            let Some(src) = layer.resolve(frame).and_then(|id| p.cell(id)) else {
+                continue;
+            };
+            let xform = layer.resolve_transform(frame);
+            crate::io::composite::composite_layer(&mut doc, src, &xform, layer.opacity, pw, ph);
+        }
+        Some(doc_to_cell(doc, &dst_xform, cell_w, cell_h, pw, ph))
+    }
+
     /// Render the layer linked from `layer_idx` via `lines_from` into the *cell
     /// space* of that layer's own cell, so flood fill can treat its strokes as
     /// walls. `None` when no link is set or the link can't be resolved on this
@@ -3609,30 +3770,7 @@ impl AppState {
         let (pw, ph) = (p.width, p.height);
         let mut doc = Canvas::new(pw, ph);
         crate::io::composite::composite_layer(&mut doc, src, &src_xform, 1.0, pw, ph);
-
-        if dst_xform.is_identity() && cell_w == pw && cell_h == ph {
-            return Some(doc);
-        }
-
-        // The destination cell is transformed, so walk its pixels and pull the
-        // matching document-space sample for each.
-        let mut out = Canvas::new(cell_w, cell_h);
-        let (cw, ch) = (cell_w as f32, cell_h as f32);
-        let (pwf, phf) = (pw as f32, ph as f32);
-        for v in 0..cell_h {
-            for u in 0..cell_w {
-                let (dx, dy) =
-                    dst_xform.cell_to_doc(u as f32 + 0.5, v as f32 + 0.5, cw, ch, pwf, phf);
-                let (sx, sy) = (dx - 0.5, dy - 0.5);
-                if sx < -0.5 || sy < -0.5 || sx > pwf - 0.5 || sy > phf - 0.5 {
-                    continue;
-                }
-                let px = crate::io::composite::sample_bilinear(&doc, sx, sy);
-                let i = ((v * cell_w + u) * 4) as usize;
-                out.pixels[i..i + 4].copy_from_slice(&px);
-            }
-        }
-        Some(out)
+        Some(doc_to_cell(doc, &dst_xform, cell_w, cell_h, pw, ph))
     }
 
     /// Remember the layer we just came from, so `Action::LayerLast` can jump
@@ -3956,6 +4094,7 @@ impl AppState {
         self.stroke = None;
         self.stroke_target = None;
         self.shape_drag = None;
+        self.fill_drag = None;
         self.clear_selection_state();
         self.stroke_pre_live = false;
         self.preview_upload_rect = None;
@@ -4148,11 +4287,14 @@ impl AppState {
                         self.land_float();
                     }
                 }
-                // Esc backs out one step at a time: a polygon in progress, a
-                // drag in the tracks, the drawings selected there, and last
-                // the canvas selection.
+                // Esc backs out one step at a time: a Fill press still under
+                // the pen, a polygon in progress, a drag in the tracks, the
+                // drawings selected there, and last the canvas selection.
                 if escape && !self.screen_pick {
-                    if self.cancel_gesture() || self.track_drag.take().is_some() {
+                    if self.cancel_fill()
+                        || self.cancel_gesture()
+                        || self.track_drag.take().is_some()
+                    {
                     } else if !self.track_sel.is_empty() {
                         self.track_sel.clear();
                     } else {
@@ -5010,6 +5152,40 @@ fn cap_canvas(c: Canvas, max: u32) -> Canvas {
     out
 }
 
+/// A document-space canvas `pw`×`ph` brought into the pixels of a
+/// `cell_w`×`cell_h` cell placed by `xform`. Handed straight back when the
+/// cell sits unmoved on a frame-sized canvas — the common case.
+fn doc_to_cell(
+    doc: Canvas,
+    xform: &Transform,
+    cell_w: u32,
+    cell_h: u32,
+    pw: u32,
+    ph: u32,
+) -> Canvas {
+    if xform.is_identity() && cell_w == pw && cell_h == ph {
+        return doc;
+    }
+    // The cell is transformed, so walk its pixels and pull the matching
+    // document-space sample for each.
+    let mut out = Canvas::new(cell_w, cell_h);
+    let (cw, ch) = (cell_w as f32, cell_h as f32);
+    let (pwf, phf) = (pw as f32, ph as f32);
+    for v in 0..cell_h {
+        for u in 0..cell_w {
+            let (dx, dy) = xform.cell_to_doc(u as f32 + 0.5, v as f32 + 0.5, cw, ch, pwf, phf);
+            let (sx, sy) = (dx - 0.5, dy - 0.5);
+            if sx < -0.5 || sy < -0.5 || sx > pwf - 0.5 || sy > phf - 0.5 {
+                continue;
+            }
+            let px = crate::io::composite::sample_bilinear(&doc, sx, sy);
+            let i = ((v * cell_w + u) * 4) as usize;
+            out.pixels[i..i + 4].copy_from_slice(&px);
+        }
+    }
+    out
+}
+
 /// Slice a sub-rectangle (RGBA8) out of a buffer of width `full_w`.
 fn subrect_from_buffer(buf: &[u8], full_w: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
     let row_bytes = w as usize * 4;
@@ -5025,6 +5201,145 @@ fn subrect_from_buffer(buf: &[u8], full_w: u32, x: u32, y: u32, w: u32, h: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Fill presses ---
+
+    const FILL_RED: [u8; 4] = [255, 0, 0, 255];
+
+    /// Ink a 1-px box outline over 100..=200 on `layer`'s drawing at the current
+    /// frame, its top edge broken by a 4-px hole at x = 140..144.
+    fn ink_box(state: &mut AppState, layer: usize) {
+        let keep = state.project.current_layer;
+        state.project.current_layer = layer;
+        let id = state.project.ensure_active_cell();
+        state.project.current_layer = keep;
+        let c = state.project.cell_mut(id).unwrap();
+        for i in 100..=200u32 {
+            for (x, y) in [(i, 100), (i, 200), (100, i), (200, i)] {
+                if y == 100 && (140..144).contains(&x) {
+                    continue;
+                }
+                let k = ((y * c.width + x) * 4) as usize;
+                c.pixels[k..k + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+
+    fn fill_state() -> AppState {
+        let mut state = AppState::for_test();
+        state.dispatch(Action::ToolFill);
+        state.brush.color = FILL_RED;
+        state.brush.fill_gap = 0;
+        state.brush.fill_expand = 0;
+        ink_box(&mut state, 0);
+        state
+    }
+
+    fn px(state: &AppState, x: u32, y: u32) -> [u8; 4] {
+        let id = state.project.resolved_current().unwrap();
+        let c = state.project.cell(id).unwrap();
+        let k = ((y * c.width + x) * 4) as usize;
+        [c.pixels[k], c.pixels[k + 1], c.pixels[k + 2], c.pixels[k + 3]]
+    }
+
+    /// Press the bucket at cell point `(x, y)`, landing on screen at `at`.
+    fn fill_press(state: &mut AppState, x: f32, y: f32, at: egui::Pos2) {
+        state.pointer_down(state.make_sample(x, y, 0.0));
+        state.fill_anchor(at);
+    }
+
+    #[test]
+    fn dragging_sideways_shuts_the_gap_live_and_lands_as_one_undo() {
+        let mut state = fill_state();
+        let at = egui::pos2(500.0, 500.0);
+        fill_press(&mut state, 150.0, 150.0, at);
+        assert_eq!(px(&state, 50, 50), FILL_RED, "gap 0: pours out of the hole");
+        // 8 px dead zone, then 12 px a step: 60 px is four steps.
+        state.fill_drag_to(at + egui::vec2(60.0, 0.0));
+        assert_eq!(state.brush.fill_gap, 4);
+        assert_eq!(state.brush.fill_expand, 0);
+        assert_eq!(px(&state, 50, 50)[3], 0, "the drag put the leak back");
+        assert_eq!(px(&state, 150, 150), FILL_RED);
+        assert!(state.fill_dragging());
+        state.pointer_up();
+        assert!(!state.fill_dragging());
+        assert_eq!(state.history.undo_len(), 1);
+        state.undo();
+        assert_eq!(px(&state, 150, 150)[3], 0);
+        assert_eq!(px(&state, 50, 50)[3], 0);
+        // The drag's value stays in the slider for the next press.
+        assert_eq!(state.brush.fill_gap, 4);
+    }
+
+    #[test]
+    fn dragging_up_grows_the_expand_and_back_down_undoes_it() {
+        let mut state = fill_state();
+        state.brush.fill_gap = 4;
+        let at = egui::pos2(500.0, 500.0);
+        fill_press(&mut state, 150.0, 150.0, at);
+        assert_eq!(px(&state, 100, 150), [0, 0, 0, 255], "the line, before any expand");
+        state.fill_drag_to(at + egui::vec2(0.0, -30.0));
+        assert_eq!((state.brush.fill_gap, state.brush.fill_expand), (4, 1));
+        assert_eq!(px(&state, 100, 150), FILL_RED, "expand 1 tucks under the line");
+        state.fill_drag_to(at + egui::vec2(0.0, 5.0));
+        assert_eq!(state.brush.fill_expand, 0);
+        assert_eq!(px(&state, 100, 150), [0, 0, 0, 255], "and gives it back");
+        state.pointer_up();
+        assert_eq!(state.history.undo_len(), 1);
+    }
+
+    #[test]
+    fn a_plain_tap_fills_once() {
+        let mut state = fill_state();
+        state.brush.fill_gap = 4;
+        fill_press(&mut state, 150.0, 150.0, egui::pos2(10.0, 10.0));
+        // A few points of wobble stay inside the dead zone.
+        state.fill_drag_to(egui::pos2(15.0, 6.0));
+        state.pointer_up();
+        assert_eq!((state.brush.fill_gap, state.brush.fill_expand), (4, 0));
+        assert_eq!(px(&state, 150, 150), FILL_RED);
+        assert_eq!(px(&state, 50, 50)[3], 0);
+        assert_eq!(state.history.undo_len(), 1);
+    }
+
+    #[test]
+    fn cancelling_a_fill_press_leaves_nothing_behind() {
+        let mut state = fill_state();
+        let at = egui::pos2(500.0, 500.0);
+        fill_press(&mut state, 150.0, 150.0, at);
+        state.fill_drag_to(at + egui::vec2(60.0, -30.0));
+        assert!(state.cancel_fill());
+        assert_eq!(px(&state, 150, 150)[3], 0);
+        assert_eq!(px(&state, 50, 50)[3], 0);
+        assert_eq!(px(&state, 100, 150), [0, 0, 0, 255]);
+        // The pen lifting afterwards records nothing.
+        state.pointer_up();
+        assert_eq!(state.history.undo_len(), 0);
+    }
+
+    #[test]
+    fn reading_all_visible_layers_walls_the_fill_with_another_layers_lines() {
+        let mut state = fill_state();
+        // Lines on layer 0, colour on a fresh layer above with no link.
+        state.project.add_layer_above_active();
+        state.brush.fill_gap = 4;
+        let at = egui::pos2(0.0, 0.0);
+        fill_press(&mut state, 150.0, 150.0, at);
+        state.pointer_up();
+        assert_eq!(px(&state, 50, 50), FILL_RED, "its own empty pixels: floods");
+        state.undo();
+        state.brush.fill_all_visible = true;
+        fill_press(&mut state, 150.0, 150.0, at);
+        state.pointer_up();
+        assert_eq!(px(&state, 150, 150), FILL_RED);
+        assert_eq!(px(&state, 50, 50)[3], 0, "held by layer 0's box");
+        // Hidden layers don't count.
+        state.undo();
+        state.project.layers[0].visible = false;
+        fill_press(&mut state, 150.0, 150.0, at);
+        state.pointer_up();
+        assert_eq!(px(&state, 50, 50), FILL_RED);
+    }
 
     /// Tab back out of the mini-timeline mode leaves the shortcuts live. egui
     /// also reads that Tab as "focus the next widget", which on that frame is
