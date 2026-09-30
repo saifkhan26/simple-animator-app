@@ -3137,7 +3137,7 @@ fn floating_frame() -> Frame {
 
 /// Perspective tool options: the grid list, then the active grid's settings.
 fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
-    use crate::tools::perspective::{PerspectiveGrid, MAX_DIVISIONS};
+    use crate::tools::perspective::{from_doc, PerspectiveGrid, MAX_DIVISIONS, MAX_EXTRA_VPS};
 
     ui.label(
         egui::RichText::new(
@@ -3171,6 +3171,7 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     ui.add_space(4.0);
     // Grids are stored in frame heights; the X / Y fields show document px.
     let frame_h = (state.project.height as f32).max(1.0);
+    let frame_w = state.project.width as f32;
     let cfg = &mut state.perspective;
     let mut remove = None;
     for i in 0..cfg.grids.len() {
@@ -3227,10 +3228,7 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
         {
             if let Some(mut g) = dup {
                 // Nudged so the copy doesn't sit invisibly on the original.
-                for c in &mut g.corners {
-                    c[0] += 0.03;
-                    c[1] += 0.03;
-                }
+                g.translate([0.03, 0.03]);
                 g.locked = false;
                 cfg.grids.push(g);
                 cfg.active = cfg.grids.len() - 1;
@@ -3309,6 +3307,44 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     ui.add(egui::Slider::new(&mut g.weight, 0.5..=4.0).text("Line weight"));
     ui.checkbox(&mut g.extend, "Extend lines to vanishing points");
     ui.checkbox(&mut g.horizon, "Horizon and vanishing points");
+
+    // Up to two more vanishing points, numbered after the plane's own two.
+    ui.add_space(4.0);
+    ui.add_enabled_ui(!g.locked, |ui| {
+        let room = g.extra_vps.len() < MAX_EXTRA_VPS;
+        if ui
+            .add_enabled(room, egui::Button::new(theme::icon_text(ic::PLUS, "Vanishing point")))
+            .on_hover_text(
+                "Another point strokes can snap toward. On the horizon it slides along \
+                 it — for a box turned another way on the same floor. Pull it well off \
+                 the horizon for a third, vertical vanishing point; bring it back and it \
+                 sticks again.",
+            )
+            .clicked()
+        {
+            g.add_extra_vp(frame_w, frame_h);
+        }
+        let shown = g.extra_doc(frame_w, frame_h);
+        let mut drop = None;
+        for (k, v) in g.extra_vps.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("VP {}", k + 3));
+                let was = v.on_horizon;
+                ui.checkbox(&mut v.on_horizon, "On horizon");
+                // Letting go of the horizon keeps the point where it shows.
+                if was && !v.on_horizon {
+                    v.pos = from_doc(shown[k], frame_w, frame_h);
+                }
+                ui.checkbox(&mut v.rays, "Rays");
+                if theme::icon_button(ui, ic::TRASH, "Remove this vanishing point").clicked() {
+                    drop = Some(k);
+                }
+            });
+        }
+        if let Some(k) = drop {
+            g.extra_vps.remove(k);
+        }
+    });
 }
 
 /// The Lasso's options: what a drag draws, how it combines with the
@@ -4004,7 +4040,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
 /// is active — sized in screen pixels like the selection's, which is the size
 /// `grab_at` tests against.
 fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform, clip: Rect) {
-    use crate::tools::perspective::{clip_line, Plane, Vp};
+    use crate::tools::perspective::{clip_line, vp_rays, Plane, Vp};
 
     let editing = state.tool == ActiveTool::Perspective;
     if !editing && !state.perspective.show {
@@ -4102,6 +4138,52 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
                     painter.circle_filled(v, 3.5, color);
                     painter.circle_stroke(v, 3.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
                 }
+            }
+        }
+
+        // The extra vanishing points: their rays under everything they
+        // mark, then a diamond each — round is taken by the plane's own.
+        let extras = g.extra_doc(w, h);
+        let ray = Stroke::new(
+            g.weight.max(0.25) * 0.8,
+            theme::premul(g.color[0], g.color[1], g.color[2], alpha / 2),
+        );
+        for (v, &at) in g.extra_vps.iter().zip(&extras) {
+            if v.rays {
+                for (a, b) in vp_rays(&corners, at, g.rows.max(g.cols)) {
+                    painter.line_segment([to_screen(a), to_screen(b)], ray);
+                }
+            }
+        }
+        let handles = editing && active && !g.locked;
+        for (k, &at) in extras.iter().enumerate() {
+            let v = to_screen(at);
+            if !clip.contains(v) || !(g.horizon || handles) {
+                continue;
+            }
+            let r = if handles { crate::tools::selection::HANDLE_PX * 1.4 } else { 4.5 };
+            let diamond = vec![
+                v + egui::vec2(0.0, -r),
+                v + egui::vec2(r, 0.0),
+                v + egui::vec2(0.0, r),
+                v + egui::vec2(-r, 0.0),
+            ];
+            let (fill, edge) = if handles {
+                (Color32::WHITE, Color32::from_black_alpha(200))
+            } else {
+                (color, Color32::from_black_alpha(160))
+            };
+            painter.add(egui::Shape::convex_polygon(diamond, fill, Stroke::new(1.0, edge)));
+            if handles {
+                painter.circle_filled(v, 2.0, color);
+                // Numbered after the plane's own two, as the panel lists them.
+                painter.text(
+                    v + egui::vec2(r + 3.0, -r),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("{}", k + 3),
+                    egui::FontId::proportional(11.0),
+                    Color32::WHITE,
+                );
             }
         }
 
@@ -6156,12 +6238,68 @@ mod perspective_tests {
             w,
             h,
         );
+        // Both extra points on the two-point grid, one pulled off the
+        // horizon; and one sitting right in the middle of the first grid,
+        // where its rays go all the way round.
+        let g = &mut state.perspective.grids[1];
+        g.add_extra_vp(w, h);
+        g.add_extra_vp(w, h);
+        g.extra_vps[1].on_horizon = false;
+        g.extra_vps[1].pos[1] -= 0.5;
+        let c = state.perspective.grids[0].centre();
+        state.perspective.grids[0].extra_vps.push(crate::tools::perspective::ExtraVp {
+            pos: c,
+            on_horizon: false,
+            rays: true,
+        });
         let ctx = egui::Context::default();
-        for tool in [Action::ToolPerspective, Action::ToolPencil] {
-            state.dispatch(tool);
-            frame(&ctx, &mut state, vec![]);
-            frame(&ctx, &mut state, vec![]);
+        for active in [0, 1] {
+            state.perspective.active = active;
+            for tool in [Action::ToolPerspective, Action::ToolPencil] {
+                state.dispatch(tool);
+                frame(&ctx, &mut state, vec![]);
+                frame(&ctx, &mut state, vec![]);
+            }
         }
+    }
+
+    #[test]
+    fn an_extra_vanishing_point_drags_along_the_horizon_on_the_canvas() {
+        let mut state = state();
+        let (w, h) = (state.project.width as f32, state.project.height as f32);
+        // One-point floor with a level horizon at y = 66.7.
+        state.perspective.grids[0].set_doc_corners(
+            [[140.0, 100.0], [160.0, 100.0], [250.0, 400.0], [50.0, 400.0]],
+            w,
+            h,
+        );
+        state.perspective.grids[0].add_extra_vp(w, h);
+        let v0 = state.perspective.grids[0].extra_doc(w, h)[0];
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let xf = Xform::new(&state, SCREEN);
+        let from = xf.doc_to_screen(v0[0], v0[1]);
+        // Along, and a little off: it stays on the horizon.
+        let to = from + vec2(-40.0, 12.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 4.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame(&ctx, &mut state, vec![button(to, false)]);
+        let v1 = state.perspective.grids[0].extra_doc(w, h)[0];
+        let want = xf.screen_to_doc(to);
+        assert!((v1[0] - want.0).abs() < 0.5, "{v1:?} vs {want:?}");
+        assert!((v1[1] - 200.0 / 3.0).abs() < 0.1, "still on the horizon: {v1:?}");
+        assert!(state.perspective.grids[0].extra_vps[0].on_horizon);
+        // The grid itself never moved.
+        assert!((state.perspective.grids[0].doc_corners(w, h)[0][0] - 140.0).abs() < 1e-3);
     }
 
     #[test]
