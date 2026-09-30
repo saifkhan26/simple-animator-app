@@ -285,6 +285,9 @@ pub enum NavKind {
     Rotate,
 }
 
+/// The canvas backdrop colour before the artist picks one.
+const DEFAULT_BG_COLOR: [f32; 3] = [0.12, 0.12, 0.13];
+
 /// Storage key for [`UiPrefs`].
 const UI_PREFS_KEY: &str = "ui_prefs";
 
@@ -355,6 +358,12 @@ struct UiPrefs {
     /// Dim everything outside the selection. The switch persists, like the
     /// other view guides.
     tint_outside: bool,
+    /// The canvas backdrop: colour (RGB, 0..1), its opacity, and the checker.
+    /// A workspace preference — the colour an artist works against follows
+    /// them from project to project.
+    bg_color: [f32; 3],
+    bg_opacity: f32,
+    show_checker: bool,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -442,6 +451,9 @@ impl Default for UiPrefs {
             sel_shape: SelShape::Freehand,
             sel_amount: 4,
             tint_outside: false,
+            bg_color: DEFAULT_BG_COLOR,
+            bg_opacity: 1.0,
+            show_checker: false,
         }
     }
 }
@@ -1145,9 +1157,9 @@ impl AppState {
             stroke_pen_samples: 0,
             stroke_mouse_samples: 0,
             wheel_scrub_accum: 0.0,
-            bg_opacity: 1.0,
-            bg_color: [0.12, 0.12, 0.13],
-            show_checker: false,
+            bg_opacity: prefs.bg_opacity,
+            bg_color: prefs.bg_color,
+            show_checker: prefs.show_checker,
             pen: PenInput::new(),
             history: History::default(),
             stroke_pre_pixels: Vec::new(),
@@ -1242,12 +1254,9 @@ impl AppState {
         self.view_scale = 1.0;
         self.nav_drag = None;
         self.playback = Playback::default();
-        // `onion` is deliberately not reset: like `show_panels` it is a
-        // workspace preference, and resetting it here is what made tuned
-        // settings feel like they never stuck.
-        self.bg_opacity = 1.0;
-        self.bg_color = [0.12, 0.12, 0.13];
-        self.show_checker = false;
+        // `onion` and the backdrop are deliberately not reset: like
+        // `show_panels` they are workspace preferences, and resetting them
+        // here is what made tuned settings feel like they never stuck.
         self.history = History::default();
         self.stroke_pre_live = false;
         self.preview_upload_rect = None;
@@ -4661,6 +4670,9 @@ impl eframe::App for AppState {
                 sel_shape: self.sel_shape,
                 sel_amount: self.sel_amount,
                 tint_outside: self.tint_outside,
+                bg_color: self.bg_color,
+                bg_opacity: self.bg_opacity,
+                show_checker: self.show_checker,
             },
         );
     }
@@ -6546,6 +6558,23 @@ mod tests {
         let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
         assert!(!old.show_panels);
         assert_eq!(old.perspective, PerspectiveConfig::default());
+    }
+
+    #[test]
+    fn the_backdrop_is_kept_between_runs_and_across_new_projects() {
+        let mut prefs = UiPrefs::default();
+        prefs.bg_color = [0.9, 0.85, 0.7];
+        prefs.bg_opacity = 0.5;
+        prefs.show_checker = true;
+        let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
+        let mut st = AppState::with_prefs(back, 8192);
+        assert_eq!((st.bg_color, st.bg_opacity, st.show_checker), ([0.9, 0.85, 0.7], 0.5, true));
+        // File > New starts a fresh project, not a fresh workspace.
+        st.reset();
+        assert_eq!((st.bg_color, st.bg_opacity, st.show_checker), ([0.9, 0.85, 0.7], 0.5, true));
+        // Prefs saved before the backdrop was kept load with the old default.
+        let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
+        assert_eq!((old.bg_color, old.bg_opacity, old.show_checker), (DEFAULT_BG_COLOR, 1.0, false));
     }
 
     #[test]
