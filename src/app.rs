@@ -6562,10 +6562,12 @@ mod tests {
 
     #[test]
     fn the_backdrop_is_kept_between_runs_and_across_new_projects() {
-        let mut prefs = UiPrefs::default();
-        prefs.bg_color = [0.9, 0.85, 0.7];
-        prefs.bg_opacity = 0.5;
-        prefs.show_checker = true;
+        let prefs = UiPrefs {
+            bg_color: [0.9, 0.85, 0.7],
+            bg_opacity: 0.5,
+            show_checker: true,
+            ..UiPrefs::default()
+        };
         let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
         let mut st = AppState::with_prefs(back, 8192);
         assert_eq!((st.bg_color, st.bg_opacity, st.show_checker), ([0.9, 0.85, 0.7], 0.5, true));
