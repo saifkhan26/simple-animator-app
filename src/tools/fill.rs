@@ -33,7 +33,7 @@ use crate::tools::lasso::Mask;
 use crate::tools::ribbon::union_rect;
 
 /// Upper bound on the expand radius, matching the UI slider.
-pub const MAX_EXPAND: u8 = 8;
+pub const MAX_EXPAND: u8 = 32;
 /// Upper bound on the gap setting, matching the UI slider.
 pub const MAX_GAP: u8 = 255;
 
