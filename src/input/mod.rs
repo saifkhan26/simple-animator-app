@@ -3,6 +3,7 @@
 //! Phase A: mouse only via egui::Response.
 //! Phase D: tablet (octotablet / wintab) injects PointerSample with pressure + tilt.
 
+pub mod button_drag;
 pub mod clipboard_keys;
 pub mod pointer;
 pub mod screen_pixel;

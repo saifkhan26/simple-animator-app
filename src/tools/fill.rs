@@ -45,12 +45,6 @@ const GAP_LADDER: [u8; 37] = [
     64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 255,
 ];
 
-/// Screen points a fill drag moves before it starts counting, so the small
-/// wander of a plain tap never changes a value.
-const DRAG_DEAD_ZONE: f32 = 8.0;
-/// Screen points of drag per step of a value.
-const DRAG_STEP: f32 = 12.0;
-
 #[derive(Clone, Copy)]
 pub struct FillOptions {
     /// 0..=255 per-channel tolerance.
@@ -66,16 +60,6 @@ pub struct FillOptions {
 
 /// Inclusive pixel bounds, `(min_x, min_y, max_x, max_y)`.
 type Bbox = (i32, i32, i32, i32);
-
-/// Whole steps in a drag of `d` screen points along one axis: none inside the
-/// dead zone, then one per [`DRAG_STEP`], signed like `d`.
-pub fn drag_steps(d: f32) -> i32 {
-    let past = d.abs() - DRAG_DEAD_ZONE;
-    if past.is_nan() || past <= 0.0 {
-        return 0;
-    }
-    (past / DRAG_STEP).floor() as i32 * d.signum() as i32
-}
 
 /// The gap `steps` rungs of [`GAP_LADDER`] away from `base`. No steps keeps
 /// `base` as it is, even off the ladder; the first step lands on the next rung
@@ -1405,17 +1389,6 @@ mod tests {
             last = g;
         }
         assert_eq!(last, MAX_GAP);
-    }
-
-    #[test]
-    fn drag_steps_wait_out_the_dead_zone() {
-        assert_eq!(drag_steps(0.0), 0);
-        assert_eq!(drag_steps(7.9), 0);
-        assert_eq!(drag_steps(19.9), 0);
-        assert_eq!(drag_steps(20.0), 1);
-        assert_eq!(drag_steps(-20.0), -1);
-        assert_eq!(drag_steps(40.0), 2);
-        assert_eq!(drag_steps(f32::NAN), 0);
     }
 
     /// Cost at a 1080p frame, for the record: `cargo test --release fill_timing
