@@ -357,6 +357,16 @@ impl Project {
         self.current_frame = next as usize;
     }
 
+    /// The base layer `li` is clipped to: the nearest layer below it that is
+    /// not clipped itself. `None` when `li` isn't clipped, or nothing under it
+    /// can be a base — a clipped bottom layer shows as if it weren't.
+    pub fn clip_base(&self, li: usize) -> Option<usize> {
+        if !self.layers.get(li)?.clip {
+            return None;
+        }
+        (0..li).rev().find(|&j| !self.layers[j].clip)
+    }
+
     /// Frame of the nearest drawing key on the active layer strictly *before*
     /// the current frame, or `None` when there is none.
     ///

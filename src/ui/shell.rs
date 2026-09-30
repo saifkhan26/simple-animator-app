@@ -3598,8 +3598,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         if li == cur_layer {
             draw_onion();
         }
-        if let Some(id) = layer.resolve(cur_frame) {
-            if let (Some(tex), Some(lc)) = (state.cell_textures.get(&id), cell_corners(li, id)) {
+        // A clipped layer draws its drawing cut to its base.
+        if let Some((id, tex)) = state.layer_texture(li) {
+            if let Some(lc) = cell_corners(li, id) {
                 let op = layer.opacity * state.layer_view_alpha(li);
                 let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
                 image_quad(

@@ -91,6 +91,10 @@ pub struct StrokeWorkspace {
     /// constant for the whole stroke: that is what keeps incremental
     /// compositing exact under a clip.
     clip: Option<Arc<Mask>>,
+    /// The layer's alpha is locked: paint recolours pixels that already have
+    /// paint and adds none, and the eraser does nothing. Set after `begin()`,
+    /// which clears it.
+    alpha_lock: bool,
 }
 
 impl StrokeWorkspace {
@@ -106,6 +110,7 @@ impl StrokeWorkspace {
             grain_scale: 1.5,
             build_up: false,
             clip: None,
+            alpha_lock: false,
         }
     }
 
@@ -129,6 +134,13 @@ impl StrokeWorkspace {
         self.grain_scale = brush.grain_scale.max(0.05);
         self.build_up = brush.mode == BrushMode::Dab;
         self.clip = None;
+        self.alpha_lock = false;
+    }
+
+    /// Lock the stroke begun by the last `begin()` to the alpha already on
+    /// the canvas. See [`StrokeWorkspace::alpha_lock`].
+    pub fn set_alpha_lock(&mut self, on: bool) {
+        self.alpha_lock = on;
     }
 
     /// Hold the stroke begun by the last `begin()` to `clip`. An empty mask
@@ -427,6 +439,22 @@ impl StrokeWorkspace {
                 }
                 let a_src = cov as f32 / 65535.0 * opacity * k;
                 let a_pre = pre[idx + 3] as f32 / 255.0;
+                if self.alpha_lock {
+                    // Recolour in place: the colour mixes in by the stroke's
+                    // coverage, the alpha stays what it was. Bare canvas
+                    // stays bare — it still equals `pre`, never having been
+                    // written.
+                    if pre[idx + 3] == 0 {
+                        continue;
+                    }
+                    let dst = &mut canvas.pixels[idx..idx + 4];
+                    let mix = |c: f32, p: u8| (c * a_src + p as f32 * (1.0 - a_src)).round() as u8;
+                    dst[0] = mix(br, pre[idx]);
+                    dst[1] = mix(bg, pre[idx + 1]);
+                    dst[2] = mix(bb, pre[idx + 2]);
+                    dst[3] = pre[idx + 3];
+                    continue;
+                }
                 let a_out = a_src + a_pre * (1.0 - a_src);
                 let dst = &mut canvas.pixels[idx..idx + 4];
                 if a_out <= 0.0 {
@@ -453,6 +481,10 @@ impl StrokeWorkspace {
         strength: f32,
     ) {
         let strength = strength.clamp(0.0, 1.0);
+        // Erasing is taking alpha away, which a locked alpha forbids.
+        if self.alpha_lock {
+            return;
+        }
         let Some(rect) = self.clipped(rect) else {
             return;
         };

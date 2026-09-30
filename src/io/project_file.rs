@@ -27,9 +27,10 @@ const MAGIC: &[u8; 4] = b"ANIM";
 // v4 appends the project camera + camera keys, and the per-layer cell size.
 // v5 appends `ease` to each layer transform key, matching camera keys.
 // v6 changes the *framing* only — the body is now zlib-deflated. The postcard
-// layout is identical to v5, so both versions decode into the same `Project`
-// and only the inflate step differs.
-const VERSION: u32 = 6;
+// layout is identical to v5, so both versions decode into the same mirror and
+// only the inflate step differs.
+// v7 appends `clip` and `alpha_lock` to each layer. Still deflated.
+const VERSION: u32 = 7;
 const EXT: &str = "anim";
 
 /// Compression level. Deliberately [`Compression::fast`] (level 1) rather than
@@ -88,16 +89,22 @@ fn decode(bytes: &[u8]) -> Result<Project> {
     }
     let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let body = &bytes[8..];
+    let inflate = || -> Result<Vec<u8>> {
+        let mut raw = Vec::new();
+        ZlibDecoder::new(body)
+            .read_to_end(&mut raw)
+            .context("decompressing project body")?;
+        Ok(raw)
+    };
     let project: Project = match version {
-        6 => {
-            let mut raw = Vec::new();
-            ZlibDecoder::new(body)
-                .read_to_end(&mut raw)
-                .context("decompressing project body")?;
-            postcard::from_bytes(&raw).context("parsing project body")?
-        }
+        7 => postcard::from_bytes(&inflate()?).context("parsing project body")?,
+        6 => postcard::from_bytes::<crate::io::legacy::ProjectV6>(&inflate()?)
+            .context("parsing v6 project body")?
+            .into(),
         // v5 shares v6's postcard layout; it just isn't compressed.
-        5 => postcard::from_bytes(body).context("parsing project body")?,
+        5 => postcard::from_bytes::<crate::io::legacy::ProjectV6>(body)
+            .context("parsing v5 project body")?
+            .into(),
         4 => postcard::from_bytes::<crate::io::legacy::ProjectV4>(body)
             .context("parsing v4 project body")?
             .into(),
@@ -342,7 +349,7 @@ mod tests {
             ease: crate::doc::camera::Ease::In,
         }];
         // v5 layout is v6's; the difference is purely that it isn't deflated.
-        let body = postcard::to_stdvec(&p).unwrap();
+        let body = postcard::to_stdvec(&v6_mirror(&p)).unwrap();
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&5u32.to_le_bytes());
@@ -353,6 +360,77 @@ mod tests {
         assert_eq!((q.layers[0].cell_w, q.layers[0].cell_h), (8, 6));
         assert_eq!(q.camera_keys.len(), 1);
         assert_eq!(q.fps, 24.0);
+        assert!(!q.layers[0].clip && !q.layers[0].alpha_lock);
+    }
+
+    /// `p` in the v5/v6 layout, as a file of that era wrote it.
+    fn v6_mirror(p: &Project) -> crate::io::legacy::ProjectV6 {
+        use crate::io::legacy::{LayerV6, ProjectV6};
+        ProjectV6 {
+            width: p.width,
+            height: p.height,
+            fps: p.fps,
+            cells: p.cells.clone(),
+            layers: p
+                .layers
+                .iter()
+                .map(|l| LayerV6 {
+                    name: l.name.clone(),
+                    opacity: l.opacity,
+                    visible: l.visible,
+                    locked: l.locked,
+                    reference: l.reference,
+                    exposures: l.exposures.clone(),
+                    transform: l.transform,
+                    transform_keys: l.transform_keys.clone(),
+                    track_points: l.track_points.clone(),
+                    cell_w: l.cell_w,
+                    cell_h: l.cell_h,
+                })
+                .collect(),
+            frame_count: p.frame_count,
+            current_frame: p.current_frame,
+            current_layer: p.current_layer,
+            loop_start: p.loop_start,
+            loop_end: p.loop_end,
+            camera: p.camera,
+            camera_keys: p.camera_keys.clone(),
+        }
+    }
+
+    /// A v6 file — deflated, no clipping yet — opens with nothing clipped.
+    #[test]
+    fn decodes_v6_project() {
+        use std::io::Write;
+        let mut p = Project::new(4, 3, 24.0);
+        p.add_layer();
+        p.layers[1].name = "Shade".into();
+        let raw = postcard::to_stdvec(&v6_mirror(&p)).unwrap();
+        let mut enc = ZlibEncoder::new(Vec::new(), level());
+        enc.write_all(&raw).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&6u32.to_le_bytes());
+        bytes.extend_from_slice(&enc.finish().unwrap());
+
+        let q = decode(&bytes).expect("v6 decode");
+        assert_eq!(q.layers.len(), 2);
+        assert_eq!(q.layers[1].name, "Shade");
+        assert!(q.layers.iter().all(|l| !l.clip && !l.alpha_lock));
+    }
+
+    #[test]
+    fn clipping_and_alpha_lock_survive_a_save() {
+        let mut p = Project::new(4, 3, 24.0);
+        p.add_layer();
+        p.add_layer();
+        p.layers[1].clip = true;
+        p.layers[2].alpha_lock = true;
+        let (bytes, _) = encode(&p).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 7);
+        let q = decode(&bytes).unwrap();
+        let flags: Vec<(bool, bool)> = q.layers.iter().map(|l| (l.clip, l.alpha_lock)).collect();
+        assert_eq!(flags, [(false, false), (true, false), (false, true)]);
     }
 
     /// The point of the whole format bump. Blank cells are runs of zero bytes,
