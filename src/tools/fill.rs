@@ -35,7 +35,15 @@ use crate::tools::ribbon::union_rect;
 /// Upper bound on the expand radius, matching the UI slider.
 pub const MAX_EXPAND: u8 = 8;
 /// Upper bound on the gap setting, matching the UI slider.
-pub const MAX_GAP: u8 = 24;
+pub const MAX_GAP: u8 = 255;
+
+/// The gaps a drag steps through: every pixel while gaps are small, wider
+/// strides as they grow, so the whole range is a comfortable pen's travel
+/// either way.
+const GAP_LADDER: [u8; 37] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56,
+    64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 255,
+];
 
 /// Screen points a fill drag moves before it starts counting, so the small
 /// wander of a plain tap never changes a value.
@@ -69,6 +77,23 @@ pub fn drag_steps(d: f32) -> i32 {
     (past / DRAG_STEP).floor() as i32 * d.signum() as i32
 }
 
+/// The gap `steps` rungs of [`GAP_LADDER`] away from `base`. No steps keeps
+/// `base` as it is, even off the ladder; the first step lands on the next rung
+/// in that direction.
+pub fn step_gap(base: u8, steps: i32) -> u8 {
+    let rungs = GAP_LADDER.len() as i32;
+    let at = if steps > 0 {
+        let above = GAP_LADDER.iter().position(|&g| g > base).unwrap_or(GAP_LADDER.len()) as i32;
+        above + steps - 1
+    } else if steps < 0 {
+        let below = GAP_LADDER.iter().rposition(|&g| g < base).map_or(-1, |i| i as i32);
+        below + steps + 1
+    } else {
+        return base;
+    };
+    GAP_LADDER[at.clamp(0, rungs - 1) as usize]
+}
+
 /// The flood's reach at one gap setting: a `w * h` bitmap and its bounds.
 struct Region {
     gap: u8,
@@ -77,14 +102,18 @@ struct Region {
 }
 
 /// Squared distance to the nearest wall over a window of the cell, 0 on the
-/// walls. The window is the plain flood's bounds grown by enough that every
-/// wall close enough to matter at [`MAX_GAP`] lies inside it; a gap fill never
-/// reaches past the plain flood, so nothing outside is needed.
+/// walls. The window is the plain flood's bounds grown by `reach`, which puts
+/// every wall close enough to matter for a gap up to `2 * (reach - 1)` inside
+/// it; a gap fill never reaches past the plain flood, so nothing outside is
+/// needed.
 struct Field {
     x0: i32,
     y0: i32,
     w: i32,
     h: i32,
+    reach: i32,
+    /// The window is the whole cell, so it serves any gap.
+    whole: bool,
     dist: Vec<f32>,
 }
 
@@ -194,7 +223,6 @@ impl FillSession {
         if let Some(b) = old {
             restore(canvas, pre, b);
         }
-        let gap = gap.min(MAX_GAP);
         self.ensure_regions(pre, gap);
         let region = if gap == 0 {
             self.plain.as_ref()
@@ -264,9 +292,16 @@ impl FillSession {
         if gap == 0 || self.region.as_ref().is_some_and(|r| r.gap == gap) {
             return;
         }
-        let field = self
-            .field
-            .get_or_insert_with(|| wall_distance(src, w, h, plain.bbox, target, tol));
+        // A wider gap needs walls from farther out. Rebuild in doubling
+        // steps, so a long drag outward rebuilds only a few times.
+        let needed = gap.div_ceil(2) as i32 + 1;
+        if self.field.as_ref().is_some_and(|f| !f.whole && f.reach < needed) {
+            self.field = None;
+        }
+        let field = self.field.get_or_insert_with(|| {
+            let reach = (needed as u32).next_power_of_two().max(16) as i32;
+            wall_distance(src, w, h, plain.bbox, reach, target, tol)
+        });
         let (mask, bbox) = gap_flood(field, &plain.mask, w, h, seed, gap);
         self.region = Some(Region { gap, mask, bbox });
     }
@@ -662,12 +697,20 @@ const FAR: f64 = 1e30;
 /// Felzenszwalb & Huttenlocher's exact transform: along each row, then down
 /// each column.
 ///
-/// Walls outside the window are farther from the flood than any gap looks,
-/// so leaving them out changes nothing that matters.
-fn wall_distance(src: &[u8], w: i32, h: i32, bbox: Bbox, target: [u8; 4], tol: u8) -> Field {
-    let m = MAX_GAP.div_ceil(2) as i32 + 1;
-    let (x0, y0) = ((bbox.0 - m).max(0), (bbox.1 - m).max(0));
-    let (x1, y1) = ((bbox.2 + m).min(w - 1), (bbox.3 + m).min(h - 1));
+/// The window is `bbox` grown by `reach`. Walls outside it are farther from
+/// the flood than the gaps it serves look, so leaving them out changes nothing
+/// that matters.
+fn wall_distance(
+    src: &[u8],
+    w: i32,
+    h: i32,
+    bbox: Bbox,
+    reach: i32,
+    target: [u8; 4],
+    tol: u8,
+) -> Field {
+    let (x0, y0) = ((bbox.0 - reach).max(0), (bbox.1 - reach).max(0));
+    let (x1, y1) = ((bbox.2 + reach).min(w - 1), (bbox.3 + reach).min(h - 1));
     let (fw, fh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
     let n = fw.max(fh);
     let mut f = vec![0f64; n];
@@ -704,6 +747,8 @@ fn wall_distance(src: &[u8], w: i32, h: i32, bbox: Bbox, target: [u8; 4], tol: u
         y0,
         w: fw as i32,
         h: fh as i32,
+        reach,
+        whole: x0 == 0 && y0 == 0 && x1 == w - 1 && y1 == h - 1,
         dist,
     }
 }
@@ -1317,6 +1362,52 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_gap_holds_and_the_field_grows_to_serve_it() {
+        // A closed room split down the middle by a wall with a 40-px doorway.
+        // The room is small against the cell, so the field starts out as a
+        // window, too narrow for the second gap asked for.
+        let room = |x: i32, y: i32| {
+            let outer = ((x == 40 || x == 216) && (40..=216).contains(&y))
+                || ((y == 40 || y == 216) && (40..=216).contains(&x));
+            let split = x == 128 && (40..=216).contains(&y) && !(108..148).contains(&y);
+            outer || split
+        };
+        let b = lines(512, 512, room);
+        let mut canvas = Canvas::new(512, 512);
+        let pre = canvas.pixels.clone();
+        let mut s = FillSession::new(&pre, (512, 512), (80, 128), &opts(0), Some(b.clone()), None)
+            .unwrap();
+        s.apply(&mut canvas, &pre, 4, 0).unwrap();
+        assert!(filled_at(&canvas, 170, 128), "gap 4: pours through the doorway");
+        s.apply(&mut canvas, &pre, 48, 0).unwrap();
+        assert!(!filled_at(&canvas, 170, 128), "gap 48: held");
+        assert!(filled_at(&canvas, 41, 41) && filled_at(&canvas, 127, 215));
+        assert!(canvas.pixels == fill_on(&b, 80, 128, 48, 0).pixels);
+    }
+
+    #[test]
+    fn gap_drags_climb_a_ladder_that_spreads_out() {
+        assert_eq!(step_gap(0, 0), 0);
+        assert_eq!(step_gap(0, 4), 4);
+        assert_eq!(step_gap(12, 1), 14);
+        assert_eq!(step_gap(0, -3), 0);
+        assert_eq!(step_gap(0, 1000), MAX_GAP);
+        // Off the ladder: stays put until moved, then takes the next rung.
+        assert_eq!(step_gap(50, 0), 50);
+        assert_eq!(step_gap(50, 1), 56);
+        assert_eq!(step_gap(50, -1), 48);
+        assert_eq!(step_gap(13, -1), 12);
+        // Every rung is reachable, and in order.
+        let mut last = 0;
+        for n in 1..GAP_LADDER.len() as i32 {
+            let g = step_gap(0, n);
+            assert!(g > last, "rung {n}");
+            last = g;
+        }
+        assert_eq!(last, MAX_GAP);
+    }
+
+    #[test]
     fn drag_steps_wait_out_the_dead_zone() {
         assert_eq!(drag_steps(0.0), 0);
         assert_eq!(drag_steps(7.9), 0);
@@ -1364,6 +1455,9 @@ mod tests {
         time("ring: gap 8 step", &mut || {
             s.apply(&mut canvas, &pre, 8, 0);
         });
+        time("ring: gap 64 step (grows the field)", &mut || {
+            s.apply(&mut canvas, &pre, 64, 0);
+        });
         s.revert(&mut canvas, &pre);
         let mut s = FillSession::new(&pre, (w, h), (5, 5), &o, Some(b.clone()), None).unwrap();
         time("background: press with expand 4", &mut || {
@@ -1385,6 +1479,12 @@ mod tests {
         });
         time("background: expand 3 step at gap 8", &mut || {
             s.apply(&mut canvas, &pre, 8, 3);
+        });
+        time("background: gap 64 step", &mut || {
+            s.apply(&mut canvas, &pre, 64, 0);
+        });
+        time("background: gap 255 step", &mut || {
+            s.apply(&mut canvas, &pre, 255, 0);
         });
     }
 }

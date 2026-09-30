@@ -3085,19 +3085,21 @@ impl AppState {
     /// sets the gap and up and down the expand, each in steps away from its
     /// value at the press; a change re-runs the fill so the canvas follows.
     /// The new values stay in the sliders.
+    ///
+    /// Expand steps a pixel at a time. The gap climbs a ladder whose rungs
+    /// spread out as it grows, so its whole range fits in a drag.
     pub fn fill_drag_to(&mut self, at: egui::Pos2) {
-        use crate::tools::fill::{drag_steps, MAX_EXPAND, MAX_GAP};
+        use crate::tools::fill::{drag_steps, step_gap, MAX_EXPAND};
         let (Some(drag), Some(target)) = (&mut self.fill_drag, self.stroke_target) else {
             return;
         };
         let Some(anchor) = drag.anchor else {
             return;
         };
-        let step =
-            |base: u8, d: f32, max: u8| (base as i32 + drag_steps(d)).clamp(0, max as i32) as u8;
-        let gap = step(drag.base_gap, at.x - anchor.x, MAX_GAP);
+        let gap = step_gap(drag.base_gap, drag_steps(at.x - anchor.x));
         // Screen y grows downward, and up means more.
-        let expand = step(drag.base_expand, anchor.y - at.y, MAX_EXPAND);
+        let expand = (drag.base_expand as i32 + drag_steps(anchor.y - at.y))
+            .clamp(0, MAX_EXPAND as i32) as u8;
         if gap == self.brush.fill_gap && expand == self.brush.fill_expand {
             return;
         }

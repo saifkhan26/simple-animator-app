@@ -840,7 +840,11 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                      your own strokes.\n\nOr press on the canvas and drag up / down.",
                 );
                 ui.add(
+                    // Logarithmic, so the small gaps line art mostly needs
+                    // keep most of the track.
                     egui::Slider::new(&mut state.brush.fill_gap, 0..=fill::MAX_GAP)
+                        .logarithmic(true)
+                        .smallest_positive(1.0)
                         .text("Gap (px)"),
                 )
                 .on_hover_text(
