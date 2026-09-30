@@ -11,6 +11,7 @@ use crate::input::shortcuts::{Action, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, PIN_TINTS};
+use crate::tools::fill;
 use crate::tools::select_mask::{self, SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing, StrokeCap};
@@ -194,6 +195,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             let t = ui.input(|i| i.time as f32);
                             let s = stroke_sample(state, cx, cy, t, packet);
                             state.pointer_down(s);
+                            // A Fill press keeps listening: dragging before
+                            // the pen lifts retunes it, counted from here.
+                            state.fill_anchor(pos);
                         }
                     }
                 }
@@ -294,6 +298,13 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                         None if state.tool == ActiveTool::Lasso => {
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 state.select_move(canvas_to_doc(pos));
+                            }
+                        }
+                        // Screen points, not canvas: a drag step is the same
+                        // length of pen travel at any zoom.
+                        None if state.fill_dragging() => {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                state.fill_drag_to(pos);
                             }
                         }
                         // The press frame: `pointer_down` has just started
@@ -818,16 +829,40 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 ui.add(
                     egui::Slider::new(&mut state.brush.fill_tolerance, 0..=128).text("Tolerance"),
                 );
-                ui.add(egui::Slider::new(&mut state.brush.fill_expand, 0..=8).text("Expand (px)"))
+                ui.add(
+                    egui::Slider::new(&mut state.brush.fill_expand, 0..=fill::MAX_EXPAND)
+                        .text("Expand (px)"),
+                )
+                .on_hover_text(
+                    "Grow the fill by this many pixels so the colour tucks under \
+                     anti-aliased lines instead of leaving a halo. Meant for the \
+                     'lines from' workflow — on a same-layer fill it eats into \
+                     your own strokes.\n\nOr press on the canvas and drag up / down.",
+                );
+                ui.add(
+                    // Logarithmic, so the small gaps line art mostly needs
+                    // keep most of the track.
+                    egui::Slider::new(&mut state.brush.fill_gap, 0..=fill::MAX_GAP)
+                        .logarithmic(true)
+                        .smallest_positive(1.0)
+                        .text("Gap (px)"),
+                )
+                .on_hover_text(
+                    "Treat breaks in the lines up to this wide as closed, so the \
+                     colour doesn't pour out through them.\n\nOr press on the \
+                     canvas and drag left / right.",
+                );
+                ui.checkbox(&mut state.brush.fill_all_visible, "Read all visible layers")
                     .on_hover_text(
-                        "Grow the fill by this many pixels so the colour tucks under \
-                         anti-aliased lines instead of leaving a halo. Meant for the \
-                         'lines from' workflow — on a same-layer fill it eats into \
-                         your own strokes.",
+                        "Stop at lines on any visible layer, not only this layer or \
+                         the one it takes its lines from.",
                     );
                 // The boundary source is a per-layer link, set in the Layers
                 // panel — surface it here so the coupling is visible.
                 let hint = match state.fill_boundary_name() {
+                    _ if state.brush.fill_all_visible => {
+                        "Lines from: all visible layers".to_string()
+                    }
                     Some(name) => format!("Lines from: {name}"),
                     None => "Lines from: this layer — set it in the Layers panel".to_string(),
                 };
@@ -4410,6 +4445,20 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
                 Color32::from_rgb(c[0], c[1], c[2]),
             );
             painter.circle_stroke(pos, 2.8, Stroke::new(0.8, black));
+            // What a press being dragged is set to — beside the pen, and only
+            // while the drag lasts.
+            if state.fill_dragging() {
+                let text = format!(
+                    "Gap {} · Expand {}",
+                    state.brush.fill_gap, state.brush.fill_expand
+                );
+                let galley =
+                    painter.layout_no_wrap(text, egui::FontId::proportional(12.0), Color32::WHITE);
+                let at = pos + Vec2::new(14.0, 12.0);
+                let back = Rect::from_min_size(at, galley.size()).expand2(Vec2::new(5.0, 2.0));
+                painter.rect_filled(back, 3.0, theme::premul(0, 0, 0, 170));
+                painter.galley(at, galley, Color32::WHITE);
+            }
         }
         ActiveTool::Shape => {
             // Crosshair anchor; the live preview shows the actual geometry.
@@ -6716,5 +6765,77 @@ mod lasso_options_tests {
             t.iter().any(|s| s == "Applies to 3 drawings on this layer"),
             "{t:?}"
         );
+    }
+}
+
+/// A Fill press through the real canvas: egui events in, pixels out.
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
+    const RED: [u8; 4] = [255, 0, 0, 255];
+
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| draw(state, ctx));
+    }
+
+    fn button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn px(state: &AppState, x: u32, y: u32) -> [u8; 4] {
+        let c = state.project.cell(state.project.resolved_current().unwrap()).unwrap();
+        let k = ((y * c.width + x) * 4) as usize;
+        [c.pixels[k], c.pixels[k + 1], c.pixels[k + 2], c.pixels[k + 3]]
+    }
+
+    #[test]
+    fn dragging_a_fill_press_sideways_shuts_the_gap() {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolFill);
+        state.brush.color = RED;
+        state.brush.fill_gap = 0;
+        // A box with a 4-px hole in its top edge.
+        let id = state.project.ensure_active_cell();
+        let c = state.project.cell_mut(id).unwrap();
+        for i in 100..=300u32 {
+            for (x, y) in [(i, 100), (i, 300), (100, i), (300, i)] {
+                if !(y == 100 && (190..194).contains(&x)) {
+                    let k = ((y * c.width + x) * 4) as usize;
+                    c.pixels[k..k + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let from = Xform::new(&state, SCREEN).doc_to_screen(200.0, 200.0);
+
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        // Past the dead zone and into the drag proper, in a few moves.
+        for dx in [4.0, 30.0, 60.0] {
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from + vec2(dx, 0.0))]);
+        }
+        assert!(state.fill_dragging());
+        assert_eq!(state.brush.fill_gap, 4);
+        assert_eq!(px(&state, 200, 200), RED);
+        assert_eq!(px(&state, 20, 20)[3], 0, "held inside the box");
+        frame(&ctx, &mut state, vec![button(from + vec2(60.0, 0.0), false)]);
+        frame(&ctx, &mut state, vec![]);
+        assert!(!state.fill_dragging());
+        assert_eq!(state.history.undo_len(), 1);
     }
 }
