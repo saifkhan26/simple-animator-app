@@ -13,22 +13,33 @@ use crate::doc::transform::Transform;
 /// second pass: both are similarity transforms, so the composition is just
 /// another one and costs nothing extra. An identity camera folds to a no-op,
 /// which keeps the 1:1 fast path below alive for pre-camera projects.
+///
+/// A clipped layer composites its drawing cut to its base; see
+/// [`crate::doc::clip`]. Everything unclipped goes straight from its cell.
 pub fn flatten_frame(project: &Project, frame: usize) -> Canvas {
+    flatten(project, frame, true)
+}
+
+/// [`flatten_frame`], but in document space: the frame rect as the document
+/// has it, no camera.
+pub fn flatten_doc(project: &Project, frame: usize) -> Canvas {
+    flatten(project, frame, false)
+}
+
+fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
     let mut out = Canvas::new(project.width, project.height);
     let (pw, ph) = (project.width, project.height);
     let cam = project.resolve_camera(frame);
-    for layer in &project.layers {
+    for (li, layer) in project.layers.iter().enumerate() {
         if !layer.visible || layer.reference {
             continue;
         }
-        let Some(id) = layer.resolve(frame) else {
+        let Some(src) = crate::doc::clip::shown(project, li, frame) else {
             continue;
         };
-        let Some(src) = project.cell(id) else {
-            continue;
-        };
-        let xform = cam.apply(&layer.resolve_transform(frame));
-        composite_layer(&mut out, src, &xform, layer.opacity, pw, ph);
+        let xform = layer.resolve_transform(frame);
+        let xform = if through_camera { cam.apply(&xform) } else { xform };
+        composite_layer(&mut out, &src, &xform, layer.opacity, pw, ph);
     }
     out
 }
@@ -86,6 +97,36 @@ pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_shows_a_clipped_layer_only_over_its_base() {
+        let mut p = Project::new(8, 4, 12.0);
+        p.add_layer();
+        let mut base = Canvas::new(8, 4);
+        let mut top = Canvas::new(8, 4);
+        for y in 0..4u32 {
+            for x in 0..8u32 {
+                let i = ((y * 8 + x) * 4) as usize;
+                if x < 4 {
+                    base.pixels[i..i + 4].copy_from_slice(&[0, 0, 255, 255]);
+                }
+                top.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        let n = p.cells.len();
+        p.cells.push(base);
+        p.cells.push(top);
+        p.layers[0].set_key(0, n);
+        p.layers[1].set_key(0, n + 1);
+        p.layers[1].clip = true;
+        let flat = flatten_frame(&p, 0);
+        let px = |x: u32| &flat.pixels[(x * 4) as usize..(x * 4 + 4) as usize];
+        assert_eq!(px(1), &[255, 0, 0, 255], "red over the blue");
+        assert_eq!(px(6), &[0, 0, 0, 0], "nothing past the base");
+        // Unclipped, it covers the frame.
+        p.layers[1].clip = false;
+        assert_eq!(&flatten_frame(&p, 0).pixels[24..28], &[255, 0, 0, 255]);
+    }
     use crate::doc::camera::Camera;
 
     /// Paint one opaque red pixel at `(x, y)` of the project's only cell.

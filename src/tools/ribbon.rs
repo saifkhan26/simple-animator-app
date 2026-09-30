@@ -91,6 +91,10 @@ pub struct StrokeWorkspace {
     /// constant for the whole stroke: that is what keeps incremental
     /// compositing exact under a clip.
     clip: Option<Arc<Mask>>,
+    /// The layer's alpha is locked: paint recolours pixels that already have
+    /// paint and adds none, and the eraser does nothing. Set after `begin()`,
+    /// which clears it.
+    alpha_lock: bool,
 }
 
 impl StrokeWorkspace {
@@ -106,6 +110,7 @@ impl StrokeWorkspace {
             grain_scale: 1.5,
             build_up: false,
             clip: None,
+            alpha_lock: false,
         }
     }
 
@@ -129,6 +134,13 @@ impl StrokeWorkspace {
         self.grain_scale = brush.grain_scale.max(0.05);
         self.build_up = brush.mode == BrushMode::Dab;
         self.clip = None;
+        self.alpha_lock = false;
+    }
+
+    /// Lock the stroke begun by the last `begin()` to the alpha already on
+    /// the canvas. See [`StrokeWorkspace::alpha_lock`].
+    pub fn set_alpha_lock(&mut self, on: bool) {
+        self.alpha_lock = on;
     }
 
     /// Hold the stroke begun by the last `begin()` to `clip`. An empty mask
@@ -427,6 +439,22 @@ impl StrokeWorkspace {
                 }
                 let a_src = cov as f32 / 65535.0 * opacity * k;
                 let a_pre = pre[idx + 3] as f32 / 255.0;
+                if self.alpha_lock {
+                    // Recolour in place: the colour mixes in by the stroke's
+                    // coverage, the alpha stays what it was. Bare canvas
+                    // stays bare — it still equals `pre`, never having been
+                    // written.
+                    if pre[idx + 3] == 0 {
+                        continue;
+                    }
+                    let dst = &mut canvas.pixels[idx..idx + 4];
+                    let mix = |c: f32, p: u8| (c * a_src + p as f32 * (1.0 - a_src)).round() as u8;
+                    dst[0] = mix(br, pre[idx]);
+                    dst[1] = mix(bg, pre[idx + 1]);
+                    dst[2] = mix(bb, pre[idx + 2]);
+                    dst[3] = pre[idx + 3];
+                    continue;
+                }
                 let a_out = a_src + a_pre * (1.0 - a_src);
                 let dst = &mut canvas.pixels[idx..idx + 4];
                 if a_out <= 0.0 {
@@ -453,6 +481,10 @@ impl StrokeWorkspace {
         strength: f32,
     ) {
         let strength = strength.clamp(0.0, 1.0);
+        // Erasing is taking alpha away, which a locked alpha forbids.
+        if self.alpha_lock {
+            return;
+        }
         let Some(rect) = self.clipped(rect) else {
             return;
         };
@@ -879,6 +911,57 @@ mod tests {
         let r = ws.raster_dot(node(32.0, 32.0, 12.0, 1.0)).expect("dot");
         ws.composite_paint(&mut canvas, &pre, r, [200, 10, 10, 255], 1.0);
         canvas
+    }
+
+    /// A 64×64 canvas: left half opaque blue, a half-alpha blue column at
+    /// x = 40, bare elsewhere.
+    fn half_blue() -> Canvas {
+        let mut c = Canvas::new(64, 64);
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let a = if x < 32 { 255 } else if x == 40 { 128 } else { 0 };
+                let i = ((y * 64 + x) * 4) as usize;
+                if a > 0 {
+                    c.pixels[i..i + 4].copy_from_slice(&[0, 0, 255, a]);
+                }
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn alpha_lock_recolours_paint_and_leaves_bare_canvas_bare() {
+        let mut canvas = half_blue();
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        ws.set_alpha_lock(true);
+        let r = ws.raster_dot(node(32.0, 32.0, 14.0, 1.0)).expect("dot");
+        ws.composite_paint(&mut canvas, &pre, r, [200, 10, 10, 255], 1.0);
+        let px = |x: u32| {
+            let i = ((32 * 64 + x) * 4) as usize;
+            [canvas.pixels[i], canvas.pixels[i + 1], canvas.pixels[i + 2], canvas.pixels[i + 3]]
+        };
+        assert_eq!(px(28), [200, 10, 10, 255], "painted over: recoloured, alpha kept");
+        assert_eq!(px(40), [200, 10, 10, 128], "half alpha stays half");
+        assert_eq!(px(36), [0, 0, 0, 0], "bare canvas stays bare");
+    }
+
+    #[test]
+    fn alpha_lock_stops_the_eraser() {
+        let mut canvas = half_blue();
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        ws.set_alpha_lock(true);
+        let r = ws.raster_dot(node(30.0, 32.0, 10.0, 1.0)).expect("dot");
+        ws.composite_erase(&mut canvas, &pre, r, 1.0);
+        assert_eq!(canvas.pixels, pre);
+        // And `begin` lets go of it for the next stroke.
+        ws.begin(64, 64, &ribbon(1.0, 0.0));
+        let r = ws.raster_dot(node(30.0, 32.0, 10.0, 1.0)).expect("dot");
+        ws.composite_erase(&mut canvas, &pre, r, 1.0);
+        assert_eq!(alpha(&canvas, 30, 32), 0);
     }
 
     fn alpha(c: &Canvas, x: u32, y: u32) -> u8 {

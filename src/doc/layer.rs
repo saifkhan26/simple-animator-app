@@ -72,12 +72,23 @@ pub struct Layer {
     pub track_points: Vec<TrackSample>,
     /// Cell buffer size for this layer's drawings. `0` = use the project frame
     /// size. Larger than the frame lets a single layer's artwork extend past
-    /// what the camera sees. Must stay the LAST fields: the `.anim` format
-    /// (postcard) is positional.
+    /// what the camera sees.
     #[serde(default)]
     pub cell_w: u32,
     #[serde(default)]
     pub cell_h: u32,
+    /// Clipped to the layer below: it only shows where the first layer under
+    /// it that isn't clipped itself — its base — has pixels. See
+    /// [`crate::doc::clip`].
+    ///
+    /// These two must stay the LAST fields: the `.anim` format (postcard) is
+    /// positional, and v7 appended them.
+    #[serde(default)]
+    pub clip: bool,
+    /// Painting only changes pixels that already have paint: strokes and
+    /// fills recolour, never add coverage, and the eraser does nothing.
+    #[serde(default)]
+    pub alpha_lock: bool,
 }
 
 impl Layer {
@@ -97,6 +108,8 @@ impl Layer {
             track_points: Vec::new(),
             cell_w: 0,
             cell_h: 0,
+            clip: false,
+            alpha_lock: false,
         }
     }
 

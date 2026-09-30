@@ -5,6 +5,7 @@
 
 pub mod camera;
 pub mod canvas;
+pub mod clip;
 pub mod layer;
 pub mod project;
 pub mod transform;

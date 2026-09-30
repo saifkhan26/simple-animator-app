@@ -2324,8 +2324,16 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut rename_commit = false;
             let mut rename_cancel = false;
             let mut krita_edit: Option<usize> = None;
+            let mut toggle_clip: Option<usize> = None;
+            let mut toggle_alpha_lock: Option<usize> = None;
             let mut drop: Option<(usize, usize)> = None;
             let krita_label = krita_menu_label(state);
+            let clip_key = combo_text(state, Action::LayerClipToggle);
+            let lock_key = combo_text(state, Action::LayerAlphaLockToggle);
+            // What each clipped layer clips to — `None` for one clipped with
+            // nothing under it to clip to.
+            let bases: Vec<Option<usize>> =
+                (0..n).map(|i| state.project.clip_base(i)).collect();
             // Owned copy: the "lines from" combo lists every layer's name while
             // a single layer is mutably borrowed below.
             let names: Vec<String> = state
@@ -2365,6 +2373,28 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                             .inner_margin(Margin::symmetric(6.0, 4.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
+                                    // A clipped layer sits indented, an arrow
+                                    // pointing down at its base.
+                                    if layer.clip {
+                                        ui.add_space(8.0);
+                                        let (tint, tip) = match bases[i] {
+                                            Some(b) => (
+                                                theme::ACCENT,
+                                                format!("Clipped to {}", names[b]),
+                                            ),
+                                            None => (
+                                                theme::TEXT_MUTED,
+                                                "Clipped, but there is nothing under it to clip to"
+                                                    .to_string(),
+                                            ),
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(ic::ARROW_BEND_LEFT_DOWN)
+                                                .size(16.0)
+                                                .color(tint),
+                                        )
+                                        .on_hover_text(tip);
+                                    }
                                     // Eye toggle.
                                     let eye_icon = if layer.visible {
                                         ic::EYE
@@ -2443,7 +2473,47 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         } else if resp.clicked() {
                                             select = Some(i);
                                         }
+                                        if layer.alpha_lock {
+                                            ui.label(
+                                                egui::RichText::new(ic::CHECKERBOARD)
+                                                    .size(14.0)
+                                                    .color(theme::ACCENT),
+                                            )
+                                            .on_hover_text(format!(
+                                                "Alpha locked ({lock_key}): painting only \
+                                                 changes pixels that already have paint"
+                                            ));
+                                        }
                                         resp.context_menu(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    layer.clip,
+                                                    format!("Clip to layer below ({clip_key})"),
+                                                )
+                                                .on_hover_text(
+                                                    "Show this layer only where the first \
+                                                     unclipped layer under it has paint",
+                                                )
+                                                .clicked()
+                                            {
+                                                toggle_clip = Some(i);
+                                                ui.close_menu();
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    layer.alpha_lock,
+                                                    format!("Lock alpha ({lock_key})"),
+                                                )
+                                                .on_hover_text(
+                                                    "Painting only changes pixels that already \
+                                                     have paint",
+                                                )
+                                                .clicked()
+                                            {
+                                                toggle_alpha_lock = Some(i);
+                                                ui.close_menu();
+                                            }
+                                            ui.separator();
                                             if ui
                                                 .button(theme::icon_text(ic::PAINT_BRUSH, krita_label))
                                                 .on_hover_text("Opens the project in Krita with this layer selected")
@@ -2536,6 +2606,12 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             }
             if let Some(i) = krita_edit {
                 state.edit_in_krita(i);
+            }
+            if let Some(l) = toggle_clip.and_then(|i| state.project.layers.get_mut(i)) {
+                l.clip = !l.clip;
+            }
+            if let Some(l) = toggle_alpha_lock.and_then(|i| state.project.layers.get_mut(i)) {
+                l.alpha_lock = !l.alpha_lock;
             }
 
             // --- Layer transform ---
@@ -3598,8 +3674,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         if li == cur_layer {
             draw_onion();
         }
-        if let Some(id) = layer.resolve(cur_frame) {
-            if let (Some(tex), Some(lc)) = (state.cell_textures.get(&id), cell_corners(li, id)) {
+        // A clipped layer draws its drawing cut to its base.
+        if let Some((id, tex)) = state.layer_texture(li) {
+            if let Some(lc) = cell_corners(li, id) {
                 let op = layer.opacity * state.layer_view_alpha(li);
                 let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
                 image_quad(
@@ -6896,6 +6973,42 @@ mod layers_panel_tests {
             shapes = frame(&ctx, &mut state, vec![]);
         }
         (state, ctx, shapes)
+    }
+
+    /// Whether any text painted inside the Layers panel contains `glyph`.
+    fn panel_shows(
+        ctx: &egui::Context,
+        shapes: &[egui::epaint::ClippedShape],
+        glyph: &str,
+    ) -> bool {
+        fn find(shape: &egui::Shape, glyph: &str, panel: Rect) -> bool {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().any(|s| find(s, glyph, panel)),
+                egui::Shape::Text(t) => {
+                    t.galley.text().contains(glyph) && panel.contains_rect(t.visual_bounding_rect())
+                }
+                _ => false,
+            }
+        }
+        let panel = egui::AreaState::load(ctx, egui::Id::new(panel_key(PanelId::Layers)))
+            .expect("Layers panel laid out")
+            .rect();
+        shapes.iter().any(|s| find(&s.shape, glyph, panel))
+    }
+
+    #[test]
+    fn clipped_and_alpha_locked_layers_are_marked_in_the_panel() {
+        let (mut state, ctx, shapes) = setup();
+        assert!(!panel_shows(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN));
+        assert!(!panel_shows(&ctx, &shapes, ic::CHECKERBOARD));
+        state.project.layers[1].clip = true;
+        state.project.layers[2].alpha_lock = true;
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            shapes = frame(&ctx, &mut state, vec![]);
+        }
+        assert!(panel_shows(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN));
+        assert!(panel_shows(&ctx, &shapes, ic::CHECKERBOARD));
     }
 
     fn names(state: &AppState) -> Vec<&str> {

@@ -487,7 +487,7 @@ const GHOST_REST: f64 = 0.12;
 /// One resident texture, for the budget.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TexEntry {
-    ghost: bool,
+    kind: TexKind,
     id: CellId,
     /// Last sync it was on screen.
     used: u64,
@@ -496,6 +496,35 @@ struct TexEntry {
 
 /// Which textures to drop so the rest fit in `budget` bytes: least recently
 /// shown first, and never one shown at `now` — it's on screen this frame.
+/// Which texture map a [`TexEntry`] is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TexKind {
+    Cell,
+    Ghost,
+    /// A clipped drawing; `id` is the clipped cell, this its base's.
+    Clip(CellId),
+}
+
+/// A clipped layer as it shows on the current frame: see
+/// [`AppState::clip_pair`].
+struct ClipPair {
+    cell: CellId,
+    base: CellId,
+    at: crate::doc::clip::Placement,
+}
+
+/// A clipped drawing's texture as the canvas shows it: cut to its base.
+struct ClipTex {
+    tex: TextureHandle,
+    /// Where the two drawings sat when it was made. A change is a fresh bake.
+    at: crate::doc::clip::Placement,
+    /// A base pixel lies under the clipped pixel with the same index, so a
+    /// change to the base maps onto the same rect here.
+    aligned: bool,
+    /// What changed in either drawing since.
+    pending: Dirty,
+}
+
 fn evictions(entries: &[TexEntry], budget: usize, now: u64) -> Vec<TexEntry> {
     let mut total: usize = entries.iter().map(|e| e.bytes).sum();
     if total <= budget {
@@ -643,6 +672,11 @@ pub struct AppState {
     /// texture budget evicts by.
     sync_frame: u64,
     cell_tex_used: HashMap<CellId, u64>,
+    /// Clipped layers' drawings as the canvas shows them, keyed by (clipped
+    /// cell, base cell), drawn in place of the plain cell texture. See
+    /// `sync_clip_textures`.
+    clip_textures: HashMap<(CellId, CellId), ClipTex>,
+    clip_tex_used: HashMap<(CellId, CellId), u64>,
     ghost_tex_used: HashMap<CellId, u64>,
     /// Frame the playhead sat on at the last sync, and since when (egui time).
     /// A ghost not built yet waits for the playhead to rest, so a scrub
@@ -1041,6 +1075,8 @@ impl AppState {
             cell_dirty,
             sync_frame: 0,
             cell_tex_used: HashMap::new(),
+            clip_textures: HashMap::new(),
+            clip_tex_used: HashMap::new(),
             ghost_tex_used: HashMap::new(),
             playhead_rest: (usize::MAX, 0.0),
             tool: ActiveTool::Pencil,
@@ -1411,6 +1447,15 @@ impl AppState {
         };
         let pending = self.cell_dirty.get(&id).copied().unwrap_or(Dirty::Full);
         self.cell_dirty.insert(id, pending.with(region));
+        // Clipped drawings made from this cell — as the clipped drawing or as
+        // its base — need the same region redone.
+        for (&(c, base), t) in self.clip_textures.iter_mut() {
+            if c == id {
+                t.pending = t.pending.with(region);
+            } else if base == id {
+                t.pending = t.pending.with(if t.aligned { region } else { Dirty::Full });
+            }
+        }
         self.blank_cache.remove(&id);
         // The ghost is baked from these pixels, so it needs rebuilding — but
         // re-uploaded in place, never freed. See `ghost_stale`.
@@ -1434,6 +1479,9 @@ impl AppState {
         self.retired_textures
             .extend(self.cell_textures.drain().map(|(_, tex)| tex));
         self.cell_tex_used.clear();
+        self.retired_textures
+            .extend(self.clip_textures.drain().map(|(_, t)| t.tex));
+        self.clip_tex_used.clear();
     }
 
     /// Park every ghost for release on the next sync. See `retired_textures`.
@@ -1597,20 +1645,28 @@ impl AppState {
         let (pw, ph) = (p.width, p.height);
         let top = &p.layers[li];
         let below = &p.layers[bi];
+        // A clipped top layer merges as it shows, cut to its base, so the
+        // base's own changes are frames to bake too. The layer below keeps
+        // its pixels whole: it keeps its own clipping.
+        let base = p.clip_base(li).map(|b| &p.layers[b]);
 
         // Interpolated transforms change the picture on every frame; otherwise
         // only exposure keys (and a lone transform key's frame) matter.
-        let animated = top.transform_keys.len() >= 2 || below.transform_keys.len() >= 2;
+        let animated = top.transform_keys.len() >= 2
+            || below.transform_keys.len() >= 2
+            || base.is_some_and(|b| b.transform_keys.len() >= 2);
         let mut bake_frames: Vec<usize> = if animated {
             (0..p.frame_count).collect()
         } else {
             let mut fs: Vec<usize> = (0..p.frame_count)
                 .filter(|&f| {
-                    top.exposures.get(f).copied().flatten().is_some()
-                        || below.exposures.get(f).copied().flatten().is_some()
+                    [Some(top), Some(below), base]
+                        .into_iter()
+                        .flatten()
+                        .any(|l| l.exposures.get(f).copied().flatten().is_some())
                 })
                 .collect();
-            for l in [top, below] {
+            for l in [Some(top), Some(below), base].into_iter().flatten() {
                 for k in &l.transform_keys {
                     fs.push(k.frame.min(p.frame_count.saturating_sub(1)));
                 }
@@ -1650,14 +1706,18 @@ impl AppState {
             .into_iter()
             .map(|f| {
                 let mut out = Canvas::new(bw, bh);
-                for l in [below, top] {
-                    let Some(id) = l.resolve(f) else { continue };
-                    let Some(src) = p.cell(id) else { continue };
+                for (idx, l) in [(bi, below), (li, top)] {
+                    let src = if idx == li {
+                        crate::doc::clip::shown(p, li, f)
+                    } else {
+                        l.resolve(f).and_then(|id| p.cell(id)).map(std::borrow::Cow::Borrowed)
+                    };
+                    let Some(src) = src else { continue };
                     let xform = l.resolve_transform(f);
                     // Passing the *baked* size as the doc size keeps the
                     // transform maths centred on the same point, since the
                     // baked cell is itself centred on the doc.
-                    crate::io::composite::composite_layer(&mut out, src, &xform, l.opacity, bw, bh);
+                    crate::io::composite::composite_layer(&mut out, &src, &xform, l.opacity, bw, bh);
                 }
                 (f, out)
             })
@@ -2609,7 +2669,13 @@ impl AppState {
             let Some(target) = self.stroke_target else {
                 return;
             };
-            if self.cell_textures.contains_key(&target) {
+            // Painting a clipped layer, or a base something is clipped to:
+            // what shows is the clipped texture, so take the full path below,
+            // which redoes just the changed rect of it.
+            let cur = self.project.current_layer;
+            let clipping = self.project.clip_base(cur).is_some()
+                || (0..self.project.layers.len()).any(|i| self.project.clip_base(i) == Some(cur));
+            if !clipping && self.cell_textures.contains_key(&target) {
                 self.cell_tex_used.insert(target, now);
                 if let Some(rect) = self.preview_upload_rect.take() {
                     self.upload_rect(target, rect);
@@ -2624,10 +2690,21 @@ impl AppState {
         // Only what's drawn. Onion ghosts are drawn from their own silhouette
         // textures, so a ghosted cell's plain texture isn't needed at all.
         let mut needed: Vec<CellId> = Vec::new();
+        let mut clipped: Vec<ClipPair> = Vec::new();
         let cur = self.project.current_frame;
-        for layer in &self.project.layers {
+        for (li, layer) in self.project.layers.iter().enumerate() {
             if !layer.visible {
                 continue;
+            }
+            // A clipped layer shows as its clipped texture instead — or not
+            // at all, with its base hidden or empty here.
+            if !layer.reference {
+                if let Some(b) = self.project.clip_base(li) {
+                    if let Some(pair) = self.clip_pair(li, b) {
+                        clipped.push(pair);
+                    }
+                    continue;
+                }
             }
             if let Some(id) = layer.resolve(cur) {
                 if !needed.contains(&id) {
@@ -2635,6 +2712,7 @@ impl AppState {
                 }
             }
         }
+        self.sync_clip_textures(ctx, now, &clipped);
 
         for id in needed {
             self.cell_tex_used.insert(id, now);
@@ -2698,6 +2776,104 @@ impl AppState {
         self.sync_tint(ctx);
         self.sync_ghosts(ctx, now);
         self.enforce_texture_budget();
+    }
+
+    /// Layer `li`, clipped to `b`, as it shows on the current frame: its
+    /// drawing and its base's, and where each sits. `None` when it shows
+    /// nothing — base hidden, a reference, or empty here.
+    fn clip_pair(&self, li: usize, b: usize) -> Option<ClipPair> {
+        let p = &self.project;
+        let f = p.current_frame;
+        let base = p.layers.get(b)?;
+        if !base.visible || base.reference {
+            return None;
+        }
+        Some(ClipPair {
+            cell: p.layers[li].resolve(f)?,
+            base: base.resolve(f)?,
+            at: crate::doc::clip::Placement {
+                xf: self.display_transform(li, f),
+                base_xf: self.display_transform(b, f),
+                pw: p.width,
+                ph: p.height,
+            },
+        })
+    }
+
+    /// The texture the canvas draws for layer `li` on the current frame, and
+    /// the cell it stands for: its cell's own, or for a clipped layer, the
+    /// clipped one. `None` draws nothing.
+    pub fn layer_texture(&self, li: usize) -> Option<(CellId, &TextureHandle)> {
+        let layer = self.project.layers.get(li)?;
+        match self.project.clip_base(li).filter(|_| !layer.reference) {
+            Some(b) => {
+                let pair = self.clip_pair(li, b)?;
+                let t = self.clip_textures.get(&(pair.cell, pair.base))?;
+                Some((pair.cell, &t.tex))
+            }
+            None => {
+                let id = layer.resolve(self.project.current_frame)?;
+                Some((id, self.cell_textures.get(&id)?))
+            }
+        }
+    }
+
+    /// Bring the clipped drawings on screen up to date: one texture per
+    /// (clipped, base) pairing, the drawing cut to its base. Only what changed
+    /// in either is redone; the two moving relative to each other redoes it
+    /// all. Nothing here runs for a project without clipping.
+    fn sync_clip_textures(&mut self, ctx: &egui::Context, now: u64, pairs: &[ClipPair]) {
+        use crate::doc::clip::mask_rect;
+        for pair in pairs {
+            let key = (pair.cell, pair.base);
+            self.clip_tex_used.insert(key, now);
+            let (Some(clip), Some(base)) = (self.project.cell(pair.cell), self.project.cell(pair.base)) else {
+                continue;
+            };
+            let dims = [clip.width as usize, clip.height as usize];
+            let aligned = pair.at.aligned(clip, base);
+            let whole = DirtyRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: clip.width,
+                max_y: clip.height,
+            };
+            match self.clip_textures.get_mut(&key) {
+                Some(t) if t.tex.size() == dims && t.at == pair.at => {
+                    let r = match t.pending {
+                        Dirty::Clean => continue,
+                        Dirty::Rect(r) => r,
+                        Dirty::Full => whole,
+                    };
+                    let (x0, y0) = (r.min_x.min(clip.width), r.min_y.min(clip.height));
+                    let (x1, y1) = (r.max_x.min(clip.width), r.max_y.min(clip.height));
+                    if x1 > x0 && y1 > y0 {
+                        let buf = mask_rect(clip, Some(base), &pair.at, r);
+                        let size = [(x1 - x0) as usize, (y1 - y0) as usize];
+                        let image = premultiplied_image(size, &buf);
+                        t.tex.set_partial([x0 as usize, y0 as usize], image, TextureOptions::LINEAR);
+                    }
+                    t.pending = Dirty::Clean;
+                    // A resized base leaves the placement alone but can end
+                    // the 1:1 match.
+                    t.aligned = aligned;
+                }
+                _ => {
+                    let image = premultiplied_image(dims, &mask_rect(clip, Some(base), &pair.at, whole));
+                    let name = format!("clip_{}_{}", pair.cell, pair.base);
+                    let tex = ctx.load_texture(name, image, TextureOptions::LINEAR);
+                    let fresh = ClipTex {
+                        tex,
+                        at: pair.at,
+                        aligned,
+                        pending: Dirty::Clean,
+                    };
+                    if let Some(old) = self.clip_textures.insert(key, fresh) {
+                        self.retired_textures.push(old.tex);
+                    }
+                }
+            }
+        }
     }
 
     /// Upload just `rect` of cell `id` into its existing texture.
@@ -2794,7 +2970,7 @@ impl AppState {
         let mut entries: Vec<TexEntry> = Vec::new();
         for (&id, tex) in &self.cell_textures {
             entries.push(TexEntry {
-                ghost: false,
+                kind: TexKind::Cell,
                 id,
                 used: self.cell_tex_used.get(&id).copied().unwrap_or(0),
                 bytes: bytes(tex),
@@ -2802,20 +2978,39 @@ impl AppState {
         }
         for (&id, (_, tex)) in &self.ghost_textures {
             entries.push(TexEntry {
-                ghost: true,
+                kind: TexKind::Ghost,
                 id,
                 used: self.ghost_tex_used.get(&id).copied().unwrap_or(0),
                 bytes: bytes(tex),
             });
         }
+        for (&key, t) in &self.clip_textures {
+            entries.push(TexEntry {
+                kind: TexKind::Clip(key.1),
+                id: key.0,
+                used: self.clip_tex_used.get(&key).copied().unwrap_or(0),
+                bytes: bytes(&t.tex),
+            });
+        }
         for e in evictions(&entries, TEXTURE_BUDGET, self.sync_frame) {
-            if e.ghost {
-                self.retire_ghost(e.id);
-                self.ghost_tex_used.remove(&e.id);
-            } else if let Some(tex) = self.cell_textures.remove(&e.id) {
-                self.retired_textures.push(tex);
-                self.cell_tex_used.remove(&e.id);
-                self.cell_dirty.insert(e.id, Dirty::Full);
+            match e.kind {
+                TexKind::Ghost => {
+                    self.retire_ghost(e.id);
+                    self.ghost_tex_used.remove(&e.id);
+                }
+                TexKind::Clip(base) => {
+                    if let Some(t) = self.clip_textures.remove(&(e.id, base)) {
+                        self.retired_textures.push(t.tex);
+                    }
+                    self.clip_tex_used.remove(&(e.id, base));
+                }
+                TexKind::Cell => {
+                    if let Some(tex) = self.cell_textures.remove(&e.id) {
+                        self.retired_textures.push(tex);
+                        self.cell_tex_used.remove(&e.id);
+                        self.cell_dirty.insert(e.id, Dirty::Full);
+                    }
+                }
             }
         }
     }
@@ -2937,6 +3132,7 @@ impl AppState {
                 color: self.brush.color,
                 expand: self.brush.fill_expand,
                 gap: self.brush.fill_gap,
+                alpha_lock: self.active_alpha_lock(),
             };
             // Owned, so the immutable project borrow ends before `cell_mut`.
             let (cw, ch) = {
@@ -3002,6 +3198,7 @@ impl AppState {
             .begin(cw, ch, &self.brush);
         let clip = self.active_cell_clip();
         self.stroke_ws.set_clip(clip);
+        self.stroke_ws.set_alpha_lock(self.active_alpha_lock());
 
         // Resolve the radius and the view scale once, here: a stroke must not
         // change width or smoothing behaviour partway through if the view moves.
@@ -3071,6 +3268,7 @@ impl AppState {
             self.stroke_ws.begin(cw, ch, &brush);
             let clip = self.active_cell_clip();
             self.stroke_ws.set_clip(clip);
+            self.stroke_ws.set_alpha_lock(self.active_alpha_lock());
             if let (Some(pre), Some(c)) = (
                 self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
                 self.project.cell_mut(target),
@@ -3142,6 +3340,14 @@ impl AppState {
         if applied {
             self.mark_dirty(target);
         }
+    }
+
+    /// Whether the active layer's alpha is locked.
+    pub fn active_alpha_lock(&self) -> bool {
+        self.project
+            .layers
+            .get(self.project.current_layer)
+            .is_some_and(|l| l.alpha_lock)
     }
 
     /// Whether a Fill press is still under the pen.
@@ -3780,19 +3986,8 @@ impl AppState {
         let p = &self.project;
         let frame = p.current_frame;
         let dst_xform = p.layers.get(layer_idx)?.resolve_transform(frame);
-        let (pw, ph) = (p.width, p.height);
-        let mut doc = Canvas::new(pw, ph);
-        for layer in &p.layers {
-            if !layer.visible || layer.reference {
-                continue;
-            }
-            let Some(src) = layer.resolve(frame).and_then(|id| p.cell(id)) else {
-                continue;
-            };
-            let xform = layer.resolve_transform(frame);
-            crate::io::composite::composite_layer(&mut doc, src, &xform, layer.opacity, pw, ph);
-        }
-        Some(doc_to_cell(doc, &dst_xform, cell_w, cell_h, pw, ph))
+        let doc = crate::io::composite::flatten_doc(p, frame);
+        Some(doc_to_cell(doc, &dst_xform, cell_w, cell_h, p.width, p.height))
     }
 
     /// Render the layer linked from `layer_idx` via `lines_from` into the *cell
@@ -3956,6 +4151,16 @@ impl AppState {
             }
             Action::LayerLast => self.goto_last_layer(),
             Action::FadeOthersToggle => self.fade_others = !self.fade_others,
+            Action::LayerClipToggle => {
+                if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
+                    l.clip = !l.clip;
+                }
+            }
+            Action::LayerAlphaLockToggle => {
+                if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
+                    l.alpha_lock = !l.alpha_lock;
+                }
+            }
             Action::KeyBlank => {
                 self.structural_edit(false, |p| {
                     p.insert_blank_key_here();
@@ -5189,6 +5394,9 @@ impl AppState {
         let project = self.project.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
+            // Krita has no clipping to match ours: clipped layers go cut.
+            let mut project = project;
+            crate::doc::clip::bake_clipping(&mut project);
             let res = kra::write(&project, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: selected, carried: &[] })
                 .and_then(|bytes| std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display())))
                 .map(|()| name);
@@ -5266,6 +5474,187 @@ fn subrect_from_buffer(buf: &[u8], full_w: u32, x: u32, y: u32, w: u32, h: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Clipped layers on the canvas ---
+
+    /// Layer 0 inked opaque black on its left half; layer 1, clipped to it,
+    /// painted solid red all over.
+    fn clip_state() -> AppState {
+        let mut st = AppState::for_test();
+        let (w, h) = (st.project.width, st.project.height);
+        let mut base = Canvas::new(w, h);
+        let mut top = Canvas::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                if x < w / 2 {
+                    base.pixels[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+                top.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        st.project.add_layer();
+        let n = st.project.cells.len();
+        st.project.cells.push(base);
+        st.project.cells.push(top);
+        st.project.layers[0].set_key(0, n);
+        st.project.layers[1].set_key(0, n + 1);
+        st.project.layers[1].clip = true;
+        st
+    }
+
+    /// Run one texture sync and hand back what egui was asked to upload.
+    fn sync(st: &mut AppState, ctx: &egui::Context) -> egui::TexturesDelta {
+        ctx.run(egui::RawInput::default(), |ctx| st.sync_textures(ctx)).textures_delta
+    }
+
+    /// Alpha of the uploaded image for texture `id` at `(x, y)` of the image.
+    fn uploaded_alpha(delta: &egui::TexturesDelta, id: egui::TextureId, x: usize, y: usize) -> u8 {
+        let (_, d) = delta.set.iter().find(|(t, _)| *t == id).expect("texture uploaded");
+        match &d.image {
+            egui::ImageData::Color(img) => img.pixels[y * img.size[0] + x].a(),
+            _ => panic!("colour image expected"),
+        }
+    }
+
+    #[test]
+    fn a_clipped_layer_shows_only_over_its_base() {
+        let mut st = clip_state();
+        let ctx = egui::Context::default();
+        let delta = sync(&mut st, &ctx);
+        let (id, tex) = st.layer_texture(1).expect("clipped layer drawn");
+        assert_eq!(id, st.project.layers[1].resolve(0).unwrap());
+        let tex = tex.id();
+        let w = st.project.width as usize;
+        assert_eq!(uploaded_alpha(&delta, tex, 10, 10), 255, "over the base");
+        assert_eq!(uploaded_alpha(&delta, tex, w - 10, 10), 0, "past it");
+        // Its plain cell texture is never needed.
+        assert!(!st.cell_textures.contains_key(&id));
+    }
+
+    #[test]
+    fn painting_the_base_redoes_just_that_rect_of_the_clip() {
+        let mut st = clip_state();
+        let ctx = egui::Context::default();
+        let _ = sync(&mut st, &ctx);
+        let tex = st.layer_texture(1).unwrap().1.id();
+        // Ink a block of the base's empty right half.
+        let base = st.project.layers[0].resolve(0).unwrap();
+        let w = st.project.width;
+        let c = st.project.cell_mut(base).unwrap();
+        c.dirty = None;
+        for y in 100..110u32 {
+            for x in w - 50..w - 40 {
+                let i = ((y * w + x) * 4) as usize;
+                c.pixels[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+        c.mark_dirty(w - 50, 100, 10, 10);
+        st.mark_dirty(base);
+        let delta = sync(&mut st, &ctx);
+        let (_, d) = delta.set.iter().find(|(t, _)| *t == tex).expect("clip redone");
+        assert_eq!(d.pos, Some([(w - 50) as usize, 100]), "a partial upload");
+        assert_eq!(d.image.size(), [10, 10]);
+        assert_eq!(uploaded_alpha(&delta, tex, 0, 0), 255);
+    }
+
+    #[test]
+    fn hiding_the_base_hides_the_clipped_layer_and_unclipping_restores_it() {
+        let mut st = clip_state();
+        let ctx = egui::Context::default();
+        let _ = sync(&mut st, &ctx);
+        st.project.layers[0].visible = false;
+        let _ = sync(&mut st, &ctx);
+        assert!(st.layer_texture(1).is_none());
+        st.project.layers[0].visible = true;
+        st.project.layers[1].clip = false;
+        let _ = sync(&mut st, &ctx);
+        let id = st.project.layers[1].resolve(0).unwrap();
+        assert_eq!(st.layer_texture(1).map(|(c, _)| c), Some(id));
+        assert!(st.cell_textures.contains_key(&id), "drawn plain again");
+    }
+
+    #[test]
+    fn a_stroke_on_a_clipped_layer_shows_while_it_is_drawn() {
+        let mut st = clip_state();
+        let ctx = egui::Context::default();
+        let _ = sync(&mut st, &ctx);
+        let tex = st.layer_texture(1).unwrap().1.id();
+        st.project.current_layer = 1;
+        st.dispatch(Action::ToolInk);
+        st.pointer_down(st.make_sample(20.0, 20.0, 0.0));
+        st.pointer_move(st.make_sample(60.0, 20.0, 0.1));
+        assert!(st.stroke.is_some(), "mid-stroke");
+        let delta = sync(&mut st, &ctx);
+        let (_, d) = delta.set.iter().find(|(t, _)| *t == tex).expect("clip redone mid-stroke");
+        assert!(d.pos.is_some(), "just the stroke's rect");
+        st.pointer_up();
+    }
+
+    #[test]
+    fn merging_a_clipped_layer_down_keeps_only_what_showed() {
+        let mut st = clip_state();
+        st.project.current_layer = 1;
+        assert!(st.can_merge_down());
+        st.merge_layer_down();
+        assert_eq!(st.project.layers.len(), 1);
+        let id = st.project.layers[0].resolve(0).unwrap();
+        let c = st.project.cell(id).unwrap();
+        let w = st.project.width;
+        // Merged cells may be bigger than the frame, centred on it.
+        let (ox, oy) = ((c.width - w) / 2, (c.height - st.project.height) / 2);
+        let px = |x: u32, y: u32| {
+            let i = (((y + oy) * c.width + x + ox) * 4) as usize;
+            [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+        };
+        assert_eq!(px(10, 10), [255, 0, 0, 255], "red over the base");
+        assert_eq!(px(w - 10, 10)[3], 0, "the clipped-away part stays away");
+    }
+
+    #[test]
+    fn the_layer_shortcuts_toggle_clip_and_alpha_lock() {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.dispatch(Action::LayerClipToggle);
+        st.dispatch(Action::LayerAlphaLockToggle);
+        let l = &st.project.layers[st.project.current_layer];
+        assert!(l.clip && l.alpha_lock);
+        st.dispatch(Action::LayerClipToggle);
+        assert!(!st.project.layers[st.project.current_layer].clip);
+    }
+
+    #[test]
+    fn a_stroke_on_an_alpha_locked_layer_only_recolours() {
+        let mut st = clip_state();
+        // Paint on the base, locked: its left half is ink, its right bare.
+        st.project.layers[1].clip = false;
+        st.project.current_layer = 0;
+        st.project.layers[0].alpha_lock = true;
+        st.dispatch(Action::ToolInk);
+        st.brush.color = [0, 200, 0, 255];
+        st.brush.radius = 6.0;
+        let mid = (st.project.width / 2) as f32;
+        st.pointer_down(st.make_sample(mid - 40.0, 50.0, 0.0));
+        st.pointer_move(st.make_sample(mid + 40.0, 50.0, 0.1));
+        st.pointer_up();
+        let id = st.project.layers[0].resolve(0).unwrap();
+        let c = st.project.cell(id).unwrap();
+        let px = |x: f32| {
+            let i = ((50 * c.width + x as u32) * 4) as usize;
+            [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+        };
+        assert_eq!(px(mid - 30.0), [0, 200, 0, 255], "ink recoloured");
+        assert_eq!(px(mid + 30.0)[3], 0, "bare canvas still bare");
+    }
+
+    #[test]
+    fn a_project_without_clipping_makes_no_clip_textures() {
+        let mut st = clip_state();
+        st.project.layers[1].clip = false;
+        let ctx = egui::Context::default();
+        let _ = sync(&mut st, &ctx);
+        assert!(st.clip_textures.is_empty());
+    }
 
     // --- Fill presses ---
 
@@ -5734,7 +6123,7 @@ mod tests {
 
     fn entry(id: CellId, used: u64, mb: usize) -> TexEntry {
         TexEntry {
-            ghost: false,
+            kind: TexKind::Cell,
             id,
             used,
             bytes: mb << 20,

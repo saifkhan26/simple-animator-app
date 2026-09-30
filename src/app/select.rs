@@ -518,10 +518,11 @@ impl AppState {
             return;
         };
         let color = self.brush.color;
+        let alpha_lock = self.active_alpha_lock();
         self.snapshot_pre(target);
         if let Some(c) = self.project.cell_mut(target) {
             c.dirty = None;
-            crate::tools::fill::fill_masked(c, &clip, color);
+            crate::tools::fill::fill_masked(c, &clip, color, alpha_lock);
         }
         self.mark_dirty(target);
         if self.commit_undo(target) {

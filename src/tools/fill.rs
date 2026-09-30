@@ -56,6 +56,8 @@ pub struct FillOptions {
     pub expand: u8,
     /// Treat breaks in the lines up to this many pixels wide as shut. 0 = off.
     pub gap: u8,
+    /// Recolour only pixels that already have paint, keeping their alpha.
+    pub alpha_lock: bool,
 }
 
 /// Inclusive pixel bounds, `(min_x, min_y, max_x, max_y)`.
@@ -111,6 +113,7 @@ pub struct FillSession {
     target: [u8; 4],
     tolerance: u8,
     color: [u8; 4],
+    alpha_lock: bool,
     /// Lines from another layer, already in the cell's pixels. `None` reads
     /// the cell's own pixels as they were before the press.
     boundary: Option<Canvas>,
@@ -170,6 +173,7 @@ impl FillSession {
             target,
             tolerance: opts.tolerance,
             color: opts.color,
+            alpha_lock: opts.alpha_lock,
             // Without a boundary, filling a region that already *is* the fill
             // colour is a no-op. With one, the sampled colour comes from a
             // different layer, so it says nothing about what is already painted.
@@ -218,7 +222,7 @@ impl FillSession {
         let bbox = if r > 0 {
             let grown = dilate_window(&region.mask, self.w, self.h, region.bbox, r);
             let b = grown.bbox();
-            paint(canvas, b, |x, y| grown.at(x, y), self.color, clip);
+            paint(canvas, b, |x, y| grown.at(x, y), self.color, self.alpha_lock, clip);
             b
         } else {
             let (mask, w) = (&region.mask, self.w);
@@ -227,6 +231,7 @@ impl FillSession {
                 region.bbox,
                 |x, y| mask[(y * w + x) as usize],
                 self.color,
+                self.alpha_lock,
                 clip,
             );
             region.bbox
@@ -320,9 +325,10 @@ pub fn flood_clipped(
 }
 
 /// Fill everything `mask` covers with `color` — Fill selection. Fully covered
-/// pixels are replaced, as the bucket does; a feathered edge blends. Returns
-/// whether anything was inside the canvas to fill.
-pub fn fill_masked(canvas: &mut Canvas, mask: &Mask, color: [u8; 4]) -> bool {
+/// pixels are replaced, as the bucket does; a feathered edge blends. With
+/// `alpha_lock`, only pixels that already have paint change, and keep their
+/// alpha. Returns whether anything was inside the canvas to fill.
+pub fn fill_masked(canvas: &mut Canvas, mask: &Mask, color: [u8; 4], alpha_lock: bool) -> bool {
     let (x1, y1) = (
         (mask.x + mask.w).min(canvas.width),
         (mask.y + mask.h).min(canvas.height),
@@ -332,11 +338,7 @@ pub fn fill_masked(canvas: &mut Canvas, mask: &Mask, color: [u8; 4]) -> bool {
     }
     for y in mask.y..y1 {
         for x in mask.x..x1 {
-            match mask.at(x, y) {
-                0 => {}
-                255 => write_px(canvas, x as i32, y as i32, color),
-                k => blend_toward(canvas, x as i32, y as i32, color, k as f32 / 255.0),
-            }
+            put(canvas, x as i32, y as i32, color, mask.at(x, y), alpha_lock);
         }
     }
     canvas.mark_dirty(mask.x, mask.y, x1 - mask.x, y1 - mask.y);
@@ -350,19 +352,38 @@ fn paint(
     bbox: Bbox,
     inside: impl Fn(i32, i32) -> bool,
     color: [u8; 4],
+    alpha_lock: bool,
     clip: Option<&Mask>,
 ) {
     for yi in bbox.1..=bbox.3 {
         for xi in bbox.0..=bbox.2 {
-            if !inside(xi, yi) {
-                continue;
-            }
-            match clip.map(|m| m.at(xi as u32, yi as u32)) {
-                None | Some(255) => write_px(canvas, xi, yi, color),
-                Some(0) => {}
-                Some(k) => blend_toward(canvas, xi, yi, color, k as f32 / 255.0),
+            if inside(xi, yi) {
+                let k = clip.map_or(255, |m| m.at(xi as u32, yi as u32));
+                put(canvas, xi, yi, color, k, alpha_lock);
             }
         }
+    }
+}
+
+/// Fill one pixel with `color` at coverage `k`: replaced when fully covered,
+/// blended toward it when partly. With `alpha_lock` only the colour moves —
+/// the pixel's alpha stays, and a bare pixel stays bare.
+fn put(canvas: &mut Canvas, x: i32, y: i32, color: [u8; 4], k: u8, alpha_lock: bool) {
+    if k == 0 {
+        return;
+    }
+    if alpha_lock {
+        let p = read_px(canvas, x, y);
+        if p[3] == 0 {
+            return;
+        }
+        let t = k as f32 / 255.0;
+        let mix = |c: u8, q: u8| (c as f32 * t + q as f32 * (1.0 - t)).round() as u8;
+        write_px(canvas, x, y, [mix(color[0], p[0]), mix(color[1], p[1]), mix(color[2], p[2]), p[3]]);
+    } else if k == 255 {
+        write_px(canvas, x, y, color);
+    } else {
+        blend_toward(canvas, x, y, color, k as f32 / 255.0);
     }
 }
 
@@ -894,6 +915,7 @@ mod tests {
             color: RED,
             expand,
             gap: 0,
+            alpha_lock: false,
         }
     }
 
@@ -1012,6 +1034,32 @@ mod tests {
     }
 
     #[test]
+    fn an_alpha_locked_fill_recolours_only_what_is_painted() {
+        // Same-layer bucket: a translucent grey blob in an empty canvas.
+        let mut target = Canvas::new(16, 16);
+        for y in 4..8 {
+            for x in 4..8 {
+                write_px(&mut target, x, y, [90, 90, 90, 100]);
+            }
+        }
+        let o = FillOptions {
+            alpha_lock: true,
+            ..opts(0)
+        };
+        flood(&mut target, None, 5, 5, o);
+        assert_eq!(read_px(&target, 5, 5), [255, 0, 0, 100], "recoloured, alpha kept");
+        // Clicking the empty canvas around it fills nothing.
+        flood(&mut target, None, 0, 0, o);
+        assert_eq!(read_px(&target, 0, 0)[3], 0);
+        // Fill selection obeys it too.
+        let mut t2 = Canvas::new(16, 16);
+        write_px(&mut t2, 2, 2, [90, 90, 90, 60]);
+        assert!(fill_masked(&mut t2, &left_half(255), RED, true));
+        assert_eq!(read_px(&t2, 2, 2), [255, 0, 0, 60]);
+        assert_eq!(read_px(&t2, 3, 3)[3], 0);
+    }
+
+    #[test]
     fn a_selection_holds_the_fill_inside_it() {
         let mut target = Canvas::new(16, 16);
         flood_clipped(&mut target, None, 2, 8, opts(0), Some(&left_half(255)));
@@ -1041,7 +1089,7 @@ mod tests {
     #[test]
     fn fill_selection_paints_only_the_mask() {
         let mut target = Canvas::new(16, 16);
-        assert!(fill_masked(&mut target, &left_half(255), RED));
+        assert!(fill_masked(&mut target, &left_half(255), RED, false));
         assert!(filled_at(&target, 0, 0) && filled_at(&target, 7, 15));
         assert_eq!(read_px(&target, 8, 0)[3], 0);
     }
