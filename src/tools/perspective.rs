@@ -190,6 +190,8 @@ pub enum GridGrab {
     Corner(u8),
     /// A finite vanishing point: 0 the rows', 1 the columns'.
     Vp(u8),
+    /// One of the grid's extra vanishing points, by index.
+    Extra(u8),
     Rotate,
     Move,
 }
@@ -211,9 +213,41 @@ pub struct PerspectiveGrid {
     /// Carry every grid line out to its vanishing point.
     pub extend: bool,
     pub horizon: bool,
+    /// Vanishing points beyond the two the rows and columns run to — at most
+    /// [`MAX_EXTRA_VPS`].
+    pub extra_vps: Vec<ExtraVp>,
 }
 
 pub const MAX_DIVISIONS: u32 = 64;
+
+/// Most vanishing points a grid adds to the two of its own plane, for four in
+/// all.
+pub const MAX_EXTRA_VPS: usize = 2;
+
+/// A vanishing point a grid carries besides its plane's own: somewhere else
+/// strokes can snap toward. On the horizon it is a second pair of directions
+/// on the same floor — a box turned another way. Off it, above or below, it
+/// is the third point verticals run to.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtraVp {
+    /// Frame-relative, like the corners. A point on the horizon shows at this
+    /// spot's foot on it, so it rides along as the grid is re-aimed.
+    pub pos: P,
+    pub on_horizon: bool,
+    /// Fan guide lines from it across the grid.
+    pub rays: bool,
+}
+
+impl Default for ExtraVp {
+    fn default() -> Self {
+        Self {
+            pos: [0.0, -0.5],
+            on_horizon: true,
+            rays: true,
+        }
+    }
+}
 
 impl Default for PerspectiveGrid {
     /// A floor-like trapezoid in the middle of the frame: one-point
@@ -230,6 +264,7 @@ impl Default for PerspectiveGrid {
             locked: false,
             extend: false,
             horizon: true,
+            extra_vps: Vec::new(),
         }
     }
 }
@@ -246,9 +281,69 @@ impl PerspectiveGrid {
 
     /// Rotate about the corner centroid. Frame-relative storage is a uniform
     /// scale plus a translation of document space, so rotating it directly is
-    /// the same as rotating in the document.
+    /// the same as rotating in the document. The extra vanishing points turn
+    /// with it.
     pub fn rotate(&mut self, angle: f32) {
+        let o = centroid(&self.corners);
         self.corners = rotate(&self.corners, angle);
+        for v in &mut self.extra_vps {
+            v.pos = rotate_about(o, v.pos, angle);
+        }
+    }
+
+    /// Where each extra vanishing point sits in document space for a `w`×`h`
+    /// frame: on the horizon at the foot of its spot, when it keeps to the
+    /// horizon and the grid has one, else at the spot itself.
+    pub fn extra_doc(&self, w: f32, h: f32) -> Vec<P> {
+        let horizon = Plane::new(self.doc_corners(w, h)).and_then(|p| p.horizon());
+        self.extra_vps
+            .iter()
+            .map(|v| {
+                let at = to_doc(v.pos, w, h);
+                match horizon {
+                    Some(hz) if v.on_horizon => project(hz.p, hz.d, at),
+                    _ => at,
+                }
+            })
+            .collect()
+    }
+
+    /// Add an extra vanishing point, unless the grid has all it can take. On
+    /// the horizon, well out to one side of the grid — the other side for the
+    /// second — or straight above it when the horizon is at infinity.
+    pub fn add_extra_vp(&mut self, w: f32, h: f32) -> bool {
+        if self.extra_vps.len() >= MAX_EXTRA_VPS {
+            return false;
+        }
+        let c = self.doc_corners(w, h);
+        let centre = centroid(&c);
+        let reach = spread(&c) * 3.0;
+        let side = if self.extra_vps.is_empty() { 1.0 } else { -1.0 };
+        let horizon = Plane::new(c).and_then(|p| p.horizon());
+        let (at, on_horizon) = match horizon {
+            Some(hz) => {
+                let foot = project(hz.p, hz.d, centre);
+                (add(foot, hz.d.map(|x| x * side * reach)), true)
+            }
+            None => ([centre[0], centre[1] - side * reach], false),
+        };
+        self.extra_vps.push(ExtraVp {
+            pos: from_doc(at, w, h),
+            on_horizon,
+            ..ExtraVp::default()
+        });
+        true
+    }
+
+    /// Candidate snap directions at `at` for a `w`×`h` frame: the plane's (see
+    /// [`Plane::snap_dirs`]), then toward each extra vanishing point.
+    pub fn snap_dirs(&self, w: f32, h: f32, at: P, vertical: bool) -> Vec<P> {
+        let Some(plane) = Plane::new(self.doc_corners(w, h)) else {
+            return Vec::new();
+        };
+        let mut out = plane.snap_dirs(at, vertical);
+        out.extend(self.extra_doc(w, h).into_iter().filter_map(|v| normalize(sub(v, at))));
+        out
     }
 
     // The pose below is what the grid's X / Y / Scale / Rotation fields show.
@@ -263,6 +358,9 @@ impl PerspectiveGrid {
 
     pub fn translate(&mut self, d: P) {
         self.corners = self.corners.map(|c| add(c, d));
+        for v in &mut self.extra_vps {
+            v.pos = add(v.pos, d);
+        }
     }
 
     /// Size relative to a fresh grid, which reads 1.
@@ -277,7 +375,11 @@ impl PerspectiveGrid {
             return;
         }
         let o = self.centre();
-        self.corners = self.corners.map(|c| add(o, sub(c, o).map(|x| x * k)));
+        let grow = |c: P| add(o, sub(c, o).map(|x| x * k));
+        self.corners = self.corners.map(grow);
+        for v in &mut self.extra_vps {
+            v.pos = grow(v.pos);
+        }
     }
 
     /// Heading of the grid, in radians: from the middle of its left edge to
@@ -475,11 +577,54 @@ pub fn centroid(c: &[P; 4]) -> P {
 /// Rotate the corners about their centroid.
 pub fn rotate(c: &[P; 4], angle: f32) -> [P; 4] {
     let o = centroid(c);
+    c.map(|p| rotate_about(o, p, angle))
+}
+
+fn rotate_about(o: P, p: P, angle: f32) -> P {
     let (s, co) = angle.sin_cos();
-    c.map(|p| {
-        let d = sub(p, o);
-        [o[0] + d[0] * co - d[1] * s, o[1] + d[0] * s + d[1] * co]
-    })
+    let d = sub(p, o);
+    [o[0] + d[0] * co - d[1] * s, o[1] + d[0] * s + d[1] * co]
+}
+
+/// `p` carried along by the move, turn or scale that took corners `from` to
+/// `to` — the similarity fixed by the first two corners. For a grid moved or
+/// rotated whole, which is when its extra vanishing points come along.
+pub fn carry(from: &[P; 4], to: &[P; 4], p: P) -> P {
+    let (a0, b0) = (from[0], from[1]);
+    let (a1, b1) = (to[0], to[1]);
+    let (e0, e1) = (sub(b0, a0), sub(b1, a1));
+    let n = dot(e0, e0);
+    if n <= 1e-12 {
+        return add(p, sub(a1, a0));
+    }
+    // (e1 / e0) as complex numbers: the turn and scale between the edges.
+    let (re, im) = (dot(e1, e0) / n, cross(e0, e1) / n);
+    let d = sub(p, a0);
+    [a1[0] + re * d[0] - im * d[1], a1[1] + im * d[0] + re * d[1]]
+}
+
+/// Where an extra vanishing point dragged to document point `to` lands, and
+/// whether it keeps to the horizon. One on the horizon slides along it until
+/// pulled more than `detach` off it, and is then free; a free one sticks back
+/// on once within `attach`. Without a horizon it goes where it is put.
+pub fn place_extra(
+    horizon: Option<Line>,
+    on_horizon: bool,
+    to: P,
+    detach: f32,
+    attach: f32,
+) -> (P, bool) {
+    let Some(hz) = horizon else {
+        return (to, on_horizon);
+    };
+    let foot = project(hz.p, hz.d, to);
+    let off = len(sub(to, foot));
+    let stick = if on_horizon { off <= detach } else { off <= attach };
+    if stick {
+        (foot, true)
+    } else {
+        (to, false)
+    }
 }
 
 fn inside(c: &[P; 4], p: P) -> bool {
@@ -498,10 +643,11 @@ fn inside(c: &[P; 4], p: P) -> bool {
     true
 }
 
-/// What a press at `p` grabs on a grid with corners `c`, with `tol` the
-/// handle radius in document units. Corners win, then the vanishing points,
-/// then a ring just outside the corners rotates, then anywhere inside moves.
-pub fn grab_at(c: &[P; 4], p: P, tol: f32) -> Option<GridGrab> {
+/// What a press at `p` grabs on a grid with corners `c` and extra vanishing
+/// points at `extra`, with `tol` the handle radius in document units. Corners
+/// win, then the vanishing points, then a ring just outside the corners
+/// rotates, then anywhere inside moves.
+pub fn grab_at(c: &[P; 4], extra: &[P], p: P, tol: f32) -> Option<GridGrab> {
     let (i, d) = c
         .iter()
         .enumerate()
@@ -519,6 +665,9 @@ pub fn grab_at(c: &[P; 4], p: P, tol: f32) -> Option<GridGrab> {
                 return Some(GridGrab::Vp(which));
             }
         }
+    }
+    if let Some(i) = extra.iter().position(|&v| len(sub(p, v)) <= tol * 1.5) {
+        return Some(GridGrab::Extra(i as u8));
     }
     let is_inside = inside(c, p);
     if !is_inside && d <= tol * 4.0 {
@@ -544,6 +693,8 @@ pub fn dragged(start_c: &[P; 4], grab: GridGrab, start: P, now: P, snap: bool) -
             let v0 = Plane::new(*start_c)?.vp_point(which)?;
             move_vp(start_c, which, add(v0, delta))
         }
+        // The point moves, not the grid: see `place_extra`.
+        GridGrab::Extra(_) => Some(*start_c),
         GridGrab::Rotate => {
             let o = centroid(start_c);
             let a0 = (start[1] - o[1]).atan2(start[0] - o[0]);
@@ -611,6 +762,43 @@ pub fn move_vp(c: &[P; 4], which: u8, v: P) -> Option<[P; 4]> {
     out[moving[0]] = n0;
     out[moving[1]] = n1;
     is_convex(&out).then_some(out)
+}
+
+/// Guide rays from vanishing point `v` fanned across a grid with corners `c`,
+/// as segments starting at `v`: `n + 1` of them, spread evenly in angle
+/// between the two outermost corners as seen from `v`, each running a little
+/// past the farthest corner. All the way round, `2n` of them, when `v` sits
+/// inside the grid.
+pub fn vp_rays(c: &[P; 4], v: P, n: u32) -> Vec<(P, P)> {
+    let n = n.clamp(1, MAX_DIVISIONS);
+    let reach = c.iter().map(|&k| len(sub(k, v))).fold(0.0f32, f32::max) * 1.15;
+    if reach <= 1e-6 {
+        return Vec::new();
+    }
+    // Sitting right on the centre, any heading will do to start the round.
+    let base = normalize(sub(centroid(c), v)).unwrap_or([0.0, -1.0]);
+    let (a0, a1, count) = if inside(c, v) {
+        let step = std::f32::consts::TAU / (2 * n) as f32;
+        (0.0, step * (2 * n - 1) as f32, 2 * n)
+    } else {
+        let side = |k: P| {
+            let d = sub(k, v);
+            cross(base, d).atan2(dot(base, d))
+        };
+        let (lo, hi) = c
+            .iter()
+            .map(|&k| side(k))
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), a| (lo.min(a), hi.max(a)));
+        (lo, hi, n + 1)
+    };
+    (0..count)
+        .map(|i| {
+            let a = a0 + (a1 - a0) * i as f32 / (count - 1).max(1) as f32;
+            let (s, co) = a.sin_cos();
+            let d = [base[0] * co - base[1] * s, base[0] * s + base[1] * co];
+            (v, add(v, d.map(|x| x * reach)))
+        })
+        .collect()
 }
 
 /// Of `dirs`, the one most nearly parallel to `motion` (either sense).
@@ -792,7 +980,7 @@ mod tests {
 
     #[test]
     fn a_vanishing_point_is_grabbable_and_drags() {
-        assert_eq!(grab_at(&TRAP, [51.0, -24.0], 5.0), Some(GridGrab::Vp(1)));
+        assert_eq!(grab_at(&TRAP, &[], [51.0, -24.0], 5.0), Some(GridGrab::Vp(1)));
         let moved =
             dragged(&TRAP, GridGrab::Vp(1), [51.0, -24.0], [61.0, -24.0], false).unwrap();
         let p = Plane::new(moved).unwrap();
@@ -832,22 +1020,22 @@ mod tests {
     #[test]
     fn grab_priority_is_corner_then_ring_then_inside() {
         let sq = [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]];
-        assert_eq!(grab_at(&sq, [2.0, 3.0], 5.0), Some(GridGrab::Corner(0)));
-        assert_eq!(grab_at(&sq, [101.0, 99.0], 5.0), Some(GridGrab::Corner(2)));
-        assert_eq!(grab_at(&sq, [-10.0, -10.0], 5.0), Some(GridGrab::Rotate));
+        assert_eq!(grab_at(&sq, &[], [2.0, 3.0], 5.0), Some(GridGrab::Corner(0)));
+        assert_eq!(grab_at(&sq, &[], [101.0, 99.0], 5.0), Some(GridGrab::Corner(2)));
+        assert_eq!(grab_at(&sq, &[], [-10.0, -10.0], 5.0), Some(GridGrab::Rotate));
         // Inside near a corner, but past the handle: a move, not a rotate.
-        assert_eq!(grab_at(&sq, [12.0, 12.0], 5.0), Some(GridGrab::Move));
-        assert_eq!(grab_at(&sq, [50.0, 50.0], 5.0), Some(GridGrab::Move));
-        assert_eq!(grab_at(&sq, [200.0, 50.0], 5.0), None);
+        assert_eq!(grab_at(&sq, &[], [12.0, 12.0], 5.0), Some(GridGrab::Move));
+        assert_eq!(grab_at(&sq, &[], [50.0, 50.0], 5.0), Some(GridGrab::Move));
+        assert_eq!(grab_at(&sq, &[], [200.0, 50.0], 5.0), None);
     }
 
     #[test]
     fn grabbing_follows_a_rotation() {
         let sq = [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]];
         let r = rotate(&sq, 0.5);
-        assert_eq!(grab_at(&r, r[1], 5.0), Some(GridGrab::Corner(1)));
+        assert_eq!(grab_at(&r, &[], r[1], 5.0), Some(GridGrab::Corner(1)));
         assert_eq!(
-            grab_at(&r, sq[1], 5.0),
+            grab_at(&r, &[], sq[1], 5.0),
             None,
             "the old corner spot is empty"
         );
@@ -971,5 +1159,144 @@ mod tests {
         assert_eq!(cfg.active, 0);
         cfg.remove(0);
         assert!(cfg.grids.is_empty() && cfg.active_grid().is_none());
+    }
+
+    // --- Extra vanishing points ---
+
+    const W: f32 = 1000.0;
+    const H: f32 = 1000.0;
+
+    fn grid(c: [P; 4]) -> PerspectiveGrid {
+        let mut g = PerspectiveGrid::default();
+        g.set_doc_corners(c, W, H);
+        g
+    }
+
+    /// How far `p` is off `g`'s horizon, in document units.
+    fn off_horizon(g: &PerspectiveGrid, p: P) -> f32 {
+        let hz = Plane::new(g.doc_corners(W, H)).unwrap().horizon().unwrap();
+        cross(hz.d, sub(p, hz.p)).abs()
+    }
+
+    #[test]
+    fn an_extra_vp_lands_on_the_horizon_and_rides_it_when_the_grid_is_reaimed() {
+        let mut g = grid(QUAD);
+        assert!(g.add_extra_vp(W, H));
+        let v = g.extra_doc(W, H)[0];
+        assert!(off_horizon(&g, v) < 1e-2);
+        assert!(len(sub(v, centroid(&QUAD))) > 100.0, "well out to the side");
+        // Tilt the plane: the point follows the new horizon.
+        let mut c = QUAD;
+        c[2] = [85.0, 60.0];
+        g.set_doc_corners(c, W, H);
+        assert!(off_horizon(&g, g.extra_doc(W, H)[0]) < 1e-2);
+    }
+
+    #[test]
+    fn a_grid_takes_two_extra_vps_one_to_each_side() {
+        let mut g = grid(QUAD);
+        assert!(g.add_extra_vp(W, H) && g.add_extra_vp(W, H));
+        assert!(!g.add_extra_vp(W, H), "four in all");
+        let [a, b] = [g.extra_doc(W, H)[0], g.extra_doc(W, H)[1]];
+        let hz = Plane::new(QUAD).unwrap().horizon().unwrap();
+        let c = project(hz.p, hz.d, centroid(&QUAD));
+        assert!(dot(sub(a, c), hz.d) * dot(sub(b, c), hz.d) < 0.0, "opposite sides");
+        // With the horizon at infinity there is no side: straight up instead.
+        let mut flat = grid([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+        flat.add_extra_vp(W, H);
+        assert!(!flat.extra_vps[0].on_horizon);
+        assert!(flat.extra_doc(W, H)[0][1] < 0.0);
+    }
+
+    #[test]
+    fn pulling_an_extra_vp_off_the_horizon_frees_it_and_near_it_sticks_again() {
+        let hz = Some(Line { p: [0.0, 0.0], d: [1.0, 0.0] });
+        // On the horizon: slides along it, however the pointer wanders...
+        assert_eq!(place_extra(hz, true, [50.0, 30.0], 40.0, 10.0), ([50.0, 0.0], true));
+        // ...until pulled past the detach distance.
+        assert_eq!(place_extra(hz, true, [50.0, 45.0], 40.0, 10.0), ([50.0, 45.0], false));
+        // Free: stays free until it comes close.
+        assert_eq!(place_extra(hz, false, [50.0, 30.0], 40.0, 10.0), ([50.0, 30.0], false));
+        assert_eq!(place_extra(hz, false, [50.0, -8.0], 40.0, 10.0), ([50.0, 0.0], true));
+        // No horizon: wherever it is put.
+        assert_eq!(place_extra(None, true, [5.0, 6.0], 40.0, 10.0), ([5.0, 6.0], true));
+    }
+
+    #[test]
+    fn moving_turning_and_scaling_a_grid_carries_its_extra_vps() {
+        let mut g = grid(QUAD);
+        g.extra_vps.push(ExtraVp {
+            pos: from_doc([300.0, -200.0], W, H),
+            on_horizon: false,
+            rays: true,
+        });
+        let before = g.extra_doc(W, H)[0];
+        let o = to_doc(g.centre(), W, H);
+        g.translate([0.01, 0.02]);
+        assert!(close(g.extra_doc(W, H)[0], add(before, [10.0, 20.0])));
+        let o = add(o, [10.0, 20.0]);
+        let at = g.extra_doc(W, H)[0];
+        g.rotate(0.5);
+        assert!(close(g.extra_doc(W, H)[0], rotate_about(o, at, 0.5)));
+        let at = g.extra_doc(W, H)[0];
+        g.scale_by(2.0);
+        assert!(close(g.extra_doc(W, H)[0], add(o, sub(at, o).map(|x| x * 2.0))));
+    }
+
+    #[test]
+    fn carry_follows_a_whole_grid_move_or_turn() {
+        let p = [300.0, -40.0];
+        let moved = QUAD.map(|c| add(c, [7.0, -3.0]));
+        assert!(close(carry(&QUAD, &moved, p), add(p, [7.0, -3.0])));
+        let turned = rotate(&QUAD, 0.3);
+        assert!(close(carry(&QUAD, &turned, p), rotate_about(centroid(&QUAD), p, 0.3)));
+    }
+
+    #[test]
+    fn extra_vps_are_grabbed_after_the_planes_own() {
+        let c = QUAD;
+        let extra = [[400.0, -300.0]];
+        assert_eq!(grab_at(&c, &extra, [401.0, -299.0], 4.0), Some(GridGrab::Extra(0)));
+        // A corner still wins where both are in reach.
+        assert_eq!(grab_at(&c, &[[11.0, 5.0]], [10.0, 5.0], 4.0), Some(GridGrab::Corner(0)));
+        // Dragging one leaves the corners alone.
+        assert_eq!(dragged(&c, GridGrab::Extra(0), [0.0, 0.0], [50.0, 50.0], false), Some(c));
+    }
+
+    #[test]
+    fn strokes_can_snap_toward_an_extra_vp() {
+        let mut g = grid(QUAD);
+        let plain = g.snap_dirs(W, H, [50.0, 50.0], false).len();
+        g.extra_vps.push(ExtraVp {
+            pos: from_doc([50.0, -500.0], W, H),
+            on_horizon: false,
+            rays: false,
+        });
+        let dirs = g.snap_dirs(W, H, [50.0, 50.0], false);
+        assert_eq!(dirs.len(), plain + 1);
+        assert!(close(*dirs.last().unwrap(), [0.0, -1.0]));
+    }
+
+    #[test]
+    fn rays_fan_between_the_outermost_corners() {
+        let c = [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]];
+        let v = [50.0, -100.0];
+        let rays = vp_rays(&c, v, 4);
+        assert_eq!(rays.len(), 5);
+        assert!(rays.iter().all(|&(a, _)| a == v));
+        // The outer two run through the corners widest apart as seen from
+        // the point — from above a square, its near two.
+        let through = |(a, b): (P, P), k: P| {
+            let (d, e) = (sub(b, a), sub(k, a));
+            cross(d, e).abs() / (len(d) * len(e)) < 1e-3
+        };
+        assert!(through(rays[0], c[0]) || through(rays[0], c[1]));
+        assert!(through(rays[4], c[0]) || through(rays[4], c[1]));
+        assert!(!through(rays[0], c[1]) || !through(rays[4], c[1]), "not both the same");
+        // Past the farthest corner.
+        let far = len(sub(c[2], v));
+        assert!(rays.iter().all(|&(a, b)| len(sub(b, a)) > far));
+        // Inside the grid: all the way round.
+        assert_eq!(vp_rays(&c, [50.0, 50.0], 4).len(), 8);
     }
 }

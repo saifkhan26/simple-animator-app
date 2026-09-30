@@ -213,7 +213,14 @@ struct GridDrag {
     grab: GridGrab,
     start: [f32; 2],
     corners: [[f32; 2]; 4],
+    /// The extra vanishing points where they showed at the press.
+    extra: [Option<[f32; 2]>; perspective::MAX_EXTRA_VPS],
 }
+
+/// Screen points an extra vanishing point on the horizon can be pulled off it
+/// before it lets go, and how near a free one has to come to stick back on.
+const HORIZON_DETACH_PX: f32 = 40.0;
+const HORIZON_ATTACH_PX: f32 = 10.0;
 
 /// Perspective snap state for one stroke: where it started, and — once the
 /// pointer has moved far enough to tell — the grid direction it is locked to.
@@ -3518,16 +3525,22 @@ impl AppState {
                 continue;
             }
             let corners = g.doc_corners(w, h);
-            let Some(grab) = perspective::grab_at(&corners, p, tol) else {
+            let extra_at = g.extra_doc(w, h);
+            let Some(grab) = perspective::grab_at(&corners, &extra_at, p, tol) else {
                 continue;
             };
             self.perspective.active = i;
             if !g.locked {
+                let mut extra = [None; perspective::MAX_EXTRA_VPS];
+                for (slot, &v) in extra.iter_mut().zip(&extra_at) {
+                    *slot = Some(v);
+                }
                 self.grid_drag = Some(GridDrag {
                     grid: i,
                     grab,
                     start: p,
                     corners,
+                    extra,
                 });
             }
             return;
@@ -3535,19 +3548,47 @@ impl AppState {
     }
 
     /// Perspective tool drag to document point `p`. A corner drag that would
-    /// fold the quad leaves it where it last was.
+    /// fold the quad leaves it where it last was. Moving or turning the whole
+    /// grid carries its extra vanishing points along; reshaping it leaves them
+    /// be, and those on the horizon ride it wherever it goes.
     pub fn perspective_move(&mut self, p: [f32; 2]) {
         let Some(d) = self.grid_drag else {
             return;
         };
         let (w, h) = self.frame_size();
         let snap = self.shift_held;
-        if let (Some(c), Some(g)) = (
-            perspective::dragged(&d.corners, d.grab, d.start, p, snap),
-            self.perspective.grids.get_mut(d.grid),
-        ) {
-            g.set_doc_corners(c, w, h);
+        let px = 1.0 / self.view_scale.max(1e-6);
+        let Some(g) = self.perspective.grids.get_mut(d.grid) else {
+            return;
+        };
+        if let GridGrab::Extra(i) = d.grab {
+            let (Some(from), Some(v)) = (d.extra[i as usize], g.extra_vps.get(i as usize)) else {
+                return;
+            };
+            let to = [from[0] + p[0] - d.start[0], from[1] + p[1] - d.start[1]];
+            let horizon = perspective::Plane::new(g.doc_corners(w, h)).and_then(|pl| pl.horizon());
+            let (at, on_horizon) = perspective::place_extra(
+                horizon,
+                v.on_horizon,
+                to,
+                HORIZON_DETACH_PX * px,
+                HORIZON_ATTACH_PX * px,
+            );
+            g.extra_vps[i as usize].pos = perspective::from_doc(at, w, h);
+            g.extra_vps[i as usize].on_horizon = on_horizon;
+            return;
         }
+        let Some(c) = perspective::dragged(&d.corners, d.grab, d.start, p, snap) else {
+            return;
+        };
+        if matches!(d.grab, GridGrab::Move | GridGrab::Rotate) {
+            for (v, from) in g.extra_vps.iter_mut().zip(d.extra) {
+                if let Some(from) = from {
+                    v.pos = perspective::from_doc(perspective::carry(&d.corners, &c, from), w, h);
+                }
+            }
+        }
+        g.set_doc_corners(c, w, h);
     }
 
     /// Whether the active grid is up for snapping to: switched on, shown, and
@@ -3651,8 +3692,7 @@ impl AppState {
                 let dirs = self
                     .perspective
                     .active_grid()
-                    .and_then(|g| perspective::Plane::new(g.doc_corners(w, h)))
-                    .map(|plane| plane.snap_dirs(lock.start, self.perspective.snap_vertical))
+                    .map(|g| g.snap_dirs(w, h, lock.start, self.perspective.snap_vertical))
                     .unwrap_or_default();
                 let Some(d) = perspective::pick_dir(&dirs, motion) else {
                     // A degenerate grid has nothing to snap to.
@@ -5838,6 +5878,71 @@ mod tests {
         // Across the far diagonal: the quad would fold.
         state.perspective_move([50.0, 250.0]);
         assert_eq!(doc_corners(&state, 0), ok);
+    }
+
+    #[test]
+    fn an_extra_vp_slides_along_the_horizon_until_pulled_off_and_sticks_back() {
+        let mut state = perspective_state();
+        let (w, h) = state.frame_size();
+        // One-point floor: a level horizon through (150, 66.7).
+        let trap = [[140.0, 100.0], [160.0, 100.0], [250.0, 400.0], [50.0, 400.0]];
+        state.perspective.grids[0].set_doc_corners(trap, w, h);
+        assert!(state.perspective.grids[0].add_extra_vp(w, h));
+        let at = |state: &AppState| state.perspective.grids[0].extra_doc(w, h)[0];
+        let v0 = at(&state);
+        let level = 200.0 / 3.0;
+        assert!((v0[1] - level).abs() < 0.1, "{v0:?}");
+
+        // Grab it and wander: it keeps to the horizon.
+        state.perspective_down(v0);
+        state.perspective_move([v0[0] + 30.0, v0[1] + 20.0]);
+        assert!(near(at(&state), [v0[0] + 30.0, level]), "{:?}", at(&state));
+        // Pulled well off, it comes free and follows the pointer.
+        state.perspective_move([v0[0] + 30.0, v0[1] + 60.0]);
+        assert!(near(at(&state), [v0[0] + 30.0, v0[1] + 60.0]));
+        assert!(!state.perspective.grids[0].extra_vps[0].on_horizon);
+        state.pointer_up();
+
+        // Brought back near the horizon, it sticks again.
+        let v1 = at(&state);
+        state.perspective_down(v1);
+        state.perspective_move([v1[0], level + 6.0]);
+        assert!(near(at(&state), [v1[0], level]));
+        assert!(state.perspective.grids[0].extra_vps[0].on_horizon);
+    }
+
+    #[test]
+    fn moving_a_grid_takes_its_extra_vps_along() {
+        let mut state = perspective_state();
+        let (w, h) = state.frame_size();
+        // Seen square-on the horizon is at infinity: the point goes above.
+        assert!(state.perspective.grids[0].add_extra_vp(w, h));
+        let before = state.perspective.grids[0].extra_doc(w, h)[0];
+        state.perspective_down([150.0, 150.0]);
+        state.perspective_move([160.0, 170.0]);
+        state.pointer_up();
+        let after = state.perspective.grids[0].extra_doc(w, h)[0];
+        assert!(near(after, [before[0] + 10.0, before[1] + 20.0]), "{after:?}");
+    }
+
+    #[test]
+    fn a_stroke_heading_for_an_extra_vp_locks_onto_it() {
+        let mut state = perspective_state();
+        let (w, h) = state.frame_size();
+        state.perspective.grids[0]
+            .extra_vps
+            .push(crate::tools::perspective::ExtraVp {
+                pos: perspective::from_doc([450.0, 450.0], w, h),
+                on_horizon: false,
+                rays: false,
+            });
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        state.snap_begin([150.0, 150.0]);
+        // Heading down-right, on the diagonal to (450, 450), not along the
+        // square's rows or columns.
+        assert!(near(state.snap_doc([170.0, 172.0]), [171.0, 171.0]));
     }
 
     #[test]
