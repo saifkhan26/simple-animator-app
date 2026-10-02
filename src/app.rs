@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use eframe::CreationContext;
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
+use crate::color::{Harmony, HarmonySet};
 use crate::doc::camera::{Camera, Ease};
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
@@ -364,6 +365,9 @@ struct UiPrefs {
     bg_color: [f32; 3],
     bg_opacity: f32,
     show_checker: bool,
+    /// The Color panel's harmony scheme. Only the scheme persists: the set
+    /// is rebuilt around the brush colour each launch.
+    harmony: Harmony,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -454,6 +458,7 @@ impl Default for UiPrefs {
             bg_color: DEFAULT_BG_COLOR,
             bg_opacity: 1.0,
             show_checker: false,
+            harmony: Harmony::default(),
         }
     }
 }
@@ -565,6 +570,7 @@ pub enum PanelId {
     Xsheet,
     Timeline,
     Camera,
+    Color,
 }
 
 impl Default for NewProjectConfig {
@@ -718,6 +724,9 @@ pub struct AppState {
     /// Pinned swatches, most recently added last. Capped at
     /// [`AppState::MAX_SWATCHES`].
     pub palette: Vec<[u8; 3]>,
+    /// The Color panel's harmony set. Its scheme is a workspace preference;
+    /// the base follows the brush colour.
+    pub harmony: HarmonySet,
     /// Saved New project presets. Like `palette`, a new project keeps them.
     pub project_presets: Vec<ProjectPreset>,
     /// Drawing clipboard: one cell's pixels, cut or copied from a slot. Held
@@ -1095,6 +1104,10 @@ impl AppState {
             brush: restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()]
                 .clone(),
             palette: prefs.palette,
+            harmony: {
+                let c = restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()].color;
+                HarmonySet::new(prefs.harmony, [c[0], c[1], c[2]])
+            },
             project_presets: prefs.project_presets,
             cell_clip: None,
             track_sel: BTreeSet::new(),
@@ -3962,13 +3975,24 @@ impl AppState {
     /// no-op rather than a duplicate.
     pub fn pin_swatch(&mut self) {
         let c = self.brush.color;
-        let rgb = [c[0], c[1], c[2]];
+        self.pin_rgb([c[0], c[1], c[2]]);
+    }
+
+    /// Pin `rgb` unless it is already held; past the cap the oldest drops.
+    pub fn pin_rgb(&mut self, rgb: [u8; 3]) {
         if self.palette.contains(&rgb) {
             return;
         }
         self.palette.push(rgb);
         if self.palette.len() > Self::MAX_SWATCHES {
             self.palette.remove(0);
+        }
+    }
+
+    /// Pin every colour of a harmony set, in order, skipping ones held.
+    pub fn pin_set(&mut self, colors: &[[u8; 3]]) {
+        for &rgb in colors {
+            self.pin_rgb(rgb);
         }
     }
 
@@ -4694,6 +4718,7 @@ impl eframe::App for AppState {
                 bg_color: self.bg_color,
                 bg_opacity: self.bg_opacity,
                 show_checker: self.show_checker,
+                harmony: self.harmony.scheme,
             },
         );
     }
