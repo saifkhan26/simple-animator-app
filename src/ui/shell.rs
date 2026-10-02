@@ -1423,6 +1423,11 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
             );
     });
 
+    if state.brush.mode == BrushMode::Krita {
+        krita_brush_summary(state, ui);
+        return;
+    }
+
     ui.add(egui::Slider::new(&mut state.brush.hardness, 0.0..=1.0).text("Hardness"))
         .on_hover_text("Fraction of the radius that stays fully solid.");
     ui.add(egui::Slider::new(&mut state.brush.softness, 0.2..=4.0).text("Softness"))
@@ -1470,6 +1475,41 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
         ui.add(egui::Slider::new(&mut state.brush.tilt_size, 0.0..=1.0).text("Tilt → size"));
     });
     if dab && !state.pen.pen_active() {
+        ui.label(
+            egui::RichText::new("Tilt needs a tablet — mouse input reports none.")
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+    }
+}
+
+/// What a Krita preset does, in place of the sliders it does not use: its
+/// response is the preset's own, so the only controls that still apply are
+/// Size and Opacity, which act as Krita's.
+fn krita_brush_summary(state: &AppState, ui: &mut egui::Ui) {
+    use crate::tools::krita::KritaPreset;
+    let (name, lines): (&str, &[&str]) = match state.brush.krita {
+        KritaPreset::Pencil5Tilted => (
+            "Krita · Pencil-5 Tilted",
+            &[
+                "Size ← tilt: a quarter size upright, full size laid flat",
+                "Rotation ← the way the pen leans",
+                "Opacity ← pressure, on the preset's curve",
+                "Paper texture, stronger the harder you press",
+                "Builds up dab by dab in 8 bits, as Krita does",
+            ],
+        ),
+    };
+    ui.label(egui::RichText::new(name).strong());
+    for l in lines {
+        ui.label(egui::RichText::new(*l).small());
+    }
+    ui.label(
+        egui::RichText::new("Size and Opacity work as Krita's own sliders.")
+            .small()
+            .color(theme::TEXT_MUTED),
+    );
+    if !state.pen.pen_active() {
         ui.label(
             egui::RichText::new("Tilt needs a tablet — mouse input reports none.")
                 .small()
@@ -1553,6 +1593,25 @@ fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
     );
     diag_row(ui, "pressure", format!("{:.3}", d.pressure));
     diag_row(ui, "tilt", format!("{:.1}, {:.1} deg", d.tilt.0, d.tilt.1));
+    {
+        // The same tilt as a Krita brush reads it: whole degrees, then its
+        // elevation and direction sensors.
+        use crate::tools::krita::{qt_tilt, sensors};
+        let info = sensors::PaintInfo {
+            x_tilt: qt_tilt(d.tilt.0) as f64,
+            y_tilt: qt_tilt(d.tilt.1) as f64,
+            ..Default::default()
+        };
+        diag_row(
+            ui,
+            "krita tilt",
+            format!(
+                "elevation {:.2}, direction {:.0} deg",
+                sensors::tilt_elevation(&info, 60.0, 60.0, true),
+                sensors::tilt_direction(&info, false).to_degrees()
+            ),
+        );
+    }
     diag_row(
         ui,
         "map x",
@@ -3779,8 +3838,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // Live-tail overlay: the committed stroke is already streamed into the
     // cell texture via partial uploads, so only the short uncommitted span
     // between the last rasterized spine node and the cursor needs an overlay
-    // (it hides the one-sample Catmull-Rom commit lag).
-    if let Some(ref builder) = state.stroke {
+    // (it hides the one-sample Catmull-Rom commit lag). Not for a Krita brush:
+    // a solid band would be nothing like its dabs, and Krita shows no tail.
+    if let Some(builder) = state.stroke.as_ref().filter(|b| b.brush.mode != BrushMode::Krita) {
         if let (Some((tail, _)), Some(cur)) = (builder.live_tail(), builder.current_node()) {
             let is_eraser = builder.tool == crate::tools::ActiveTool::Eraser;
             let a = builder.brush.opacity.clamp(0.0, 1.0);
@@ -4690,6 +4750,55 @@ fn pie_wedge(
     painter.add(egui::Shape::closed_line(edge, stroke));
 }
 
+/// A Krita preset's cursor: its tip's outline, as Krita draws it. For
+/// Pencil-5 that is the bar, turned by the way the pen leans and grown as it
+/// tilts, exactly as the next dab would be. Hovering reads as full pressure,
+/// as in Krita; mid-stroke it is the pen's own.
+fn draw_krita_outline(state: &AppState, painter: &egui::Painter, canvas_rect: Rect, pos: egui::Pos2) {
+    let xf = Xform::new(state, canvas_rect);
+    let packet = state.pen.last_packet().filter(|_| state.pen.pen_active());
+    let tilt = packet.map_or((0.0, 0.0), |p| (p.tilt_x, p.tilt_y));
+    let pressure = match (state.stroke.is_some(), packet) {
+        (true, Some(p)) => p.pressure,
+        _ => 1.0,
+    };
+    let (rotation, mirrored) = state.cell_screen_orientation();
+    let corners = state.brush.krita.brush().outline(
+        state.effective_radius() as f64 * 2.0,
+        pressure,
+        tilt,
+        rotation,
+        mirrored,
+    );
+
+    // The corners sit around the pointer in the cell's pixels: find the cell
+    // point under it, then map each corner back out through the layer and
+    // the view, so zoom, rotation and flips all come along.
+    let li = state.project.current_layer;
+    let f = state.project.current_frame;
+    let t = state.display_transform(li, f);
+    let (cw, ch) = state.project.draw_cell_size(li, f);
+    let (cw, ch) = (cw as f32, ch as f32);
+    let (pw, ph) = (state.project.width as f32, state.project.height as f32);
+    let doc = xf.screen_to_doc(pos);
+    let (u, v) = t.doc_to_cell(doc.0, doc.1, cw, ch, pw, ph);
+    let outline: Vec<egui::Pos2> = corners
+        .iter()
+        .map(|&(dx, dy)| {
+            let (x, y) = t.cell_to_doc(u + dx as f32, v + dy as f32, cw, ch, pw, ph);
+            xf.doc_to_screen(x, y)
+        })
+        .collect();
+
+    // Black under white, so it shows on any drawing.
+    let white = theme::white_alpha(220);
+    let black = theme::premul(0, 0, 0, 180);
+    painter.add(egui::Shape::closed_line(outline.clone(), Stroke::new(2.5, black)));
+    painter.add(egui::Shape::closed_line(outline, Stroke::new(1.0, white)));
+    painter.circle_filled(pos, 1.2, white);
+    painter.circle_stroke(pos, 1.2, Stroke::new(0.6, black));
+}
+
 /// Paint the active tool's cursor preview on top of the canvas.
 /// Pencil/Ink/Eraser → outline circle sized by brush radius (in doc px → screen
 /// px via current canvas scale). Eraser shown with a dashed inner ring.
@@ -4703,6 +4812,11 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
     let black = theme::premul(0, 0, 0, 180);
 
     match state.tool {
+        ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser
+            if state.brush.mode == BrushMode::Krita =>
+        {
+            draw_krita_outline(state, &painter, canvas_rect, pos);
+        }
         ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser => {
             // Effective radius scales with pressure (mouse = 1.0 always).
             let pressure = state.pen.current_pressure().unwrap_or(1.0);
@@ -7348,5 +7462,131 @@ mod button_drag_tests {
         let ctx = egui::Context::default();
         frame(&ctx, &mut state, vec![]);
         frame(&ctx, &mut state, vec![]);
+    }
+}
+
+/// The Krita brush through the real UI: the preset is offered, its summary
+/// replaces the sliders it does not use, and a drag on the canvas paints
+/// with it as one undoable stroke.
+#[cfg(test)]
+mod krita_brush_tests {
+    use super::*;
+    use crate::tools::BrushSettings;
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 900.0));
+
+    fn run(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                _ => {}
+            }
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for s in ctx.run(raw, |ctx| draw(state, ctx)).shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    fn button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn the_krita_pencil_is_offered_and_paints_through_the_canvas() {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolPencil);
+        state.show_brush_settings = true;
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        run(&ctx, &mut state, vec![]);
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "Pencil-5"), "preset button");
+        assert!(!t.iter().any(|s| s.starts_with("Krita · ")), "no summary yet");
+
+        state.brush = BrushSettings::pencil5_krita();
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "Krita · Pencil-5 Tilted"), "{t:?}");
+        assert!(!t.iter().any(|s| s == "Hardness"), "sliders it ignores are gone");
+
+        state.show_brush_settings = false;
+        run(&ctx, &mut state, vec![]);
+        let id = state.project.ensure_active_cell();
+        let from = Xform::new(&state, SCREEN).doc_to_screen(300.0, 300.0);
+        run(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=30 {
+            run(&ctx, &mut state, vec![egui::Event::PointerMoved(from + vec2(i as f32 * 6.0, 0.0))]);
+        }
+        run(&ctx, &mut state, vec![button(from + vec2(180.0, 0.0), false)]);
+        run(&ctx, &mut state, vec![]);
+
+        let c = state.project.cell(id).unwrap();
+        let painted = c.pixels.chunks(4).filter(|p| p[3] > 0).count();
+        assert!(painted > 100, "painted {painted} pixels");
+        assert_eq!(state.history.undo_len(), 1, "one stroke, one undo step");
+    }
+
+    /// Every closed outline one frame drew.
+    fn closed_paths(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) -> Vec<Vec<Pos2>> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<Vec<Pos2>>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Path(p) if p.closed => out.push(p.points.clone()),
+                _ => {}
+            }
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for s in ctx.run(raw, |ctx| draw(state, ctx)).shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// Over the canvas a Krita brush shows its tip's outline — a thin
+    /// rectangle round the pointer — instead of the round brush ring.
+    #[test]
+    fn the_krita_pencil_cursor_is_its_tip_outline() {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolPencil);
+        state.brush = BrushSettings::pencil5_krita();
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        closed_paths(&ctx, &mut state, vec![]);
+        let at = Xform::new(&state, SCREEN).doc_to_screen(300.0, 300.0);
+        let paths = closed_paths(&ctx, &mut state, vec![egui::Event::PointerMoved(at)]);
+        // The canvas frame is a closed rectangle too; the outline is the one
+        // round the pointer.
+        let around = |r: &&Vec<Pos2>| {
+            let mid = (r[0].to_vec2() + r[2].to_vec2()) / 2.0;
+            (mid - at.to_vec2()).length() < 3.0
+        };
+        let rects: Vec<_> = paths.iter().filter(|p| p.len() == 4).filter(around).collect();
+        assert!(!rects.is_empty(), "no outline round the pointer among {paths:?}");
+        for r in rects {
+            let (a, b) = ((r[1] - r[0]).length(), (r[2] - r[1]).length());
+            assert!(a.max(b) > 3.0 * a.min(b), "a thin bar: {a} x {b}");
+        }
     }
 }

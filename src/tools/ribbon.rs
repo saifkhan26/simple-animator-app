@@ -149,6 +149,17 @@ impl StrokeWorkspace {
         self.clip = clip;
     }
 
+    /// The selection the current stroke is held to, for painters that write
+    /// the canvas themselves rather than through the coverage buffer.
+    pub fn clip(&self) -> Option<&Arc<Mask>> {
+        self.clip.as_ref()
+    }
+
+    /// Whether the current stroke's layer has its alpha locked.
+    pub fn alpha_lock(&self) -> bool {
+        self.alpha_lock
+    }
+
     /// `rect` cut down to the clip's box — outside it nothing is composited,
     /// so those pixels still equal `pre`. `None` when nothing is left.
     fn clipped(&self, rect: DirtyRect) -> Option<DirtyRect> {

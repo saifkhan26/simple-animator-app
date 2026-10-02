@@ -1425,6 +1425,25 @@ impl AppState {
         }
     }
 
+    /// How the active cell is turned on screen: its rotation in degrees,
+    /// clockwise, with any mirroring factored out, and whether the view is
+    /// mirrored on each axis. This is Krita's "canvas rotation": its tilt
+    /// sensors measure the pen on screen, and a Krita brush corrects by it.
+    pub fn cell_screen_orientation(&self) -> (f64, (bool, bool)) {
+        let view_rot = if self.camera_look_through {
+            -self.display_camera(self.project.current_frame).rot
+        } else {
+            self.view.rotation
+        };
+        let layer_rot = self
+            .display_transform(self.project.current_layer, self.project.current_frame)
+            .rot;
+        // A mirror turns the layer's rotation the other way on screen.
+        let flipped_once = self.view.flip_x != self.view.flip_y;
+        let rot = view_rot + if flipped_once { -layer_rot } else { layer_rot };
+        ((rot as f64).to_degrees(), (self.view.flip_x, self.view.flip_y))
+    }
+
     /// Screen pixels per *active-cell* pixel: the view scale folded with the
     /// active layer's own scale, since strokes are rasterized in cell space.
     /// Mirrors the `scale * layer_scale` product the canvas uses for previews.
@@ -3215,6 +3234,8 @@ impl AppState {
         brush.radius = self.effective_radius();
         let mut builder =
             StrokeBuilder::new(brush, self.tool, self.cell_view_scale(), self.smoothing);
+        let (rotation, mirrored) = self.cell_screen_orientation();
+        builder.orient(rotation, mirrored);
         builder.push(sample);
         if let (Some(pre), Some(c)) = (
             self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
