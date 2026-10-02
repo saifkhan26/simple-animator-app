@@ -2,6 +2,7 @@
 
 pub mod dab;
 pub mod fill;
+pub mod krita;
 pub mod lasso;
 pub mod perspective;
 pub mod paper;
@@ -116,6 +117,10 @@ pub enum BrushMode {
     /// darken, which is what makes graphite read as graphite rather than as
     /// flat fill.
     Dab,
+    /// A real Krita preset on Krita's own pixel-brush engine
+    /// ([`krita`]): its tip, sensors, texture and 8-bit build-up, painted
+    /// dab by dab straight onto the layer. Which preset is `krita`.
+    Krita,
 }
 
 /// How a ribbon stroke ends, at pen-down and at pen-up.
@@ -196,6 +201,10 @@ pub struct BrushSettings {
     pub tilt_size: f32,
     /// Rasterization model. See [`BrushMode`].
     pub mode: BrushMode,
+    /// The Krita preset `Krita` mode paints with. Its own curves, tip and
+    /// texture replace everything above except radius (Krita's size),
+    /// opacity (its opacity slider) and colour.
+    pub krita: krita::KritaPreset,
     /// Shape of the stroke's two ends. `Ribbon` mode only: a dab brush's
     /// coverage builds up, so its ends cannot be re-cut after the fact.
     pub cap: StrokeCap,
@@ -235,6 +244,7 @@ impl Default for BrushSettings {
             tilt_elongation: 0.0,
             tilt_size: 0.0,
             mode: BrushMode::Ribbon,
+            krita: krita::KritaPreset::default(),
             cap: StrokeCap::Round,
             fill_tolerance: 16,
             fill_expand: 0,
@@ -304,6 +314,21 @@ impl BrushSettings {
             tilt_elongation: 0.75,
             tilt_size: 0.6,
             mode: BrushMode::Dab,
+            ..Self::default()
+        }
+    }
+
+    /// Krita's own `Pencil-5_Tilted`, on the Krita engine: the gradient bar
+    /// tip turned with the pen's lean and grown as it tilts, opacity from
+    /// pressure, the preset's paper texture. The radius is half Krita's
+    /// 40 px brush size.
+    pub fn pencil5_krita() -> Self {
+        let b = krita::KritaPreset::Pencil5Tilted.brush();
+        Self {
+            radius: (b.diameter() / 2.0) as f32,
+            opacity: 1.0,
+            mode: BrushMode::Krita,
+            krita: krita::KritaPreset::Pencil5Tilted,
             ..Self::default()
         }
     }
@@ -383,8 +408,9 @@ impl BrushSettings {
     }
 
     /// Presets offered in the brush panel, as (label, tooltip, builder).
-    /// Starting points matched to the Krita brushes they are named after, not
-    /// bit-exact copies of them.
+    /// Most are starting points matched to the Krita brushes they are named
+    /// after, not copies of them; "Pencil-5" is the Krita preset itself, on
+    /// the Krita engine.
     pub const PRESETS: &'static [(&'static str, &'static str, fn() -> Self)] = &[
         (
             "Pencil",
@@ -401,6 +427,13 @@ impl BrushSettings {
             "Shading pencil: lean the pen and the dab flattens across the lean. \
              After Krita's Pencil-5_Tilted. Needs a tilt-capable tablet.",
             BrushSettings::pencil_tilted,
+        ),
+        (
+            "Pencil-5",
+            "Krita's own Pencil-5 Tilted preset, painted the way Krita paints it: the \
+             bar tip turns with the pen's lean and widens as it tilts, pressure sets how \
+             dark, over Krita's paper texture. Needs a tilt-capable tablet.",
+            BrushSettings::pencil5_krita,
         ),
         (
             "G-Pen",

@@ -23,6 +23,7 @@
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::input::pointer::PointerSample;
 use crate::tools::dab::Dab;
+use crate::tools::krita::{qt_tilt, KritaStroke};
 use crate::tools::ribbon::{union_rect, CapPlane, SpineNode, StrokeWorkspace};
 use crate::tools::{
     ActiveTool, BrushMode, BrushSettings, Smoothing, SmoothingOptions, StrokeCap,
@@ -96,6 +97,12 @@ pub struct StrokeBuilder {
     /// filter specify its width in the units the hand and the device actually
     /// work in. Latched per stroke — see `AppState::cell_view_scale`.
     view_scale: f32,
+    /// The Krita engine's side of a `Krita`-mode stroke: its own spacing
+    /// walker and the dabs waiting to be painted.
+    krita: Option<KritaStroke>,
+    /// Some segment has been handed to the walker: Krita's
+    /// `hasPaintAtLeastOnce`, which decides how a stroke ends.
+    painted_once: bool,
 }
 
 impl StrokeBuilder {
@@ -110,7 +117,20 @@ impl StrokeBuilder {
             BrushMode::Ribbon => (brush.radius * 0.3).max(1.0),
             // A starting guess at full size; the first stamp replaces it.
             BrushMode::Dab => (brush.radius * 2.0 * brush.spacing).max(0.5),
+            // Unused: the Krita engine walks its own spacing.
+            BrushMode::Krita => 1.0,
         };
+        let krita = (brush.mode == BrushMode::Krita).then(|| {
+            KritaStroke::new(
+                brush.krita,
+                brush.radius as f64 * 2.0,
+                brush.color,
+                brush.opacity as f64,
+                tool == ActiveTool::Eraser,
+                0.0,
+                (false, false),
+            )
+        });
         Self {
             brush,
             tool,
@@ -133,6 +153,26 @@ impl StrokeBuilder {
             dot_pending: false,
             smooth_pos: None,
             smooth_pressure: None,
+            krita,
+            painted_once: false,
+        }
+    }
+
+    /// Tell a Krita-mode stroke how the view is turned: the rotation of
+    /// canvas space on screen, degrees clockwise, and whether it is
+    /// mirrored. Krita's tilt-direction rotation is measured on screen and
+    /// corrected by this. Call before the first sample.
+    pub fn orient(&mut self, rotation_deg: f64, mirrored: (bool, bool)) {
+        if let Some(k) = &mut self.krita {
+            *k = KritaStroke::new(
+                self.brush.krita,
+                self.brush.radius as f64 * 2.0,
+                self.brush.color,
+                self.brush.opacity as f64,
+                self.tool == ActiveTool::Eraser,
+                rotation_deg,
+                mirrored,
+            );
         }
     }
 
@@ -141,7 +181,12 @@ impl StrokeBuilder {
     /// Painting trails input by one sample, because the Bezier through
     /// `older -> previous` is only determined once the sample after
     /// `previous` has arrived.
-    pub fn push(&mut self, s: PointerSample) {
+    pub fn push(&mut self, mut s: PointerSample) {
+        if self.krita.is_some() {
+            // Krita gets tilt from Qt in whole degrees.
+            s.tilt_x = qt_tilt(s.tilt_x);
+            s.tilt_y = qt_tilt(s.tilt_y);
+        }
         // Drop duplicate positions (egui emits zero-delta moves, and a
         // stationary pen still reports pressure changes). Expressed in screen
         // pixels so it means the same thing at every zoom.
@@ -158,8 +203,12 @@ impl StrokeBuilder {
 
         let Some(previous) = self.previous else {
             // Pen-down: ink immediately, exactly where the user pressed.
-            self.emit(&info);
-            self.dot_pending = true;
+            // Krita does not: its first dab comes half a pixel along the
+            // first segment, or at pen-up for a stroke that never moved.
+            if self.krita.is_none() {
+                self.emit(&info);
+                self.dot_pending = true;
+            }
             self.previous = Some(info);
             return;
         };
@@ -203,6 +252,13 @@ impl StrokeBuilder {
     ) -> Option<DirtyRect> {
         let mut acc: Option<DirtyRect> = None;
 
+        // Krita paints each dab straight onto the layer as it goes, the
+        // pen-down dab included; there is no coverage to composite.
+        if let Some(k) = &mut self.krita {
+            self.dot_pending = false;
+            return k.drain(canvas, ws.clip(), ws.alpha_lock());
+        }
+
         // Pen-down dot: instant ink with zero latency. A lone disc rather
         // than a capsule, so it is rasterized here rather than by `drain`.
         if self.dot_pending {
@@ -210,6 +266,7 @@ impl StrokeBuilder {
             let first = match self.brush.mode {
                 BrushMode::Dab => self.dabs.first().and_then(|&d| ws.raster_dab(d)),
                 BrushMode::Ribbon => self.spine.first().and_then(|&n| ws.raster_dot(n)),
+                BrushMode::Krita => None,
             };
             self.raster_from = 1;
             if let Some(r) = first {
@@ -244,6 +301,20 @@ impl StrokeBuilder {
     ) -> Option<DirtyRect> {
         let mut acc = self.flush(canvas, ws, pre);
 
+        // Krita's `endPaint`: a stroke that never handed the walker a
+        // segment gets one dab where the pen last was; one that did gets
+        // its held-back segment closed, as below, if it smooths at all.
+        if self.krita.is_some() {
+            if !self.painted_once {
+                if let (Some(k), Some(last)) = (&mut self.krita, self.previous) {
+                    k.paint_at(&last);
+                }
+                self.have_tangent = false;
+            } else if self.opts.kind == Smoothing::None {
+                self.have_tangent = false;
+            }
+        }
+
         // Krita's `finishStroke`: the segment `older -> previous` has been
         // held back waiting for a sample that will never come, so close it
         // with a tangent derived from the two points in hand.
@@ -253,6 +324,14 @@ impl StrokeBuilder {
                 let new_tangent = tangent(older, previous);
                 self.paint_bezier_segment(older, previous, self.previous_tangent, new_tangent);
             }
+        }
+
+        // Krita stops at the last whole step: no extra dab on the end point.
+        if let Some(k) = &mut self.krita {
+            if let Some(r) = k.drain(canvas, ws.clip(), ws.alpha_lock()) {
+                acc = Some(union_rect(acc, r));
+            }
+            return acc;
         }
 
         // Land the spine exactly on the stroke's end point. The spacing walker
@@ -522,6 +601,7 @@ impl StrokeBuilder {
         pi2: PointerSample,
         depth: u32,
     ) {
+        self.painted_once = true;
         let p1 = (pi1.x, pi1.y);
         let p2 = (pi2.x, pi2.y);
         let d1 = line_distance(control1, p1, p2);
@@ -555,11 +635,15 @@ impl StrokeBuilder {
     /// step. The leftover distance carries into the next call, so spacing is
     /// uniform across segment and curve boundaries alike.
     fn paint_line(&mut self, from: PointerSample, to: PointerSample) {
+        self.painted_once = true;
         let mut cur = from;
         // The walker always makes progress or returns -1, but a cap costs
         // nothing and turns a hypothetical hang into a dropped segment.
         for _ in 0..100_000 {
-            let t = self.next_point_position((cur.x, cur.y), (to.x, to.y));
+            let t = match &mut self.krita {
+                Some(k) => k.next_point((cur.x, cur.y), (to.x, to.y)),
+                None => self.next_point_position((cur.x, cur.y), (to.x, to.y)),
+            };
             if t < 0.0 {
                 return;
             }
@@ -604,7 +688,9 @@ impl StrokeBuilder {
         };
         self.arc.push(arc);
         self.spine.push(n);
-        if self.brush.mode == BrushMode::Dab {
+        if let Some(k) = &mut self.krita {
+            k.paint_at(s);
+        } else if self.brush.mode == BrushMode::Dab {
             let d = Dab::from_sample(&self.brush, s);
             self.spacing = d.spacing(&self.brush);
             self.dabs.push(d);
@@ -622,6 +708,8 @@ impl StrokeBuilder {
                 }
                 self.raster_from = self.dabs.len().max(self.raster_from);
             }
+            // Drained by `KritaStroke` itself, onto the canvas.
+            BrushMode::Krita => {}
             BrushMode::Ribbon => {
                 for j in self.raster_from.max(1)..self.spine.len() {
                     if let Some(r) = ws.raster_capsule(self.spine[j - 1], self.spine[j]) {
@@ -1386,6 +1474,276 @@ mod tests {
         assert!(a.pixels == b.pixels);
     }
 
+    // --- Krita engine ------------------------------------------------------
+
+    /// One straight stroke with a Krita brush: `n` samples from `from` to
+    /// `to`, flushed after each like the app does. A zero-length stroke is
+    /// a tap.
+    #[allow(clippy::too_many_arguments)]
+    fn krita_stroke(
+        canvas: &mut Canvas,
+        brush: BrushSettings,
+        tool: ActiveTool,
+        from: (f32, f32),
+        to: (f32, f32),
+        pressure: f32,
+        tilt: (f32, f32),
+        setup: impl FnOnce(&mut StrokeWorkspace),
+        rotation_deg: f64,
+    ) {
+        let pre = canvas.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(canvas.width, canvas.height, &brush);
+        setup(&mut ws);
+        let mut b = StrokeBuilder::new(brush, tool, 1.0, SmoothingOptions::default());
+        b.orient(rotation_deg, (false, false));
+        let n = 40;
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            b.push(PointerSample {
+                x: from.0 + (to.0 - from.0) * t,
+                y: from.1 + (to.1 - from.1) * t,
+                pressure,
+                tilt_x: tilt.0,
+                tilt_y: tilt.1,
+                t: 0.0,
+            });
+            b.flush(canvas, &mut ws, &pre);
+        }
+        b.finish(canvas, &mut ws, &pre);
+    }
+
+    /// Total alpha, and its variance along x and along y.
+    fn spread(c: &Canvas) -> (f64, f64, f64) {
+        let (mut n, mut sx, mut sy, mut xx, mut yy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for y in 0..c.height {
+            for x in 0..c.width {
+                let a = c.pixels[((y * c.width + x) * 4 + 3) as usize] as f64;
+                let (fx, fy) = (x as f64, y as f64);
+                n += a;
+                sx += fx * a;
+                sy += fy * a;
+                xx += fx * fx * a;
+                yy += fy * fy * a;
+            }
+        }
+        let (mx, my) = (sx / n, sy / n);
+        (n, xx / n - mx * mx, yy / n - my * my)
+    }
+
+    #[test]
+    fn krita_pencil_paints_only_its_colour_and_is_deterministic() {
+        let mut brush = BrushSettings::pencil5_krita();
+        brush.color = [30, 60, 90, 255];
+        let draw = || {
+            let mut c = Canvas::new(200, 120);
+            krita_stroke(
+                &mut c,
+                brush.clone(),
+                ActiveTool::Pencil,
+                (30.0, 60.0),
+                (170.0, 60.0),
+                0.8,
+                (40.0, 10.0),
+                |_| {},
+                0.0,
+            );
+            c
+        };
+        let a = draw();
+        let painted = a.pixels.chunks(4).filter(|p| p[3] > 0).count();
+        assert!(painted > 500, "painted {painted}");
+        assert!(a
+            .pixels
+            .chunks(4)
+            .filter(|p| p[3] > 0)
+            .all(|p| p[..3] == [30, 60, 90]));
+        assert_eq!(a.pixels, draw().pixels);
+    }
+
+    /// Pencil-5's size follows tilt elevation: a quarter size upright, full
+    /// size laid flat. A tap shows it without the stroke's own length.
+    #[test]
+    fn krita_pencil_grows_as_the_pen_tilts() {
+        let tap = |tilt: (f32, f32)| {
+            let mut c = Canvas::new(120, 120);
+            krita_stroke(
+                &mut c,
+                BrushSettings::pencil5_krita(),
+                ActiveTool::Pencil,
+                (60.0, 60.0),
+                (60.0, 60.0),
+                1.0,
+                tilt,
+                |_| {},
+                0.0,
+            );
+            let (_, vx, vy) = spread(&c);
+            vx + vy
+        };
+        let upright = tap((0.0, 0.0));
+        let flat = tap((60.0, 0.0));
+        assert!(flat > upright * 6.0, "upright spread {upright}, flat {flat}");
+    }
+
+    /// The tip is a thin bar that turns with the lean: leaning towards x and
+    /// towards y lays the bar at right angles to each other.
+    #[test]
+    fn krita_pencil_turns_with_the_lean() {
+        let tap = |tilt: (f32, f32), rot: f64| {
+            let mut c = Canvas::new(120, 120);
+            krita_stroke(
+                &mut c,
+                BrushSettings::pencil5_krita(),
+                ActiveTool::Pencil,
+                (60.0, 60.0),
+                (60.0, 60.0),
+                1.0,
+                tilt,
+                |_| {},
+                rot,
+            );
+            let (_, vx, vy) = spread(&c);
+            vx / vy
+        };
+        let lean_x = tap((60.0, 0.0), 0.0);
+        let lean_y = tap((0.0, 60.0), 0.0);
+        assert!(
+            (lean_x > 3.0 && lean_y < 1.0 / 3.0) || (lean_x < 1.0 / 3.0 && lean_y > 3.0),
+            "{lean_x} {lean_y}"
+        );
+        // A quarter turn of the view turns the dab a quarter the other way
+        // in the canvas, so on screen it keeps its angle to the pen.
+        let lean_x_turned = tap((60.0, 0.0), 90.0);
+        assert!((lean_x > 1.0) != (lean_x_turned > 1.0), "{lean_x} vs {lean_x_turned}");
+    }
+
+    /// Krita puts no dab down at pen-down: the first comes half a pixel
+    /// along the first segment, and a stroke that never moves gets its one
+    /// dab at pen-up.
+    #[test]
+    fn krita_pencil_starts_and_ends_like_krita() {
+        let brush = BrushSettings::pencil5_krita();
+        let mut c = Canvas::new(120, 120);
+        let pre = c.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(c.width, c.height, &brush);
+        let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+        let at = |x: f32| PointerSample {
+            x,
+            y: 60.0,
+            pressure: 1.0,
+            tilt_x: 0.0,
+            tilt_y: 60.0,
+            t: 0.0,
+        };
+        b.push(at(60.0));
+        assert!(b.flush(&mut c, &mut ws, &pre).is_none(), "painted at pen-down");
+        assert!(c.pixels.iter().all(|&v| v == 0));
+        b.finish(&mut c, &mut ws, &pre);
+        assert!(c.pixels.chunks(4).any(|p| p[3] > 0), "a tap must still leave a dab");
+    }
+
+    #[test]
+    fn krita_pencil_honours_selection_and_alpha_lock() {
+        let mut c = Canvas::new(160, 80);
+        let clip = std::sync::Arc::new(crate::tools::lasso::Mask {
+            x: 0,
+            y: 0,
+            w: 80,
+            h: 80,
+            cov: vec![255; 80 * 80],
+        });
+        krita_stroke(
+            &mut c,
+            BrushSettings::pencil5_krita(),
+            ActiveTool::Pencil,
+            (20.0, 40.0),
+            (140.0, 40.0),
+            1.0,
+            (60.0, 0.0),
+            |ws| ws.set_clip(Some(clip.clone())),
+            0.0,
+        );
+        let outside = (0..80u32)
+            .flat_map(|y| (80..160u32).map(move |x| (x, y)))
+            .any(|(x, y)| c.pixels[((y * 160 + x) * 4 + 3) as usize] > 0);
+        assert!(!outside, "painted outside the selection");
+        let inside = c.pixels.chunks(4).filter(|p| p[3] > 0).count();
+        assert!(inside > 100, "painted nothing inside the selection");
+
+        let mut c = Canvas::new(160, 80);
+        c.pixels[((40 * 160 + 50) * 4 + 3) as usize] = 255;
+        krita_stroke(
+            &mut c,
+            BrushSettings::pencil5_krita(),
+            ActiveTool::Pencil,
+            (20.0, 40.0),
+            (140.0, 40.0),
+            1.0,
+            (60.0, 0.0),
+            |ws| ws.set_alpha_lock(true),
+            0.0,
+        );
+        let painted = c.pixels.chunks(4).filter(|p| p[3] > 0).count();
+        assert_eq!(painted, 1, "alpha lock must not add paint");
+    }
+
+    #[test]
+    fn krita_eraser_takes_alpha_away() {
+        let mut c = Canvas::new(160, 80);
+        for px in c.pixels.chunks_mut(4) {
+            px.copy_from_slice(&[10, 10, 10, 255]);
+        }
+        krita_stroke(
+            &mut c,
+            BrushSettings::pencil5_krita(),
+            ActiveTool::Eraser,
+            (20.0, 40.0),
+            (140.0, 40.0),
+            1.0,
+            (60.0, 0.0),
+            |_| {},
+            0.0,
+        );
+        let min = c.pixels.chunks(4).map(|p| p[3]).min().unwrap();
+        assert!(min < 255, "nothing erased");
+        assert!(c.pixels.chunks(4).all(|p| p[3] == 0 || p[..3] == [10, 10, 10]));
+    }
+
+    /// A full-tilt diagonal across a 1080p cell, timed. Spacing and the dab
+    /// cache keep it well inside a frame's budget per flush.
+    #[test]
+    fn krita_pencil_across_1080p_is_quick() {
+        let mut c = Canvas::new(1920, 1080);
+        let brush = BrushSettings::pencil5_krita();
+        let pre = c.pixels.clone();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(c.width, c.height, &brush);
+        let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+        let t0 = std::time::Instant::now();
+        let mut worst = std::time::Duration::ZERO;
+        let n = 400;
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            b.push(PointerSample {
+                x: 40.0 + t * 1840.0,
+                y: 40.0 + t * 1000.0,
+                pressure: 0.9,
+                tilt_x: 50.0 * (t * 9.0).cos(),
+                tilt_y: 50.0 * (t * 9.0).sin(),
+                t: 0.0,
+            });
+            let f0 = std::time::Instant::now();
+            b.flush(&mut c, &mut ws, &pre);
+            worst = worst.max(f0.elapsed());
+        }
+        b.finish(&mut c, &mut ws, &pre);
+        let dt = t0.elapsed();
+        println!("1080p Pencil-5 diagonal: {dt:?} total, worst flush {worst:?}");
+        assert!(dt.as_secs_f64() < 3.0, "{dt:?}");
+    }
+
     /// Render every preset as a stroke on a grey ground, for eyeballing brush
     /// feel against a reference. Ignored by default — it writes a file:
     ///
@@ -1402,20 +1760,28 @@ mod tests {
         let Ok(path) = std::env::var("PREVIEW_OUT") else {
             panic!("set PREVIEW_OUT to the .png to write");
         };
-        let (w, h) = (900u32, 560u32);
+        let (w, h) = (900u32, 1070u32);
         let mut canvas = Canvas::new(w, h);
         for px in canvas.pixels.chunks_mut(4) {
             px.copy_from_slice(&[205, 205, 205, 255]);
         }
 
         // (brush, tilt in degrees, peak pressure)
-        let rows: [(BrushSettings, (f32, f32), f32); 6] = [
+        let rows: [(BrushSettings, (f32, f32), f32); 12] = [
             (BrushSettings::default_pencil(), (0.0, 0.0), 1.0),
             (BrushSettings::default_pencil(), (0.0, 0.0), 0.45),
             (BrushSettings::pencil_4b(), (0.0, 0.0), 1.0),
             (BrushSettings::pencil_tilted(), (0.0, 0.0), 1.0),
             (BrushSettings::pencil_tilted(), (55.0, 20.0), 1.0),
             (BrushSettings::default_ink(), (0.0, 0.0), 1.0),
+            // Krita's Pencil-5 Tilted: upright, half tilted, flat, in
+            // three directions, and light.
+            (BrushSettings::pencil5_krita(), (0.0, 0.0), 1.0),
+            (BrushSettings::pencil5_krita(), (30.0, 0.0), 1.0),
+            (BrushSettings::pencil5_krita(), (60.0, 0.0), 1.0),
+            (BrushSettings::pencil5_krita(), (0.0, 60.0), 1.0),
+            (BrushSettings::pencil5_krita(), (-42.0, 42.0), 1.0),
+            (BrushSettings::pencil5_krita(), (60.0, 0.0), 0.4),
         ];
         for (i, (brush, tilt, peak)) in rows.into_iter().enumerate() {
             sheet_stroke(&mut canvas, brush, 60.0 + i as f32 * 85.0, tilt, peak);

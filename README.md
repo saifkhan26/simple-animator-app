@@ -25,6 +25,10 @@ threads except export.
   *Hold* deletes a key so the previous one persists ("on 2s/3s" workflow).
 - **Tools** — Pencil, Ink, Eraser, Flood Fill, Shape, Lasso select, Tracker.
   Each tool ships with a default pressure curve and brush settings.
+- **Krita's Pencil-5 Tilted**, the real preset on a port of Krita's pixel
+  brush: its bar tip turns with the pen's lean and widens as it tilts,
+  pressure sets how dark, over Krita's own paper texture, built up in 8 bits
+  the way Krita paints. *Brush settings → Preset → Pencil-5*.
 - **Selections, Krita-style** — lasso, box, ellipse or polygon; add to,
   remove from or intersect them; every stroke and fill stays inside. Move,
   cut, copy and paste the selected pixels between frames and layers.
