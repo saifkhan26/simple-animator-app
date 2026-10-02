@@ -35,6 +35,9 @@ threads except export.
 - **Flip the view** horizontally or vertically as a drawing check. Never
   touches the document.
 - **Pinned colour swatches**, remembered across runs.
+- **Colour wheel with harmonies** — an HSL wheel in the Color panel that lays
+  Complementary, Monochromatic, Analogous, Triadic or Tetradic colours around
+  the one you pick. Every colour in the app reads and pastes as `hsl(…)`.
 - **Tablet pressure** on Windows via Wintab (Wacom, Huion, XP-Pen, Gaomon, …)
   — auto-detected. Falls back to mouse (constant pressure) when no driver
   found.
@@ -96,7 +99,7 @@ the window; double-click it to toggle maximize.
 ## Drawing
 
 1. Pick a tool in the **Tools** window.
-2. Set color in the **Brush** window.
+2. Set color in the **Brush** window, or on the wheel in the **Color** window.
 3. Drag on the canvas to draw on the currently-selected layer's currently-
    visible cell.
 
@@ -258,6 +261,29 @@ keyed at that slot, or `·` for a hold.
 The Brush panel keeps a strip of pinned colours under the picker: `+` pins the
 current colour, a click selects one, right-click removes it. Up to 32, saved
 with your preferences, so a palette follows you between projects.
+
+## Colour wheel
+
+The **Color** panel is an HSL wheel: hue goes round the disc, saturation runs
+out from the centre, and the bar beside it is lightness. Pick a scheme and the
+wheel shows every colour of the set as a dot:
+
+- **Complementary** — the opposite hue.
+- **Monochromatic** — five lightnesses of one hue. They share a dot on the
+  disc; their ticks on the lightness bar set the step.
+- **Analogous** — the neighbours either side.
+- **Triadic** — three hues a third of the wheel apart.
+- **Tetradic** — two complementary pairs, a rectangle on the wheel.
+
+Click a swatch under the wheel to paint with it; the set stays where it is.
+Drag the base dot (or press bare disc) to move the whole set; drag a side dot
+of Analogous or Tetradic to widen or narrow it. H / S / L fields set the
+current colour exactly, and **Pin set** adds the whole set to your swatches.
+The set rebuilds around the brush colour whenever it changes elsewhere
+(eyedropper, a swatch, Paste). The scheme is remembered; the set is not.
+
+Every colour button in the app opens the same wheel. Colours show as
+`hsl(h, s%, l%)`, and **Paste** takes `hsl(…)`, `rgb(…)` or `#hex`.
 
 ## Onion skin
 

@@ -5,6 +5,7 @@ use egui::{Align, Color32, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as ic;
 
 use crate::app::{AppState, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
+use crate::color::{fmt_rgb, parse_color};
 use crate::doc::camera::Ease;
 use crate::doc::layer::CellId;
 use crate::input::button_drag::{self, ButtonDrag};
@@ -16,7 +17,7 @@ use crate::tools::fill;
 use crate::tools::select_mask::{self, SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing, StrokeCap};
-use crate::ui::{expr, theme};
+use crate::ui::{color_wheel, expr, theme};
 
 /// Tooltip text including the currently-bound shortcut (e.g. "Pencil  (Q)").
 fn tip(state: &AppState, action: Action, base: &str) -> String {
@@ -53,6 +54,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         // Left: tools + brush.  Right: layers / onion / x-sheet.  Bottom: timeline.
         panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, resized);
         panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 232.0, true, resized);
+        panel_window(state, ctx, PanelId::Color, [12.0, COLOR_PANEL_Y], 232.0, true, resized);
         panel_window(state, ctx, PanelId::Layers, [1004.0, 48.0], 252.0, true, resized);
         panel_window(state, ctx, PanelId::Onion, [1004.0, 300.0], 252.0, false, resized);
         panel_window(state, ctx, PanelId::Camera, [1004.0, 400.0], 252.0, false, resized);
@@ -558,26 +560,22 @@ fn draw_screen_pick_loupe(
     painter.rect_stroke(cpix, 0.0, Stroke::new(0.5, Color32::WHITE));
     painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_gray(90)));
 
-    // Hex readout + swatch below the loupe.
+    // HSL readout + swatch below the loupe.
     let (swatch, label) = match color {
-        Some(c) => (
-            Color32::from_rgb(c[0], c[1], c[2]),
-            format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]),
-        ),
+        Some(c) => (Color32::from_rgb(c[0], c[1], c[2]), fmt_rgb([c[0], c[1], c[2]])),
         None => (Color32::from_gray(40), "—".to_string()),
     };
-    let bar = Rect::from_min_size(egui::pos2(rect.min.x, rect.max.y + 4.0), Vec2::new(size, 22.0));
+    let galley = painter.layout_no_wrap(label, egui::FontId::monospace(13.0), Color32::WHITE);
+    // `hsl(360, 100%, 100%)` is wider than the loupe, so the bar grows to fit.
+    // It grows away from the cursor, so it stays out of the sampled region.
+    let bar_w = size.max(galley.size().x + 32.0);
+    let bar_x = if rect.min.x < cursor.x { rect.max.x - bar_w } else { rect.min.x };
+    let bar = Rect::from_min_size(egui::pos2(bar_x, rect.max.y + 4.0), Vec2::new(bar_w, 22.0));
     painter.rect_filled(bar, 4.0, theme::premul(10, 11, 14, 235));
     let sw = Rect::from_min_size(bar.min + Vec2::new(5.0, 4.0), Vec2::splat(14.0));
     painter.rect_filled(sw, 2.0, swatch);
     painter.rect_stroke(sw, 2.0, Stroke::new(1.0, Color32::from_gray(90)));
-    painter.text(
-        bar.min + Vec2::new(26.0, 3.0),
-        egui::Align2::LEFT_TOP,
-        label,
-        egui::FontId::monospace(13.0),
-        Color32::WHITE,
-    );
+    painter.galley(bar.min + Vec2::new(26.0, 3.0), galley, Color32::WHITE);
 }
 
 /// Icon + title for a panel.
@@ -590,6 +588,7 @@ fn panel_meta(id: PanelId) -> (&'static str, &'static str) {
         PanelId::Xsheet => (ic::TABLE, "X-sheet"),
         PanelId::Timeline => (ic::FILM_STRIP, "Timeline"),
         PanelId::Camera => (ic::VIDEO_CAMERA, "Camera"),
+        PanelId::Color => (ic::PALETTE, "Color"),
     }
 }
 
@@ -689,6 +688,10 @@ fn timeline_wheel_scrub(state: &mut AppState, ctx: &egui::Context) {
 /// Trackpad scroll (in points) that counts as one wheel notch.
 const POINTS_PER_SCRUB_NOTCH: f32 = 24.0;
 
+/// Default top of the Color panel: just under Brush in the left column,
+/// clear of the timeline, which starts further right.
+const COLOR_PANEL_Y: f32 = 546.0;
+
 /// Stable egui Id for a panel window. Without this the Id is hashed from the
 /// window's title — which embeds a phosphor glyph — so bumping the icon font or
 /// editing a title in `panel_meta` would silently orphan every saved position.
@@ -701,6 +704,7 @@ fn panel_key(id: PanelId) -> &'static str {
         PanelId::Xsheet => "panel_xsheet",
         PanelId::Timeline => "panel_timeline",
         PanelId::Camera => "panel_camera",
+        PanelId::Color => "panel_color",
     }
 }
 
@@ -714,6 +718,7 @@ fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, i
         PanelId::Xsheet => xsheet_content(state, ui),
         PanelId::Timeline => timeline_content(state, ctx, ui),
         PanelId::Camera => camera_content(state, ui),
+        PanelId::Color => color_wheel::color_panel(state, ui),
     }
 }
 
@@ -1047,7 +1052,7 @@ fn swatch_strip(state: &mut AppState, ui: &mut egui::Ui) {
                     ui.close_menu();
                 }
             });
-            resp.on_hover_text(format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]));
+            resp.on_hover_text(fmt_rgb(rgb));
         }
         let full = state.palette.len() >= AppState::MAX_SWATCHES;
         let held = state.palette.contains(&cur);
@@ -1077,31 +1082,15 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
             theme::section_header(ui, ic::PALETTE, "Color");
             ui.horizontal(|ui| {
-                let mut rgba = [
-                    state.brush.color[0] as f32 / 255.0,
-                    state.brush.color[1] as f32 / 255.0,
-                    state.brush.color[2] as f32 / 255.0,
-                ];
-                if ui.color_edit_button_rgb(&mut rgba).changed() {
-                    state.brush.color[0] = (rgba[0] * 255.0).round() as u8;
-                    state.brush.color[1] = (rgba[1] * 255.0).round() as u8;
-                    state.brush.color[2] = (rgba[2] * 255.0).round() as u8;
+                let c = state.brush.color;
+                let mut rgb = [c[0], c[1], c[2]];
+                if color_wheel::hsl_edit_button(ui, &mut rgb).changed() {
+                    state.set_brush_color(rgb);
                 }
-                ui.label(format!(
-                    "#{:02X}{:02X}{:02X}",
-                    state.brush.color[0], state.brush.color[1], state.brush.color[2]
-                ));
-            });
-            ui.horizontal(|ui| {
-                let rgb = state.brush.color;
-                ui.label(format!("rgb({}, {}, {})", rgb[0], rgb[1], rgb[2]));
-                if ui.button("Paste").clicked() {
-                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                        if let Ok(s) = cb.get_text() {
-                            if let Some([r, g, b, _]) = parse_rgb(&s) {
-                                state.set_brush_color([r, g, b]);
-                            }
-                        }
+                ui.label(fmt_rgb(rgb));
+                if paste_button(ui) {
+                    if let Some(rgb) = clipboard_color() {
+                        state.set_brush_color(rgb);
                     }
                 }
             });
@@ -1127,28 +1116,15 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::Slider::new(&mut state.bg_opacity, 0.0..=1.0).text("Opacity"));
-                        ui.color_edit_button_rgb(&mut state.bg_color);
+                        color_wheel::hsl_edit_button_f32(ui, &mut state.bg_color);
                     });
                     ui.checkbox(&mut state.show_checker, "Checker backdrop");
                     ui.horizontal(|ui| {
-                        let r = (state.bg_color[0] * 255.0).round() as u8;
-                        let g = (state.bg_color[1] * 255.0).round() as u8;
-                        let b = (state.bg_color[2] * 255.0).round() as u8;
-                        ui.label(
-                            egui::RichText::new(format!("rgb({r}, {g}, {b})"))
-                                .color(theme::TEXT_MUTED),
-                        );
-                        if ui.button("Paste").clicked() {
-                            if let Ok(mut cb) = arboard::Clipboard::new() {
-                                if let Ok(s) = cb.get_text() {
-                                    if let Some([r, g, b, _]) = parse_rgb(&s) {
-                                        state.bg_color = [
-                                            r as f32 / 255.0,
-                                            g as f32 / 255.0,
-                                            b as f32 / 255.0,
-                                        ];
-                                    }
-                                }
+                        let rgb = state.bg_color.map(|c| (c * 255.0).round() as u8);
+                        ui.label(egui::RichText::new(fmt_rgb(rgb)).color(theme::TEXT_MUTED));
+                        if paste_button(ui) {
+                            if let Some(rgb) = clipboard_color() {
+                                state.bg_color = rgb.map(|c| c as f32 / 255.0);
                             }
                         }
                     });
@@ -3242,16 +3218,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
 
 fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3]) {
     ui.horizontal(|ui| {
-        let mut rgb = [
-            c[0] as f32 / 255.0,
-            c[1] as f32 / 255.0,
-            c[2] as f32 / 255.0,
-        ];
-        if ui.color_edit_button_rgb(&mut rgb).changed() {
-            c[0] = (rgb[0] * 255.0).round() as u8;
-            c[1] = (rgb[1] * 255.0).round() as u8;
-            c[2] = (rgb[2] * 255.0).round() as u8;
-        }
+        color_wheel::hsl_edit_button(ui, c);
         ui.label(label);
     });
 }
@@ -3436,7 +3403,7 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
         });
     });
     ui.horizontal(|ui| {
-        ui.color_edit_button_srgb(&mut g.color);
+        color_wheel::hsl_edit_button(ui, &mut g.color);
         ui.add(egui::Slider::new(&mut g.opacity, 0.05..=1.0).text("Opacity"));
     });
     ui.add(egui::Slider::new(&mut g.weight, 0.5..=4.0).text("Line weight"));
@@ -4988,20 +4955,17 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
     }
 }
 
-/// Parse a color string like `"rgb(157, 89, 76)"` into RGBA bytes.
-/// Returns `[r, g, b, 255]` on success, `None` on parse failure.
-fn parse_rgb(text: &str) -> Option<[u8; 4]> {
-    let text = text.trim();
-    let inner = text
-        .strip_prefix("rgb(")
-        .or_else(|| text.strip_prefix("RGB("))
-        .or_else(|| text.strip_prefix("Rgb("))?
-        .strip_suffix(")")?;
-    let mut parts = inner.split(',');
-    let r = parts.next()?.trim().parse::<u8>().ok()?;
-    let g = parts.next()?.trim().parse::<u8>().ok()?;
-    let b = parts.next()?.trim().parse::<u8>().ok()?;
-    Some([r, g, b, 255])
+/// The Paste button beside a colour readout.
+fn paste_button(ui: &mut egui::Ui) -> bool {
+    ui.button("Paste")
+        .on_hover_text("Paste a colour copied as hsl(…), rgb(…) or #hex")
+        .clicked()
+}
+
+/// The colour on the clipboard, in any form [`parse_color`] reads.
+fn clipboard_color() -> Option<[u8; 3]> {
+    let text = arboard::Clipboard::new().ok()?.get_text().ok()?;
+    parse_color(&text)
 }
 
 fn canvas_to_doc_mapping(state: &AppState, rect: Rect) -> impl Fn(egui::Pos2) -> (f32, f32) + Copy {
@@ -7588,5 +7552,35 @@ mod krita_brush_tests {
             let (a, b) = ((r[1] - r[0]).length(), (r[2] - r[1]).length());
             assert!(a.max(b) > 3.0 * a.min(b), "a thin bar: {a} x {b}");
         }
+    }
+}
+
+#[cfg(test)]
+mod color_panel_layout_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    #[test]
+    fn the_color_panel_opens_under_brush_on_a_1080p_screen() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut state = AppState::for_test();
+        // A few frames: windows settle their size after the first.
+        for _ in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1920.0, 1080.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| draw(&mut state, ctx));
+        }
+        let rect = |id| {
+            egui::AreaState::load(&ctx, egui::Id::new(panel_key(id)))
+                .expect("panel laid out")
+                .rect()
+        };
+        let (brush, color) = (rect(PanelId::Brush), rect(PanelId::Color));
+        assert!(color.top() >= brush.bottom(), "{brush:?} vs {color:?}");
+        assert!(color.bottom() <= 1080.0, "{color:?}");
+        assert!(!color.intersects(rect(PanelId::Timeline)), "{color:?}");
     }
 }
