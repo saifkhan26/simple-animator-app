@@ -7,6 +7,7 @@ use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer};
 use crate::doc::project::Project;
+use crate::tools::perspective::PerspectiveGrid;
 use crate::tools::select_mask::{PackedMask, SelectionMask};
 
 /// Bounded undo capacity — prevents memory blow-up on long sessions.
@@ -24,6 +25,8 @@ pub enum Touched {
     Structure,
     /// The selection became this.
     Selection(Option<SelectionMask>),
+    /// A perspective grid's pose, keys or wall height went back to this.
+    Grid(Box<PerspectiveGrid>),
     /// Several of the above, from a [`Command::Compound`].
     Many(Vec<Touched>),
 }
@@ -113,6 +116,13 @@ pub enum Command {
     Selection {
         before: Option<PackedMask>,
         after: Option<PackedMask>,
+    },
+    /// A perspective grid moved, or its keys changed. Grids live on the app,
+    /// not in the project, so this restores nothing here: the caller puts
+    /// the snapshot back by the grid's id.
+    Grid {
+        before: Box<PerspectiveGrid>,
+        after: Box<PerspectiveGrid>,
     },
     /// Several commands that undo and redo as one step — a float landing is
     /// its pixels *and* the selection that moved with them. Applied in order
@@ -253,6 +263,9 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
         Command::Selection { before, after } => {
             let m = if forward { after } else { before };
             Touched::Selection(m.as_ref().map(PackedMask::unpack))
+        }
+        Command::Grid { before, after } => {
+            Touched::Grid(if forward { after.clone() } else { before.clone() })
         }
         Command::Compound(cmds) => {
             let mut out = Vec::with_capacity(cmds.len());

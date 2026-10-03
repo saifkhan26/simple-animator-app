@@ -676,6 +676,23 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
             painter.circle_filled(c, 1.8, KEY_CAMERA);
         }
     }
+    // The active grid's keys, in its own colour, beside the camera's — while
+    // grids are on show. Diamonds, as the grids' own key marks are.
+    if let Some((frames, color)) = crate::ui::shell::grid_key_marks(state) {
+        for f in frames.into_iter().filter(|&f| f < fc) {
+            let beside = state.project.has_camera_key(f);
+            let x = g.x(f as f32 + 0.5) - if beside { 4.0 } else { 0.0 };
+            let c = pos2(x, ruler.max.y - 3.0);
+            let r = 2.2;
+            let diamond = vec![
+                c + vec2(0.0, -r),
+                c + vec2(r, 0.0),
+                c + vec2(0.0, r),
+                c + vec2(-r, 0.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(diamond, color, Stroke::NONE));
+        }
+    }
 
     // Past the end, as in the tracks below.
     let end_x = g.x(fc as f32);

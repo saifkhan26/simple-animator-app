@@ -1,6 +1,7 @@
 //! Top-level application state. Wires project (timeline + layers), tools, UI.
 
 mod button_drag;
+mod grids;
 mod select;
 
 pub use button_drag::ButtonDragState;
@@ -216,6 +217,9 @@ struct GridDrag {
     corners: [[f32; 2]; 4],
     /// The extra vanishing points where they showed at the press.
     extra: [Option<[f32; 2]>; perspective::MAX_EXTRA_VPS],
+    /// Where the grid's coordinates land in the document, at the press. The
+    /// camera or layer it follows doesn't move mid-drag.
+    space: perspective::Space,
 }
 
 /// Screen points an extra vanishing point on the horizon can be pulled off it
@@ -341,10 +345,13 @@ struct UiPrefs {
     /// Frame column width in the timeline tracks — how zoomed in the artist
     /// likes to work.
     track_frame_w: f32,
-    /// Perspective grids. A workspace preference rather than project data:
-    /// the same guides follow the artist between files, stored frame-relative
-    /// so they fit any resolution.
+    /// Perspective grid switches. Its `grids` are only a seed now: the grids
+    /// from before they were kept per file, handed to any file the app has
+    /// none kept for, so nothing set up then went missing.
     perspective: PerspectiveConfig,
+    /// Each project file's grids, by path. Kept by the app rather than in
+    /// the `.anim`, and never shared between files.
+    grid_files: Vec<grids::GridFile>,
     /// How far "fade other layers" pushes the rest of the stack back. Only
     /// the amounts persist — the toggle itself starts off every launch.
     fade: FadeOthers,
@@ -449,6 +456,7 @@ impl Default for UiPrefs {
             palette: Vec::new(),
             track_frame_w: crate::ui::tracks::DEFAULT_FRAME_W,
             perspective: PerspectiveConfig::default(),
+            grid_files: Vec::new(),
             fade: FadeOthers::default(),
             krita_path: None,
             project_presets: Vec::new(),
@@ -817,6 +825,15 @@ pub struct AppState {
     pub perspective: PerspectiveConfig,
     /// In-flight drag on a perspective grid, or `None`.
     grid_drag: Option<GridDrag>,
+    /// The dragged grid as it was at the press, for the drag's undo step.
+    grid_drag_before: Option<perspective::PerspectiveGrid>,
+    /// Last frame keyed grids were brought to.
+    grid_sync_last: Option<usize>,
+    /// Every project file's grids but the open one's live copy.
+    grid_files: Vec<grids::GridFile>,
+    /// The grids from before grids were kept per file, for files the app
+    /// has none kept for.
+    grid_seed: Vec<perspective::PerspectiveGrid>,
     /// Perspective snap for the stroke in progress, or `None` when the stroke
     /// isn't snapping.
     snap_lock: Option<SnapLock>,
@@ -929,6 +946,9 @@ pub struct AppState {
     /// where a window sits persists through egui's own memory, but
     /// whether it is open should not outlive the session that opened it.
     pub show_brush_settings: bool,
+    /// The active grid's settings window. Session-only, like the brush
+    /// settings window.
+    pub show_grid_settings: bool,
     /// Master visibility of all floating panel windows. Tab toggles it.
     pub show_panels: bool,
     /// Minimal timeline bar shown when `show_panels` is false. Has its own
@@ -1143,8 +1163,16 @@ impl AppState {
             shape_drag: None,
             fill_drag: None,
             shift_held: false,
-            perspective: prefs.perspective,
+            perspective: {
+                let mut cfg = prefs.perspective.clone();
+                cfg.ensure_ids();
+                cfg
+            },
             grid_drag: None,
+            grid_drag_before: None,
+            grid_sync_last: None,
+            grid_files: prefs.grid_files.clone(),
+            grid_seed: prefs.perspective.grids.clone(),
             snap_lock: None,
             view: View::default(),
             view_scale: 1.0,
@@ -1184,6 +1212,7 @@ impl AppState {
             layer_rename: None,
             show_settings: false,
             show_brush_settings: false,
+            show_grid_settings: false,
             show_panels: prefs.show_panels,
             show_mini_timeline: prefs.show_mini_timeline,
             show_new_project: false,
@@ -1238,10 +1267,12 @@ impl AppState {
         // old file — the exact overwrite the reset below is guarding against.
         self.finish_pending_save();
         self.stop_krita_link();
+        self.stash_grids();
         self.project = Project::new(width, height, fps);
         // Forget the old file, or the next Save silently overwrites the project
         // the user just navigated away from.
         self.project_path = None;
+        self.unstash_grids(None);
         self.save_toast = None;
         self.save_error = None;
         self.retire_cell_textures();
@@ -1277,6 +1308,7 @@ impl AppState {
         self.layer_rename = None;
         self.show_settings = false;
         self.show_brush_settings = false;
+        self.show_grid_settings = false;
         // `show_panels` / `show_mini_timeline` are deliberately not reset here.
         // They're preferences that persist across runs, like `shortcuts` — a new
         // project shouldn't shove hidden panels back on screen.
@@ -1544,6 +1576,7 @@ impl AppState {
                 }
             }
             Some(undo::Touched::Selection(m)) => self.set_mask(m, false),
+            Some(undo::Touched::Grid(g)) => self.restore_grid(&g),
             Some(undo::Touched::Many(all)) => {
                 for t in all {
                     self.apply_touched(Some(t));
@@ -3286,7 +3319,7 @@ impl AppState {
     }
 
     pub fn pointer_up(&mut self) {
-        self.grid_drag = None;
+        self.finish_grid_drag();
         self.snap_lock = None;
         if self.finish_fill() {
             return;
@@ -3729,115 +3762,8 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// Give the perspective tool something to edit: selecting it with every
-    /// grid deleted brings a default one back.
-    pub fn ensure_perspective_grid(&mut self) {
-        if self.perspective.grids.is_empty() {
-            self.perspective.grids.push(perspective::PerspectiveGrid::default());
-            self.perspective.active = 0;
-        }
-        self.perspective.active = self.perspective.active.min(self.perspective.grids.len() - 1);
-    }
-
     fn frame_size(&self) -> (f32, f32) {
         (self.project.width as f32, self.project.height as f32)
-    }
-
-    /// Make the next visible grid after the active one active, wrapping
-    /// round — how to switch the grid strokes snap to without opening the
-    /// grid list. Hidden grids are skipped: nothing can snap to them.
-    pub fn cycle_perspective_grid(&mut self) {
-        let cfg = &mut self.perspective;
-        let n = cfg.grids.len();
-        if let Some(next) = (1..n)
-            .map(|k| (cfg.active + k) % n)
-            .find(|&i| cfg.grids[i].visible)
-        {
-            cfg.active = next;
-        }
-    }
-
-    /// Perspective tool press at document point `p`. The active grid gets
-    /// first pick; a press on another visible grid makes it active and grabs
-    /// it. A locked grid is selected but never grabbed.
-    pub fn perspective_down(&mut self, p: [f32; 2]) {
-        self.grid_drag = None;
-        let (w, h) = self.frame_size();
-        let tol = crate::tools::selection::HANDLE_PX / self.view_scale.max(1e-6);
-        let n = self.perspective.grids.len();
-        let order = std::iter::once(self.perspective.active).chain((0..n).filter(|&i| i != self.perspective.active));
-        for i in order {
-            let Some(g) = self.perspective.grids.get(i) else {
-                continue;
-            };
-            if !g.visible {
-                continue;
-            }
-            let corners = g.doc_corners(w, h);
-            let extra_at = g.extra_doc(w, h);
-            let Some(grab) = perspective::grab_at(&corners, &extra_at, p, tol) else {
-                continue;
-            };
-            self.perspective.active = i;
-            if !g.locked {
-                let mut extra = [None; perspective::MAX_EXTRA_VPS];
-                for (slot, &v) in extra.iter_mut().zip(&extra_at) {
-                    *slot = Some(v);
-                }
-                self.grid_drag = Some(GridDrag {
-                    grid: i,
-                    grab,
-                    start: p,
-                    corners,
-                    extra,
-                });
-            }
-            return;
-        }
-    }
-
-    /// Perspective tool drag to document point `p`. A corner drag that would
-    /// fold the quad leaves it where it last was. Moving or turning the whole
-    /// grid carries its extra vanishing points along; reshaping it leaves them
-    /// be, and those on the horizon ride it wherever it goes.
-    pub fn perspective_move(&mut self, p: [f32; 2]) {
-        let Some(d) = self.grid_drag else {
-            return;
-        };
-        let (w, h) = self.frame_size();
-        let snap = self.shift_held;
-        let px = 1.0 / self.view_scale.max(1e-6);
-        let Some(g) = self.perspective.grids.get_mut(d.grid) else {
-            return;
-        };
-        if let GridGrab::Extra(i) = d.grab {
-            let (Some(from), Some(v)) = (d.extra[i as usize], g.extra_vps.get(i as usize)) else {
-                return;
-            };
-            let to = [from[0] + p[0] - d.start[0], from[1] + p[1] - d.start[1]];
-            let horizon = perspective::Plane::new(g.doc_corners(w, h)).and_then(|pl| pl.horizon());
-            let (at, on_horizon) = perspective::place_extra(
-                horizon,
-                v.on_horizon,
-                to,
-                HORIZON_DETACH_PX * px,
-                HORIZON_ATTACH_PX * px,
-            );
-            g.extra_vps[i as usize].pos = perspective::from_doc(at, w, h);
-            g.extra_vps[i as usize].on_horizon = on_horizon;
-            return;
-        }
-        let Some(c) = perspective::dragged(&d.corners, d.grab, d.start, p, snap) else {
-            return;
-        };
-        if matches!(d.grab, GridGrab::Move | GridGrab::Rotate) {
-            for (v, from) in g.extra_vps.iter_mut().zip(d.extra) {
-                if let Some(from) = from {
-                    v.pos = perspective::from_doc(perspective::carry(&d.corners, &c, from), w, h);
-                }
-            }
-        }
-        g.set_doc_corners(c, w, h);
     }
 
     /// Whether the active grid is up for snapping to: switched on, shown, and
@@ -3851,7 +3777,7 @@ impl AppState {
     /// Whether strokes should snap to a grid direction right now. A shape
     /// line counts as a stroke; rectangles and ellipses lie on the plane
     /// instead (see [`Self::shape_plane`]).
-    fn snapping(&self) -> bool {
+    pub fn snapping(&self) -> bool {
         let stroke_tool = match self.tool {
             ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser => true,
             ActiveTool::Shape => self.brush.shape_kind == ShapeKind::Line,
@@ -3880,8 +3806,9 @@ impl AppState {
         let (pw, ph) = self.frame_size();
         let c = &self.project.cells[target];
         let (cw, ch) = (c.width as f32, c.height as f32);
-        let t = self.display_transform(self.project.current_layer, self.project.current_frame);
-        let corners = g.doc_corners(pw, ph).map(|p| {
+        let f = self.project.current_frame;
+        let t = self.display_transform(self.project.current_layer, f);
+        let corners = g.doc_corners(&self.grid_space(g, f)).map(|p| {
             let (x, y) = t.doc_to_cell(p[0], p[1], cw, ch, pw, ph);
             [x, y]
         });
@@ -3937,11 +3864,14 @@ impl AppState {
                 if motion[0].hypot(motion[1]) * self.view_scale < DECIDE_PX {
                     return lock.start;
                 }
-                let (w, h) = self.frame_size();
+                let f = self.project.current_frame;
                 let dirs = self
                     .perspective
                     .active_grid()
-                    .map(|g| g.snap_dirs(w, h, lock.start, self.perspective.snap_vertical))
+                    .map(|g| {
+                        let s = self.grid_space(g, f);
+                        g.snap_dirs(&s, lock.start, self.perspective.snap_vertical)
+                    })
                     .unwrap_or_default();
                 let Some(d) = perspective::pick_dir(&dirs, motion) else {
                     // A degenerate grid has nothing to snap to.
@@ -4353,6 +4283,7 @@ impl AppState {
         match job.rx.try_recv() {
             Err(TryRecvError::Empty) => self.save_job = Some(job),
             Ok(Ok(())) => {
+                self.grids_saved_as(&job.path);
                 self.project_path = Some(job.path);
                 self.save_toast = Some((job.name, Instant::now() + Self::TOAST_TTL));
                 self.save_error = None;
@@ -4400,7 +4331,9 @@ impl AppState {
         // the previous one was being saved to.
         self.finish_pending_save();
         self.stop_krita_link();
+        self.stash_grids();
         self.project = project;
+        self.unstash_grids(path.as_deref());
         self.project_path = path;
         self.save_toast = None;
         self.save_error = None;
@@ -4708,7 +4641,12 @@ impl eframe::App for AppState {
                 tool_brushes: Some(self.tool_brushes.to_vec()),
                 palette: self.palette.clone(),
                 track_frame_w: self.track_frame_w,
-                perspective: self.perspective.clone(),
+                perspective: PerspectiveConfig {
+                    grids: self.grid_seed.clone(),
+                    active: 0,
+                    ..self.perspective.clone()
+                },
+                grid_files: self.grid_files_for_prefs(),
                 fade: self.fade,
                 krita_path: self.krita_path.clone(),
                 project_presets: self.project_presets.clone(),
@@ -4800,6 +4738,8 @@ impl eframe::App for AppState {
         self.sync_active_transform_buffer();
         self.sync_selection();
         self.sync_camera_buffer();
+        // After the camera and layer buffers, which grids may follow.
+        self.sync_grid_buffers();
 
         // Advance background import jobs / preview fetches without blocking.
         self.poll_bg_jobs();
@@ -6252,17 +6192,197 @@ mod tests {
         state.view_scale = 1.0;
         let (w, h) = state.frame_size();
         let sq = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]];
-        state.perspective.grids[0].set_doc_corners(sq, w, h);
+        state.perspective.grids[0].set_doc_corners(sq, &perspective::Space::flat(w, h));
         state
     }
 
     fn doc_corners(state: &AppState, i: usize) -> [[f32; 2]; 4] {
         let (w, h) = state.frame_size();
-        state.perspective.grids[i].doc_corners(w, h)
+        state.perspective.grids[i].doc_corners(&perspective::Space::flat(w, h))
     }
 
     fn near(a: [f32; 2], b: [f32; 2]) -> bool {
         (a[0] - b[0]).abs() < 1e-2 && (a[1] - b[1]).abs() < 1e-2
+    }
+
+    // --- Grid keys, follow links and the per-file store ---
+
+    fn grid_centre_doc(state: &AppState, i: usize) -> [f32; 2] {
+        let g = &state.perspective.grids[i];
+        let s = state.grid_space(g, state.project.current_frame);
+        perspective::centroid(&g.doc_corners(&s))
+    }
+
+    #[test]
+    fn a_keyed_grid_tweens_as_the_frame_moves_and_undo_takes_a_key_back() {
+        let mut state = perspective_state();
+        state.project.ensure_frame_count(30);
+        state.sync_grid_buffers();
+        state.add_grid_key();
+        let c0 = grid_centre_doc(&state, 0);
+        state.project.goto(20);
+        state.sync_grid_buffers();
+        state.perspective.grids[0].translate([0.2, 0.0]);
+        state.add_grid_key();
+        state.project.goto(10);
+        state.sync_grid_buffers();
+        // Halfway, linear: half of 0.2 frame heights of 720.
+        let c10 = grid_centre_doc(&state, 0);
+        assert!((c10[0] - c0[0] - 72.0).abs() < 0.5, "{c10:?} vs {c0:?}");
+        state.undo();
+        assert_eq!(state.perspective.grids[0].keys.len(), 1);
+        assert!(near(grid_centre_doc(&state, 0), c0), "back to the one key's pose");
+        state.redo();
+        assert_eq!(state.perspective.grids[0].keys.len(), 2);
+    }
+
+    #[test]
+    fn dragging_a_keyed_grid_keys_the_frame_as_one_undo_step() {
+        let mut state = perspective_state();
+        state.project.ensure_frame_count(30);
+        state.sync_grid_buffers();
+        state.add_grid_key();
+        state.project.goto(12);
+        state.sync_grid_buffers();
+        let steps = state.history.undo_len();
+        state.perspective_down([150.0, 150.0]);
+        state.perspective_move([160.0, 150.0]);
+        state.perspective_move([170.0, 150.0]);
+        state.pointer_up();
+        assert!(state.perspective.grids[0].has_key(12), "auto-key");
+        assert_eq!(state.history.undo_len(), steps + 1);
+        // Away and back: it stuck, because it was keyed.
+        state.project.goto(0);
+        state.sync_grid_buffers();
+        state.project.goto(12);
+        state.sync_grid_buffers();
+        assert!(near(doc_corners(&state, 0)[0], [120.0, 100.0]));
+        state.undo();
+        assert!(!state.perspective.grids[0].has_key(12));
+
+        // Without auto-key a drag on a keyed grid lasts until the frame
+        // changes, as the camera's does.
+        state.perspective.auto_key = false;
+        state.perspective_down([150.0, 150.0]);
+        state.perspective_move([170.0, 150.0]);
+        state.pointer_up();
+        assert!(!state.perspective.grids[0].has_key(12));
+        state.project.goto(13);
+        state.sync_grid_buffers();
+        assert!(near(doc_corners(&state, 0)[0], [100.0, 100.0]));
+    }
+
+    #[test]
+    fn a_grid_without_keys_just_moves() {
+        let mut state = perspective_state();
+        state.perspective_down([150.0, 150.0]);
+        state.perspective_move([170.0, 150.0]);
+        state.pointer_up();
+        assert!(state.perspective.grids[0].keys.is_empty());
+        // Still one undo step for the drag.
+        state.undo();
+        assert!(near(doc_corners(&state, 0)[0], [100.0, 100.0]));
+    }
+
+    #[test]
+    fn a_grid_on_the_camera_rides_it_and_switching_keeps_it_in_place() {
+        let mut state = perspective_state();
+        state.project.camera.tx = 50.0;
+        let before = doc_corners(&state, 0);
+        state.set_grid_follow(0, perspective::Follow::Camera);
+        let at = |state: &AppState| {
+            let g = &state.perspective.grids[0];
+            g.doc_corners(&state.grid_space(g, state.project.current_frame))
+        };
+        assert!(near(at(&state)[0], before[0]), "switching doesn't jump it");
+        state.project.camera.tx = 80.0;
+        assert!(near(at(&state)[0], [before[0][0] + 30.0, before[0][1]]));
+        // Zooming the camera in shrinks it in the document, so it keeps its
+        // size in the shot.
+        state.project.camera.zoom = 2.0;
+        let c = at(&state);
+        assert!((c[1][0] - c[0][0] - 50.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn a_grid_on_a_layer_finds_it_again_by_name_next_session() {
+        let mut state = perspective_state();
+        let l = state.project.current_layer;
+        let link = state.follow_layer(l).unwrap();
+        state.set_grid_follow(0, link);
+        state.project.layers[l].transform.tx = 40.0;
+        let at = |state: &AppState| {
+            let g = &state.perspective.grids[0];
+            g.doc_corners(&state.grid_space(g, state.project.current_frame))[0]
+        };
+        assert!(near(at(&state), [140.0, 100.0]));
+        // What the store gives back: the id is gone, the name is not.
+        if let perspective::Follow::Layer { uid, .. } = &mut state.perspective.grids[0].follow {
+            *uid = 0;
+        }
+        state.sync_grid_buffers();
+        assert!(near(at(&state), [140.0, 100.0]));
+    }
+
+    #[test]
+    fn each_file_keeps_its_own_grids() {
+        let mut state = perspective_state();
+        let a = PathBuf::from("C:/shots/a.anim");
+        let b = PathBuf::from("C:/shots/b.anim");
+        state.load_project(Project::new(1280, 720, 24.0), Some(a.clone()));
+        state.perspective.grids[0].translate([0.1, 0.0]);
+        let a_grids = state.perspective.grids.clone();
+        state.load_project(Project::new(1280, 720, 24.0), Some(b.clone()));
+        assert_ne!(state.perspective.grids, a_grids, "b has its own");
+        state.perspective.grids[0].rows = 9;
+        state.load_project(Project::new(1280, 720, 24.0), Some(a.clone()));
+        assert_eq!(state.perspective.grids, a_grids);
+        // Save As takes them along; the old file keeps its own.
+        let c = PathBuf::from("C:/shots/c.anim");
+        state.grids_saved_as(&c);
+        state.project_path = Some(c.clone());
+        state.perspective.grids[0].cols = 2;
+        state.load_project(Project::new(1280, 720, 24.0), Some(a.clone()));
+        assert_eq!(state.perspective.grids, a_grids);
+        state.load_project(Project::new(1280, 720, 24.0), Some(c));
+        assert_eq!(state.perspective.grids[0].cols, 2);
+        state.load_project(Project::new(1280, 720, 24.0), Some(b));
+        assert_eq!(state.perspective.grids[0].rows, 9);
+        // A new project starts with one plain grid.
+        state.reset_with(640, 480, 24.0);
+        assert_eq!(state.perspective.grids.len(), 1);
+        let fresh = perspective::PerspectiveGrid::default();
+        assert_eq!(state.perspective.grids[0].corners, fresh.corners);
+        // And the store survives a trip through the preferences.
+        assert!(state.grid_files_for_prefs().len() >= 3);
+    }
+
+    #[test]
+    fn a_walls_top_corner_drags_its_height_and_nothing_else_moves_it() {
+        let mut state = perspective_state();
+        let id = state.perspective.grids[0].id;
+        state.perspective.grids[0] = perspective::PerspectiveGrid {
+            id,
+            ..Default::default()
+        };
+        let w = state.perspective.add_wall(0, 0).unwrap();
+        let (fw, fh) = state.frame_size();
+        let s = perspective::Space::flat(fw, fh);
+        let wall = state.perspective.grids[w].doc_corners(&s);
+        let h0 = state.perspective.grids[w].wall.unwrap().height;
+        state.perspective_down(wall[0]);
+        state.perspective_move([wall[0][0], wall[0][1] - 30.0]);
+        state.pointer_up();
+        let h1 = state.perspective.grids[w].wall.unwrap().height;
+        assert!(h1 > h0, "{h1} > {h0}");
+        let base = state.perspective.grids[w].doc_corners(&s);
+        assert!(near(base[3], wall[3]) && near(base[2], wall[2]), "the base stays on the floor");
+        // Inside it is selected, never moved.
+        state.perspective_down(perspective::centroid(&base));
+        assert!(state.grid_drag.is_none());
+        assert_eq!(state.perspective.active, w);
+        state.undo();
+        assert_eq!(state.perspective.grids[w].wall.unwrap().height, h0);
     }
 
     #[test]
@@ -6303,7 +6423,8 @@ mod tests {
         let mut state = perspective_state();
         let mut other = state.perspective.grids[0].clone();
         let (w, h) = state.frame_size();
-        other.set_doc_corners([[400.0, 100.0], [500.0, 100.0], [500.0, 200.0], [400.0, 200.0]], w, h);
+        let sq = [[400.0, 100.0], [500.0, 100.0], [500.0, 200.0], [400.0, 200.0]];
+        other.set_doc_corners(sq, &perspective::Space::flat(w, h));
         state.perspective.grids.push(other);
         state.perspective_down([450.0, 150.0]);
         assert_eq!(state.perspective.active, 1);
@@ -6333,9 +6454,10 @@ mod tests {
         let (w, h) = state.frame_size();
         // One-point floor: a level horizon through (150, 66.7).
         let trap = [[140.0, 100.0], [160.0, 100.0], [250.0, 400.0], [50.0, 400.0]];
-        state.perspective.grids[0].set_doc_corners(trap, w, h);
-        assert!(state.perspective.grids[0].add_extra_vp(w, h));
-        let at = |state: &AppState| state.perspective.grids[0].extra_doc(w, h)[0];
+        state.perspective.grids[0].set_doc_corners(trap, &perspective::Space::flat(w, h));
+        assert!(state.perspective.grids[0].add_extra_vp(&perspective::Space::flat(w, h)));
+        let s = perspective::Space::flat(w, h);
+        let at = |state: &AppState| state.perspective.grids[0].extra_doc(&s)[0];
         let v0 = at(&state);
         let level = 200.0 / 3.0;
         assert!((v0[1] - level).abs() < 0.1, "{v0:?}");
@@ -6363,12 +6485,12 @@ mod tests {
         let mut state = perspective_state();
         let (w, h) = state.frame_size();
         // Seen square-on the horizon is at infinity: the point goes above.
-        assert!(state.perspective.grids[0].add_extra_vp(w, h));
-        let before = state.perspective.grids[0].extra_doc(w, h)[0];
+        assert!(state.perspective.grids[0].add_extra_vp(&perspective::Space::flat(w, h)));
+        let before = state.perspective.grids[0].extra_doc(&perspective::Space::flat(w, h))[0];
         state.perspective_down([150.0, 150.0]);
         state.perspective_move([160.0, 170.0]);
         state.pointer_up();
-        let after = state.perspective.grids[0].extra_doc(w, h)[0];
+        let after = state.perspective.grids[0].extra_doc(&perspective::Space::flat(w, h))[0];
         assert!(near(after, [before[0] + 10.0, before[1] + 20.0]), "{after:?}");
     }
 
@@ -6382,6 +6504,7 @@ mod tests {
                 pos: perspective::from_doc([450.0, 450.0], w, h),
                 on_horizon: false,
                 rays: false,
+                snap: true,
             });
         state.dispatch(Action::ToolPencil);
         state.perspective.show = true;
@@ -6419,7 +6542,7 @@ mod tests {
         let (w, h) = state.frame_size();
         // One-point floor: the columns meet at about (150, 67).
         let trap = [[140.0, 100.0], [160.0, 100.0], [250.0, 400.0], [50.0, 400.0]];
-        state.perspective.grids[0].set_doc_corners(trap, w, h);
+        state.perspective.grids[0].set_doc_corners(trap, &perspective::Space::flat(w, h));
         state.dispatch(Action::ToolPencil);
         state.perspective.show = true;
         state.perspective.snap = true;
@@ -6443,7 +6566,7 @@ mod tests {
     fn shape_state(kind: ShapeKind) -> AppState {
         let mut state = perspective_state();
         let (w, h) = state.frame_size();
-        state.perspective.grids[0].set_doc_corners(FLOOR, w, h);
+        state.perspective.grids[0].set_doc_corners(FLOOR, &perspective::Space::flat(w, h));
         state.dispatch(Action::ToolShape);
         state.brush.shape_kind = kind;
         state.brush.radius = 3.0;
@@ -6529,7 +6652,7 @@ mod tests {
         let mut state = shape_state(ShapeKind::Line);
         let (w, h) = state.frame_size();
         let sq = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]];
-        state.perspective.grids[0].set_doc_corners(sq, w, h);
+        state.perspective.grids[0].set_doc_corners(sq, &perspective::Space::flat(w, h));
         // What the canvas does: snap in document space, then feed the cell.
         let a = state.snap_begin([150.0, 150.0]);
         state.pointer_down(state.make_sample(a[0], a[1], 0.0));
