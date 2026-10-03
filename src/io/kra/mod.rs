@@ -265,7 +265,7 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
             let data = match id.and_then(|id| project.cell(id)) {
                 Some(c) => {
                     let (ox, oy) = cell_origin(pw, ph, c.width, c.height);
-                    tiles::encode(&c.pixels, c.width, c.height, ox, oy)
+                    tiles::encode(&c.pixels(), c.width, c.height, ox, oy)
                 }
                 None => empty.clone(),
             };
@@ -296,7 +296,7 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
 
     // Thumbnails for file browsers and other apps; Krita itself reads layers.
     let merged = composite::flatten_frame(project, project.current_frame.min(last));
-    let img = image::RgbaImage::from_raw(merged.width, merged.height, merged.pixels)
+    let img = image::RgbaImage::from_raw(merged.width, merged.height, merged.into_pixels())
         .context("flattened frame has the wrong size")?;
     zip.start_file("mergedimage.png", deflated)?;
     zip.write_all(&png_bytes(&img)?)?;
@@ -336,7 +336,7 @@ impl Drawing {
     pub fn place(&self, cx: i32, cy: i32, cw: u32, ch: u32) -> (Canvas, bool) {
         let mut c = Canvas::new(cw, ch);
         if self.default != [0; 4] {
-            for px in c.pixels.chunks_exact_mut(4) {
+            for px in c.pixels_mut().chunks_exact_mut(4) {
                 px.copy_from_slice(&self.default);
             }
         }
@@ -359,7 +359,7 @@ impl Drawing {
             if x1 > x0 {
                 let dst = ((ty as usize * cw as usize) + (self.x + x0 - cx) as usize) * 4;
                 let n = (x1 - x0) as usize * 4;
-                c.pixels[dst..dst + n].copy_from_slice(&row[x0 as usize * 4..x0 as usize * 4 + n]);
+                c.pixels_mut()[dst..dst + n].copy_from_slice(&row[x0 as usize * 4..x0 as usize * 4 + n]);
             }
         }
         (c, clipped)
@@ -643,7 +643,7 @@ pub(crate) mod tests {
         for i in 0..5u32 {
             let (x, y) = ((i * 7 + seed as u32) % w, (i * 3 + seed as u32) % h);
             let p = ((y * w + x) * 4) as usize;
-            c.pixels[p..p + 4].copy_from_slice(&[seed, 10 * i as u8, 255 - seed, 200]);
+            c.pixels_mut()[p..p + 4].copy_from_slice(&[seed, 10 * i as u8, 255 - seed, 200]);
         }
         c
     }
@@ -705,7 +705,7 @@ pub(crate) mod tests {
         assert_eq!(ink.keys[0].1, ink.keys[2].1);
         assert_eq!(ink.drawings.len(), 2);
         let a = read_cell(&ink.drawings[ink.keys[0].1], 100, 60, 100, 60);
-        assert_eq!(a.pixels, p.cells[p.layers[0].exposures[0].unwrap()].pixels);
+        assert_eq!(a.pixels(), p.cells[p.layers[0].exposures[0].unwrap()].pixels());
 
         let big = &doc.layers[1];
         assert!(big.locked);
@@ -713,7 +713,7 @@ pub(crate) mod tests {
         assert_eq!(big.keys.iter().map(|k| k.0).collect::<Vec<_>>(), vec![0, 3]);
         assert_eq!(big.drawings[big.keys[0].1].w, 0);
         let c = read_cell(&big.drawings[big.keys[1].1], 100, 60, 140, 81);
-        assert_eq!(c.pixels, p.cells[p.layers[1].exposures[3].unwrap()].pixels);
+        assert_eq!(c.pixels(), p.cells[p.layers[1].exposures[3].unwrap()].pixels());
     }
 
     /// `sample_project` with drawings big enough to see — the project behind
@@ -726,7 +726,7 @@ pub(crate) mod tests {
                 for x in 0..w {
                     if (x as i32 - (20 + 15 * i as i32)).abs() < 12 && (y as i32 - 30).abs() < 25 {
                         let o = ((y * w + x) * 4) as usize;
-                        c.pixels[o..o + 4].copy_from_slice(&[(60 * i) as u8, 200, 90, 255]);
+                        c.pixels_mut()[o..o + 4].copy_from_slice(&[(60 * i) as u8, 200, 90, 255]);
                     }
                 }
             }
@@ -739,7 +739,7 @@ pub(crate) mod tests {
         for y in 40..55 {
             for x in 60..90 {
                 let o = ((y * 100 + x) * 4) as usize;
-                c.pixels[o..o + 4].copy_from_slice(&[30, 60, 220, 255]);
+                c.pixels_mut()[o..o + 4].copy_from_slice(&[30, 60, 220, 255]);
             }
         }
         p.cells.push(c.into());
@@ -770,7 +770,7 @@ pub(crate) mod tests {
                 match l.exposures[time] {
                     Some(id) => {
                         let c = &p.cells[id];
-                        assert_eq!(read_cell(d, 100, 60, c.width, c.height).pixels, c.pixels, "layer {li} t{time}");
+                        assert_eq!(read_cell(d, 100, 60, c.width, c.height).pixels(), c.pixels(), "layer {li} t{time}");
                     }
                     // Our explicit blank lead-in key.
                     None => assert!(d.pixels.iter().all(|&b| b == 0)),
@@ -865,7 +865,7 @@ pub(crate) mod tests {
         for y in 5..20 {
             for x in 5..95 {
                 let o = ((y * 100 + x) * 4) as usize;
-                c.pixels[o..o + 4].copy_from_slice(&[220, 40, 160, 255]);
+                c.pixels_mut()[o..o + 4].copy_from_slice(&[220, 40, 160, 255]);
             }
         }
         p.cells.push(c.into());
@@ -914,7 +914,7 @@ pub(crate) mod tests {
         std::fs::write(dir.join("ours.kra"), bytes).unwrap();
         for f in 0..p.frame_count {
             let flat = composite::flatten_frame(&p, f);
-            image::RgbaImage::from_raw(flat.width, flat.height, flat.pixels)
+            image::RgbaImage::from_raw(flat.width, flat.height, flat.into_pixels())
                 .unwrap()
                 .save(dir.join(format!("ours_{f:04}.png")))
                 .unwrap();
@@ -951,7 +951,7 @@ pub(crate) mod tests {
         let d = Drawing { x: -1, y: 0, w: 2, h: 1, pixels: vec![1, 2, 3, 255, 4, 5, 6, 255], default: [0; 4] };
         let (c, clipped) = d.place(0, 0, 1, 1);
         assert!(clipped);
-        assert_eq!(&c.pixels, &[4, 5, 6, 255]);
+        assert_eq!(&c.pixels()[..], &[4, 5, 6, 255]);
     }
 
     /// A group the filter rejects takes its layers along: they come back as

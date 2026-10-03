@@ -506,6 +506,9 @@ const TEXTURE_BUDGET: usize = 1536 * 1024 * 1024;
 /// to build and upload than the cell it comes from.
 const GHOST_MAX_SIDE: u32 = 2048;
 
+/// Time a frame may spend packing idle cells. See `AppState::pack_idle_cells`.
+const PACK_BUDGET: Duration = Duration::from_millis(4);
+
 /// Seconds the playhead rests before a ghost that isn't built yet gets built.
 const GHOST_REST: f64 = 0.12;
 
@@ -664,14 +667,7 @@ fn crop_image(rect: DirtyRect, straight: impl FnOnce() -> Vec<u8>) -> ColorImage
 
 /// `rect` of `c`'s pixels, straight alpha, row by row.
 fn crop_pixels(c: &Canvas, rect: DirtyRect) -> Vec<u8> {
-    let (x0, x1) = (rect.min_x as usize, rect.max_x as usize);
-    let stride = c.width as usize;
-    let mut buf = Vec::with_capacity((x1 - x0) * (rect.max_y - rect.min_y) as usize * 4);
-    for y in rect.min_y as usize..rect.max_y as usize {
-        let row = (y * stride + x0) * 4;
-        buf.extend_from_slice(&c.pixels[row..row + (x1 - x0) * 4]);
-    }
-    buf
+    c.read_rect(rect)
 }
 
 /// A clipped drawing's texture as the canvas shows it: cut to its base.
@@ -1762,6 +1758,32 @@ impl AppState {
         }
     }
 
+    /// Pack the cells nobody is drawing on (see `Canvas`). A write unpacks a
+    /// cell and it stays so while in use — the stroke's, the active slot's,
+    /// the floating selection's; once it isn't, this puts it back to just
+    /// its drawing. Within `PACK_BUDGET` a frame, so a bulk edit that
+    /// unpacked dozens packs over a few frames instead of in one hitch.
+    fn pack_idle_cells(&mut self) {
+        let start = Instant::now();
+        let p = &self.project;
+        let active = p.layers.get(p.current_layer).and_then(|l| l.resolve(p.current_frame));
+        let hot = [self.stroke_target, active, self.selection.as_ref().map(|s| s.cell)];
+        for (id, cell) in self.project.cells.iter_mut().enumerate() {
+            if cell.is_packed() || hot.contains(&Some(id)) {
+                continue;
+            }
+            // Shared with a save in flight or an undo step: packing would
+            // copy it first. It comes round again once they let go.
+            let Some(c) = Arc::get_mut(cell) else {
+                continue;
+            };
+            c.pack();
+            if start.elapsed() >= PACK_BUDGET {
+                break;
+            }
+        }
+    }
+
     /// Park one ghost for release on the next sync. See `retired_textures`.
     fn retire_ghost(&mut self, id: CellId) {
         self.ghost_stale.remove(&id);
@@ -1838,8 +1860,10 @@ impl AppState {
         // one re-select after this returns.
         self.track_sel.clear();
         let before = undo::TimelineState::capture(&self.project);
-        let cells_before: Vec<Vec<u8>> = if capture_cells {
-            self.project.cells.iter().map(|c| c.pixels.clone()).collect()
+        // Shared handles, not copies: a cell the edit writes to is copied on
+        // that write, so a changed pointer is a changed cell.
+        let cells_before: Vec<Arc<Canvas>> = if capture_cells {
+            self.project.cells.clone()
         } else {
             Vec::new()
         };
@@ -1851,8 +1875,12 @@ impl AppState {
             .into_iter()
             .enumerate()
             .filter_map(|(cell, before)| {
-                let after = self.project.cells.get(cell)?.pixels.clone();
-                (before != after).then_some(undo::CellPixelDelta { cell, before, after })
+                let after = self.project.cells.get(cell)?;
+                (!Arc::ptr_eq(&before, after)).then(|| undo::CellPixelDelta {
+                    cell,
+                    before,
+                    after: Arc::clone(after),
+                })
             })
             .collect();
 
@@ -2899,7 +2927,7 @@ impl AppState {
             match &self.import_range {
                 Some(st) => match &st.source {
                     ImportSource::Gif(frames) => match frames.get(idx) {
-                        Some(c) => Act::Have(preview_color_image(c.width, c.height, &c.pixels)),
+                        Some(c) => Act::Have(preview_color_image(c.width, c.height, &c.pixels())),
                         None => Act::Nothing,
                     },
                     ImportSource::Video { path, fps } => Act::SpawnVideo(path.clone(), *fps),
@@ -3239,7 +3267,7 @@ impl AppState {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(GHOST_REST - rested));
                 continue;
             }
-            let image = ghost_image(c.width, c.height, &c.pixels, tint);
+            let image = ghost_image(c.width, c.height, &c.pixels(), tint);
             // Same reuse rule as the cell textures: keep the handle when the
             // dimensions still match — re-uploading into it avoids freeing a
             // texture the last frame may still have queued a mesh against.
@@ -3704,8 +3732,11 @@ impl AppState {
     /// faults to pay at pen-down.
     fn snapshot_pre(&mut self, cell: CellId) {
         self.stroke_pre_pixels.clear();
-        self.stroke_pre_pixels
-            .extend_from_slice(&self.project.cells[cell].pixels);
+        // About to be painted, so unpacked now: the snapshot copies the buffer
+        // the edit will write, instead of building a whole one to copy.
+        if let Some(c) = self.project.cell_mut(cell) {
+            self.stroke_pre_pixels.extend_from_slice(c.pixels_mut());
+        }
         self.stroke_pre_live = true;
     }
 
@@ -3864,7 +3895,7 @@ impl AppState {
             return None;
         }
         self.blank_scans_left -= 1;
-        let blank = self.project.cell(id).map_or(true, |c| no_alpha(&c.pixels));
+        let blank = self.project.cell(id).map_or(true, Canvas::is_blank);
         self.blank_cache.insert(id, blank);
         Some(blank)
     }
@@ -4980,6 +5011,7 @@ impl eframe::App for AppState {
         }
 
         self.collect_cells();
+        self.pack_idle_cells();
         self.sync_textures(ctx);
         ui::shell::draw(self, ctx);
 
@@ -5063,23 +5095,6 @@ pub(crate) fn ghost_image(w: u32, h: u32, rgba: &[u8], tint: [u8; 3]) -> ColorIm
         size: [ow, oh],
         pixels,
     }
-}
-
-/// Whether no pixel in straight-alpha RGBA8 has any coverage. OR-reduces the
-/// buffer a word at a time, in blocks so a drawing stops at its first stroke:
-/// a blank 100 MB cell is one pass at memory speed, not 25M branches.
-pub(crate) fn no_alpha(px: &[u8]) -> bool {
-    let (head, words, tail) = bytemuck::pod_align_to::<u8, u64>(px);
-    if !head.is_empty() {
-        // Words wouldn't line up with pixels. Allocations this size are
-        // aligned in practice, so this is the rare path.
-        return px.chunks_exact(4).all(|p| p[3] == 0);
-    }
-    const ALPHA: u64 = u64::from_ne_bytes([0, 0, 0, 0xff, 0, 0, 0, 0xff]);
-    words
-        .chunks(4096)
-        .all(|block| block.iter().fold(0, |acc, w| acc | w) & ALPHA == 0)
-        && tail.chunks_exact(4).all(|p| p[3] == 0)
 }
 
 // Build a small (≤360px wide) preview `ColorImage` from RGBA pixels.
@@ -5524,7 +5539,7 @@ impl AppState {
                         let (c, clip) = kl.drawings[di].place(0, 0, kw, kh);
                         // Nothing to show before the first drawing: a blank
                         // lead-in key is just Krita's way of saying so.
-                        if keys.is_empty() && c.pixels.iter().all(|&b| b == 0) {
+                        if keys.is_empty() && c.is_all_zero() {
                             continue;
                         }
                         clipped += clip as usize;
@@ -5642,13 +5657,11 @@ fn cap_canvas(c: Canvas, max: u32) -> Canvas {
     let s = (max as f32 / c.width as f32).min(max as f32 / c.height as f32);
     let nw = ((c.width as f32 * s).floor() as u32).max(1);
     let nh = ((c.height as f32 * s).floor() as u32).max(1);
-    let Some(img) = image::RgbaImage::from_raw(c.width, c.height, c.pixels) else {
+    let Some(img) = image::RgbaImage::from_raw(c.width, c.height, c.into_pixels()) else {
         return Canvas::new(nw, nh);
     };
     let resized = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
-    let mut out = Canvas::new(nw, nh);
-    out.pixels = resized.into_raw();
-    out
+    Canvas::from_pixels(nw, nh, resized.into_raw())
 }
 
 /// A document-space canvas `pw`×`ph` brought into the pixels of a
@@ -5679,7 +5692,7 @@ fn doc_to_cell(
             }
             let px = crate::io::composite::sample_bilinear(&doc, sx, sy);
             let i = ((v * cell_w + u) * 4) as usize;
-            out.pixels[i..i + 4].copy_from_slice(&px);
+            out.pixels_mut()[i..i + 4].copy_from_slice(&px);
         }
     }
     out
@@ -5700,6 +5713,7 @@ fn subrect_from_buffer(buf: &[u8], full_w: u32, x: u32, y: u32, w: u32, h: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::canvas::no_alpha;
 
     // --- Clipped layers on the canvas ---
 
@@ -5714,9 +5728,9 @@ mod tests {
             for x in 0..w {
                 let i = ((y * w + x) * 4) as usize;
                 if x < w / 2 {
-                    base.pixels[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                    base.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
                 }
-                top.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+                top.pixels_mut()[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
             }
         }
         st.project.add_layer();
@@ -5772,7 +5786,7 @@ mod tests {
         for y in 100..110u32 {
             for x in w - 50..w - 40 {
                 let i = ((y * w + x) * 4) as usize;
-                c.pixels[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                c.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
             }
         }
         c.mark_dirty(w - 50, 100, 10, 10);
@@ -5831,7 +5845,7 @@ mod tests {
         let (ox, oy) = ((c.width - w) / 2, (c.height - st.project.height) / 2);
         let px = |x: u32, y: u32| {
             let i = (((y + oy) * c.width + x + ox) * 4) as usize;
-            [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+            [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
         };
         assert_eq!(px(10, 10), [255, 0, 0, 255], "red over the base");
         assert_eq!(px(w - 10, 10)[3], 0, "the clipped-away part stays away");
@@ -5867,7 +5881,7 @@ mod tests {
         let c = st.project.cell(id).unwrap();
         let px = |x: f32| {
             let i = ((50 * c.width + x as u32) * 4) as usize;
-            [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+            [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
         };
         assert_eq!(px(mid - 30.0), [0, 200, 0, 255], "ink recoloured");
         assert_eq!(px(mid + 30.0)[3], 0, "bare canvas still bare");
@@ -5900,7 +5914,7 @@ mod tests {
                     continue;
                 }
                 let k = ((y * c.width + x) * 4) as usize;
-                c.pixels[k..k + 4].copy_from_slice(&[0, 0, 0, 255]);
+                c.pixels_mut()[k..k + 4].copy_from_slice(&[0, 0, 0, 255]);
             }
         }
     }
@@ -5919,7 +5933,7 @@ mod tests {
         let id = state.project.resolved_current().unwrap();
         let c = state.project.cell(id).unwrap();
         let k = ((y * c.width + x) * 4) as usize;
-        [c.pixels[k], c.pixels[k + 1], c.pixels[k + 2], c.pixels[k + 3]]
+        [c.pixels()[k], c.pixels()[k + 1], c.pixels()[k + 2], c.pixels()[k + 3]]
     }
 
     /// Press the bucket at cell point `(x, y)`, landing on screen at `at`.
@@ -6117,7 +6131,7 @@ mod tests {
         let mut k = st.project.clone();
         k.layers.remove(bg);
         let id = k.layers[0].exposures[0].unwrap();
-        k.cell_mut(id).unwrap().pixels[0..4].copy_from_slice(&[255, 0, 0, 255]);
+        k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&[255, 0, 0, 255]);
         let bytes = kra::write(&k, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: 0, carried: &[] }).unwrap();
         std::fs::write(&path, bytes).unwrap();
 
@@ -6128,7 +6142,7 @@ mod tests {
         }
         let now = st.project.layers[ink].exposures[0].unwrap();
         assert_ne!(now, id, "the pull should have landed");
-        assert_eq!(&st.project.cells[now].pixels[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&st.project.cells[now].pixels()[0..4], &[255, 0, 0, 255]);
         assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.starts_with("Updated from Krita")));
         // The background is where it was, untouched, still not linked.
         assert_eq!(st.project.layers[bg].name, "BG");
@@ -6196,7 +6210,7 @@ mod tests {
         let (pw, ph) = (st.project.width, st.project.height);
         let (x, y) = kra::cell_origin(pw, ph, pw, ph);
         let (c, _) = l.drawings[l.keys[0].1].place(x, y, pw, ph);
-        [c.pixels[0], c.pixels[1], c.pixels[2], c.pixels[3]]
+        [c.pixels()[0], c.pixels()[1], c.pixels()[2], c.pixels()[3]]
     }
 
     /// The helper answers "ready", the new file goes out, "sent" is posted,
@@ -6236,7 +6250,7 @@ mod tests {
         let mut k = st.project.clone(); // what Krita has: the sent version…
         st.project.layers[0].name = "Ink here".into(); // …while we rename here
         let id = k.layers[0].exposures[0].unwrap();
-        k.cell_mut(id).unwrap().pixels[0..4].copy_from_slice(&[255, 0, 0, 255]); // …and Krita paints
+        k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&[255, 0, 0, 255]); // …and Krita paints
 
         st.begin_send(0, None);
         krita_saves(&st, &k, &path);
@@ -6282,7 +6296,7 @@ mod tests {
 
         let mut k = st.project.clone();
         let id = k.layers[0].exposures[0].unwrap();
-        k.cell_mut(id).unwrap().pixels[0..4].copy_from_slice(&[9, 9, 9, 255]);
+        k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&[9, 9, 9, 255]);
         krita_saves(&st, &k, &path);
         pump(&mut st, |st| st.history.can_undo());
         assert_eq!(first_pixel_on_disk(&st, &path), [9, 9, 9, 255]);
@@ -6315,7 +6329,7 @@ mod tests {
         }
         let mut k = st.project.clone();
         let id = k.layers[0].exposures[0].unwrap();
-        k.cell_mut(id).unwrap().pixels[0..4].copy_from_slice(&[0, 255, 0, 255]);
+        k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&[0, 255, 0, 255]);
         krita_saves(&st, &k, &path);
 
         st.begin_send(0, None);
@@ -6355,7 +6369,7 @@ mod tests {
         for y in r.min_y..r.max_y {
             for x in r.min_x..r.max_x {
                 let i = ((y * w + x) * 4) as usize;
-                c.pixels[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                c.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
             }
         }
         c.mark_dirty(r.min_x, r.min_y, r.max_x - r.min_x, r.max_y - r.min_y);
@@ -6368,7 +6382,7 @@ mod tests {
         c.dirty = None;
         assert_eq!(plan_upload(&c, None, Dirty::Full, false), TexPlan::Rebuild(rect(0, 0, 0, 0)));
         for x in 10..20 {
-            c.pixels[(5 * 100 + x) * 4 + 3] = 255;
+            c.pixels_mut()[(5 * 100 + x) * 4 + 3] = 255;
         }
         let have = rect(8, 3, 22, 8);
         assert_eq!(plan_upload(&c, None, Dirty::Clean, false), TexPlan::Rebuild(have), "no texture yet");
@@ -6384,7 +6398,7 @@ mod tests {
         );
         assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(50, 30, 60, 40)), false), TexPlan::Keep);
         // The drawing spread: crop around all of it.
-        c.pixels[(40 * 100 + 70) * 4 + 3] = 255;
+        c.pixels_mut()[(40 * 100 + 70) * 4 + 3] = 255;
         let grown = rect(8, 3, 73, 43);
         assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(70, 40, 71, 41)), false), TexPlan::Rebuild(grown));
         assert_eq!(plan_upload(&c, Some(have), Dirty::Full, false), TexPlan::Rebuild(grown));
@@ -6917,7 +6931,7 @@ mod tests {
         let id = state.project.resolved_current().unwrap();
         let c = state.project.cell(id).unwrap();
         let (x, y) = (p.0.round() as u32, p.1.round() as u32);
-        c.pixels[((y * c.width + x) * 4 + 3) as usize]
+        c.pixels()[((y * c.width + x) * 4 + 3) as usize]
     }
 
     #[test]
@@ -7239,7 +7253,7 @@ mod tests {
 
         let c = state.project.cell_mut(old).unwrap();
         c.dirty = None;
-        c.pixels[3] = 255;
+        c.pixels_mut()[3] = 255;
         c.mark_dirty(0, 0, 1, 1);
         state.mark_dirty(old);
         assert_eq!(state.cell_dirty[&old], Dirty::Rect(rect(0, 0, 1, 1)));
@@ -7326,7 +7340,7 @@ mod tests {
     fn a_dropped_drawing_lives_as_long_as_undo_can_reach_it() {
         let mut st = AppState::for_test();
         let ctx = egui::Context::default();
-        st.project.cell_mut(0).unwrap().pixels[3] = 255;
+        st.project.cell_mut(0).unwrap().pixels_mut()[3] = 255;
         st.project.add_layer();
         st.project.current_layer = 0;
         let pool = st.project.cells.len();
@@ -7338,7 +7352,7 @@ mod tests {
         assert!(!st.project.cells[0].is_tombstone(), "undo can still bring it back");
         st.undo();
         assert_eq!(st.project.layers[0].resolve(0), Some(0));
-        assert_eq!(st.project.cells[0].pixels[3], 255);
+        assert_eq!(st.project.cells[0].pixels()[3], 255);
 
         st.project.current_layer = 0;
         st.structural_edit(false, |p| p.delete_layer());
@@ -7349,6 +7363,54 @@ mod tests {
         assert!(st.project.cells[0].is_tombstone(), "out of undo's reach: freed");
         assert!(!st.cell_textures.contains_key(&0));
         assert_eq!(st.project.cells.len(), pool, "no id moved");
+    }
+
+    /// A packed drawing looks the same: same texture, same export.
+    #[test]
+    fn packing_changes_nothing_on_screen_or_in_export() {
+        let mut st = AppState::for_test();
+        let ctx = egui::Context::default();
+        ink(&mut st, 0, rect(100, 50, 120, 60));
+        ink(&mut st, 0, rect(300, 200, 310, 205));
+        let full = sync(&mut st, &ctx);
+        let flat = crate::io::composite::flatten_frame(&st.project, 0).into_pixels();
+        let tex = st.layer_texture(0).unwrap().1.id();
+        let image = |d: &egui::TexturesDelta| {
+            let (_, d) = d.set.iter().find(|(t, _)| *t == tex).expect("uploaded");
+            match &d.image {
+                egui::ImageData::Color(img) => img.pixels.clone(),
+                _ => panic!("colour image expected"),
+            }
+        };
+        let before = image(&full);
+
+        assert!(!st.project.cells[0].is_packed(), "drawn on, so whole");
+        st.project.current_layer = 0;
+        st.project.add_layer(); // the drawing is no longer the active slot
+        st.pack_idle_cells();
+        assert!(st.project.cells[0].is_packed());
+        st.mark_region(0, Dirty::Full);
+        let again = sync(&mut st, &ctx);
+        assert_eq!(image(&again), before);
+        assert_eq!(crate::io::composite::flatten_frame(&st.project, 0).into_pixels(), flat);
+    }
+
+    /// The packer never takes the buffer out from under a stroke.
+    #[test]
+    fn the_packer_leaves_the_drawing_being_drawn_alone() {
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolInk);
+        st.pointer_down(st.make_sample(40.0, 40.0, 0.0));
+        st.pointer_move(st.make_sample(80.0, 40.0, 0.1));
+        let target = st.stroke_target.unwrap();
+        // Off the active slot, it's still the stroke's.
+        st.project.add_layer();
+        st.pack_idle_cells();
+        assert!(!st.project.cells[target].is_packed());
+        st.pointer_up();
+        st.pack_idle_cells();
+        assert!(st.project.cells[target].is_packed(), "done with: packed");
+        assert!(!st.project.cells[target].is_blank());
     }
 
     /// The shortcut has no clock to start from, but the first tick must still

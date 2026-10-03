@@ -74,12 +74,13 @@ impl TimelineState {
     }
 }
 
-/// Full-buffer before/after for a cell whose pixels a structural edit wiped
-/// (only the "delete the last remaining frame" path clears pixels).
+/// Before/after for a cell whose pixels a structural edit wiped (only the
+/// "delete the last remaining frame" path clears pixels). The buffers
+/// themselves, shared: holding them costs nothing the pool didn't hold.
 pub struct CellPixelDelta {
     pub cell: CellId,
-    pub before: Vec<u8>,
-    pub after: Vec<u8>,
+    pub before: Arc<Canvas>,
+    pub after: Arc<Canvas>,
 }
 
 pub enum Command {
@@ -246,16 +247,10 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
         } => {
             let state = if forward { after } else { before };
             state.restore(project);
+            // Shared back, not copied; `Touched::Cells` says they changed whole.
             for d in cell_pixels {
-                let bytes = if forward { &d.after } else { &d.before };
-                if let Some(c) = project.cell_mut(d.cell) {
-                    c.pixels.copy_from_slice(bytes);
-                    c.dirty = Some(crate::doc::canvas::DirtyRect {
-                        min_x: 0,
-                        min_y: 0,
-                        max_x: c.width,
-                        max_y: c.height,
-                    });
+                if let Some(c) = project.cells.get_mut(d.cell) {
+                    *c = Arc::clone(if forward { &d.after } else { &d.before });
                 }
             }
             if cell_pixels.is_empty() {
@@ -313,25 +308,23 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
 /// Copy `bytes` (length = w * h * 4) into `canvas` at (x, y).
 fn blit_subrect(canvas: &mut Canvas, x: u32, y: u32, w: u32, h: u32, bytes: &[u8]) {
     let row_bytes = w as usize * 4;
+    let stride = canvas.width as usize;
+    let px = canvas.pixels_mut();
     for row in 0..h as usize {
-        let dst_off = ((y as usize + row) * canvas.width as usize + x as usize) * 4;
+        let dst_off = ((y as usize + row) * stride + x as usize) * 4;
         let src_off = row * row_bytes;
-        canvas.pixels[dst_off..dst_off + row_bytes]
-            .copy_from_slice(&bytes[src_off..src_off + row_bytes]);
+        px[dst_off..dst_off + row_bytes].copy_from_slice(&bytes[src_off..src_off + row_bytes]);
     }
 }
 
 /// Capture an RGBA8 sub-rect from `canvas` into a fresh owned buffer.
 pub fn snapshot_subrect(canvas: &Canvas, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (w * h * 4) as usize];
-    let row_bytes = w as usize * 4;
-    for row in 0..h as usize {
-        let src_off = ((y as usize + row) * canvas.width as usize + x as usize) * 4;
-        let dst_off = row * row_bytes;
-        out[dst_off..dst_off + row_bytes]
-            .copy_from_slice(&canvas.pixels[src_off..src_off + row_bytes]);
-    }
-    out
+    canvas.read_rect(crate::doc::canvas::DirtyRect {
+        min_x: x,
+        min_y: y,
+        max_x: x + w,
+        max_y: y + h,
+    })
 }
 
 #[cfg(test)]
@@ -398,7 +391,7 @@ mod tests {
             }
             _ => panic!("expected a compound"),
         }
-        assert_eq!(&p.cells[id].pixels[..4], &[0, 0, 0, 0]);
+        assert_eq!(&p.cells[id].pixels()[..4], &[0, 0, 0, 0]);
         match h.redo(&mut p) {
             Some(Touched::Many(v)) => {
                 assert!(matches!(v[0], Touched::Cell(_)));
@@ -406,6 +399,6 @@ mod tests {
             }
             _ => panic!("expected a compound"),
         }
-        assert_eq!(&p.cells[id].pixels[..4], &[9, 9, 9, 255]);
+        assert_eq!(&p.cells[id].pixels()[..4], &[9, 9, 9, 255]);
     }
 }

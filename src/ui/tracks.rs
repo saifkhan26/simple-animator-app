@@ -1310,8 +1310,8 @@ mod tests {
         p.layers[0].exposures = vec![None; frames];
         for &f in keys {
             let id = p.alloc_cell_for(0);
-            p.cell_mut(id).unwrap().pixels[0] = f as u8 + 1;
-            p.cell_mut(id).unwrap().pixels[3] = 255;
+            p.cell_mut(id).unwrap().pixels_mut()[0] = f as u8 + 1;
+            p.cell_mut(id).unwrap().pixels_mut()[3] = 255;
             p.layers[0].set_key(f, id);
         }
         p
@@ -1320,7 +1320,7 @@ mod tests {
     /// The mark of the drawing showing on every frame of `layer`.
     fn row(p: &Project, layer: usize) -> Vec<u8> {
         (0..p.frame_count)
-            .map(|f| p.layers[layer].resolve(f).map_or(0, |id| p.cells[id].pixels[0]))
+            .map(|f| p.layers[layer].resolve(f).map_or(0, |id| p.cells[id].pixels()[0]))
             .collect()
     }
 
@@ -1400,8 +1400,8 @@ mod tests {
             p.add_layer();
             for (f, mark) in [(0, 50u8), (4, 51)] {
                 let id = p.alloc_cell_for(1);
-                p.cell_mut(id).unwrap().pixels[0] = mark;
-                p.cell_mut(id).unwrap().pixels[3] = 255;
+                p.cell_mut(id).unwrap().pixels_mut()[0] = mark;
+                p.cell_mut(id).unwrap().pixels_mut()[3] = 255;
                 p.layers[1].set_key(f, id);
             }
             p
@@ -1414,7 +1414,7 @@ mod tests {
         for from_layer in 0..2 {
             for b in probe.blocks(from_layer) {
                 let id = probe.layers[from_layer].exposures[b.start].unwrap();
-                let mark = probe.cells[id].pixels[0];
+                let mark = probe.cells[id].pixels()[0];
                 let before = frames_showing(&probe, 0, mark) + frames_showing(&probe, 1, mark);
                 for grab in b.span(fc) {
                     for to_layer in 0..2 {

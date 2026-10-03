@@ -62,9 +62,7 @@ pub fn import_from(project: &mut Project, dir: &PathBuf) -> Result<()> {
             img.into_raw()
         };
 
-        let mut canvas = Canvas::new(project_w, project_h);
-        canvas.pixels = pixels;
-        imported_cells.push(canvas);
+        imported_cells.push(Canvas::from_pixels(project_w, project_h, pixels));
     }
 
     let needed_frames = imported_cells.len();

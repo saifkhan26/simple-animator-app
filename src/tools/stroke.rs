@@ -1049,7 +1049,7 @@ mod tests {
         brush.radius = 8.0 / view_scale;
 
         let mut canvas = Canvas::new(512, 512);
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(512, 512, &brush);
 
@@ -1372,10 +1372,10 @@ mod tests {
     /// pre-stroke pixels.
     fn draw(brush: BrushSettings, w: u32, h: u32, path: &[(f32, f32)]) -> (Canvas, Vec<u8>) {
         let mut canvas = Canvas::new(w, h);
-        for px in canvas.pixels.chunks_mut(4) {
+        for px in canvas.pixels_mut().chunks_mut(4) {
             px.copy_from_slice(&GROUND);
         }
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(w, h, &brush);
         let mut b = StrokeBuilder::new(brush, ActiveTool::Ink, 1.0, SmoothingOptions::default());
@@ -1396,7 +1396,7 @@ mod tests {
 
     fn px(c: &Canvas, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * c.width + x) * 4) as usize;
-        [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+        [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
     }
 
     fn horizontal(x0: i32, x1: i32, y: f32) -> Vec<(f32, f32)> {
@@ -1471,7 +1471,7 @@ mod tests {
         flat.cap = StrokeCap::Flat;
         let (a, _) = draw(round, 64, 64, &path);
         let (b, _) = draw(flat, 64, 64, &path);
-        assert!(a.pixels == b.pixels);
+        assert!(a.pixels() == b.pixels());
     }
 
     // --- Krita engine ------------------------------------------------------
@@ -1491,7 +1491,7 @@ mod tests {
         setup: impl FnOnce(&mut StrokeWorkspace),
         rotation_deg: f64,
     ) {
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(canvas.width, canvas.height, &brush);
         setup(&mut ws);
@@ -1518,7 +1518,7 @@ mod tests {
         let (mut n, mut sx, mut sy, mut xx, mut yy) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for y in 0..c.height {
             for x in 0..c.width {
-                let a = c.pixels[((y * c.width + x) * 4 + 3) as usize] as f64;
+                let a = c.pixels()[((y * c.width + x) * 4 + 3) as usize] as f64;
                 let (fx, fy) = (x as f64, y as f64);
                 n += a;
                 sx += fx * a;
@@ -1551,14 +1551,14 @@ mod tests {
             c
         };
         let a = draw();
-        let painted = a.pixels.chunks(4).filter(|p| p[3] > 0).count();
+        let painted = a.pixels().chunks(4).filter(|p| p[3] > 0).count();
         assert!(painted > 500, "painted {painted}");
         assert!(a
-            .pixels
+            .pixels()
             .chunks(4)
             .filter(|p| p[3] > 0)
             .all(|p| p[..3] == [30, 60, 90]));
-        assert_eq!(a.pixels, draw().pixels);
+        assert_eq!(a.pixels(), draw().pixels());
     }
 
     /// Pencil-5's size follows tilt elevation: a quarter size upright, full
@@ -1625,7 +1625,7 @@ mod tests {
     fn krita_pencil_starts_and_ends_like_krita() {
         let brush = BrushSettings::pencil5_krita();
         let mut c = Canvas::new(120, 120);
-        let pre = c.pixels.clone();
+        let pre = c.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(c.width, c.height, &brush);
         let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
@@ -1639,9 +1639,9 @@ mod tests {
         };
         b.push(at(60.0));
         assert!(b.flush(&mut c, &mut ws, &pre).is_none(), "painted at pen-down");
-        assert!(c.pixels.iter().all(|&v| v == 0));
+        assert!(c.pixels().iter().all(|&v| v == 0));
         b.finish(&mut c, &mut ws, &pre);
-        assert!(c.pixels.chunks(4).any(|p| p[3] > 0), "a tap must still leave a dab");
+        assert!(c.pixels().chunks(4).any(|p| p[3] > 0), "a tap must still leave a dab");
     }
 
     #[test]
@@ -1667,13 +1667,13 @@ mod tests {
         );
         let outside = (0..80u32)
             .flat_map(|y| (80..160u32).map(move |x| (x, y)))
-            .any(|(x, y)| c.pixels[((y * 160 + x) * 4 + 3) as usize] > 0);
+            .any(|(x, y)| c.pixels()[((y * 160 + x) * 4 + 3) as usize] > 0);
         assert!(!outside, "painted outside the selection");
-        let inside = c.pixels.chunks(4).filter(|p| p[3] > 0).count();
+        let inside = c.pixels().chunks(4).filter(|p| p[3] > 0).count();
         assert!(inside > 100, "painted nothing inside the selection");
 
         let mut c = Canvas::new(160, 80);
-        c.pixels[((40 * 160 + 50) * 4 + 3) as usize] = 255;
+        c.pixels_mut()[((40 * 160 + 50) * 4 + 3) as usize] = 255;
         krita_stroke(
             &mut c,
             BrushSettings::pencil5_krita(),
@@ -1685,14 +1685,14 @@ mod tests {
             |ws| ws.set_alpha_lock(true),
             0.0,
         );
-        let painted = c.pixels.chunks(4).filter(|p| p[3] > 0).count();
+        let painted = c.pixels().chunks(4).filter(|p| p[3] > 0).count();
         assert_eq!(painted, 1, "alpha lock must not add paint");
     }
 
     #[test]
     fn krita_eraser_takes_alpha_away() {
         let mut c = Canvas::new(160, 80);
-        for px in c.pixels.chunks_mut(4) {
+        for px in c.pixels_mut().chunks_mut(4) {
             px.copy_from_slice(&[10, 10, 10, 255]);
         }
         krita_stroke(
@@ -1706,9 +1706,9 @@ mod tests {
             |_| {},
             0.0,
         );
-        let min = c.pixels.chunks(4).map(|p| p[3]).min().unwrap();
+        let min = c.pixels().chunks(4).map(|p| p[3]).min().unwrap();
         assert!(min < 255, "nothing erased");
-        assert!(c.pixels.chunks(4).all(|p| p[3] == 0 || p[..3] == [10, 10, 10]));
+        assert!(c.pixels().chunks(4).all(|p| p[3] == 0 || p[..3] == [10, 10, 10]));
     }
 
     /// A full-tilt diagonal across a 1080p cell, timed. Spacing and the dab
@@ -1717,7 +1717,7 @@ mod tests {
     fn krita_pencil_across_1080p_is_quick() {
         let mut c = Canvas::new(1920, 1080);
         let brush = BrushSettings::pencil5_krita();
-        let pre = c.pixels.clone();
+        let pre = c.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(c.width, c.height, &brush);
         let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
@@ -1762,7 +1762,7 @@ mod tests {
         };
         let (w, h) = (900u32, 1070u32);
         let mut canvas = Canvas::new(w, h);
-        for px in canvas.pixels.chunks_mut(4) {
+        for px in canvas.pixels_mut().chunks_mut(4) {
             px.copy_from_slice(&[205, 205, 205, 255]);
         }
 
@@ -1787,7 +1787,7 @@ mod tests {
             sheet_stroke(&mut canvas, brush, 60.0 + i as f32 * 85.0, tilt, peak);
         }
 
-        image::RgbaImage::from_raw(w, h, canvas.pixels.clone())
+        image::RgbaImage::from_raw(w, h, canvas.pixels().into_owned())
             .expect("canvas is RGBA8")
             .save(&path)
             .expect("write preview");
@@ -1802,7 +1802,7 @@ mod tests {
         let brush = BrushSettings::airbrush();
         let mut canvas = Canvas::new(300, 100);
         let pass = |canvas: &mut Canvas| {
-            let pre = canvas.pixels.clone();
+            let pre = canvas.pixels().into_owned();
             let mut ws = StrokeWorkspace::new();
             ws.begin(canvas.width, canvas.height, &brush);
             let mut b =
@@ -1820,7 +1820,7 @@ mod tests {
             }
             b.finish(canvas, &mut ws, &pre);
         };
-        let alpha = |c: &Canvas, y: u32| c.pixels[((y * c.width + 150) * 4 + 3) as usize];
+        let alpha = |c: &Canvas, y: u32| c.pixels()[((y * c.width + 150) * 4 + 3) as usize];
         pass(&mut canvas);
         let (core, mid, edge) = (alpha(&canvas, 50), alpha(&canvas, 65), alpha(&canvas, 76));
         assert!(core > mid && mid > edge && edge > 0, "{core} {mid} {edge}");
@@ -1839,7 +1839,7 @@ mod tests {
         tilt: (f32, f32),
         peak: f32,
     ) {
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(canvas.width, canvas.height, &brush);
         let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());

@@ -45,8 +45,15 @@ pub fn cell_hash(c: &Canvas) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     c.width.hash(&mut h);
     c.height.hash(&mut h);
-    h.write(&c.pixels);
+    h.write(&c.pixels());
     h.finish()
+}
+
+/// `c` holding only what's drawn — done here, on the worker, so a pull's
+/// new drawings land in the project already packed.
+fn packed(mut c: Canvas) -> Canvas {
+    c.pack();
+    c
 }
 
 /// How a pull that would leave no layers is refused.
@@ -73,7 +80,7 @@ pub fn comes_back(name: &str, groups: &[String]) -> bool {
 }
 
 fn is_blank(c: &Canvas) -> bool {
-    c.pixels.iter().all(|&b| b == 0)
+    c.is_all_zero()
 }
 
 /// A fresh `{8-4-4-4-12}` uuid in Krita's layer-id format. Random per process
@@ -273,7 +280,7 @@ pub fn prepare(doc: KraDoc, base: &Baseline, present: &HashSet<String>) -> Pulle
                         let h = cell_hash(&c);
                         if let Some(&id) = b.and_then(|b| b.by_hash.get(&h)) {
                             let blank = is_blank(&c);
-                            return PulledDrawing { hash: h, size: s, matched: Some(id), blank, canvas: whole.then_some(c) };
+                            return PulledDrawing { hash: h, size: s, matched: Some(id), blank, canvas: whole.then(|| packed(c)) };
                         }
                         tried.push((s, c, clip, h));
                     }
@@ -294,7 +301,7 @@ pub fn prepare(doc: KraDoc, base: &Baseline, present: &HashSet<String>) -> Pulle
                             (want, c, clip, h)
                         });
                     clipped += clip as usize;
-                    PulledDrawing { hash: h, size: s, matched: None, blank: is_blank(&c), canvas: Some(c) }
+                    PulledDrawing { hash: h, size: s, matched: None, blank: is_blank(&c), canvas: Some(packed(c)) }
                 })
                 .collect::<Vec<_>>();
 
@@ -1112,7 +1119,7 @@ mod tests {
         for i in 0..6u32 {
             let (x, y) = ((i * 5 + seed as u32) % w, (i * 3 + seed as u32 * 2) % h);
             let p = ((y * w + x) * 4) as usize;
-            c.pixels[p..p + 4].copy_from_slice(&[seed, 40 + i as u8, 7, 255]);
+            c.pixels_mut()[p..p + 4].copy_from_slice(&[seed, 40 + i as u8, 7, 255]);
         }
         c
     }
@@ -1162,7 +1169,7 @@ mod tests {
     }
 
     fn paint(p: &mut Project, id: CellId, seed: u8) {
-        let px = &mut p.cell_mut(id).unwrap().pixels;
+        let px = p.cell_mut(id).unwrap().pixels_mut();
         px[0..4].copy_from_slice(&[seed, seed, seed, 255]);
     }
 
@@ -1205,7 +1212,7 @@ mod tests {
         let b = k.layers[0].exposures[2].unwrap();
         paint(&mut k, b, 99);
         let before = p.layers[0].exposures.clone();
-        let old_pixels = p.cells[b].pixels.clone();
+        let old_pixels = p.cells[b].pixels().into_owned();
 
         let plan = pull_from(&p, &base, &mut links, &k);
         assert_eq!(plan.report.drawings, 1);
@@ -1216,9 +1223,9 @@ mod tests {
         assert_eq!(after[4], before[4]);
         let new_b = after[2].unwrap();
         assert_ne!(new_b, b);
-        assert_eq!(p.cells[new_b].pixels, k.cells[b].pixels);
+        assert_eq!(p.cells[new_b].pixels(), k.cells[b].pixels());
         // The old cell is untouched — undo only has to restore exposures.
-        assert_eq!(p.cells[b].pixels, old_pixels);
+        assert_eq!(p.cells[b].pixels(), old_pixels);
         // The other layer wasn't touched at all.
         assert_eq!(p.layers[1].exposures, project().layers[1].exposures);
     }
@@ -1236,7 +1243,7 @@ mod tests {
 
         pull_from(&p, &base, &mut links, &k).apply(&mut p);
         assert_eq!(p.layers[0].exposures[0], Some(a));
-        assert_eq!(p.cells[a].pixels[0], 50);
+        assert_eq!(p.cells[a].pixels()[0], 50);
     }
 
     #[test]
@@ -1249,7 +1256,7 @@ mod tests {
         paint(&mut k, b, 99);
         pull_from(&p, &base, &mut links, &k).apply(&mut p);
         let now = p.layers[0].exposures[2].unwrap();
-        assert_eq!(p.cells[now].pixels[0], 99);
+        assert_eq!(p.cells[now].pixels()[0], 99);
     }
 
     #[test]
@@ -1318,7 +1325,7 @@ mod tests {
         assert_eq!(names, ["Ink", "Local", "Color", "Krita new"]);
         assert!(links.contains_key(&p.layers[3].uid));
         let got = p.layers[3].exposures[1].unwrap();
-        assert_eq!(p.cells[got].pixels, k.cells[id].pixels);
+        assert_eq!(p.cells[got].pixels(), k.cells[id].pixels());
 
         // Now Krita deletes Color and swaps the other two.
         let base = base_of(&p, &links);
@@ -1381,7 +1388,7 @@ mod tests {
                 for x in 0..c.width {
                     let i = ((y * c.width + x) * 4) as usize;
                     let on = id == color || (x < c.width / 2) == left;
-                    c.pixels[i..i + 4].copy_from_slice(if on { &[9, 9, 9, 255] } else { &[0; 4] });
+                    c.pixels_mut()[i..i + 4].copy_from_slice(if on { &[9, 9, 9, 255] } else { &[0; 4] });
                 }
             }
         }
@@ -1429,7 +1436,7 @@ mod tests {
         let now = p.layers[1].exposures[0].unwrap();
         assert_ne!(now, id);
         assert_eq!((p.cells[now].width, p.cells[now].height), (60, 51));
-        assert_eq!(p.cells[now].pixels, k.cells[id].pixels);
+        assert_eq!(p.cells[now].pixels(), k.cells[id].pixels());
     }
 
     #[test]
@@ -1589,7 +1596,7 @@ mod tests {
         assert_eq!(names, ["Ink", "sketch-x", "Paint"]);
         let sk = &doc.layers[1];
         let (c, _) = sk.drawings[sk.keys[0].1].place(0, 0, 40, 30);
-        assert_eq!(c.pixels, cell(40, 30, 9).pixels);
+        assert_eq!(c.pixels(), cell(40, 30, 9).pixels());
         // Baseline: only what came from here.
         assert_eq!(sent.baseline.layers.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);

@@ -92,7 +92,5 @@ pub fn decode_all(path: &Path) -> Result<Vec<Canvas>> {
 /// Wrap a full-screen GIF RGBA buffer into a native-resolution canvas (the layer
 /// transform handles placement/scale).
 fn to_canvas(buf: &[u8], gw: u32, gh: u32) -> Canvas {
-    let mut canvas = Canvas::new(gw, gh);
-    canvas.pixels.copy_from_slice(buf);
-    canvas
+    Canvas::from_pixels(gw, gh, buf.to_vec())
 }

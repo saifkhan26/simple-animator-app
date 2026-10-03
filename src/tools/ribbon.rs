@@ -458,7 +458,7 @@ impl StrokeWorkspace {
                     if pre[idx + 3] == 0 {
                         continue;
                     }
-                    let dst = &mut canvas.pixels[idx..idx + 4];
+                    let dst = &mut canvas.pixels_mut()[idx..idx + 4];
                     let mix = |c: f32, p: u8| (c * a_src + p as f32 * (1.0 - a_src)).round() as u8;
                     dst[0] = mix(br, pre[idx]);
                     dst[1] = mix(bg, pre[idx + 1]);
@@ -467,7 +467,7 @@ impl StrokeWorkspace {
                     continue;
                 }
                 let a_out = a_src + a_pre * (1.0 - a_src);
-                let dst = &mut canvas.pixels[idx..idx + 4];
+                let dst = &mut canvas.pixels_mut()[idx..idx + 4];
                 if a_out <= 0.0 {
                     dst.copy_from_slice(&[0, 0, 0, 0]);
                     continue;
@@ -514,7 +514,7 @@ impl StrokeWorkspace {
                 let a_pre = pre[idx + 3] as f32 / 255.0;
                 let a_out = a_pre * (1.0 - cov as f32 / 65535.0 * strength * k);
                 let a8 = (a_out * 255.0).round() as u8;
-                let dst = &mut canvas.pixels[idx..idx + 4];
+                let dst = &mut canvas.pixels_mut()[idx..idx + 4];
                 if a8 == 0 {
                     dst.copy_from_slice(&[0, 0, 0, 0]);
                 } else {
@@ -547,7 +547,7 @@ impl StrokeWorkspace {
             let row = (y * self.w) as usize;
             let a = (row + rect.min_x.min(self.w) as usize) * 4;
             let b = (row + rect.max_x.min(self.w) as usize) * 4;
-            canvas.pixels[a..b].copy_from_slice(&pre[a..b]);
+            canvas.pixels_mut()[a..b].copy_from_slice(&pre[a..b]);
         }
     }
 
@@ -707,10 +707,10 @@ mod tests {
         ws.begin(16, 16, &ribbon(1.0, 0.0));
         let mut canvas = Canvas::new(16, 16);
         // Pre: mid-gray at alpha 128.
-        for px in canvas.pixels.chunks_exact_mut(4) {
+        for px in canvas.pixels_mut().chunks_exact_mut(4) {
             px.copy_from_slice(&[100, 100, 100, 128]);
         }
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         ws.raster_dot(node(8.0, 8.0, 4.0, 1.0));
         let rect = ws.stroke_rect.unwrap();
         ws.composite_paint(&mut canvas, &pre, rect, [200, 40, 40, 255], 0.5);
@@ -723,8 +723,8 @@ mod tests {
         let a_out = a_src + a_pre * (1.0 - a_src);
         let expect_r =
             ((200.0 * a_src + 100.0 * a_pre * (1.0 - a_src)) / a_out).round() as u8;
-        assert_eq!(canvas.pixels[idx], expect_r);
-        assert_eq!(canvas.pixels[idx + 3], (a_out * 255.0).round() as u8);
+        assert_eq!(canvas.pixels()[idx], expect_r);
+        assert_eq!(canvas.pixels()[idx + 3], (a_out * 255.0).round() as u8);
     }
 
     #[test]
@@ -734,18 +734,18 @@ mod tests {
         let mut ws = StrokeWorkspace::new();
         ws.begin(16, 16, &ribbon(1.0, 0.0));
         let mut canvas = Canvas::new(16, 16);
-        for px in canvas.pixels.chunks_exact_mut(4) {
+        for px in canvas.pixels_mut().chunks_exact_mut(4) {
             px.copy_from_slice(&[0, 0, 255, 255]); // opaque blue
         }
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         ws.raster_dot(node(8.0, 8.0, 5.0, 1.0));
         let rect = ws.stroke_rect.unwrap();
         ws.composite_paint(&mut canvas, &pre, rect, [255, 0, 0, 255], 0.5);
 
         let idx = ((8 * 16 + 8) * 4) as usize;
-        assert!(canvas.pixels[idx] > 60, "red must show through");
-        assert!(canvas.pixels[idx + 2] < 255, "blue must be reduced");
-        assert_eq!(canvas.pixels[idx + 3], 255, "stays opaque");
+        assert!(canvas.pixels()[idx] > 60, "red must show through");
+        assert!(canvas.pixels()[idx + 2] < 255, "blue must be reduced");
+        assert_eq!(canvas.pixels()[idx + 3], 255, "stays opaque");
     }
 
     #[test]
@@ -753,10 +753,10 @@ mod tests {
         let mut ws = StrokeWorkspace::new();
         ws.begin(16, 16, &ribbon(1.0, 0.0));
         let mut canvas = Canvas::new(16, 16);
-        for px in canvas.pixels.chunks_exact_mut(4) {
+        for px in canvas.pixels_mut().chunks_exact_mut(4) {
             px.copy_from_slice(&[50, 60, 70, 200]);
         }
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         ws.raster_dot(node(8.0, 8.0, 5.0, 1.0));
         let rect = ws.stroke_rect.unwrap();
         ws.composite_erase(&mut canvas, &pre, rect, 0.5);
@@ -764,8 +764,8 @@ mod tests {
         let idx = ((8 * 16 + 8) * 4) as usize;
         let cov = ws.cov[8 * 16 + 8] as f32 / 65535.0;
         let expect = (200.0 / 255.0 * (1.0 - cov * 0.5) * 255.0).round() as u8;
-        assert_eq!(canvas.pixels[idx + 3], expect);
-        assert_eq!(canvas.pixels[idx], 50, "RGB carried from snapshot");
+        assert_eq!(canvas.pixels()[idx + 3], expect);
+        assert_eq!(canvas.pixels()[idx], 50, "RGB carried from snapshot");
     }
 
     #[test]
@@ -915,7 +915,7 @@ mod tests {
     /// Paint a dot through `clip` onto a transparent canvas and return it.
     fn painted_through(clip: Option<Arc<Mask>>) -> Canvas {
         let mut canvas = Canvas::new(64, 64);
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(64, 64, &ribbon(1.0, 0.0));
         ws.set_clip(clip);
@@ -933,7 +933,7 @@ mod tests {
                 let a = if x < 32 { 255 } else if x == 40 { 128 } else { 0 };
                 let i = ((y * 64 + x) * 4) as usize;
                 if a > 0 {
-                    c.pixels[i..i + 4].copy_from_slice(&[0, 0, 255, a]);
+                    c.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 255, a]);
                 }
             }
         }
@@ -943,7 +943,7 @@ mod tests {
     #[test]
     fn alpha_lock_recolours_paint_and_leaves_bare_canvas_bare() {
         let mut canvas = half_blue();
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(64, 64, &ribbon(1.0, 0.0));
         ws.set_alpha_lock(true);
@@ -951,7 +951,7 @@ mod tests {
         ws.composite_paint(&mut canvas, &pre, r, [200, 10, 10, 255], 1.0);
         let px = |x: u32| {
             let i = ((32 * 64 + x) * 4) as usize;
-            [canvas.pixels[i], canvas.pixels[i + 1], canvas.pixels[i + 2], canvas.pixels[i + 3]]
+            [canvas.pixels()[i], canvas.pixels()[i + 1], canvas.pixels()[i + 2], canvas.pixels()[i + 3]]
         };
         assert_eq!(px(28), [200, 10, 10, 255], "painted over: recoloured, alpha kept");
         assert_eq!(px(40), [200, 10, 10, 128], "half alpha stays half");
@@ -961,13 +961,13 @@ mod tests {
     #[test]
     fn alpha_lock_stops_the_eraser() {
         let mut canvas = half_blue();
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(64, 64, &ribbon(1.0, 0.0));
         ws.set_alpha_lock(true);
         let r = ws.raster_dot(node(30.0, 32.0, 10.0, 1.0)).expect("dot");
         ws.composite_erase(&mut canvas, &pre, r, 1.0);
-        assert_eq!(canvas.pixels, pre);
+        assert_eq!(canvas.pixels(), pre);
         // And `begin` lets go of it for the next stroke.
         ws.begin(64, 64, &ribbon(1.0, 0.0));
         let r = ws.raster_dot(node(30.0, 32.0, 10.0, 1.0)).expect("dot");
@@ -976,7 +976,7 @@ mod tests {
     }
 
     fn alpha(c: &Canvas, x: u32, y: u32) -> u8 {
-        c.pixels[((y * c.width + x) * 4 + 3) as usize]
+        c.pixels()[((y * c.width + x) * 4 + 3) as usize]
     }
 
     #[test]
@@ -996,7 +996,7 @@ mod tests {
             h: 64,
             cov: vec![255; 64 * 64],
         })));
-        assert_eq!(free.pixels, all.pixels);
+        assert_eq!(free.pixels(), all.pixels());
     }
 
     #[test]
@@ -1015,16 +1015,16 @@ mod tests {
             h: 0,
             cov: Vec::new(),
         })));
-        assert!(c.pixels.iter().all(|&b| b == 0));
+        assert!(c.pixels().iter().all(|&b| b == 0));
     }
 
     #[test]
     fn the_eraser_is_held_to_the_selection_too() {
         let mut canvas = Canvas::new(64, 64);
-        for px in canvas.pixels.chunks_exact_mut(4) {
+        for px in canvas.pixels_mut().chunks_exact_mut(4) {
             px.copy_from_slice(&[0, 0, 0, 255]);
         }
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(64, 64, &ribbon(1.0, 0.0));
         ws.set_clip(Some(half_clip(255)));
@@ -1061,7 +1061,7 @@ mod tests {
         });
 
         let mut inc = Canvas::new(64, 64);
-        let pre = inc.pixels.clone();
+        let pre = inc.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(64, 64, &ribbon(0.6, 0.0));
         ws.set_clip(Some(clip.clone()));
@@ -1081,6 +1081,6 @@ mod tests {
             ws2.raster_capsule(seg[0], seg[1]);
         }
         ws2.composite_paint(&mut once, &pre, all.expect("rect"), [0, 90, 200, 255], 0.9);
-        assert_eq!(inc.pixels, once.pixels);
+        assert_eq!(inc.pixels(), once.pixels());
     }
 }

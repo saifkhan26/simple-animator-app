@@ -7123,7 +7123,7 @@ mod perspective_tests {
 
         let id = state.project.resolved_current().expect("the shape drew a cell");
         let c = state.project.cell(id).unwrap();
-        let alpha = |x: u32, y: u32| c.pixels[((y * c.width + x) * 4 + 3) as usize];
+        let alpha = |x: u32, y: u32| c.pixels()[((y * c.width + x) * 4 + 3) as usize];
         // Near edge out to the leaning column (x ≈ 220), flat corner bare.
         assert!(alpha(210, 380) > 200);
         assert_eq!(alpha(120, 200), 0);
@@ -7201,7 +7201,7 @@ mod onion_tests {
         let cell_on = |f| state.project.layers[li].resolve(f).unwrap();
         let (past, current, future, pinned) = (cell_on(1), cell_on(2), cell_on(3), cell_on(4));
         // A blank drawing paints nothing; give the current one a dot of ink.
-        state.project.cell_mut(current).unwrap().pixels[3] = 255;
+        state.project.cell_mut(current).unwrap().pixels_mut()[3] = 255;
 
         let ctx = egui::Context::default();
         let mut meshes = Vec::new();
@@ -7309,7 +7309,7 @@ mod fade_tests {
         let (below, active, above) = (cell_of(0), cell_of(1), cell_of(2));
         // A blank drawing paints nothing: a dot of ink in each.
         for id in [below, active, above] {
-            state.project.cell_mut(id).unwrap().pixels[3] = 255;
+            state.project.cell_mut(id).unwrap().pixels_mut()[3] = 255;
         }
 
         let ctx = egui::Context::default();
@@ -7922,7 +7922,7 @@ mod fill_tests {
     fn px(state: &AppState, x: u32, y: u32) -> [u8; 4] {
         let c = state.project.cell(state.project.resolved_current().unwrap()).unwrap();
         let k = ((y * c.width + x) * 4) as usize;
-        [c.pixels[k], c.pixels[k + 1], c.pixels[k + 2], c.pixels[k + 3]]
+        [c.pixels()[k], c.pixels()[k + 1], c.pixels()[k + 2], c.pixels()[k + 3]]
     }
 
     #[test]
@@ -7940,7 +7940,7 @@ mod fill_tests {
             for (x, y) in [(i, 100), (i, 300), (100, i), (300, i)] {
                 if !(y == 100 && (190..194).contains(&x)) {
                     let k = ((y * c.width + x) * 4) as usize;
-                    c.pixels[k..k + 4].copy_from_slice(&[0, 0, 0, 255]);
+                    c.pixels_mut()[k..k + 4].copy_from_slice(&[0, 0, 0, 255]);
                 }
             }
         }
@@ -8134,7 +8134,7 @@ mod krita_brush_tests {
         run(&ctx, &mut state, vec![]);
 
         let c = state.project.cell(id).unwrap();
-        let painted = c.pixels.chunks(4).filter(|p| p[3] > 0).count();
+        let painted = c.pixels().chunks(4).filter(|p| p[3] > 0).count();
         assert!(painted > 100, "painted {painted} pixels");
         assert_eq!(state.history.undo_len(), 1, "one stroke, one undo step");
     }

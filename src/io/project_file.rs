@@ -401,18 +401,18 @@ mod tests {
     #[test]
     fn pixels_survive_the_round_trip_exactly() {
         let mut p = Project::new(23, 17, 12.0);
-        for (i, b) in p.cell_mut(0).unwrap().pixels.iter_mut().enumerate() {
+        for (i, b) in p.cell_mut(0).unwrap().pixels_mut().iter_mut().enumerate() {
             // Deliberately not a flat fill: a stride-coprime pattern with no
             // long runs would expose any lossy or truncating step.
             *b = ((i * 37 + i / 23 * 11) % 251) as u8;
         }
-        let expect = p.cells[0].pixels.clone();
+        let expect = p.cells[0].pixels().into_owned();
 
         let (bytes, _) = encode(&p).unwrap();
         let q = decode(&bytes).expect("decode");
         assert_eq!(q.cells.len(), 1);
         assert_eq!(
-            q.cells[0].pixels, expect,
+            q.cells[0].pixels(), expect,
             "pixels came back changed — the round trip is not lossless"
         );
         assert_eq!((q.cells[0].width, q.cells[0].height), (23, 17));
@@ -571,7 +571,7 @@ mod tests {
                     if on {
                         let i = (y * 1920 + x) * 4;
                         let a = ((x * 31 + y * 17) % 256) as u8;
-                        canvas.pixels[i..i + 4].copy_from_slice(&[20, 20, 25, a]);
+                        canvas.pixels_mut()[i..i + 4].copy_from_slice(&[20, 20, 25, a]);
                     }
                 }
             }
@@ -611,11 +611,11 @@ mod tests {
     #[test]
     fn saves_and_loads_a_real_file_losslessly() {
         let mut p = Project::new(64, 48, 12.0);
-        for (i, b) in p.cell_mut(0).unwrap().pixels.iter_mut().enumerate() {
+        for (i, b) in p.cell_mut(0).unwrap().pixels_mut().iter_mut().enumerate() {
             *b = ((i * 29 + i / 64 * 7) % 251) as u8;
         }
         p.layers[0].name = "Round trip".into();
-        let expect = p.cells[0].pixels.clone();
+        let expect = p.cells[0].pixels().into_owned();
 
         let path = std::env::temp_dir().join(format!(
             "animator-round-trip-{}.anim",
@@ -631,7 +631,7 @@ mod tests {
 
         assert_eq!(q.layers[0].name, "Round trip");
         assert_eq!(
-            q.cells[0].pixels, expect,
+            q.cells[0].pixels(), expect,
             "pixels changed on the way through a real file"
         );
         assert!(
