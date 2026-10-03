@@ -45,6 +45,25 @@ pub enum Action {
     LayerDelete,
     LayerToggleVisible,
     LayerLast,
+    /// Step the active layer one row up / down the Layers panel. Stops at the
+    /// ends, like the key jumps, so holding the key never wraps around.
+    LayerSelectAbove,
+    LayerSelectBelow,
+    LayerSelectTop,
+    LayerSelectBottom,
+    /// Reorder: swap the active layer with the one above / below it.
+    LayerMoveUp,
+    LayerMoveDown,
+    /// Select the Nth layer counting down from the top of the Layers panel.
+    LayerPick1,
+    LayerPick2,
+    LayerPick3,
+    LayerPick4,
+    LayerPick5,
+    LayerPick6,
+    LayerPick7,
+    LayerPick8,
+    LayerPick9,
     FadeOthersToggle,
     LayerClipToggle,
     LayerAlphaLockToggle,
@@ -130,6 +149,21 @@ impl Action {
         Action::LayerDelete,
         Action::LayerToggleVisible,
         Action::LayerLast,
+        Action::LayerSelectAbove,
+        Action::LayerSelectBelow,
+        Action::LayerSelectTop,
+        Action::LayerSelectBottom,
+        Action::LayerMoveUp,
+        Action::LayerMoveDown,
+        Action::LayerPick1,
+        Action::LayerPick2,
+        Action::LayerPick3,
+        Action::LayerPick4,
+        Action::LayerPick5,
+        Action::LayerPick6,
+        Action::LayerPick7,
+        Action::LayerPick8,
+        Action::LayerPick9,
         Action::FadeOthersToggle,
         Action::LayerClipToggle,
         Action::LayerAlphaLockToggle,
@@ -209,6 +243,21 @@ impl Action {
             Action::LayerDelete => "Delete layer",
             Action::LayerToggleVisible => "Toggle layer visibility",
             Action::LayerLast => "Go to last selected layer",
+            Action::LayerSelectAbove => "Select layer above",
+            Action::LayerSelectBelow => "Select layer below",
+            Action::LayerSelectTop => "Select top layer",
+            Action::LayerSelectBottom => "Select bottom layer",
+            Action::LayerMoveUp => "Move layer up",
+            Action::LayerMoveDown => "Move layer down",
+            Action::LayerPick1 => "Select layer 1 (from top)",
+            Action::LayerPick2 => "Select layer 2 (from top)",
+            Action::LayerPick3 => "Select layer 3 (from top)",
+            Action::LayerPick4 => "Select layer 4 (from top)",
+            Action::LayerPick5 => "Select layer 5 (from top)",
+            Action::LayerPick6 => "Select layer 6 (from top)",
+            Action::LayerPick7 => "Select layer 7 (from top)",
+            Action::LayerPick8 => "Select layer 8 (from top)",
+            Action::LayerPick9 => "Select layer 9 (from top)",
             Action::FadeOthersToggle => "Fade other layers",
             Action::LayerClipToggle => "Clip layer to the one below",
             Action::LayerAlphaLockToggle => "Lock layer alpha",
@@ -259,6 +308,23 @@ impl Action {
             Action::CameraKeyDelete => "Delete camera key",
             Action::CameraLookThrough => "Look through camera",
         }
+    }
+
+    /// `Some(n)` for the "select layer n" actions: n counts rows down from
+    /// the top of the Layers panel, starting at 1.
+    pub fn layer_pick(self) -> Option<usize> {
+        Some(match self {
+            Action::LayerPick1 => 1,
+            Action::LayerPick2 => 2,
+            Action::LayerPick3 => 3,
+            Action::LayerPick4 => 4,
+            Action::LayerPick5 => 5,
+            Action::LayerPick6 => 6,
+            Action::LayerPick7 => 7,
+            Action::LayerPick8 => 8,
+            Action::LayerPick9 => 9,
+            _ => return None,
+        })
     }
 
     /// Bound to a bare modifier combo held while a canvas drag starts, rather
@@ -337,6 +403,24 @@ impl KeyCombo {
             ctrl: true,
             shift: true,
             alt: false,
+        }
+    }
+
+    pub fn ctrl_alt(key: egui::Key) -> Self {
+        Self {
+            key: Some(key),
+            ctrl: true,
+            shift: false,
+            alt: true,
+        }
+    }
+
+    pub fn shift_alt(key: egui::Key) -> Self {
+        Self {
+            key: Some(key),
+            ctrl: false,
+            shift: true,
+            alt: true,
         }
     }
 
@@ -493,6 +577,41 @@ impl Default for ShortcutMap {
         b.insert(Action::LayerLast, KeyCombo::plain(K::Z));
         // Shifted sibling of the layer jump: push every other layer back.
         b.insert(Action::FadeOthersToggle, KeyCombo::shift(K::Z));
+        // Walk the stack: W above S, the vertical pair beside the A / S frame
+        // step. Alt keeps them off the tools; Shift goes all the way, Ctrl
+        // carries the layer along.
+        b.insert(Action::LayerSelectAbove, KeyCombo::alt(K::W));
+        b.insert(Action::LayerSelectBelow, KeyCombo::alt(K::S));
+        b.insert(Action::LayerSelectTop, KeyCombo::shift_alt(K::W));
+        b.insert(Action::LayerSelectBottom, KeyCombo::shift_alt(K::S));
+        b.insert(Action::LayerMoveUp, KeyCombo::ctrl_alt(K::W));
+        b.insert(Action::LayerMoveDown, KeyCombo::ctrl_alt(K::S));
+        // Alt+digit picks a row; the plain digits stay the x-sheet keys.
+        let digits = [
+            K::Num1,
+            K::Num2,
+            K::Num3,
+            K::Num4,
+            K::Num5,
+            K::Num6,
+            K::Num7,
+            K::Num8,
+            K::Num9,
+        ];
+        let picks = [
+            Action::LayerPick1,
+            Action::LayerPick2,
+            Action::LayerPick3,
+            Action::LayerPick4,
+            Action::LayerPick5,
+            Action::LayerPick6,
+            Action::LayerPick7,
+            Action::LayerPick8,
+            Action::LayerPick9,
+        ];
+        for (a, k) in picks.into_iter().zip(digits) {
+            b.insert(a, KeyCombo::alt(k));
+        }
         // Photoshop's keys for both.
         b.insert(
             Action::LayerClipToggle,
@@ -731,6 +850,67 @@ mod tests {
                 assert_ne!(c, other, "shares {} with {b:?}", c.display());
             }
         }
+    }
+
+    #[test]
+    fn layer_nav_defaults_clash_with_nothing() {
+        let map = ShortcutMap::default();
+        let ours = Action::ALL.iter().copied().filter(|&a| {
+            a.layer_pick().is_some()
+                || matches!(
+                    a,
+                    Action::LayerSelectAbove
+                        | Action::LayerSelectBelow
+                        | Action::LayerSelectTop
+                        | Action::LayerSelectBottom
+                        | Action::LayerMoveUp
+                        | Action::LayerMoveDown
+                )
+        });
+        let mut n = 0;
+        for a in ours {
+            n += 1;
+            let c = map.get(a).expect("bound");
+            for (&b, &other) in &map.bindings {
+                if b != a {
+                    assert_ne!(c, other, "{a:?} and {b:?} share {}", c.display());
+                }
+            }
+        }
+        assert_eq!(n, 15);
+        assert_eq!(
+            map.get(Action::LayerSelectAbove),
+            Some(KeyCombo::alt(egui::Key::W))
+        );
+        assert_eq!(Action::LayerPick9.layer_pick(), Some(9));
+    }
+
+    /// The plain digits are x-sheet keys; Alt+digit must pick a layer
+    /// without also inserting a key.
+    #[test]
+    fn alt_digit_picks_a_layer_and_nothing_else() {
+        let map = ShortcutMap::default();
+        let ctx = egui::Context::default();
+        let alt = egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        let mut fired = Vec::new();
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Num1,
+                    physical_key: Some(egui::Key::Num1),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: alt,
+                }],
+                modifiers: alt,
+                ..Default::default()
+            },
+            |ctx| fired = map.poll_actions(ctx),
+        );
+        assert_eq!(fired, vec![Action::LayerPick1]);
     }
 
     #[test]

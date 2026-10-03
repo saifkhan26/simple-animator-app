@@ -1806,6 +1806,21 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 );
                 ui.painter()
                     .rect_stroke(rect, 3.0, Stroke::new(1.0, theme::STROKE_THIN));
+                // Which layer the layer keys landed on — the Layers panel is
+                // hidden whenever this bar is up. Long names are cut short so
+                // the bar keeps its width.
+                if let Some(l) = state.project.layers.get(state.project.current_layer) {
+                    ui.separator();
+                    let name: String = if l.name.chars().count() > 18 {
+                        l.name.chars().take(17).chain(['…']).collect()
+                    } else {
+                        l.name.clone()
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("{} {name}", ic::STACK)).color(theme::TEXT),
+                    )
+                    .on_hover_text(format!("Active layer: {}", l.name));
+                }
             });
             ui.add_space(3.0);
             mini_frame_dots(state, ui);
@@ -2331,11 +2346,13 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 if theme::icon_button(ui, ic::MINUS, "Delete layer").clicked() {
                     state.structural_edit(false, |p| p.delete_layer());
                 }
-                if theme::icon_button(ui, ic::ARROW_UP, "Move layer up").clicked() {
-                    state.project.move_layer_up();
+                let up = tip(state, Action::LayerMoveUp, "Move layer up");
+                if theme::icon_button(ui, ic::ARROW_UP, &up).clicked() {
+                    state.move_active_layer(true);
                 }
-                if theme::icon_button(ui, ic::ARROW_DOWN, "Move layer down").clicked() {
-                    state.project.move_layer_down();
+                let down = tip(state, Action::LayerMoveDown, "Move layer down");
+                if theme::icon_button(ui, ic::ARROW_DOWN, &down).clicked() {
+                    state.move_active_layer(false);
                 }
                 ui.add_enabled_ui(state.can_merge_down(), |ui| {
                     if theme::icon_button(ui, ic::ARROWS_MERGE, "Merge layer down").clicked() {
@@ -2616,6 +2633,17 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                 );
                             })
                             .response;
+                        // Keep the active row in view when the selection
+                        // moves — the layer keys walk it off the list — but
+                        // only then, so the list still scrolls freely.
+                        if selected {
+                            let mem_id = egui::Id::new("layers_active_row");
+                            let last: Option<usize> = ui.data(|d| d.get_temp(mem_id));
+                            if last != Some(i) {
+                                ui.scroll_to_rect(row.rect, None);
+                                ui.data_mut(|d| d.insert_temp(mem_id, i));
+                            }
+                        }
                         // Every row is a drop target: the top half drops the
                         // dragged layer above this one, the bottom half below.
                         if let Some(from) = row.dnd_hover_payload::<LayerDrag>() {
@@ -7760,6 +7788,64 @@ mod layers_panel_tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    /// The layer keys walk the selection off the visible part of the list;
+    /// the list follows it.
+    #[test]
+    fn the_list_scrolls_to_a_layer_selected_by_key() {
+        let (mut state, ctx, _) = setup();
+        for k in 0..20 {
+            state.project.add_layer();
+            let i = state.project.current_layer;
+            state.project.layers[i].name = format!("Extra {k:02}");
+        }
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = frame(&ctx, &mut state, vec![]);
+        }
+        assert!(
+            panel_shows(&ctx, &shapes, "Extra 19"),
+            "the selected top row is in view"
+        );
+        assert!(!panel_shows(&ctx, &shapes, "Alpha"), "the bottom row starts scrolled away");
+        state.dispatch(Action::LayerSelectBottom);
+        // egui animates the scroll: give it a second's worth of frames.
+        for _ in 0..60 {
+            shapes = frame(&ctx, &mut state, vec![]);
+        }
+        assert!(panel_shows(&ctx, &shapes, "Alpha"), "scrolled to the new selection");
+    }
+
+    /// With the panels hidden, the mini bar is the only place that says which
+    /// layer the keys landed on.
+    #[test]
+    fn the_mini_bar_names_the_active_layer() {
+        let (mut state, ctx, _) = setup();
+        state.show_panels = false;
+        state.show_mini_timeline = true;
+        let painted = |shapes: &[egui::epaint::ClippedShape], want: &str| {
+            fn find(shape: &egui::Shape, want: &str) -> bool {
+                match shape {
+                    egui::Shape::Vec(v) => v.iter().any(|s| find(s, want)),
+                    egui::Shape::Text(t) => t.galley.text() == want,
+                    _ => false,
+                }
+            }
+            shapes.iter().any(|s| find(&s.shape, want))
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            shapes = frame(&ctx, &mut state, vec![]);
+        }
+        assert!(painted(&shapes, &format!("{} Charlie", ic::STACK)));
+        state.dispatch(Action::LayerSelectBelow);
+        state.project.layers[1].name = "A name far too long for the bar".into();
+        shapes = frame(&ctx, &mut state, vec![]);
+        assert!(painted(
+            &shapes,
+            &format!("{} A name far too lo…", ic::STACK)
+        ));
     }
 
     #[test]
