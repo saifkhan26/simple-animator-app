@@ -7,6 +7,7 @@ use egui_phosphor::regular as ic;
 use crate::app::{AppState, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
 use crate::color::{fmt_rgb, parse_color};
 use crate::doc::camera::Ease;
+use crate::doc::canvas::DirtyRect;
 use crate::doc::layer::CellId;
 use crate::input::button_drag::{self, ButtonDrag};
 use crate::input::shortcuts::{Action, KeyCombo};
@@ -3955,6 +3956,23 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             ph,
         ))
     };
+    // Corners for a texture holding `r` of layer `layer_idx`'s cell `id` (see
+    // `CellTex`), or None for a blank one, which draws nothing.
+    let tex_corners = |layer_idx: usize, id: usize, r: DirtyRect| -> Option<[egui::Pos2; 4]> {
+        if r.max_x <= r.min_x || r.max_y <= r.min_y {
+            return None;
+        }
+        let cell = state.project.cell(id)?;
+        Some(cell_rect_screen_corners(
+            &xf,
+            state.display_transform(layer_idx, cur_frame),
+            cell.width as f32,
+            cell.height as f32,
+            pw,
+            ph,
+            [r.min_x as f32, r.min_y as f32, r.max_x as f32, r.max_y as f32],
+        ))
+    };
 
     // Onion ghosts of the active layer at nearby frames. Drawn inside the layer
     // loop so they sit at the active layer's depth, all of them just behind
@@ -3998,12 +4016,13 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             continue;
         }
         if let Some(id) = layer.resolve(cur_frame) {
-            if let (Some(tex), Some(lc)) = (state.cell_textures.get(&id), cell_corners(li, id)) {
+            let tex = state.cell_textures.get(&id);
+            if let Some((t, lc)) = tex.and_then(|t| Some((t, tex_corners(li, id, t.rect)?))) {
                 let dim = (layer.opacity * 0.45).clamp(0.0, 1.0);
                 let a = (dim * 255.0) as u8;
                 image_quad(
                     &painter,
-                    tex.id(),
+                    t.tex.id(),
                     lc,
                     theme::white_alpha(a),
                 );
@@ -4021,8 +4040,8 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             draw_onion();
         }
         // A clipped layer draws its drawing cut to its base.
-        if let Some((id, tex)) = state.layer_texture(li) {
-            if let Some(lc) = cell_corners(li, id) {
+        if let Some((id, tex, rect)) = state.layer_texture(li) {
+            if let Some(lc) = tex_corners(li, id, rect) {
                 let op = layer.opacity * state.layer_view_alpha(li);
                 let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
                 image_quad(
@@ -5058,7 +5077,24 @@ fn layer_screen_corners(
     pw: f32,
     ph: f32,
 ) -> [egui::Pos2; 4] {
-    let pts = [(0.0, 0.0), (cw, 0.0), (cw, ch), (0.0, ch)];
+    cell_rect_screen_corners(xf, t, cw, ch, pw, ph, [0.0, 0.0, cw, ch])
+}
+
+/// The same for just the `[x0, y0, x1, y1]` part of the cell, in cell
+/// pixels — where a texture cropped to its drawing goes.
+// As with `Xform::from_parts`, the arguments are the mapping itself.
+#[allow(clippy::too_many_arguments)]
+fn cell_rect_screen_corners(
+    xf: &Xform,
+    t: crate::doc::transform::Transform,
+    cw: f32,
+    ch: f32,
+    pw: f32,
+    ph: f32,
+    r: [f32; 4],
+) -> [egui::Pos2; 4] {
+    let [x0, y0, x1, y1] = r;
+    let pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
     let mut out = [egui::Pos2::ZERO; 4];
     for (i, (u, v)) in pts.iter().enumerate() {
         let (dx, dy) = t.cell_to_doc(*u, *v, cw, ch, pw, ph);
@@ -7164,6 +7200,8 @@ mod onion_tests {
         state.project.goto(2);
         let cell_on = |f| state.project.layers[li].resolve(f).unwrap();
         let (past, current, future, pinned) = (cell_on(1), cell_on(2), cell_on(3), cell_on(4));
+        // A blank drawing paints nothing; give the current one a dot of ink.
+        state.project.cells[current].pixels[3] = 255;
 
         let ctx = egui::Context::default();
         let mut meshes = Vec::new();
@@ -7190,7 +7228,7 @@ mod onion_tests {
             let tex = tex.expect("texture built");
             meshes.iter().position(|&t| t == tex).expect("painted")
         };
-        let cell = at(state.cell_textures.get(&current).map(|t| t.id()));
+        let cell = at(state.cell_textures.get(&current).map(|t| t.tex.id()));
         for (name, id) in [("past", past), ("future", future), ("pinned", pinned)] {
             let ghost = at(state.ghost_textures.get(&id).map(|(_, t)| t.id()));
             assert!(ghost < cell, "{name} ghost painted over the drawing");
@@ -7269,6 +7307,10 @@ mod fade_tests {
         state.fade_others = true;
         let cell_of = |li: usize| state.project.layers[li].resolve(0).unwrap();
         let (below, active, above) = (cell_of(0), cell_of(1), cell_of(2));
+        // A blank drawing paints nothing: a dot of ink in each.
+        for id in [below, active, above] {
+            state.project.cells[id].pixels[3] = 255;
+        }
 
         let ctx = egui::Context::default();
         let mut meshes = Vec::new();
@@ -7292,7 +7334,7 @@ mod fade_tests {
                 .collect();
         }
         let alpha = |id: CellId| {
-            let tex = state.cell_textures.get(&id).expect("texture built").id();
+            let tex = state.cell_textures.get(&id).expect("texture built").tex.id();
             meshes.iter().find(|&&(t, _)| t == tex).expect("painted").1
         };
         assert_eq!(alpha(active), 255);

@@ -6,6 +6,9 @@ pub struct Playback {
     pub playing: bool,
     /// Wall-clock time (seconds) when the current frame started showing.
     pub last_advance_t: f64,
+    /// Started without a clock reading: the next `tick` takes its own time
+    /// as `last_advance_t` instead of advancing.
+    unclocked: bool,
 }
 
 impl Default for Playback {
@@ -13,6 +16,7 @@ impl Default for Playback {
         Self {
             playing: false,
             last_advance_t: 0.0,
+            unclocked: false,
         }
     }
 }
@@ -21,6 +25,15 @@ impl Playback {
     pub fn toggle(&mut self, now: f64) {
         self.playing = !self.playing;
         self.last_advance_t = now;
+        self.unclocked = false;
+    }
+
+    /// `toggle` from somewhere with no clock to hand — a shortcut. Without
+    /// the re-anchor, the first tick would step by the whole time since
+    /// playback last ran and land the playhead anywhere in the loop.
+    pub fn toggle_unclocked(&mut self) {
+        self.playing = !self.playing;
+        self.unclocked = true;
     }
 
     pub fn stop(&mut self) {
@@ -35,6 +48,11 @@ impl Playback {
     /// range and playback ends, rather than repeating.
     pub fn tick(&mut self, project: &mut Project, now: f64, looping: bool) -> bool {
         if !self.playing || project.fps <= 0.0 || project.frame_count == 0 {
+            return false;
+        }
+        if self.unclocked {
+            self.unclocked = false;
+            self.last_advance_t = now;
             return false;
         }
         let frame_dur = 1.0 / project.fps as f64;
