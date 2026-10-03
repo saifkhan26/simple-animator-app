@@ -3,7 +3,9 @@
 //! In Phase A this is the entire document. In Phase C this becomes one `Cell`
 //! per layer per frame, owned by a `Project` and resolved via X-sheet.
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// Serialised by hand (see the impls below) with exactly the wire layout the
+/// derive gave it, so `.anim` files are unchanged.
+#[derive(Clone)]
 pub struct Canvas {
     pub width: u32,
     pub height: u32,
@@ -11,8 +13,84 @@ pub struct Canvas {
     pub pixels: Vec<u8>,
     /// Dirty rectangle (inclusive min, exclusive max). `None` = clean.
     /// Transient render bookkeeping — not persisted.
-    #[serde(skip)]
     pub dirty: Option<DirtyRect>,
+}
+
+/// The pixels go out as one byte string rather than a sequence of bytes. In
+/// postcard both are a length then the raw bytes — the same file — but the
+/// byte string is written in one go instead of a call per byte.
+impl serde::Serialize for Canvas {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        struct Bytes<'a>(&'a [u8]);
+        impl serde::Serialize for Bytes<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_bytes(self.0)
+            }
+        }
+        let mut st = s.serialize_struct("Canvas", 3)?;
+        st.serialize_field("width", &self.width)?;
+        st.serialize_field("height", &self.height)?;
+        st.serialize_field("pixels", &Bytes(&self.pixels))?;
+        st.end()
+    }
+}
+
+/// Read back as a byte string too, which hands the pixels over as one slice:
+/// they land in a buffer of exactly their size. Read as a sequence they grew
+/// by doubling, leaving a 2160×2880 cell's 24 MB in a 32 MB allocation.
+impl<'de> serde::Deserialize<'de> for Canvas {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, SeqAccess, Visitor};
+        use std::fmt;
+
+        struct Pixels(Vec<u8>);
+        impl<'de> serde::Deserialize<'de> for Pixels {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct V;
+                impl<'de> Visitor<'de> for V {
+                    type Value = Pixels;
+                    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                        f.write_str("RGBA8 pixels")
+                    }
+                    fn visit_bytes<E: Error>(self, v: &[u8]) -> Result<Pixels, E> {
+                        Ok(Pixels(v.to_vec()))
+                    }
+                    fn visit_byte_buf<E: Error>(self, v: Vec<u8>) -> Result<Pixels, E> {
+                        Ok(Pixels(v))
+                    }
+                }
+                d.deserialize_byte_buf(V)
+            }
+        }
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Canvas;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a canvas")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Canvas, A::Error> {
+                let missing = |i| Error::invalid_length(i, &"width, height and pixels");
+                let width: u32 = seq.next_element()?.ok_or_else(|| missing(0))?;
+                let height: u32 = seq.next_element()?.ok_or_else(|| missing(1))?;
+                let Pixels(pixels) = seq.next_element()?.ok_or_else(|| missing(2))?;
+                if pixels.len() as u64 != width as u64 * height as u64 * 4 {
+                    return Err(Error::custom(format!(
+                        "{width}×{height} canvas with {} bytes of pixels",
+                        pixels.len()
+                    )));
+                }
+                Ok(Canvas {
+                    width,
+                    height,
+                    pixels,
+                    dirty: None,
+                })
+            }
+        }
+        d.deserialize_struct("Canvas", &["width", "height", "pixels"], V)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +115,21 @@ impl Canvas {
                 max_y: height,
             }),
         }
+    }
+
+    /// What a freed cell becomes: no size, no pixels. Its id stays taken so
+    /// no other id shifts; a load drops it for good (`Project::compact_cells`).
+    pub fn tombstone() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+            dirty: None,
+        }
+    }
+
+    pub fn is_tombstone(&self) -> bool {
+        self.pixels.is_empty()
     }
 
     pub fn clear(&mut self) {
@@ -109,6 +202,61 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Canvas` as the derive used to write it — what every `.anim` holds.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Derived {
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    }
+
+    fn inked(w: u32, h: u32) -> Canvas {
+        let mut c = Canvas::new(w, h);
+        for (i, b) in c.pixels.iter_mut().enumerate() {
+            *b = (i * 7 % 251) as u8;
+        }
+        c
+    }
+
+    #[test]
+    fn writes_the_bytes_the_derive_wrote() {
+        let c = inked(37, 5);
+        let old = Derived {
+            width: c.width,
+            height: c.height,
+            pixels: c.pixels.clone(),
+        };
+        let bytes = postcard::to_stdvec(&c).unwrap();
+        assert_eq!(bytes, postcard::to_stdvec(&old).unwrap());
+        // Shared in the project, written as if it weren't.
+        assert_eq!(postcard::to_stdvec(&std::sync::Arc::new(c)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn reads_what_the_derive_wrote_into_an_exact_buffer() {
+        let c = inked(300, 200);
+        let old = Derived {
+            width: c.width,
+            height: c.height,
+            pixels: c.pixels.clone(),
+        };
+        let back: Canvas = postcard::from_bytes(&postcard::to_stdvec(&old).unwrap()).unwrap();
+        assert_eq!((back.width, back.height), (300, 200));
+        assert_eq!(back.pixels, c.pixels);
+        assert_eq!(back.pixels.capacity(), back.pixels.len(), "no growth slack");
+        assert!(back.dirty.is_none());
+    }
+
+    #[test]
+    fn pixels_that_dont_fit_the_size_are_an_error() {
+        let bad = Derived {
+            width: 4,
+            height: 4,
+            pixels: vec![0; 10],
+        };
+        assert!(postcard::from_bytes::<Canvas>(&postcard::to_stdvec(&bad).unwrap()).is_err());
+    }
 
     #[test]
     fn content_bounds_wraps_every_inked_pixel() {

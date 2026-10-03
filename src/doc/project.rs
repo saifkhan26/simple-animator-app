@@ -7,6 +7,7 @@
 //!   * `current_frame`, `current_layer` — the editing cursor.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
@@ -20,7 +21,10 @@ pub struct Project {
     pub height: u32,
     pub fps: f32,
 
-    pub cells: Vec<Canvas>,
+    /// Shared, copy-on-write: cloning the project (a save, an export, a
+    /// Krita send) costs a reference per cell, and only a cell edited while
+    /// such a copy is alive gets duplicated — on its first write.
+    pub cells: Vec<Arc<Canvas>>,
     pub layers: Vec<Layer>,
     pub frame_count: usize,
 
@@ -43,7 +47,7 @@ pub struct Project {
 impl Project {
     pub fn new(width: u32, height: u32, fps: f32) -> Self {
         // Seed with one cell and one layer keyed on frame 0.
-        let cells = vec![Canvas::new(width, height)];
+        let cells = vec![Arc::new(Canvas::new(width, height))];
         let mut layer = Layer::new("Layer 1", 1);
         layer.set_key(0, 0);
         Self {
@@ -92,10 +96,43 @@ impl Project {
     }
 
     pub fn cell(&self, id: CellId) -> Option<&Canvas> {
-        self.cells.get(id)
+        self.cells.get(id).map(|c| &**c)
     }
+    /// Cell `id` for writing. Copies it first if a project clone still
+    /// shares it — see `cells`.
     pub fn cell_mut(&mut self, id: CellId) -> Option<&mut Canvas> {
-        self.cells.get_mut(id)
+        self.cells.get_mut(id).map(Arc::make_mut)
+    }
+
+    /// Drop every cell no layer shows — freed ones, and drawings that lost
+    /// their last key before the file was saved — and renumber the rest in
+    /// their old order. Only for a project nothing else holds cell ids into:
+    /// one just opened, with no history yet. A file naming a cell it doesn't
+    /// have is left as it is.
+    pub fn compact_cells(&mut self) {
+        let n = self.cells.len();
+        let mut used = vec![false; n];
+        for id in self.layers.iter().flat_map(|l| l.exposures.iter().flatten()) {
+            match used.get_mut(*id) {
+                Some(u) => *u = true,
+                None => return,
+            }
+        }
+        if used.iter().all(|&u| u) {
+            return;
+        }
+        let mut renumber = vec![0; n];
+        let mut kept = Vec::with_capacity(n);
+        for (id, cell) in std::mem::take(&mut self.cells).into_iter().enumerate() {
+            if used[id] {
+                renumber[id] = kept.len();
+                kept.push(cell);
+            }
+        }
+        self.cells = kept;
+        for e in self.layers.iter_mut().flat_map(|l| l.exposures.iter_mut().flatten()) {
+            *e = renumber[*e];
+        }
     }
 
     /// Allocates a new blank cell sized for the active layer.
@@ -110,7 +147,7 @@ impl Project {
             Some(l) => l.cell_size(self.width, self.height),
             None => (self.width, self.height),
         };
-        self.cells.push(Canvas::new(w, h));
+        self.cells.push(Canvas::new(w, h).into());
         self.cells.len() - 1
     }
 
@@ -195,7 +232,7 @@ impl Project {
         } else {
             recenter(src, w, h)
         };
-        self.cells.push(cell);
+        self.cells.push(cell.into());
         let id = self.cells.len() - 1;
         let (layer, frame) = (self.current_layer, self.current_frame);
         self.layers[layer].set_key(frame, id);
@@ -223,7 +260,7 @@ impl Project {
             Some(src) => self.cells[src].clone(),
             None => {
                 let (w, h) = self.layers[cur_layer].cell_size(self.width, self.height);
-                Canvas::new(w, h)
+                Canvas::new(w, h).into()
             }
         };
         self.cells.push(new_cell);
@@ -257,7 +294,7 @@ impl Project {
         for id in self.layer_cell_ids(layer) {
             if let Some(c) = self.cells.get_mut(id) {
                 if c.width != new_w || c.height != new_h {
-                    *c = recenter(c, new_w, new_h);
+                    *c = recenter(c, new_w, new_h).into();
                 }
             }
         }
@@ -316,7 +353,7 @@ impl Project {
                 l.track_points.clear();
             }
             for c in &mut self.cells {
-                c.clear();
+                Arc::make_mut(c).clear();
             }
             return;
         }
@@ -641,7 +678,7 @@ impl Project {
         let fc = self.frame_count;
         let cells = &mut self.cells;
         let need = layer_retime(&mut self.layers[b.layer], fc, b, new_len, || {
-            cells.push(Canvas::new(w, h));
+            cells.push(Canvas::new(w, h).into());
             cells.len() - 1
         });
         self.settle_length(need);
@@ -808,7 +845,7 @@ impl Project {
         let (need, landed) = ripple_move(&mut self.layers, fc, starts, dl, df, copy, |req| match req {
             CellReq::Blank { layer } => {
                 let (w, h) = sizes[layer];
-                cells.push(Canvas::new(w, h));
+                cells.push(Canvas::new(w, h).into());
                 cells.len() - 1
             }
             CellReq::Moved { id, src, dst, must_clone } => {
@@ -823,7 +860,7 @@ impl Project {
                     let c = if fits {
                         cells[id].clone()
                     } else {
-                        recenter(&cells[id], w, h)
+                        recenter(&cells[id], w, h).into()
                     };
                     cells.push(c);
                     cells.len() - 1
@@ -1131,6 +1168,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_clone_shares_cells_until_one_is_written() {
+        let mut p = Project::new(4, 4, 12.0);
+        let snapshot = p.clone();
+        assert!(Arc::ptr_eq(&p.cells[0], &snapshot.cells[0]), "a save's copy costs nothing");
+        p.cell_mut(0).unwrap().pixels[3] = 255;
+        assert_eq!(snapshot.cells[0].pixels[3], 0, "the snapshot keeps what it saw");
+        assert_eq!(p.cells[0].pixels[3], 255);
+    }
+
+    #[test]
+    fn a_duplicated_key_shares_its_drawing_until_drawn_on() {
+        let mut p = Project::new(4, 4, 12.0);
+        p.add_frame();
+        p.goto(1);
+        let dup = p.insert_duplicate_key_here();
+        assert!(Arc::ptr_eq(&p.cells[0], &p.cells[dup]));
+        p.cell_mut(dup).unwrap().pixels[3] = 255;
+        assert_eq!(p.cells[0].pixels[3], 0, "the original is untouched");
+    }
+
+    #[test]
+    fn compacting_drops_unshown_cells_and_renumbers_the_rest() {
+        let mut p = Project::new(4, 4, 12.0);
+        p.add_frame();
+        let mark = |n: u8| {
+            let mut c = Canvas::new(4, 4);
+            c.pixels[0] = n;
+            Arc::new(c)
+        };
+        p.cells.push(mark(1)); // 1: shown nowhere
+        p.cells.push(mark(2)); // 2: keyed on frame 1
+        p.cells.push(Arc::new(Canvas::tombstone())); // 3: freed
+        p.layers[0].set_key(1, 2);
+        p.compact_cells();
+        assert_eq!(p.cells.len(), 2);
+        assert_eq!(p.layers[0].exposures, vec![Some(0), Some(1)]);
+        assert_eq!(p.cells[1].pixels[0], 2, "the drawing came along");
+        // A file naming a cell it hasn't got is left alone.
+        p.layers[0].set_key(1, 9);
+        p.compact_cells();
+        assert_eq!(p.layers[0].exposures, vec![Some(0), Some(9)]);
+    }
+
+    #[test]
     fn step_wraps_at_both_ends_when_looping() {
         let mut p = Project::new(64, 64, 12.0);
         while p.frame_count < 4 {
@@ -1288,7 +1369,7 @@ mod tests {
         p.current_frame = 1;
         p.insert_blank_key_here();
         let id = p.resolved_current().unwrap();
-        p.cells[id].pixels[0] = 200;
+        p.cell_mut(id).unwrap().pixels[0] = 200;
 
         let taken = p.cut_active_cell().expect("something to cut");
         assert_eq!(taken.pixels[0], 200);
@@ -1307,7 +1388,7 @@ mod tests {
         p.ensure_frame_count(3);
         p.current_frame = 0;
         let src = p.insert_blank_key_here();
-        p.cells[src].pixels[0] = 111;
+        p.cell_mut(src).unwrap().pixels[0] = 111;
 
         let copied = p.copy_active_cell().unwrap();
         p.current_frame = 2;
@@ -1315,7 +1396,7 @@ mod tests {
         assert_eq!(p.cells[pasted].pixels[0], 111);
 
         // Editing the paste must not reach back to the original.
-        p.cells[pasted].pixels[0] = 222;
+        p.cell_mut(pasted).unwrap().pixels[0] = 222;
         assert_eq!(p.cells[src].pixels[0], 111);
     }
 
@@ -1400,7 +1481,7 @@ mod tests {
     /// test can tell which drawing shows where after it has moved.
     fn key(p: &mut Project, layer: usize, f: usize, mark: u8) -> CellId {
         let id = p.alloc_cell_for(layer);
-        p.cells[id].pixels[0] = mark;
+        p.cell_mut(id).unwrap().pixels[0] = mark;
         p.layers[layer].set_key(f, id);
         id
     }
@@ -1606,7 +1687,7 @@ mod tests {
         assert_eq!(p.layers[1].exposures[7], Some(bg), "the same drawing picks up again");
         // A copy is its own buffer, and the source is untouched.
         let landed = p.layers[1].exposures[5].unwrap();
-        p.cells[landed].pixels[0] = 9;
+        p.cell_mut(landed).unwrap().pixels[0] = 9;
         assert_eq!(row(&p, 0), vec![1, 1, 3, 3, 5, 5, 5, 5, 5, 5]);
         assert_sound(&p);
     }

@@ -9,7 +9,7 @@
 //! of zeros, which compresses by one to two orders of magnitude. Deflate is
 //! lossless, so the pixels that come back are bit-identical to the ones saved.
 
-use std::io::{BufWriter, Read};
+use std::io::{BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -83,24 +83,108 @@ fn encode(project: &Project) -> Result<(Vec<u8>, u64)> {
 }
 
 /// Decode bytes produced by [`encode`] back into a `Project`.
+#[cfg(test)]
 fn decode(bytes: &[u8]) -> Result<Project> {
-    if bytes.len() < 8 || &bytes[0..4] != MAGIC {
+    decode_from(bytes)
+}
+
+/// Decode a project as it streams in. The deflated versions are parsed
+/// straight out of the decompressor: inflating the whole body first held the
+/// raw postcard (every pixel of every cell) *and* the project built from it,
+/// twice the project's size at once.
+fn decode_from(mut input: impl Read) -> Result<Project> {
+    let mut head = [0u8; 8];
+    if input.read_exact(&mut head).is_err() || &head[0..4] != MAGIC {
         bail!("not an Animator project file");
     }
-    let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    let body = &bytes[8..];
-    let inflate = || -> Result<Vec<u8>> {
-        let mut raw = Vec::new();
-        ZlibDecoder::new(body)
-            .read_to_end(&mut raw)
-            .context("decompressing project body")?;
-        Ok(raw)
-    };
+    let version = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
     let project: Project = match version {
-        7 => postcard::from_bytes(&inflate()?).context("parsing project body")?,
-        6 => postcard::from_bytes::<crate::io::legacy::ProjectV6>(&inflate()?)
+        7 => stream(input).context("parsing project body")?,
+        6 => stream::<crate::io::legacy::ProjectV6>(input)
             .context("parsing v6 project body")?
             .into(),
+        _ => {
+            let mut body = Vec::new();
+            input.read_to_end(&mut body).context("reading project body")?;
+            decode_uncompressed(version, &body)?
+        }
+    };
+    Ok(project)
+}
+
+/// Parse a deflated postcard body as it inflates.
+fn stream<T: serde::de::DeserializeOwned>(body: impl Read) -> Result<T> {
+    let inflated = BufReader::with_capacity(BUF, ZlibDecoder::new(body));
+    let mut de = postcard::Deserializer::from_flavor(Stream::new(inflated));
+    Ok(T::deserialize(&mut de)?)
+}
+
+/// A postcard flavor that reads from a stream. A byte string — a cell's
+/// pixels — is read into one scratch buffer reused for every cell, so the
+/// whole body is never in memory at once, only the project being built and
+/// the largest cell.
+struct Stream<R> {
+    input: R,
+    scratch: Vec<u8>,
+}
+
+impl<R> Stream<R> {
+    fn new(input: R) -> Self {
+        Self {
+            input,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+/// The longest byte string a file may claim, so a corrupt length is an error
+/// rather than an attempt to allocate it: a 16384² cell, the largest texture
+/// a GPU takes.
+const MAX_BYTES: usize = 16384 * 16384 * 4;
+
+impl<'de, R: Read + 'de> postcard::de_flavors::Flavor<'de> for Stream<R> {
+    type Remainder = R;
+    type Source = R;
+
+    fn pop(&mut self) -> postcard::Result<u8> {
+        let mut b = [0u8];
+        self.input
+            .read_exact(&mut b)
+            .map_err(|_| postcard::Error::DeserializeUnexpectedEnd)?;
+        Ok(b[0])
+    }
+
+    /// Nothing in a project borrows from its file, and a stream has nothing
+    /// to lend.
+    fn try_take_n(&mut self, _ct: usize) -> postcard::Result<&'de [u8]> {
+        Err(postcard::Error::DeserializeUnexpectedEnd)
+    }
+
+    fn try_take_n_temp<'a>(&'a mut self, ct: usize) -> postcard::Result<&'a [u8]>
+    where
+        'de: 'a,
+    {
+        if ct > MAX_BYTES {
+            return Err(postcard::Error::DeserializeUnexpectedEnd);
+        }
+        if self.scratch.len() < ct {
+            self.scratch.resize(ct, 0);
+        }
+        let buf = &mut self.scratch[..ct];
+        self.input
+            .read_exact(buf)
+            .map_err(|_| postcard::Error::DeserializeUnexpectedEnd)?;
+        Ok(buf)
+    }
+
+    fn finalize(self) -> postcard::Result<R> {
+        Ok(self.input)
+    }
+}
+
+/// The versions from before the body was deflated.
+fn decode_uncompressed(version: u32, body: &[u8]) -> Result<Project> {
+    let project: Project = match version {
         // v5 shares v6's postcard layout; it just isn't compressed.
         5 => postcard::from_bytes::<crate::io::legacy::ProjectV6>(body)
             .context("parsing v5 project body")?
@@ -317,7 +401,7 @@ mod tests {
     #[test]
     fn pixels_survive_the_round_trip_exactly() {
         let mut p = Project::new(23, 17, 12.0);
-        for (i, b) in p.cells[0].pixels.iter_mut().enumerate() {
+        for (i, b) in p.cell_mut(0).unwrap().pixels.iter_mut().enumerate() {
             // Deliberately not a flat fill: a stride-coprime pattern with no
             // long runs would expose any lossy or truncating step.
             *b = ((i * 37 + i / 23 * 11) % 251) as u8;
@@ -370,7 +454,7 @@ mod tests {
             width: p.width,
             height: p.height,
             fps: p.fps,
-            cells: p.cells.clone(),
+            cells: p.cells.iter().map(|c| (**c).clone()).collect(),
             layers: p
                 .layers
                 .iter()
@@ -440,7 +524,7 @@ mod tests {
     fn compression_actually_shrinks_sparse_cells() {
         let mut p = Project::new(256, 256, 12.0);
         for _ in 0..4 {
-            p.cells.push(crate::doc::canvas::Canvas::new(256, 256));
+            p.cells.push(crate::doc::canvas::Canvas::new(256, 256).into());
         }
         let raw = postcard::to_stdvec(&p).unwrap().len();
         let (packed, reported_raw) = encode(&p).unwrap();
@@ -491,7 +575,7 @@ mod tests {
                     }
                 }
             }
-            p.cells.push(canvas);
+            p.cells.push(canvas.into());
         }
         let t0 = Instant::now();
         let raw = postcard::to_stdvec(&p).unwrap();
@@ -527,7 +611,7 @@ mod tests {
     #[test]
     fn saves_and_loads_a_real_file_losslessly() {
         let mut p = Project::new(64, 48, 12.0);
-        for (i, b) in p.cells[0].pixels.iter_mut().enumerate() {
+        for (i, b) in p.cell_mut(0).unwrap().pixels.iter_mut().enumerate() {
             *b = ((i * 29 + i / 64 * 7) % 251) as u8;
         }
         p.layers[0].name = "Round trip".into();
@@ -625,8 +709,8 @@ pub fn ask_save_path(current: Option<&Path>) -> Option<PathBuf> {
 /// without a file picker — the read half of [`save_to`], which has always taken
 /// a path.
 pub fn load_from(path: &Path) -> Result<Project> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {path:?}"))?;
-    let project = decode(&bytes)?;
+    let file = std::fs::File::open(path).with_context(|| format!("reading {path:?}"))?;
+    let project = decode_from(BufReader::with_capacity(BUF, file))?;
     log::info!("Loaded project ← {}", path.display());
     Ok(project)
 }

@@ -4,6 +4,8 @@
 //! structs at the time of writing. Each versioned mirror here must reproduce
 //! that order byte-for-byte and never change again.
 
+use std::sync::Arc;
+
 use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{Layer, TrackSample};
@@ -170,7 +172,7 @@ impl From<ProjectV2> for Project {
             width: p.width,
             height: p.height,
             fps: p.fps,
-            cells: p.cells,
+            cells: p.cells.into_iter().map(Arc::new).collect(),
             layers: p.layers.into_iter().map(Into::into).collect(),
             frame_count: p.frame_count,
             current_frame: p.current_frame,
@@ -235,7 +237,7 @@ impl From<ProjectV4> for Project {
             width: p.width,
             height: p.height,
             fps: p.fps,
-            cells: p.cells,
+            cells: p.cells.into_iter().map(Arc::new).collect(),
             layers: p.layers.into_iter().map(Into::into).collect(),
             frame_count: p.frame_count,
             current_frame: p.current_frame,
@@ -254,7 +256,7 @@ impl From<ProjectV3> for Project {
             width: p.width,
             height: p.height,
             fps: p.fps,
-            cells: p.cells,
+            cells: p.cells.into_iter().map(Arc::new).collect(),
             layers: p.layers.into_iter().map(Into::into).collect(),
             frame_count: p.frame_count,
             current_frame: p.current_frame,
@@ -337,7 +339,7 @@ impl From<ProjectV6> for Project {
             width: p.width,
             height: p.height,
             fps: p.fps,
-            cells: p.cells,
+            cells: p.cells.into_iter().map(Arc::new).collect(),
             layers: p.layers.into_iter().map(Into::into).collect(),
             frame_count: p.frame_count,
             current_frame: p.current_frame,

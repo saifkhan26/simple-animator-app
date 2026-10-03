@@ -3,6 +3,8 @@
 //! Each `Command` captures a localised before/after pixel snapshot, so undoing
 //! a full-canvas stroke only costs the dirty-rect area in memory.
 
+use std::sync::Arc;
+
 use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer};
@@ -103,13 +105,14 @@ pub enum Command {
     /// No existing command covers this — `Structural` restores layers but not
     /// `project.cells`.
     ///
-    /// Only the originals are stored; redo re-runs the deterministic re-pad
+    /// Only the originals are stored — the very buffers the resize replaced,
+    /// shared rather than copied — and redo re-runs the deterministic re-pad
     /// rather than keeping a second full copy of every cell.
     LayerCanvasResize {
         layer: usize,
         before_size: (u32, u32),
         after_size: (u32, u32),
-        before: Vec<(CellId, Canvas)>,
+        before: Vec<(CellId, Arc<Canvas>)>,
     },
     /// The selection changed. Only the selection: the pixels it covers are
     /// untouched, so this restores no cell.
@@ -130,18 +133,13 @@ pub enum Command {
     Compound(Vec<Command>),
 }
 
+#[derive(Default)]
 pub struct History {
     undo_stack: Vec<Command>,
     redo_stack: Vec<Command>,
-}
-
-impl Default for History {
-    fn default() -> Self {
-        Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-        }
-    }
+    /// Bumped by every push, undo and redo — whatever can change which cells
+    /// the history still reaches. See [`History::for_each_cell`].
+    revision: u64,
 }
 
 impl History {
@@ -151,6 +149,37 @@ impl History {
             self.undo_stack.remove(0);
         }
         self.undo_stack.push(cmd);
+        self.revision += 1;
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Every cell an undo or redo could put back on a layer or write to:
+    /// while any step still names a cell, its pixels must be kept.
+    pub fn for_each_cell(&self, f: &mut impl FnMut(CellId)) {
+        fn walk(cmd: &Command, f: &mut impl FnMut(CellId)) {
+            match cmd {
+                Command::PixelPatch { cell, .. } => f(*cell),
+                Command::Structural {
+                    before,
+                    after,
+                    cell_pixels,
+                } => {
+                    for state in [before, after] {
+                        for l in &state.layers {
+                            l.exposures.iter().flatten().for_each(|&id| f(id));
+                        }
+                    }
+                    cell_pixels.iter().for_each(|d| f(d.cell));
+                }
+                Command::LayerCanvasResize { before, .. } => before.iter().for_each(|(id, _)| f(*id)),
+                Command::Selection { .. } | Command::Grid { .. } => {}
+                Command::Compound(cmds) => cmds.iter().for_each(|c| walk(c, f)),
+            }
+        }
+        self.undo_stack.iter().chain(&self.redo_stack).for_each(|c| walk(c, f));
     }
 
     pub fn can_undo(&self) -> bool {
@@ -171,6 +200,7 @@ impl History {
         let cmd = self.undo_stack.pop()?;
         let touched = apply(project, &cmd, false);
         self.redo_stack.push(cmd);
+        self.revision += 1;
         Some(touched)
     }
 
@@ -178,6 +208,7 @@ impl History {
         let cmd = self.redo_stack.pop()?;
         let touched = apply(project, &cmd, true);
         self.undo_stack.push(cmd);
+        self.revision += 1;
         Some(touched)
     }
 }
@@ -242,15 +273,11 @@ fn apply(project: &mut Project, cmd: &Command, forward: bool) -> Touched {
             if forward {
                 project.expand_layer_canvas(*layer, after_size.0, after_size.1);
             } else {
+                // Shared back, not copied: the history keeps its handle for a
+                // redo. `Touched::Cells` tells the caller they changed whole.
                 for (id, canvas) in before {
-                    if let Some(c) = project.cell_mut(*id) {
-                        *c = canvas.clone();
-                        c.dirty = Some(crate::doc::canvas::DirtyRect {
-                            min_x: 0,
-                            min_y: 0,
-                            max_x: c.width,
-                            max_y: c.height,
-                        });
+                    if let Some(c) = project.cells.get_mut(*id) {
+                        *c = Arc::clone(canvas);
                     }
                 }
                 if let Some(l) = project.layers.get_mut(*layer) {

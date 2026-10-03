@@ -448,7 +448,7 @@ impl PullPlan {
         project.ensure_frame_count(self.frame_count);
         let fc = project.frame_count;
         let base = self.cell_base;
-        project.cells.extend(self.new_cells);
+        project.cells.extend(self.new_cells.into_iter().map(std::sync::Arc::new));
         let resolve = |r: CellRef| match r {
             CellRef::Old(id) => id,
             CellRef::New(i) => base + i,
@@ -1122,14 +1122,14 @@ mod tests {
         let mut p = Project::new(40, 30, 12.0);
         p.ensure_frame_count(6);
         let a = p.cells.len();
-        p.cells.push(cell(40, 30, 1));
+        p.cells.push(cell(40, 30, 1).into());
         let b = p.cells.len();
-        p.cells.push(cell(40, 30, 2));
+        p.cells.push(cell(40, 30, 2).into());
         p.layers[0].name = "Ink".into();
         p.layers[0].exposures = vec![Some(a), None, Some(b), None, Some(a), None];
         let mut color = Layer::new("Color", 6);
         let c = p.cells.len();
-        p.cells.push(cell(40, 30, 3));
+        p.cells.push(cell(40, 30, 3).into());
         color.exposures[0] = Some(c);
         p.layers.push(color);
         p
@@ -1162,7 +1162,7 @@ mod tests {
     }
 
     fn paint(p: &mut Project, id: CellId, seed: u8) {
-        let px = &mut p.cells[id].pixels;
+        let px = &mut p.cell_mut(id).unwrap().pixels;
         px[0..4].copy_from_slice(&[seed, seed, seed, 255]);
     }
 
@@ -1307,7 +1307,7 @@ mod tests {
         k.layers.remove(1); // Krita never saw "Local"
         let mut fresh = Layer::new("Krita new", 6);
         let id = k.cells.len();
-        k.cells.push(cell(40, 30, 9));
+        k.cells.push(cell(40, 30, 9).into());
         fresh.exposures[1] = Some(id);
         k.layers.push(fresh);
 
@@ -1376,7 +1376,7 @@ mod tests {
         let color = p.layers[1].exposures[0].unwrap();
         let (a, b) = (p.layers[0].exposures[0].unwrap(), p.layers[0].exposures[2].unwrap());
         for (id, left) in [(a, true), (b, false), (color, true)] {
-            let c = &mut p.cells[id];
+            let c = p.cell_mut(id).unwrap();
             for y in 0..c.height {
                 for x in 0..c.width {
                     let i = ((y * c.width + x) * 4) as usize;
@@ -1421,7 +1421,7 @@ mod tests {
         p.layers[1].cell_w = 60;
         p.layers[1].cell_h = 51;
         let id = p.layers[1].exposures[0].unwrap();
-        p.cells[id] = cell(60, 51, 3);
+        p.cells[id] = cell(60, 51, 3).into();
         let (mut links, base) = link(&p);
         let mut k = p.clone();
         paint(&mut k, id, 77);
@@ -1452,7 +1452,7 @@ mod tests {
         p.layers[1].reference = true; // Color
         let mut notes = Layer::new("notes-x", 6);
         let id = p.cells.len();
-        p.cells.push(cell(40, 30, 7));
+        p.cells.push(cell(40, 30, 7).into());
         notes.exposures[0] = Some(id);
         p.layers.push(notes);
         p
@@ -1499,7 +1499,7 @@ mod tests {
         let mut k = p.clone();
         let mut sketch = Layer::new("sketch-x", 6);
         let id = k.cells.len();
-        k.cells.push(cell(40, 30, 9));
+        k.cells.push(cell(40, 30, 9).into());
         sketch.exposures[0] = Some(id);
         k.layers.push(sketch);
         let plan = pull_from(&p, &base, &mut links, &k);
@@ -1572,7 +1572,7 @@ mod tests {
         let mut k = p.clone();
         let mut sketch = Layer::new("sketch-x", 6);
         let id = k.cells.len();
-        k.cells.push(cell(40, 30, 9));
+        k.cells.push(cell(40, 30, 9).into());
         sketch.exposures[0] = Some(id);
         k.layers.insert(1, sketch);
         let ku = vec![uuids[0].clone(), new_uuid(), uuids[1].clone()];

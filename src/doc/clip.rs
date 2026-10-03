@@ -254,7 +254,7 @@ pub fn bake_clipping(p: &mut Project) -> HashMap<CellId, CellId> {
                     let base_cell = pair.1.and_then(|id| p.cell(id));
                     let baked = masked(cell, base_cell, &Placement::of(p, li, b, f));
                     let id = p.cells.len();
-                    p.cells.push(baked);
+                    p.cells.push(baked.into());
                     made.insert(pair, id);
                     origin.insert(id, c);
                     id
@@ -377,8 +377,8 @@ mod tests {
     fn a_hidden_base_hides_what_is_clipped_to_it() {
         let mut p = Project::new(8, 8, 12.0);
         p.add_layer();
-        p.cells.push(band(0, 8, [0, 0, 0, 255]));
-        p.cells.push(band(0, 8, [200, 10, 10, 255]));
+        p.cells.push(band(0, 8, [0, 0, 0, 255]).into());
+        p.cells.push(band(0, 8, [200, 10, 10, 255]).into());
         let n = p.cells.len();
         p.layers[0].set_key(0, n - 2);
         p.layers[1].set_key(0, n - 1);
@@ -396,9 +396,9 @@ mod tests {
         }
         p.add_layer();
         let c0 = p.cells.len();
-        p.cells.push(band(0, 4, [0, 0, 0, 255]));
-        p.cells.push(band(4, 8, [0, 0, 0, 255]));
-        p.cells.push(band(0, 8, [200, 10, 10, 255]));
+        p.cells.push(band(0, 4, [0, 0, 0, 255]).into());
+        p.cells.push(band(4, 8, [0, 0, 0, 255]).into());
+        p.cells.push(band(0, 8, [200, 10, 10, 255]).into());
         let clip_cell = c0 + 2;
         p.layers[0].set_key(0, c0);
         p.layers[0].set_key(2, c0 + 1);
