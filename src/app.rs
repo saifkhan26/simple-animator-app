@@ -538,9 +538,151 @@ struct ClipPair {
     at: crate::doc::clip::Placement,
 }
 
+/// A cell's texture. It holds only `rect` of the cell — the drawing plus a
+/// transparent rim — not the whole canvas: drawings rarely fill their cell,
+/// and a loop of full 2160×2880 cells outgrew `TEXTURE_BUDGET`, so playback
+/// re-uploaded every frame and the canvas stuttered under pan and zoom.
+pub struct CellTex {
+    pub tex: TextureHandle,
+    /// Where the texture sits in the cell. Every inked pixel of the cell is
+    /// inside it. Empty for a blank cell, which then draws nothing.
+    pub rect: DirtyRect,
+    /// The cell's size when it was made. A resized cell starts over.
+    cell: [u32; 2],
+}
+
+/// Transparent pixels kept around a drawing in its texture, so linear
+/// filtering at the drawing's edge blends into clear exactly as it would
+/// over the whole cell.
+const TEX_RIM: u32 = 2;
+
+/// Where in a `cw`×`ch` cell drawn as `content` its texture should sit:
+/// the drawing plus `TEX_RIM`, or an empty rect for a blank cell.
+fn tex_rect(content: Option<DirtyRect>, cw: u32, ch: u32) -> DirtyRect {
+    match content {
+        Some(r) => DirtyRect {
+            min_x: r.min_x.saturating_sub(TEX_RIM),
+            min_y: r.min_y.saturating_sub(TEX_RIM),
+            max_x: (r.max_x + TEX_RIM).min(cw),
+            max_y: (r.max_y + TEX_RIM).min(ch),
+        },
+        None => DirtyRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: 0,
+            max_y: 0,
+        },
+    }
+}
+
+/// `r` lies wholly inside `outer`.
+fn rect_within(r: DirtyRect, outer: DirtyRect) -> bool {
+    r.min_x >= outer.min_x && r.min_y >= outer.min_y && r.max_x <= outer.max_x && r.max_y <= outer.max_y
+}
+
+/// The part of `a` inside `b`, if any.
+fn rect_meet(a: DirtyRect, b: DirtyRect) -> Option<DirtyRect> {
+    let r = DirtyRect {
+        min_x: a.min_x.max(b.min_x),
+        min_y: a.min_y.max(b.min_y),
+        max_x: a.max_x.min(b.max_x),
+        max_y: a.max_y.min(b.max_y),
+    };
+    (r.max_x > r.min_x && r.max_y > r.min_y).then_some(r)
+}
+
+/// A texture's size for `rect`. A blank cell still needs one texel.
+fn tex_dims(rect: DirtyRect) -> [usize; 2] {
+    [
+        (rect.max_x - rect.min_x).max(1) as usize,
+        (rect.max_y - rect.min_y).max(1) as usize,
+    ]
+}
+
+/// How a cropped texture catches up with its cell. See `plan_upload`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TexPlan {
+    /// Up to date.
+    Keep,
+    /// Re-send this rect of the cell; it lies inside the texture.
+    Patch(DirtyRect),
+    /// Make the texture anew, holding this rect of the cell.
+    Rebuild(DirtyRect),
+}
+
+/// What a texture holding `have` of cell `c` (`None`: no usable texture)
+/// needs after `dirty` changed. A change inside the texture is a patch. One
+/// that reaches past it, where the drawing may have grown, re-crops — unless
+/// a live stroke is painting the cell (`stroking`): that takes the whole
+/// cell at once, so the rest of the stroke streams in as patches instead of
+/// re-cropping on every frame it grows the drawing.
+fn plan_upload(c: &Canvas, have: Option<DirtyRect>, dirty: Dirty, stroking: bool) -> TexPlan {
+    let whole = DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: c.width,
+        max_y: c.height,
+    };
+    let fresh = || {
+        if stroking {
+            whole
+        } else {
+            tex_rect(c.content_bounds(), c.width, c.height)
+        }
+    };
+    let Some(have) = have else {
+        return TexPlan::Rebuild(fresh());
+    };
+    let r = match dirty {
+        Dirty::Clean => return TexPlan::Keep,
+        Dirty::Full => return TexPlan::Rebuild(fresh()),
+        Dirty::Rect(r) => r,
+    };
+    let Some(r) = rect_meet(r, whole) else {
+        return TexPlan::Keep;
+    };
+    if rect_within(r, have) {
+        return TexPlan::Patch(r);
+    }
+    let want = fresh();
+    if rect_within(want, have) {
+        // The drawing didn't grow: what changed out there is still clear.
+        return rect_meet(r, have).map_or(TexPlan::Keep, TexPlan::Patch);
+    }
+    TexPlan::Rebuild(want)
+}
+
+/// A texture image for `rect`, premultiplied from `straight` — its pixels,
+/// or nothing for an empty rect, which gets one clear texel.
+fn crop_image(rect: DirtyRect, straight: impl FnOnce() -> Vec<u8>) -> ColorImage {
+    if rect.max_x > rect.min_x && rect.max_y > rect.min_y {
+        premultiplied_image(tex_dims(rect), &straight())
+    } else {
+        ColorImage::new([1, 1], Color32::TRANSPARENT)
+    }
+}
+
+/// `rect` of `c`'s pixels, straight alpha, row by row.
+fn crop_pixels(c: &Canvas, rect: DirtyRect) -> Vec<u8> {
+    let (x0, x1) = (rect.min_x as usize, rect.max_x as usize);
+    let stride = c.width as usize;
+    let mut buf = Vec::with_capacity((x1 - x0) * (rect.max_y - rect.min_y) as usize * 4);
+    for y in rect.min_y as usize..rect.max_y as usize {
+        let row = (y * stride + x0) * 4;
+        buf.extend_from_slice(&c.pixels[row..row + (x1 - x0) * 4]);
+    }
+    buf
+}
+
 /// A clipped drawing's texture as the canvas shows it: cut to its base.
 struct ClipTex {
     tex: TextureHandle,
+    /// Where the texture sits in the clipped cell, as `CellTex::rect`. Kept
+    /// around the clipped drawing, not the cut: a base edit can uncover more
+    /// of the drawing, but never anything outside it.
+    rect: DirtyRect,
+    /// The clipped cell's size when it was made.
+    cell: [u32; 2],
     /// Where the two drawings sat when it was made. A change is a fresh bake.
     at: crate::doc::clip::Placement,
     /// A base pixel lies under the clipped pixel with the same index, so a
@@ -550,13 +692,21 @@ struct ClipTex {
     pending: Dirty,
 }
 
-fn evictions(entries: &[TexEntry], budget: usize, now: u64) -> Vec<TexEntry> {
+/// What to drop so `entries` fit in `budget`, never anything shown on sync
+/// `now`. Least recently shown first — except during playback, which walks
+/// the loop in order: there the texture shown longest ago is the next one
+/// needed, so dropping it first would miss on every frame of a loop that
+/// doesn't fit. Dropping the newest keeps most of the loop resident instead.
+fn evictions(entries: &[TexEntry], budget: usize, now: u64, playing: bool) -> Vec<TexEntry> {
     let mut total: usize = entries.iter().map(|e| e.bytes).sum();
     if total <= budget {
         return Vec::new();
     }
     let mut order: Vec<TexEntry> = entries.iter().copied().filter(|e| e.used < now).collect();
     order.sort_by_key(|e| e.used);
+    if playing {
+        order.reverse();
+    }
     let mut out = Vec::new();
     for e in order {
         if total <= budget {
@@ -690,8 +840,8 @@ pub struct AppState {
     /// Where Krita is installed. Found or picked once, then remembered.
     pub krita_path: Option<PathBuf>,
 
-    /// GPU texture handle per CellId, lazily created.
-    pub cell_textures: HashMap<CellId, TextureHandle>,
+    /// GPU texture per CellId, lazily created. See `CellTex`.
+    pub cell_textures: HashMap<CellId, CellTex>,
     /// What each cell's texture is missing: nothing, one rect, or the lot.
     pub cell_dirty: HashMap<CellId, Dirty>,
     /// Sync counter, and the last sync each texture was on screen — what the
@@ -1522,11 +1672,20 @@ impl AppState {
         self.cell_dirty.insert(id, pending.with(region));
         // Clipped drawings made from this cell — as the clipped drawing or as
         // its base — need the same region redone.
+        // A base edit can't grow the clipped drawing, so what it redoes is
+        // kept inside the texture: anything in `pending` past it is the
+        // drawing itself spreading, which re-crops.
         for (&(c, base), t) in self.clip_textures.iter_mut() {
             if c == id {
                 t.pending = t.pending.with(region);
             } else if base == id {
-                t.pending = t.pending.with(if t.aligned { region } else { Dirty::Full });
+                let inside = match region {
+                    Dirty::Clean => None,
+                    Dirty::Rect(r) if t.aligned => rect_meet(r, t.rect),
+                    // Not pixel for pixel: the whole texture (none if blank).
+                    _ => rect_meet(t.rect, t.rect),
+                };
+                t.pending = t.pending.with(inside.map_or(Dirty::Clean, Dirty::Rect));
             }
         }
         self.blank_cache.remove(&id);
@@ -1550,7 +1709,7 @@ impl AppState {
     /// See `retired_textures`.
     fn retire_cell_textures(&mut self) {
         self.retired_textures
-            .extend(self.cell_textures.drain().map(|(_, tex)| tex));
+            .extend(self.cell_textures.drain().map(|(_, t)| t.tex));
         self.cell_tex_used.clear();
         self.retired_textures
             .extend(self.clip_textures.drain().map(|(_, t)| t.tex));
@@ -2723,10 +2882,10 @@ impl AppState {
     /// visible layer's cell on this frame, and the active layer's onion ghosts.
     ///
     /// Uploads are as small as the change. A cell that only had a stroke added
-    /// sends that stroke's rect; a whole cell goes up only when it has no
-    /// texture yet (or the texture's size is stale). During a stroke, only the
-    /// region flushed since the last frame goes up — the full refresh the pen-up
-    /// used to trigger on a big layer was the hitch.
+    /// sends that stroke's rect; a new texture holds just the cell's drawing
+    /// (see `CellTex`). During a stroke, only the region flushed since the last
+    /// frame goes up — the full refresh the pen-up used to trigger on a big
+    /// layer was the hitch.
     pub fn sync_textures(&mut self, ctx: &egui::Context) {
         // Release last frame's discarded ghosts here, before anything paints
         // this frame: the meshes that referenced them were submitted a frame
@@ -2752,7 +2911,7 @@ impl AppState {
             if !clipping && self.cell_textures.contains_key(&target) {
                 self.cell_tex_used.insert(target, now);
                 if let Some(rect) = self.preview_upload_rect.take() {
-                    self.upload_rect(target, rect);
+                    self.upload_cell(ctx, target, Dirty::Rect(rect));
                 }
                 return;
             }
@@ -2790,31 +2949,11 @@ impl AppState {
 
         for id in needed {
             self.cell_tex_used.insert(id, now);
-            let Some(c) = self.project.cell(id) else {
+            if self.project.cell(id).is_none() {
                 continue;
-            };
-            let dims = [c.width as usize, c.height as usize];
-            // Expanding a layer's canvas resizes cells under their textures,
-            // so only a handle whose dimensions still match can take a partial
-            // update or be reused.
-            let fits = self.cell_textures.get(&id).is_some_and(|t| t.size() == dims);
-            match (self.cell_dirty.get(&id).copied().unwrap_or(Dirty::Full), fits) {
-                (Dirty::Clean, true) => continue,
-                (Dirty::Rect(r), true) => self.upload_rect(id, r),
-                (_, true) => {
-                    let image = premultiplied_image(dims, &c.pixels);
-                    if let Some(tex) = self.cell_textures.get_mut(&id) {
-                        tex.set(image, TextureOptions::LINEAR);
-                    }
-                }
-                (_, false) => {
-                    let image = premultiplied_image(dims, &c.pixels);
-                    let tex = ctx.load_texture(format!("cell_{id}"), image, TextureOptions::LINEAR);
-                    if let Some(old) = self.cell_textures.insert(id, tex) {
-                        self.retired_textures.push(old);
-                    }
-                }
             }
+            let dirty = self.cell_dirty.get(&id).copied().unwrap_or(Dirty::Full);
+            self.upload_cell(ctx, id, dirty);
             self.cell_dirty.insert(id, Dirty::Clean);
         }
 
@@ -2874,20 +3013,21 @@ impl AppState {
         })
     }
 
-    /// The texture the canvas draws for layer `li` on the current frame, and
-    /// the cell it stands for: its cell's own, or for a clipped layer, the
-    /// clipped one. `None` draws nothing.
-    pub fn layer_texture(&self, li: usize) -> Option<(CellId, &TextureHandle)> {
+    /// The texture the canvas draws for layer `li` on the current frame, the
+    /// cell it stands for, and the rect of that cell it holds: its cell's
+    /// own, or for a clipped layer, the clipped one. `None` draws nothing.
+    pub fn layer_texture(&self, li: usize) -> Option<(CellId, &TextureHandle, DirtyRect)> {
         let layer = self.project.layers.get(li)?;
         match self.project.clip_base(li).filter(|_| !layer.reference) {
             Some(b) => {
                 let pair = self.clip_pair(li, b)?;
                 let t = self.clip_textures.get(&(pair.cell, pair.base))?;
-                Some((pair.cell, &t.tex))
+                Some((pair.cell, &t.tex, t.rect))
             }
             None => {
                 let id = layer.resolve(self.project.current_frame)?;
-                Some((id, self.cell_textures.get(&id)?))
+                let t = self.cell_textures.get(&id)?;
+                Some((id, &t.tex, t.rect))
             }
         }
     }
@@ -2904,40 +3044,30 @@ impl AppState {
             let (Some(clip), Some(base)) = (self.project.cell(pair.cell), self.project.cell(pair.base)) else {
                 continue;
             };
-            let dims = [clip.width as usize, clip.height as usize];
+            let cell = [clip.width, clip.height];
             let aligned = pair.at.aligned(clip, base);
-            let whole = DirtyRect {
-                min_x: 0,
-                min_y: 0,
-                max_x: clip.width,
-                max_y: clip.height,
+            let stroking = self.stroke.is_some() && self.stroke_target == Some(pair.cell);
+            let (have, pending) = match self.clip_textures.get(&key) {
+                Some(t) if t.cell == cell && t.at == pair.at => (Some(t.rect), t.pending),
+                _ => (None, Dirty::Full),
             };
-            match self.clip_textures.get_mut(&key) {
-                Some(t) if t.tex.size() == dims && t.at == pair.at => {
-                    let r = match t.pending {
-                        Dirty::Clean => continue,
-                        Dirty::Rect(r) => r,
-                        Dirty::Full => whole,
-                    };
-                    let (x0, y0) = (r.min_x.min(clip.width), r.min_y.min(clip.height));
-                    let (x1, y1) = (r.max_x.min(clip.width), r.max_y.min(clip.height));
-                    if x1 > x0 && y1 > y0 {
-                        let buf = mask_rect(clip, Some(base), &pair.at, r);
-                        let size = [(x1 - x0) as usize, (y1 - y0) as usize];
-                        let image = premultiplied_image(size, &buf);
-                        t.tex.set_partial([x0 as usize, y0 as usize], image, TextureOptions::LINEAR);
+            match plan_upload(clip, have, pending, stroking) {
+                TexPlan::Keep => {}
+                TexPlan::Patch(r) => {
+                    if let Some(t) = self.clip_textures.get_mut(&key) {
+                        let image = premultiplied_image(tex_dims(r), &mask_rect(clip, Some(base), &pair.at, r));
+                        let at = [(r.min_x - t.rect.min_x) as usize, (r.min_y - t.rect.min_y) as usize];
+                        t.tex.set_partial(at, image, TextureOptions::LINEAR);
                     }
-                    t.pending = Dirty::Clean;
-                    // A resized base leaves the placement alone but can end
-                    // the 1:1 match.
-                    t.aligned = aligned;
                 }
-                _ => {
-                    let image = premultiplied_image(dims, &mask_rect(clip, Some(base), &pair.at, whole));
+                TexPlan::Rebuild(rect) => {
+                    let image = crop_image(rect, || mask_rect(clip, Some(base), &pair.at, rect));
                     let name = format!("clip_{}_{}", pair.cell, pair.base);
                     let tex = ctx.load_texture(name, image, TextureOptions::LINEAR);
                     let fresh = ClipTex {
                         tex,
+                        rect,
+                        cell,
                         at: pair.at,
                         aligned,
                         pending: Dirty::Clean,
@@ -2945,30 +3075,55 @@ impl AppState {
                     if let Some(old) = self.clip_textures.insert(key, fresh) {
                         self.retired_textures.push(old.tex);
                     }
+                    continue;
                 }
+            }
+            if let Some(t) = self.clip_textures.get_mut(&key) {
+                t.pending = Dirty::Clean;
+                // A resized base leaves the placement alone but can end the
+                // 1:1 match.
+                t.aligned = aligned;
             }
         }
     }
 
-    /// Upload just `rect` of cell `id` into its existing texture.
-    fn upload_rect(&mut self, id: CellId, rect: DirtyRect) {
+    /// Bring cell `id`'s texture up to date with `dirty` of its pixels — see
+    /// `plan_upload`.
+    fn upload_cell(&mut self, ctx: &egui::Context, id: CellId, dirty: Dirty) {
         let Some(c) = self.project.cell(id) else {
             return;
         };
-        let (x0, y0) = (rect.min_x.min(c.width) as usize, rect.min_y.min(c.height) as usize);
-        let (x1, y1) = (rect.max_x.min(c.width) as usize, rect.max_y.min(c.height) as usize);
-        if x1 <= x0 || y1 <= y0 {
-            return;
-        }
-        let (w, h, stride) = (x1 - x0, y1 - y0, c.width as usize);
-        let mut buf = Vec::with_capacity(w * h * 4);
-        for y in y0..y1 {
-            let row = (y * stride + x0) * 4;
-            buf.extend_from_slice(&c.pixels[row..row + w * 4]);
-        }
-        let image = premultiplied_image([w, h], &buf);
-        if let Some(tex) = self.cell_textures.get_mut(&id) {
-            tex.set_partial([x0, y0], image, TextureOptions::LINEAR);
+        let cell = [c.width, c.height];
+        let stroking = self.stroke.is_some() && self.stroke_target == Some(id);
+        // Expanding a layer's canvas resizes cells under their textures, so
+        // only a texture made for this size can be patched.
+        let have = self.cell_textures.get(&id).filter(|t| t.cell == cell).map(|t| t.rect);
+        match plan_upload(c, have, dirty, stroking) {
+            TexPlan::Keep => {}
+            TexPlan::Patch(r) => {
+                if let Some(t) = self.cell_textures.get_mut(&id) {
+                    let image = premultiplied_image(tex_dims(r), &crop_pixels(c, r));
+                    let at = [(r.min_x - t.rect.min_x) as usize, (r.min_y - t.rect.min_y) as usize];
+                    t.tex.set_partial(at, image, TextureOptions::LINEAR);
+                }
+            }
+            TexPlan::Rebuild(rect) => {
+                let image = crop_image(rect, || crop_pixels(c, rect));
+                match self.cell_textures.get_mut(&id) {
+                    // Same size: re-fill the handle rather than swap it.
+                    Some(t) if t.tex.size() == image.size => {
+                        t.tex.set(image, TextureOptions::LINEAR);
+                        t.rect = rect;
+                        t.cell = cell;
+                    }
+                    _ => {
+                        let tex = ctx.load_texture(format!("cell_{id}"), image, TextureOptions::LINEAR);
+                        if let Some(old) = self.cell_textures.insert(id, CellTex { tex, rect, cell }) {
+                            self.retired_textures.push(old.tex);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3042,12 +3197,12 @@ impl AppState {
     fn enforce_texture_budget(&mut self) {
         let bytes = |t: &TextureHandle| t.size()[0] * t.size()[1] * 4;
         let mut entries: Vec<TexEntry> = Vec::new();
-        for (&id, tex) in &self.cell_textures {
+        for (&id, t) in &self.cell_textures {
             entries.push(TexEntry {
                 kind: TexKind::Cell,
                 id,
                 used: self.cell_tex_used.get(&id).copied().unwrap_or(0),
-                bytes: bytes(tex),
+                bytes: bytes(&t.tex),
             });
         }
         for (&id, (_, tex)) in &self.ghost_textures {
@@ -3066,7 +3221,7 @@ impl AppState {
                 bytes: bytes(&t.tex),
             });
         }
-        for e in evictions(&entries, TEXTURE_BUDGET, self.sync_frame) {
+        for e in evictions(&entries, TEXTURE_BUDGET, self.sync_frame, self.playback.playing) {
             match e.kind {
                 TexKind::Ghost => {
                     self.retire_ghost(e.id);
@@ -3079,8 +3234,8 @@ impl AppState {
                     self.clip_tex_used.remove(&(e.id, base));
                 }
                 TexKind::Cell => {
-                    if let Some(tex) = self.cell_textures.remove(&e.id) {
-                        self.retired_textures.push(tex);
+                    if let Some(t) = self.cell_textures.remove(&e.id) {
+                        self.retired_textures.push(t.tex);
                         self.cell_tex_used.remove(&e.id);
                         self.cell_dirty.insert(e.id, Dirty::Full);
                     }
@@ -4078,11 +4233,7 @@ impl AppState {
                 self.perspective.snap = !self.perspective.snap;
             }
             Action::PerspectiveNextGrid => self.cycle_perspective_grid(),
-            Action::PlayPause => {
-                let now = 0.0; // refreshed by playback.tick on next frame
-                let _ = now;
-                self.playback.playing = !self.playback.playing;
-            }
+            Action::PlayPause => self.playback.toggle_unclocked(),
             Action::FramePrev => self
                 .project
                 .step(-self.frame_step_delta(), self.loop_timeline),
@@ -5520,7 +5671,7 @@ mod tests {
         let mut st = clip_state();
         let ctx = egui::Context::default();
         let delta = sync(&mut st, &ctx);
-        let (id, tex) = st.layer_texture(1).expect("clipped layer drawn");
+        let (id, tex, _) = st.layer_texture(1).expect("clipped layer drawn");
         assert_eq!(id, st.project.layers[1].resolve(0).unwrap());
         let tex = tex.id();
         let w = st.project.width as usize;
@@ -5568,7 +5719,7 @@ mod tests {
         st.project.layers[1].clip = false;
         let _ = sync(&mut st, &ctx);
         let id = st.project.layers[1].resolve(0).unwrap();
-        assert_eq!(st.layer_texture(1).map(|(c, _)| c), Some(id));
+        assert_eq!(st.layer_texture(1).map(|(c, _, _)| c), Some(id));
         assert!(st.cell_textures.contains_key(&id), "drawn plain again");
     }
 
@@ -6119,6 +6270,101 @@ mod tests {
         assert_eq!(Dirty::Full.with(a), Dirty::Full);
     }
 
+    /// Ink `r` of cell `id` opaque black and report it the way a tool does.
+    fn ink(st: &mut AppState, id: CellId, r: DirtyRect) {
+        let c = st.project.cell_mut(id).unwrap();
+        c.dirty = None;
+        let w = c.width;
+        for y in r.min_y..r.max_y {
+            for x in r.min_x..r.max_x {
+                let i = ((y * w + x) * 4) as usize;
+                c.pixels[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+        c.mark_dirty(r.min_x, r.min_y, r.max_x - r.min_x, r.max_y - r.min_y);
+        st.mark_dirty(id);
+    }
+
+    #[test]
+    fn uploads_patch_inside_the_texture_and_recrop_past_it() {
+        let mut c = Canvas::new(100, 50);
+        c.dirty = None;
+        assert_eq!(plan_upload(&c, None, Dirty::Full, false), TexPlan::Rebuild(rect(0, 0, 0, 0)));
+        for x in 10..20 {
+            c.pixels[(5 * 100 + x) * 4 + 3] = 255;
+        }
+        let have = rect(8, 3, 22, 8);
+        assert_eq!(plan_upload(&c, None, Dirty::Clean, false), TexPlan::Rebuild(have), "no texture yet");
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Clean, false), TexPlan::Keep);
+        let inside = rect(12, 4, 15, 6);
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(inside), false), TexPlan::Patch(inside));
+        // An edit out in the clear that left it clear (an eraser pass):
+        // just the part over the texture.
+        let erased = rect(0, 0, 12, 4);
+        assert_eq!(
+            plan_upload(&c, Some(have), Dirty::Rect(erased), false),
+            TexPlan::Patch(rect(8, 3, 12, 4))
+        );
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(50, 30, 60, 40)), false), TexPlan::Keep);
+        // The drawing spread: crop around all of it.
+        c.pixels[(40 * 100 + 70) * 4 + 3] = 255;
+        let grown = rect(8, 3, 73, 43);
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(70, 40, 71, 41)), false), TexPlan::Rebuild(grown));
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Full, false), TexPlan::Rebuild(grown));
+        // Under a live stroke, the whole cell in one go.
+        let whole = rect(0, 0, 100, 50);
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(70, 40, 71, 41)), true), TexPlan::Rebuild(whole));
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(inside), true), TexPlan::Patch(inside));
+    }
+
+    #[test]
+    fn a_cell_texture_holds_just_its_drawing() {
+        let mut st = AppState::for_test();
+        let ctx = egui::Context::default();
+        let id = st.project.layers[0].resolve(0).unwrap();
+        let _ = sync(&mut st, &ctx);
+        assert!(st.layer_texture(0).is_some_and(|(_, t, r)| t.size() == [1, 1] && r == rect(0, 0, 0, 0)), "blank");
+
+        ink(&mut st, id, rect(100, 50, 120, 60));
+        let delta = sync(&mut st, &ctx);
+        let (_, t, r) = st.layer_texture(0).unwrap();
+        assert_eq!(r, rect(98, 48, 122, 62), "the drawing and its rim");
+        assert_eq!(t.size(), [24, 14]);
+        let tex = t.id();
+        assert_eq!(uploaded_alpha(&delta, tex, 0, 0), 0, "the rim");
+        assert_eq!(uploaded_alpha(&delta, tex, 2, 2), 255, "the drawing");
+
+        ink(&mut st, id, rect(105, 52, 107, 54));
+        let delta = sync(&mut st, &ctx);
+        let (_, d) = delta.set.iter().find(|(t, _)| *t == tex).expect("patched");
+        assert_eq!(d.pos, Some([7, 4]), "placed in texture, not cell, pixels");
+
+        ink(&mut st, id, rect(300, 200, 310, 205));
+        let _ = sync(&mut st, &ctx);
+        assert_eq!(st.layer_texture(0).unwrap().2, rect(98, 48, 312, 207), "re-cropped around both");
+    }
+
+    #[test]
+    fn a_stroke_past_the_drawing_takes_the_whole_cell_once() {
+        let mut st = AppState::for_test();
+        let ctx = egui::Context::default();
+        let id = st.project.layers[0].resolve(0).unwrap();
+        ink(&mut st, id, rect(100, 50, 120, 60));
+        let _ = sync(&mut st, &ctx);
+        st.dispatch(Action::ToolInk);
+        st.pointer_down(st.make_sample(400.0, 300.0, 0.0));
+        st.pointer_move(st.make_sample(450.0, 300.0, 0.1));
+        let _ = sync(&mut st, &ctx);
+        let (w, h) = (st.project.width, st.project.height);
+        assert_eq!(st.layer_texture(0).unwrap().2, rect(0, 0, w, h));
+        let tex = st.layer_texture(0).unwrap().1.id();
+        st.pointer_move(st.make_sample(600.0, 500.0, 0.2));
+        let delta = sync(&mut st, &ctx);
+        let (_, d) = delta.set.iter().find(|(t, _)| *t == tex).expect("streamed");
+        assert!(d.pos.is_some(), "the rest of the stroke is patches");
+        st.pointer_up();
+    }
+
     fn entry(id: CellId, used: u64, mb: usize) -> TexEntry {
         TexEntry {
             kind: TexKind::Cell,
@@ -6131,15 +6377,23 @@ mod tests {
     #[test]
     fn the_budget_drops_the_least_recently_shown_first() {
         let e = [entry(0, 5, 100), entry(1, 2, 100), entry(2, 9, 100), entry(3, 7, 100)];
-        let out: Vec<CellId> = evictions(&e, 250 << 20, 9).iter().map(|e| e.id).collect();
+        let out: Vec<CellId> = evictions(&e, 250 << 20, 9, false).iter().map(|e| e.id).collect();
         assert_eq!(out, vec![1, 0], "oldest first, and only until it fits");
-        assert!(evictions(&e, 400 << 20, 9).is_empty(), "under budget: nothing");
+        assert!(evictions(&e, 400 << 20, 9, false).is_empty(), "under budget: nothing");
+    }
+
+    #[test]
+    fn playback_drops_the_most_recently_shown_first() {
+        let e = [entry(0, 5, 100), entry(1, 2, 100), entry(2, 9, 100), entry(3, 7, 100)];
+        let out: Vec<CellId> = evictions(&e, 250 << 20, 9, true).iter().map(|e| e.id).collect();
+        assert_eq!(out, vec![3, 0], "the loop comes back to the oldest soonest");
     }
 
     #[test]
     fn the_budget_never_drops_what_is_on_screen() {
         let e = [entry(0, 9, 900), entry(1, 9, 900)];
-        assert!(evictions(&e, 100 << 20, 9).is_empty());
+        assert!(evictions(&e, 100 << 20, 9, false).is_empty());
+        assert!(evictions(&e, 100 << 20, 9, true).is_empty());
     }
 
     #[test]
@@ -6987,6 +7241,26 @@ mod tests {
         state.dispatch(Action::FadeOthersToggle);
         assert!(!state.fade_others);
         assert!((0..4).all(|i| state.layer_view_alpha(i) == 1.0));
+    }
+
+    /// The shortcut has no clock to start from, but the first tick must still
+    /// step from where the playhead sits, not by however long it was paused.
+    #[test]
+    fn play_shortcut_starts_from_the_current_frame() {
+        let mut st = AppState::for_test();
+        while st.project.frame_count < 10 {
+            st.project.add_frame();
+        }
+        st.project.goto(3);
+        st.dispatch(Action::PlayPause);
+        let fps = st.project.fps as f64;
+        // A while after launch: 175 frames' worth past the old anchor, which
+        // isn't a whole number of 10-frame loops.
+        let t = 7.3;
+        st.playback.tick(&mut st.project, t, true);
+        assert_eq!(st.project.current_frame, 3, "the first tick only starts the clock");
+        st.playback.tick(&mut st.project, t + 1.0 / fps, true);
+        assert_eq!(st.project.current_frame, 4);
     }
 
     /// The toggle is session-only: a fresh state never opens faded.
