@@ -7201,7 +7201,7 @@ mod onion_tests {
         let cell_on = |f| state.project.layers[li].resolve(f).unwrap();
         let (past, current, future, pinned) = (cell_on(1), cell_on(2), cell_on(3), cell_on(4));
         // A blank drawing paints nothing; give the current one a dot of ink.
-        state.project.cells[current].pixels[3] = 255;
+        state.project.cell_mut(current).unwrap().pixels[3] = 255;
 
         let ctx = egui::Context::default();
         let mut meshes = Vec::new();
@@ -7309,7 +7309,7 @@ mod fade_tests {
         let (below, active, above) = (cell_of(0), cell_of(1), cell_of(2));
         // A blank drawing paints nothing: a dot of ink in each.
         for id in [below, active, above] {
-            state.project.cells[id].pixels[3] = 255;
+            state.project.cell_mut(id).unwrap().pixels[3] = 255;
         }
 
         let ctx = egui::Context::default();

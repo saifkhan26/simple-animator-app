@@ -120,7 +120,7 @@ impl Krita {
             l.locked = k.locked;
             let base = p.cells.len();
             for d in &k.drawings {
-                p.cells.push(d.place(x, y, pw, ph).0);
+                p.cells.push(d.place(x, y, pw, ph).0.into());
             }
             for &(t, di) in &k.keys {
                 l.exposures[t] = Some(base + di);
@@ -244,7 +244,7 @@ impl Session {
             for f in 0..FRAMES {
                 if rng.chance(35) {
                     l.exposures[f] = Some(p.cells.len());
-                    p.cells.push(doodle(&mut rng));
+                    p.cells.push(doodle(&mut rng).into());
                 }
             }
             p.layers.push(l);
@@ -253,11 +253,11 @@ impl Session {
         let mut bg = Layer::new("BG", FRAMES);
         bg.reference = true;
         bg.exposures[0] = Some(p.cells.len());
-        p.cells.push(doodle(&mut rng));
+        p.cells.push(doodle(&mut rng).into());
         p.layers.insert(0, bg);
         let mut notes = Layer::new("notes-x", FRAMES);
         notes.exposures[0] = Some(p.cells.len());
-        p.cells.push(doodle(&mut rng));
+        p.cells.push(doodle(&mut rng).into());
         let at = rng.below(p.layers.len() + 1);
         p.layers.insert(at, notes);
 
@@ -283,7 +283,7 @@ impl Session {
             0..=2 => {
                 let keys: Vec<usize> = p.layers[li].exposures.iter().flatten().copied().collect();
                 if let Some(&id) = keys.get(rng.below(keys.len())) {
-                    scribble(&mut p.cells[id], rng);
+                    scribble(p.cell_mut(id).unwrap(), rng);
                     self.d.local_content.insert(uid);
                 }
             }
@@ -297,7 +297,7 @@ impl Session {
             }
             4 => {
                 let id = p.cells.len();
-                p.cells.push(doodle(rng));
+                p.cells.push(doodle(rng).into());
                 p.layers[li].exposures[rng.below(fc)] = Some(id);
                 self.d.local_content.insert(uid);
             }
@@ -315,7 +315,7 @@ impl Session {
             7 => {
                 let mut l = Layer::new(format!("new{}", rng.below(1000)), fc);
                 l.exposures[rng.below(fc)] = Some(p.cells.len());
-                p.cells.push(doodle(rng));
+                p.cells.push(doodle(rng).into());
                 p.layers.insert(rng.below(p.layers.len() + 1), l);
             }
             8 if rng.chance(30) => p.layers[li].reference ^= true,
@@ -347,7 +347,7 @@ impl Session {
             0..=2 => {
                 let keys: Vec<usize> = k.p.layers[li].exposures.iter().flatten().copied().collect();
                 if let Some(&id) = keys.get(rng.below(keys.len())) {
-                    scribble(&mut k.p.cells[id], rng);
+                    scribble(k.p.cell_mut(id).unwrap(), rng);
                     self.d.krita_content.insert(u);
                 }
             }
@@ -364,7 +364,7 @@ impl Session {
                 let g = if rng.chance(15) { fc + rng.below(3) } else { rng.below(fc) };
                 k.p.ensure_frame_count(g + 1);
                 let id = k.p.cells.len();
-                k.p.cells.push(doodle(rng));
+                k.p.cells.push(doodle(rng).into());
                 k.p.layers[li].exposures[g] = Some(id);
                 self.d.krita_content.insert(u);
             }
@@ -372,7 +372,7 @@ impl Session {
                 let name = if rng.chance(50) { format!("sk{}-x", rng.below(1000)) } else { format!("K{}", rng.below(1000)) };
                 let mut l = Layer::new(name, k.p.frame_count);
                 l.exposures[rng.below(k.p.frame_count)] = Some(k.p.cells.len());
-                k.p.cells.push(doodle(rng));
+                k.p.cells.push(doodle(rng).into());
                 let at = rng.below(k.p.layers.len() + 1);
                 k.p.layers.insert(at, l);
                 k.uuids.insert(at, kl::new_uuid());
@@ -757,7 +757,7 @@ fn scale(tag: &str, w: u32, h: u32, frames: usize, drawings: &[usize]) {
         let mut l = Layer::new(format!("L{li}"), frames);
         for k in 0..n {
             l.exposures[k * frames / n] = Some(p.cells.len());
-            p.cells.push(blob(w, h, (li * 100 + k) as u64, 0.35));
+            p.cells.push(blob(w, h, (li * 100 + k) as u64, 0.35).into());
         }
         p.layers.push(l);
     }
@@ -778,12 +778,12 @@ fn scale(tag: &str, w: u32, h: u32, frames: usize, drawings: &[usize]) {
     // Krita paints on one drawing, and adds a full-size sketch-x.
     let mut k = Krita::open(&app.path);
     let id = k.p.layers[0].exposures.iter().flatten().next().copied().unwrap();
-    for px in k.p.cells[id].pixels.chunks_exact_mut(4).take(5000) {
+    for px in k.p.cell_mut(id).unwrap().pixels.chunks_exact_mut(4).take(5000) {
         px.copy_from_slice(&[255, 0, 0, 255]);
     }
     let mut sketch = Layer::new("sketch-x", k.p.frame_count);
     sketch.exposures[0] = Some(k.p.cells.len());
-    k.p.cells.push(blob(w, h, 999, 0.45));
+    k.p.cells.push(blob(w, h, 999, 0.45).into());
     k.p.layers.push(sketch);
     k.uuids.push(kl::new_uuid());
     k.save(&app.path);

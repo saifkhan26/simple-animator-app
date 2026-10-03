@@ -97,7 +97,7 @@ pub fn import_from(project: &mut Project, dir: &PathBuf) -> Result<()> {
     // Key each imported cell into the new layer.
     for (i, canvas) in imported_cells.into_iter().enumerate() {
         let cell_id = project.cells.len();
-        project.cells.push(canvas);
+        project.cells.push(canvas.into());
         project.layers[layer_idx].set_key(i, cell_id);
     }
 

@@ -114,8 +114,8 @@ mod tests {
             }
         }
         let n = p.cells.len();
-        p.cells.push(base);
-        p.cells.push(top);
+        p.cells.push(base.into());
+        p.cells.push(top.into());
         p.layers[0].set_key(0, n);
         p.layers[1].set_key(0, n + 1);
         p.layers[1].clip = true;

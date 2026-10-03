@@ -178,7 +178,7 @@ mod tests {
                     c.pixels[o..o + 4].copy_from_slice(&[240, 200, 40, 255]);
                 }
             }
-            p.cells.push(c);
+            p.cells.push(c.into());
             p.layers[0].exposures[f] = Some(id);
         }
         let settings = Mp4Settings { crf: 18, preset: "ultrafast" };

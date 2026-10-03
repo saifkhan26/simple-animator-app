@@ -658,9 +658,9 @@ pub(crate) mod tests {
         let mut p = Project::new(100, 60, 12.0);
         p.ensure_frame_count(6);
         let a = p.cells.len();
-        p.cells.push(cell(100, 60, 1));
+        p.cells.push(cell(100, 60, 1).into());
         let b = p.cells.len();
-        p.cells.push(cell(100, 60, 2));
+        p.cells.push(cell(100, 60, 2).into());
         let l = &mut p.layers[0];
         l.exposures = vec![Some(a), None, Some(b), None, Some(a), None];
         l.name = "Ink".into();
@@ -670,7 +670,7 @@ pub(crate) mod tests {
         top.cell_w = 140;
         top.cell_h = 81;
         let c = p.cells.len();
-        p.cells.push(cell(140, 81, 3));
+        p.cells.push(cell(140, 81, 3).into());
         top.exposures[3] = Some(c);
         top.locked = true;
         p.layers.push(top);
@@ -720,7 +720,7 @@ pub(crate) mod tests {
     /// `testdata/krita-5.2.9-resaved.kra`.
     pub(crate) fn fixture_project() -> Project {
         let mut p = sample_project();
-        for (i, c) in p.cells.iter_mut().enumerate() {
+        for (i, c) in p.cells.iter_mut().map(std::sync::Arc::make_mut).enumerate() {
             let (w, h) = (c.width, c.height);
             for y in 0..h {
                 for x in 0..w {
@@ -742,7 +742,7 @@ pub(crate) mod tests {
                 c.pixels[o..o + 4].copy_from_slice(&[30, 60, 220, 255]);
             }
         }
-        p.cells.push(c);
+        p.cells.push(c.into());
         solo.exposures[0] = Some(id);
         p.layers.push(solo);
         p
@@ -868,7 +868,7 @@ pub(crate) mod tests {
                 c.pixels[o..o + 4].copy_from_slice(&[220, 40, 160, 255]);
             }
         }
-        p.cells.push(c);
+        p.cells.push(c.into());
         sketch.exposures[1] = Some(id);
         p.layers.insert(1, sketch);
         let u = uuids(3);

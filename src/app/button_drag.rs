@@ -254,7 +254,7 @@ mod tests {
         let (w, h) = (st.project.width, st.project.height);
         for f in [0, 3, 6, 9] {
             let id = st.project.cells.len();
-            st.project.cells.push(crate::doc::canvas::Canvas::new(w, h));
+            st.project.cells.push(crate::doc::canvas::Canvas::new(w, h).into());
             st.project.layers[0].set_key(f, id);
         }
         for f in [1, 2, 4, 5, 7, 8, 10, 11] {

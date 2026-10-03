@@ -1310,8 +1310,8 @@ mod tests {
         p.layers[0].exposures = vec![None; frames];
         for &f in keys {
             let id = p.alloc_cell_for(0);
-            p.cells[id].pixels[0] = f as u8 + 1;
-            p.cells[id].pixels[3] = 255;
+            p.cell_mut(id).unwrap().pixels[0] = f as u8 + 1;
+            p.cell_mut(id).unwrap().pixels[3] = 255;
             p.layers[0].set_key(f, id);
         }
         p
@@ -1400,8 +1400,8 @@ mod tests {
             p.add_layer();
             for (f, mark) in [(0, 50u8), (4, 51)] {
                 let id = p.alloc_cell_for(1);
-                p.cells[id].pixels[0] = mark;
-                p.cells[id].pixels[3] = 255;
+                p.cell_mut(id).unwrap().pixels[0] = mark;
+                p.cell_mut(id).unwrap().pixels[3] = 255;
                 p.layers[1].set_key(f, id);
             }
             p

@@ -907,6 +907,9 @@ pub struct AppState {
     pub track_frame_w: f32,
     /// The N in the tracks' "On N" timing menu.
     pub track_timing_n: usize,
+    /// What the cell collector last ran against: the history's revision and
+    /// the pool's length. `None` makes it run. See `collect_cells`.
+    gc_key: Option<(u64, usize)>,
     /// Whether a cell has no painted pixel, per cell id. A scan is a full pass
     /// over the buffer, so it is cached, and dropped only when pixels change
     /// (`mark_dirty`) — a structural edit moves ids around but never pixels.
@@ -1286,6 +1289,7 @@ impl AppState {
             track_scroll: egui::Vec2::ZERO,
             track_frame_w: prefs.track_frame_w,
             track_timing_n: 2,
+            gc_key: None,
             blank_cache: HashMap::new(),
             blank_scans_left: 0,
             sel_mask: None,
@@ -1452,6 +1456,7 @@ impl AppState {
         // `show_panels` they are workspace preferences, and resetting them
         // here is what made tuned settings feel like they never stuck.
         self.history = History::default();
+        self.gc_key = None;
         self.stroke_pre_live = false;
         self.preview_upload_rect = None;
         self.rebinding = None;
@@ -1668,6 +1673,11 @@ impl AppState {
             Some(r) => Dirty::Rect(r),
             None => Dirty::Full,
         };
+        self.mark_region(id, region);
+    }
+
+    /// Note that `region` of cell `id`'s pixels changed. See `mark_dirty`.
+    fn mark_region(&mut self, id: CellId, region: Dirty) {
         let pending = self.cell_dirty.get(&id).copied().unwrap_or(Dirty::Full);
         self.cell_dirty.insert(id, pending.with(region));
         // Clipped drawings made from this cell — as the clipped drawing or as
@@ -1693,6 +1703,62 @@ impl AppState {
         // re-uploaded in place, never freed. See `ghost_stale`.
         if self.ghost_textures.contains_key(&id) {
             self.ghost_stale.insert(id);
+        }
+    }
+
+    /// Free the pixels of every cell nothing can show again: on no layer, out
+    /// of undo's and redo's reach, and not something an edit or the Krita
+    /// link is holding. The pool only ever grew before — deleted keys and
+    /// layers, drawings keyed over — and on a 2160×2880 project the dead
+    /// cells came to 2.3 GB. A freed cell becomes a tombstone, so no id moves.
+    ///
+    /// Runs when the history or the pool changed. Skipped while a Krita send
+    /// or pull is in flight: those match drawings to cells by id.
+    fn collect_cells(&mut self) {
+        let busy = self.krita_send.is_some()
+            || self.krita.as_ref().is_some_and(|k| k.pending.is_some() || k.round.is_some());
+        let key = (self.history.revision(), self.project.cells.len());
+        if busy || self.gc_key == Some(key) {
+            return;
+        }
+        self.gc_key = Some(key);
+        let mut used = vec![false; self.project.cells.len()];
+        let mut keep = |id: CellId| {
+            if let Some(u) = used.get_mut(id) {
+                *u = true;
+            }
+        };
+        for l in &self.project.layers {
+            l.exposures.iter().flatten().for_each(|&id| keep(id));
+        }
+        self.history.for_each_cell(&mut keep);
+        self.stroke_target.into_iter().for_each(&mut keep);
+        self.selection.as_ref().map(|s| s.cell).into_iter().for_each(&mut keep);
+        // The link maps Krita's drawings, old ones included, onto cells.
+        let link = self.krita.as_ref().and_then(|k| k.baseline.as_ref());
+        for &id in link.into_iter().flat_map(|b| b.layers.iter().flat_map(|l| l.by_hash.values())) {
+            keep(id);
+        }
+        for (id, used) in used.into_iter().enumerate() {
+            if used || self.project.cells[id].is_tombstone() {
+                continue;
+            }
+            self.project.cells[id] = Arc::new(Canvas::tombstone());
+            if let Some(t) = self.cell_textures.remove(&id) {
+                self.retired_textures.push(t.tex);
+            }
+            self.cell_tex_used.remove(&id);
+            self.cell_dirty.remove(&id);
+            self.retire_ghost(id);
+            self.ghost_tex_used.remove(&id);
+            let gone: Vec<_> = self.clip_textures.keys().copied().filter(|&(c, b)| c == id || b == id).collect();
+            for key in gone {
+                if let Some(t) = self.clip_textures.remove(&key) {
+                    self.retired_textures.push(t.tex);
+                }
+                self.clip_tex_used.remove(&key);
+            }
+            self.blank_cache.remove(&id);
         }
     }
 
@@ -1729,9 +1795,11 @@ impl AppState {
     fn apply_touched(&mut self, touched: Option<undo::Touched>) {
         match touched {
             Some(undo::Touched::Cell(id)) => self.mark_dirty(id),
+            // Wholesale: what the canvas says it touched may be stale — a
+            // buffer the history handed back can't be written to say so.
             Some(undo::Touched::Cells(ids)) => {
                 for id in ids {
-                    self.mark_dirty(id);
+                    self.mark_region(id, Dirty::Full);
                 }
             }
             Some(undo::Touched::Selection(m)) => self.set_mask(m, false),
@@ -1831,7 +1899,7 @@ impl AppState {
                 let idx = p.add_layer_below_active(name);
                 p.layers[idx].transform = init_xform;
                 let id = p.cells.len();
-                p.cells.push(cells.into_iter().next().unwrap());
+                p.cells.push(cells.into_iter().next().unwrap().into());
                 p.layers[idx].set_key(0, id);
             } else {
                 p.ensure_frame_count(cells.len());
@@ -1839,7 +1907,7 @@ impl AppState {
                 p.layers[idx].transform = init_xform;
                 for (f, canvas) in cells.into_iter().enumerate() {
                     let id = p.cells.len();
-                    p.cells.push(canvas);
+                    p.cells.push(canvas.into());
                     p.layers[idx].set_key(f, id);
                 }
             }
@@ -1969,7 +2037,7 @@ impl AppState {
             merged.cell_h = bh;
             for (f, canvas) in baked {
                 let id = p.cells.len();
-                p.cells.push(canvas);
+                p.cells.push(canvas.into());
                 p.layers[bi].set_key(f, id);
             }
             p.layers.remove(li);
@@ -2026,7 +2094,7 @@ impl AppState {
             let idx = p.add_background_layer("Pasted background");
             p.layers[idx].transform = init_xform;
             let id = p.cells.len();
-            p.cells.push(canvas);
+            p.cells.push(canvas.into());
             p.layers[idx].set_key(0, id);
         });
     }
@@ -2496,11 +2564,13 @@ impl AppState {
         if (w, h) == before_size {
             return;
         }
-        let before: Vec<(CellId, Canvas)> = self
+        // The buffers themselves: the re-pad swaps in new ones, so holding
+        // these costs nothing beyond what the layer already had.
+        let before: Vec<(CellId, Arc<Canvas>)> = self
             .project
             .layer_cell_ids(layer)
             .into_iter()
-            .filter_map(|id| self.project.cell(id).map(|c| (id, c.clone())))
+            .filter_map(|id| self.project.cells.get(id).map(|c| (id, Arc::clone(c))))
             .collect();
         self.project.expand_layer_canvas(layer, w, h);
         self.history.push(undo::Command::LayerCanvasResize {
@@ -3353,7 +3423,9 @@ impl AppState {
 
         // Snapshot pre-stroke state so undo can roll back the dirty sub-rect.
         self.snapshot_pre(target);
-        self.project.cells[target].dirty = None;
+        if let Some(c) = self.project.cell_mut(target) {
+            c.dirty = None;
+        }
 
         if self.tool == ActiveTool::Fill {
             let opts = crate::tools::fill::FillOptions {
@@ -4484,6 +4556,9 @@ impl AppState {
         self.stop_krita_link();
         self.stash_grids();
         self.project = project;
+        // Nothing holds an id into it yet, so this is the one moment the
+        // cells nothing shows can go for good, renumbering the rest.
+        self.project.compact_cells();
         self.unstash_grids(path.as_deref());
         self.project_path = path;
         self.save_toast = None;
@@ -4503,6 +4578,7 @@ impl AppState {
         self.stroke_pre_live = false;
         self.preview_upload_rect = None;
         self.history = History::default();
+        self.gc_key = None;
         self.view = View::default();
         // Republished by the canvas next frame; kept in step with `view` so a
         // reset never leaves a stale scale behind for one frame of input.
@@ -4903,6 +4979,7 @@ impl eframe::App for AppState {
             ctx.request_repaint();
         }
 
+        self.collect_cells();
         self.sync_textures(ctx);
         ui::shell::draw(self, ctx);
 
@@ -5486,7 +5563,7 @@ impl AppState {
                 let idx = p.add_layer_below_active(im.name);
                 let base = p.cells.len();
                 let size = im.cells.first().map(|c| (c.width, c.height));
-                p.cells.extend(im.cells);
+                p.cells.extend(im.cells.into_iter().map(std::sync::Arc::new));
                 let l = &mut p.layers[idx];
                 l.opacity = im.opacity as f32 / 255.0;
                 l.visible = im.visible;
@@ -5644,8 +5721,8 @@ mod tests {
         }
         st.project.add_layer();
         let n = st.project.cells.len();
-        st.project.cells.push(base);
-        st.project.cells.push(top);
+        st.project.cells.push(base.into());
+        st.project.cells.push(top.into());
         st.project.layers[0].set_key(0, n);
         st.project.layers[1].set_key(0, n + 1);
         st.project.layers[1].clip = true;
@@ -6005,7 +6082,7 @@ mod tests {
         let bg = st.project.add_background_layer("BG");
         st.project.layers[bg].reference = true;
         let bg_cell = st.project.cells.len();
-        st.project.cells.push(Canvas::new(st.project.width, st.project.height));
+        st.project.cells.push(Canvas::new(st.project.width, st.project.height).into());
         st.project.layers[bg].set_key(0, bg_cell);
         let bg_before = st.project.layers[bg].exposures.clone();
         let ink = 1;
@@ -6040,7 +6117,7 @@ mod tests {
         let mut k = st.project.clone();
         k.layers.remove(bg);
         let id = k.layers[0].exposures[0].unwrap();
-        k.cells[id].pixels[0..4].copy_from_slice(&[255, 0, 0, 255]);
+        k.cell_mut(id).unwrap().pixels[0..4].copy_from_slice(&[255, 0, 0, 255]);
         let bytes = kra::write(&k, &kra::WriteOpts { layer_uuids: &uuids, selected_layer: 0, carried: &[] }).unwrap();
         std::fs::write(&path, bytes).unwrap();
 
@@ -6159,7 +6236,7 @@ mod tests {
         let mut k = st.project.clone(); // what Krita has: the sent version…
         st.project.layers[0].name = "Ink here".into(); // …while we rename here
         let id = k.layers[0].exposures[0].unwrap();
-        k.cells[id].pixels[0..4].copy_from_slice(&[255, 0, 0, 255]); // …and Krita paints
+        k.cell_mut(id).unwrap().pixels[0..4].copy_from_slice(&[255, 0, 0, 255]); // …and Krita paints
 
         st.begin_send(0, None);
         krita_saves(&st, &k, &path);
@@ -6205,7 +6282,7 @@ mod tests {
 
         let mut k = st.project.clone();
         let id = k.layers[0].exposures[0].unwrap();
-        k.cells[id].pixels[0..4].copy_from_slice(&[9, 9, 9, 255]);
+        k.cell_mut(id).unwrap().pixels[0..4].copy_from_slice(&[9, 9, 9, 255]);
         krita_saves(&st, &k, &path);
         pump(&mut st, |st| st.history.can_undo());
         assert_eq!(first_pixel_on_disk(&st, &path), [9, 9, 9, 255]);
@@ -6238,7 +6315,7 @@ mod tests {
         }
         let mut k = st.project.clone();
         let id = k.layers[0].exposures[0].unwrap();
-        k.cells[id].pixels[0..4].copy_from_slice(&[0, 255, 0, 255]);
+        k.cell_mut(id).unwrap().pixels[0..4].copy_from_slice(&[0, 255, 0, 255]);
         krita_saves(&st, &k, &path);
 
         st.begin_send(0, None);
@@ -7160,7 +7237,7 @@ mod tests {
         let old = 0;
         assert_eq!(state.cell_dirty[&old], Dirty::Clean, "structure alone uploads nothing");
 
-        let c = &mut state.project.cells[old];
+        let c = state.project.cell_mut(old).unwrap();
         c.dirty = None;
         c.pixels[3] = 255;
         c.mark_dirty(0, 0, 1, 1);
@@ -7241,6 +7318,37 @@ mod tests {
         state.dispatch(Action::FadeOthersToggle);
         assert!(!state.fade_others);
         assert!((0..4).all(|i| state.layer_view_alpha(i) == 1.0));
+    }
+
+    /// A deleted layer's drawing is kept while undo can bring it back, and
+    /// freed — texture and all — once the step that could has left history.
+    #[test]
+    fn a_dropped_drawing_lives_as_long_as_undo_can_reach_it() {
+        let mut st = AppState::for_test();
+        let ctx = egui::Context::default();
+        st.project.cell_mut(0).unwrap().pixels[3] = 255;
+        st.project.add_layer();
+        st.project.current_layer = 0;
+        let pool = st.project.cells.len();
+        let _ = sync(&mut st, &ctx);
+        assert!(st.cell_textures.contains_key(&0));
+
+        st.structural_edit(false, |p| p.delete_layer());
+        st.collect_cells();
+        assert!(!st.project.cells[0].is_tombstone(), "undo can still bring it back");
+        st.undo();
+        assert_eq!(st.project.layers[0].resolve(0), Some(0));
+        assert_eq!(st.project.cells[0].pixels[3], 255);
+
+        st.project.current_layer = 0;
+        st.structural_edit(false, |p| p.delete_layer());
+        for _ in 0..80 {
+            st.history.push(undo::Command::Selection { before: None, after: None });
+        }
+        st.collect_cells();
+        assert!(st.project.cells[0].is_tombstone(), "out of undo's reach: freed");
+        assert!(!st.cell_textures.contains_key(&0));
+        assert_eq!(st.project.cells.len(), pool, "no id moved");
     }
 
     /// The shortcut has no clock to start from, but the first tick must still
