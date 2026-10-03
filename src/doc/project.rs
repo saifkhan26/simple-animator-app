@@ -352,8 +352,10 @@ impl Project {
                 }
                 l.track_points.clear();
             }
+            // Fresh blanks rather than clearing in place: an undo snapshot
+            // may share these, and clearing would copy each one first.
             for c in &mut self.cells {
-                Arc::make_mut(c).clear();
+                *c = Arc::new(Canvas::new(c.width, c.height));
             }
             return;
         }
@@ -1143,24 +1145,7 @@ pub fn layer_retime(
 /// Copy `src` into a fresh `new_w`×`new_h` buffer with the old content
 /// centered. Content that no longer fits (a shrink) is cropped.
 pub fn recenter(src: &Canvas, new_w: u32, new_h: u32) -> Canvas {
-    let mut out = Canvas::new(new_w, new_h);
-    // Offset of the old origin inside the new buffer; negative when shrinking.
-    let ox = (new_w as i64 - src.width as i64) / 2;
-    let oy = (new_h as i64 - src.height as i64) / 2;
-    let y0 = (-oy).max(0);
-    let y1 = (src.height as i64).min(new_h as i64 - oy);
-    let x0 = (-ox).max(0);
-    let x1 = (src.width as i64).min(new_w as i64 - ox);
-    if x1 <= x0 || y1 <= y0 {
-        return out;
-    }
-    let row_bytes = ((x1 - x0) * 4) as usize;
-    for y in y0..y1 {
-        let s = ((y * src.width as i64 + x0) * 4) as usize;
-        let d = (((y + oy) * new_w as i64 + x0 + ox) * 4) as usize;
-        out.pixels[d..d + row_bytes].copy_from_slice(&src.pixels[s..s + row_bytes]);
-    }
-    out
+    src.recentered(new_w, new_h)
 }
 
 #[cfg(test)]
@@ -1172,9 +1157,9 @@ mod tests {
         let mut p = Project::new(4, 4, 12.0);
         let snapshot = p.clone();
         assert!(Arc::ptr_eq(&p.cells[0], &snapshot.cells[0]), "a save's copy costs nothing");
-        p.cell_mut(0).unwrap().pixels[3] = 255;
-        assert_eq!(snapshot.cells[0].pixels[3], 0, "the snapshot keeps what it saw");
-        assert_eq!(p.cells[0].pixels[3], 255);
+        p.cell_mut(0).unwrap().pixels_mut()[3] = 255;
+        assert_eq!(snapshot.cells[0].pixels()[3], 0, "the snapshot keeps what it saw");
+        assert_eq!(p.cells[0].pixels()[3], 255);
     }
 
     #[test]
@@ -1184,8 +1169,8 @@ mod tests {
         p.goto(1);
         let dup = p.insert_duplicate_key_here();
         assert!(Arc::ptr_eq(&p.cells[0], &p.cells[dup]));
-        p.cell_mut(dup).unwrap().pixels[3] = 255;
-        assert_eq!(p.cells[0].pixels[3], 0, "the original is untouched");
+        p.cell_mut(dup).unwrap().pixels_mut()[3] = 255;
+        assert_eq!(p.cells[0].pixels()[3], 0, "the original is untouched");
     }
 
     #[test]
@@ -1194,7 +1179,7 @@ mod tests {
         p.add_frame();
         let mark = |n: u8| {
             let mut c = Canvas::new(4, 4);
-            c.pixels[0] = n;
+            c.pixels_mut()[0] = n;
             Arc::new(c)
         };
         p.cells.push(mark(1)); // 1: shown nowhere
@@ -1204,7 +1189,7 @@ mod tests {
         p.compact_cells();
         assert_eq!(p.cells.len(), 2);
         assert_eq!(p.layers[0].exposures, vec![Some(0), Some(1)]);
-        assert_eq!(p.cells[1].pixels[0], 2, "the drawing came along");
+        assert_eq!(p.cells[1].pixels()[0], 2, "the drawing came along");
         // A file naming a cell it hasn't got is left alone.
         p.layers[0].set_key(1, 9);
         p.compact_cells();
@@ -1243,15 +1228,15 @@ mod tests {
     #[test]
     fn recenter_grows_symmetrically() {
         let mut src = Canvas::new(2, 2);
-        src.pixels.copy_from_slice(&[
+        src.pixels_mut().copy_from_slice(&[
             1, 1, 1, 255, 2, 2, 2, 255, // row 0
             3, 3, 3, 255, 4, 4, 4, 255, // row 1
         ]);
         let out = recenter(&src, 4, 4);
-        let at = |x: usize, y: usize| out.pixels[(y * 4 + x) * 4];
+        let at = |x: usize, y: usize| out.pixels()[(y * 4 + x) * 4];
         assert_eq!((at(1, 1), at(2, 1), at(1, 2), at(2, 2)), (1, 2, 3, 4));
         assert_eq!(at(0, 0), 0, "pad is transparent");
-        assert_eq!(out.pixels.len(), 4 * 4 * 4);
+        assert_eq!(out.pixels().len(), 4 * 4 * 4);
     }
 
     fn names(p: &Project) -> Vec<&str> {
@@ -1336,14 +1321,14 @@ mod tests {
     #[test]
     fn recenter_shrinks_by_cropping() {
         let mut src = Canvas::new(4, 4);
-        for (i, px) in src.pixels.chunks_mut(4).enumerate() {
+        for (i, px) in src.pixels_mut().chunks_mut(4).enumerate() {
             px[0] = i as u8;
             px[3] = 255;
         }
         let out = recenter(&src, 2, 2);
         // The 2x2 block starting at (1,1) of the source survives.
-        assert_eq!(out.pixels[0], 5);
-        assert_eq!(out.pixels[4], 6);
+        assert_eq!(out.pixels()[0], 5);
+        assert_eq!(out.pixels()[4], 6);
     }
 
     /// New cells on an expanded layer come out at the layer's size, not the
@@ -1369,17 +1354,17 @@ mod tests {
         p.current_frame = 1;
         p.insert_blank_key_here();
         let id = p.resolved_current().unwrap();
-        p.cell_mut(id).unwrap().pixels[0] = 200;
+        p.cell_mut(id).unwrap().pixels_mut()[0] = 200;
 
         let taken = p.cut_active_cell().expect("something to cut");
-        assert_eq!(taken.pixels[0], 200);
+        assert_eq!(taken.pixels()[0], 200);
         assert_eq!(p.frame_count, 3);
         for l in &p.layers {
             assert_eq!(l.exposures.len(), 3);
         }
         // The slot is blank, not holding the previous drawing.
         let now = p.resolved_current().unwrap();
-        assert!(p.cells[now].pixels.iter().all(|&b| b == 0));
+        assert!(p.cells[now].pixels().iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -1388,16 +1373,16 @@ mod tests {
         p.ensure_frame_count(3);
         p.current_frame = 0;
         let src = p.insert_blank_key_here();
-        p.cell_mut(src).unwrap().pixels[0] = 111;
+        p.cell_mut(src).unwrap().pixels_mut()[0] = 111;
 
         let copied = p.copy_active_cell().unwrap();
         p.current_frame = 2;
         let pasted = p.paste_cell_here(&copied);
-        assert_eq!(p.cells[pasted].pixels[0], 111);
+        assert_eq!(p.cells[pasted].pixels()[0], 111);
 
         // Editing the paste must not reach back to the original.
-        p.cell_mut(pasted).unwrap().pixels[0] = 222;
-        assert_eq!(p.cells[src].pixels[0], 111);
+        p.cell_mut(pasted).unwrap().pixels_mut()[0] = 222;
+        assert_eq!(p.cells[src].pixels()[0], 111);
     }
 
     #[test]
@@ -1406,12 +1391,12 @@ mod tests {
         p.ensure_frame_count(2);
         p.expand_layer_canvas(0, 8, 8);
         let mut src = Canvas::new(4, 4);
-        src.pixels[0] = 90; // top-left of the small drawing
+        src.pixels_mut()[0] = 90; // top-left of the small drawing
         let id = p.paste_cell_here(&src);
         assert_eq!((p.cells[id].width, p.cells[id].height), (8, 8));
         // Centred: the old origin lands at (2,2) in the bigger buffer.
         let at = ((2 * 8 + 2) * 4) as usize;
-        assert_eq!(p.cells[id].pixels[at], 90);
+        assert_eq!(p.cells[id].pixels()[at], 90);
     }
 
     /// Keys on 0 / 4 / 8 of an 11-frame layer — the shape the jump buttons
@@ -1481,7 +1466,7 @@ mod tests {
     /// test can tell which drawing shows where after it has moved.
     fn key(p: &mut Project, layer: usize, f: usize, mark: u8) -> CellId {
         let id = p.alloc_cell_for(layer);
-        p.cell_mut(id).unwrap().pixels[0] = mark;
+        p.cell_mut(id).unwrap().pixels_mut()[0] = mark;
         p.layers[layer].set_key(f, id);
         id
     }
@@ -1505,7 +1490,7 @@ mod tests {
     /// The mark of the drawing showing on every frame; 0 for nothing or blank.
     fn row(p: &Project, layer: usize) -> Vec<u8> {
         (0..p.frame_count)
-            .map(|f| p.layers[layer].resolve(f).map_or(0, |id| p.cells[id].pixels[0]))
+            .map(|f| p.layers[layer].resolve(f).map_or(0, |id| p.cells[id].pixels()[0]))
             .collect()
     }
 
@@ -1687,7 +1672,7 @@ mod tests {
         assert_eq!(p.layers[1].exposures[7], Some(bg), "the same drawing picks up again");
         // A copy is its own buffer, and the source is untouched.
         let landed = p.layers[1].exposures[5].unwrap();
-        p.cell_mut(landed).unwrap().pixels[0] = 9;
+        p.cell_mut(landed).unwrap().pixels_mut()[0] = 9;
         assert_eq!(row(&p, 0), vec![1, 1, 3, 3, 5, 5, 5, 5, 5, 5]);
         assert_sound(&p);
     }

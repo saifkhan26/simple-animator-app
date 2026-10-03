@@ -213,9 +213,7 @@ pub fn extract_frames(path: &Path, start: usize, end: usize) -> Result<Vec<Canva
             .with_context(|| format!("decoding {p:?}"))?
             .to_rgba8();
         let (w, h) = img.dimensions();
-        let mut canvas = Canvas::new(w, h);
-        canvas.pixels = img.into_raw();
-        cells.push(canvas);
+        cells.push(Canvas::from_pixels(w, h, img.into_raw()));
     }
 
     Ok(cells)

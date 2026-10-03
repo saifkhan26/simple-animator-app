@@ -24,9 +24,7 @@ pub fn pick() -> Result<Option<Canvas>> {
         .to_rgba8();
 
     let (w, h) = img.dimensions();
-    let mut canvas = Canvas::new(w, h);
-    canvas.pixels = img.into_raw();
-    Ok(Some(canvas))
+    Ok(Some(Canvas::from_pixels(w, h, img.into_raw())))
 }
 
 /// Read an RGBA image off the system clipboard into a native-resolution canvas
@@ -45,7 +43,5 @@ pub fn from_clipboard() -> Result<Option<Canvas>> {
         return Ok(None);
     }
     // arboard hands back unmultiplied RGBA8 — same layout as Canvas::pixels.
-    let mut canvas = Canvas::new(w, h);
-    canvas.pixels = img.bytes.into_owned();
-    Ok(Some(canvas))
+    Ok(Some(Canvas::from_pixels(w, h, img.bytes.into_owned())))
 }

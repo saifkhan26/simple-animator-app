@@ -98,9 +98,7 @@ fn alpha_at(b: &Canvas, u: f32, v: f32) -> u8 {
     }
     let (x0, y0) = (u.floor() as i32, v.floor() as i32);
     let (fx, fy) = (u - x0 as f32, v - y0 as f32);
-    let a = |x: i32, y: i32| {
-        b.pixels[((y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) * 4 + 3) as usize] as f32
-    };
+    let a = |x: i32, y: i32| b.px(x.clamp(0, w - 1) as u32, y.clamp(0, h - 1) as u32)[3] as f32;
     let top = a(x0, y0) + (a(x0 + 1, y0) - a(x0, y0)) * fx;
     let bot = a(x0, y0 + 1) + (a(x0 + 1, y0 + 1) - a(x0, y0 + 1)) * fx;
     (top + (bot - top) * fy).round().clamp(0.0, 255.0) as u8
@@ -123,16 +121,16 @@ fn mask_row(
     x0: u32,
     x1: u32,
 ) {
-    let w = clip.width as usize;
-    let span = (y as usize * w + x0 as usize) * 4..(y as usize * w + x1 as usize) * 4;
-    let src = &clip.pixels[span.clone()];
-    out.copy_from_slice(src);
+    debug_assert_eq!(out.len(), (x1 - x0) as usize * 4);
+    clip.read_row_into(y, x0, out);
     match (base, map) {
         (None, _) => out.chunks_exact_mut(4).for_each(|o| o[3] = 0),
         // Aligned: the base pixel under each clip pixel has the same index.
         (Some(b), None) => {
-            for (o, k) in out.chunks_exact_mut(4).zip(b.pixels[span].chunks_exact(4)) {
-                o[3] = mul(o[3], k[3]);
+            for (x, o) in (x0..).zip(out.chunks_exact_mut(4)) {
+                if o[3] != 0 {
+                    o[3] = mul(o[3], b.px(x, y)[3]);
+                }
             }
         }
         (Some(b), Some(m)) => {
@@ -193,7 +191,7 @@ pub fn masked(clip: &Canvas, base: Option<&Canvas>, at: &Placement) -> Canvas {
         max_x: clip.width,
         max_y: clip.height,
     };
-    mask_into(&mut out.pixels, clip, base, at, all);
+    mask_into(out.pixels_mut(), clip, base, at, all);
     out.dirty = None;
     out
 }
@@ -279,14 +277,14 @@ mod tests {
         for y in 0..8 {
             for x in x0..x1 {
                 let i = ((y * 8 + x) * 4) as usize;
-                c.pixels[i..i + 4].copy_from_slice(&rgba);
+                c.pixels_mut()[i..i + 4].copy_from_slice(&rgba);
             }
         }
         c
     }
 
     fn alpha(c: &Canvas, x: u32, y: u32) -> u8 {
-        c.pixels[((y * c.width + x) * 4 + 3) as usize]
+        c.pixels()[((y * c.width + x) * 4 + 3) as usize]
     }
 
     fn still(pw: u32, ph: u32) -> Placement {
@@ -322,9 +320,25 @@ mod tests {
         let out = masked(&clip, Some(&base), &still(8, 8));
         assert_eq!(alpha(&out, 0, 3), 0);
         assert_eq!(alpha(&out, 3, 3), 128);
-        assert_eq!(&out.pixels[..3], &clip.pixels[..3], "colour kept");
+        assert_eq!(&out.pixels()[..3], &clip.pixels()[..3], "colour kept");
         // Nothing under it: nothing shows.
-        assert!(masked(&clip, None, &still(8, 8)).pixels.chunks(4).all(|p| p[3] == 0));
+        assert!(masked(&clip, None, &still(8, 8)).pixels().chunks(4).all(|p| p[3] == 0));
+    }
+
+    /// Clipping reads packed drawings in place and gets the same pixels.
+    #[test]
+    fn packed_drawings_clip_the_same() {
+        let clip = band(1, 6, [200, 10, 10, 255]);
+        let base = band(3, 7, [0, 0, 0, 180]);
+        let (mut pc, mut pb) = (clip.clone(), base.clone());
+        pc.pack();
+        pb.pack();
+        let mut moved = still(8, 8);
+        moved.base_xf.tx = 1.5;
+        for at in [still(8, 8), moved] {
+            let want = masked(&clip, Some(&base), &at);
+            assert_eq!(masked(&pc, Some(&pb), &at).pixels(), want.pixels());
+        }
     }
 
     #[test]
@@ -369,7 +383,7 @@ mod tests {
         let full = masked(&clip, Some(&base), &at);
         for (row, y) in (2..4).enumerate() {
             let a = ((y * 8 + 1) * 4) as usize;
-            assert_eq!(&packed[row * 16..row * 16 + 16], &full.pixels[a..a + 16]);
+            assert_eq!(&packed[row * 16..row * 16 + 16], &full.pixels()[a..a + 16]);
         }
     }
 
@@ -429,10 +443,10 @@ mod tests {
         let (w, h) = (1920u32, 1080u32);
         let mut clip = Canvas::new(w, h);
         let mut base = Canvas::new(w, h);
-        for (i, px) in clip.pixels.chunks_exact_mut(4).enumerate() {
+        for (i, px) in clip.pixels_mut().chunks_exact_mut(4).enumerate() {
             px.copy_from_slice(&[200, 10, 10, 255]);
             if (i as u32 % w) < w / 2 {
-                base.pixels[i * 4 + 3] = 255;
+                base.pixels_mut()[i * 4 + 3] = 255;
             }
         }
         let whole = DirtyRect {

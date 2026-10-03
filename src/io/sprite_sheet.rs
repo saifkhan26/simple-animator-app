@@ -83,7 +83,7 @@ pub fn export_to(
             let src = (y * fw * 4) as usize;
             let dst = (((oy + y) * sw + ox) * 4) as usize;
             let len = (fw * 4) as usize;
-            sheet[dst..dst + len].copy_from_slice(&flat.pixels[src..src + len]);
+            sheet[dst..dst + len].copy_from_slice(&flat.pixels()[src..src + len]);
         }
     }
 

@@ -15,7 +15,7 @@ pub fn save_dialog(canvas: &Canvas) -> Result<()> {
     };
 
     let buf: ImageBuffer<Rgba<u8>, _> =
-        ImageBuffer::from_raw(canvas.width, canvas.height, canvas.pixels.clone())
+        ImageBuffer::from_raw(canvas.width, canvas.height, canvas.pixels().into_owned())
             .context("canvas dimensions did not match buffer length")?;
     buf.save(&path)
         .with_context(|| format!("writing {path:?}"))?;

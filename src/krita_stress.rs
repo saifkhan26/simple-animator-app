@@ -61,18 +61,18 @@ fn doodle(rng: &mut Rng) -> Canvas {
     for _ in 0..1 + rng.below(6) {
         let i = rng.below((W * H) as usize) * 4;
         let px = [rng.next() as u8, rng.next() as u8, rng.next() as u8, 1 + rng.below(255) as u8];
-        c.pixels[i..i + 4].copy_from_slice(&px);
+        c.pixels_mut()[i..i + 4].copy_from_slice(&px);
     }
     c
 }
 
 fn scribble(c: &mut Canvas, rng: &mut Rng) {
     let i = rng.below((c.width * c.height) as usize) * 4;
-    c.pixels[i..i + 4].copy_from_slice(&[rng.next() as u8, 200, rng.next() as u8, 255]);
+    c.pixels_mut()[i..i + 4].copy_from_slice(&[rng.next() as u8, 200, rng.next() as u8, 255]);
 }
 
 fn blank(c: &Canvas) -> bool {
-    c.pixels.iter().all(|&b| b == 0)
+    c.is_all_zero()
 }
 
 /// What a layer shows, frame by frame: a content hash, 0 for nothing.
@@ -477,7 +477,7 @@ impl Session {
 
         // Undo only has to restore the timeline: no existing cell changed.
         for i in 0..n_cells {
-            check!(self, app.p.cells[i].pixels == before.cells[i].pixels, "cell {i} mutated by the pull");
+            check!(self, app.p.cells[i].pixels() == before.cells[i].pixels(), "cell {i} mutated by the pull");
         }
 
         // Layers that stay here are untouched and still here.
@@ -739,7 +739,7 @@ fn blob(w: u32, h: u32, seed: u64, frac: f32) -> Canvas {
             if d < r {
                 let a = (((r - d) / 4.0).min(1.0) * 255.0) as u8;
                 let o = ((y * w + x) * 4) as usize;
-                c.pixels[o..o + 4].copy_from_slice(&[(x % 251) as u8, (y % 241) as u8, seed as u8, a]);
+                c.pixels_mut()[o..o + 4].copy_from_slice(&[(x % 251) as u8, (y % 241) as u8, seed as u8, a]);
             }
         }
     }
@@ -778,7 +778,7 @@ fn scale(tag: &str, w: u32, h: u32, frames: usize, drawings: &[usize]) {
     // Krita paints on one drawing, and adds a full-size sketch-x.
     let mut k = Krita::open(&app.path);
     let id = k.p.layers[0].exposures.iter().flatten().next().copied().unwrap();
-    for px in k.p.cell_mut(id).unwrap().pixels.chunks_exact_mut(4).take(5000) {
+    for px in k.p.cell_mut(id).unwrap().pixels_mut().chunks_exact_mut(4).take(5000) {
         px.copy_from_slice(&[255, 0, 0, 255]);
     }
     let mut sketch = Layer::new("sketch-x", k.p.frame_count);

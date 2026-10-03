@@ -850,12 +850,12 @@ impl AppState {
             let rect = self.float_lift_rect;
             let mut restored = false;
             if let (Some(r), Some(c)) = (rect, self.project.cell_mut(sel.cell)) {
-                if c.pixels.len() == self.float_pre.len() {
+                if c.byte_len() == self.float_pre.len() {
                     let stride = c.width as usize * 4;
                     for y in r.min_y as usize..r.max_y as usize {
                         let a = y * stride + r.min_x as usize * 4;
                         let b = y * stride + r.max_x as usize * 4;
-                        c.pixels[a..b].copy_from_slice(&self.float_pre[a..b]);
+                        c.pixels_mut()[a..b].copy_from_slice(&self.float_pre[a..b]);
                     }
                     c.dirty = Some(r);
                     restored = true;
@@ -941,8 +941,10 @@ impl AppState {
             return;
         };
         self.float_pre.clear();
-        self.float_pre
-            .extend_from_slice(&self.project.cells[cell].pixels);
+        // Unpacked first: the lift writes it straight after.
+        if let Some(c) = self.project.cell_mut(cell) {
+            self.float_pre.extend_from_slice(c.pixels_mut());
+        }
         self.float_pre_live = true;
         self.float_lift_rect = None;
         if let Some(c) = self.project.cell_mut(cell) {
@@ -1066,7 +1068,7 @@ mod tests {
         for y in y0..y1 {
             for x in x0..x1 {
                 let i = ((y * c.width + x) * 4) as usize;
-                c.pixels[i..i + 4].copy_from_slice(&rgba);
+                c.pixels_mut()[i..i + 4].copy_from_slice(&rgba);
             }
         }
     }
@@ -1075,7 +1077,7 @@ mod tests {
         let id = st.project.resolved_current().unwrap();
         let c = st.project.cell(id).unwrap();
         let i = ((y * c.width + x) * 4) as usize;
-        [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+        [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
     }
 
     /// Drag the current selection shape from `a` to `b` in document space.
@@ -1169,7 +1171,7 @@ mod tests {
         let id = st.project.layers[0].resolve(f).expect("a drawing on this frame");
         let c = st.project.cell(id).unwrap();
         let i = ((y * c.width + x) * 4) as usize;
-        [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+        [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
     }
 
     /// Next frame, with a drawing of its own.
@@ -1295,14 +1297,14 @@ mod tests {
         st.land_float();
         let cell = |f: usize| {
             let id = st.project.layers[0].resolve(f).unwrap();
-            st.project.cell(id).unwrap().pixels.clone()
+            st.project.cell(id).unwrap().pixels().into_owned()
         };
         let first = cell(0);
         assert_ne!(first, {
             let mut before = lasso();
             paint(&mut before, (100, 100, 110, 140), RED);
             paint(&mut before, (100, 130, 140, 140), RED);
-            before.project.cells[0].pixels.clone()
+            before.project.cells[0].pixels().into_owned()
         }, "it did turn");
         for f in 1..3 {
             assert!(cell(f) == first, "frame {f} matches frame 0");
@@ -1313,14 +1315,14 @@ mod tests {
     fn undo_while_floating_puts_the_pixels_back_untouched() {
         let mut st = lasso();
         paint(&mut st, (100, 100, 140, 140), [10, 200, 30, 255]);
-        let before = st.project.cells[0].pixels.clone();
+        let before = st.project.cells[0].pixels().into_owned();
         drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
         let mask = st.sel_mask.clone();
         let steps = st.history.undo_len();
         drag(&mut st, (120.0, 120.0), (170.0, 140.0), None);
         st.undo();
         assert!(st.selection.is_none());
-        assert_eq!(st.project.cells[0].pixels, before);
+        assert_eq!(st.project.cells[0].pixels(), before);
         assert_eq!(st.history.undo_len(), steps);
         assert_eq!(st.sel_mask, mask);
     }
@@ -1368,7 +1370,7 @@ mod tests {
         drag(&mut st, (120.0, 120.0), (160.0, 120.0), None);
         st.dispatch(Action::LayerAdd);
         assert!(st.selection.is_none());
-        assert_eq!(st.project.cells[0].pixels[((120 * 1280 + 170) * 4 + 2) as usize], 255);
+        assert_eq!(st.project.cells[0].pixels()[((120 * 1280 + 170) * 4 + 2) as usize], 255);
     }
 
     #[test]

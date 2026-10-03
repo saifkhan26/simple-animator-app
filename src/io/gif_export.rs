@@ -39,7 +39,7 @@ pub fn export_to(project: &Project, path: &PathBuf, order: &[usize]) -> Result<(
         });
         let frame = match kept.remove(&f) {
             Some(frame) => frame,
-            None => encode_frame(&composite::flatten_frame(project, f).pixels, w, h, delay),
+            None => encode_frame(&composite::flatten_frame(project, f).pixels(), w, h, delay),
         };
         encoder.write_frame(&frame).context("write_frame")?;
         if remaining > 0 {

@@ -37,7 +37,7 @@ pub fn export_to(project: &Project, dir: &PathBuf, order: &[usize]) -> Result<()
         }
         let flat = composite::flatten_frame(project, f);
         let buf: ImageBuffer<Rgba<u8>, _> =
-            ImageBuffer::from_raw(flat.width, flat.height, flat.pixels)
+            ImageBuffer::from_raw(flat.width, flat.height, flat.pixels())
                 .context("buffer/dim mismatch")?;
         buf.save(&path)
             .with_context(|| format!("writing {path:?}"))?;
@@ -58,7 +58,7 @@ mod tests {
         for f in 0..3 {
             let id = p.cells.len();
             let mut c = crate::doc::canvas::Canvas::new(8, 6);
-            c.pixels[0..4].copy_from_slice(&[f as u8 * 80, 0, 0, 255]);
+            c.pixels_mut()[0..4].copy_from_slice(&[f as u8 * 80, 0, 0, 255]);
             p.cells.push(c.into());
             p.layers[0].exposures[f] = Some(id);
         }

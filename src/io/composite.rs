@@ -76,7 +76,7 @@ pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacit
                 continue;
             }
             let di = ((y * pw + x) * 4) as usize;
-            let d = &mut dst.pixels[di..di + 4];
+            let d = &mut dst.pixels_mut()[di..di + 4];
             let da = d[3] as f32 / 255.0;
             let out_a = sa + da * (1.0 - sa);
             if out_a <= 0.0 {
@@ -108,9 +108,9 @@ mod tests {
             for x in 0..8u32 {
                 let i = ((y * 8 + x) * 4) as usize;
                 if x < 4 {
-                    base.pixels[i..i + 4].copy_from_slice(&[0, 0, 255, 255]);
+                    base.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 255, 255]);
                 }
-                top.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+                top.pixels_mut()[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
             }
         }
         let n = p.cells.len();
@@ -120,12 +120,13 @@ mod tests {
         p.layers[1].set_key(0, n + 1);
         p.layers[1].clip = true;
         let flat = flatten_frame(&p, 0);
-        let px = |x: u32| &flat.pixels[(x * 4) as usize..(x * 4 + 4) as usize];
+        let flat = flat.pixels();
+        let px = |x: u32| &flat[(x * 4) as usize..(x * 4 + 4) as usize];
         assert_eq!(px(1), &[255, 0, 0, 255], "red over the blue");
         assert_eq!(px(6), &[0, 0, 0, 0], "nothing past the base");
         // Unclipped, it covers the frame.
         p.layers[1].clip = false;
-        assert_eq!(&flatten_frame(&p, 0).pixels[24..28], &[255, 0, 0, 255]);
+        assert_eq!(&flatten_frame(&p, 0).pixels()[24..28], &[255, 0, 0, 255]);
     }
     use crate::doc::camera::Camera;
 
@@ -135,13 +136,13 @@ mod tests {
         let id = p.layers[0].resolve(0).unwrap();
         let c = p.cell_mut(id).unwrap();
         let i = ((y * 8 + x) * 4) as usize;
-        c.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+        c.pixels_mut()[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
         p
     }
 
     fn red_at(c: &Canvas, x: u32, y: u32) -> bool {
         let i = ((y * c.width + x) * 4) as usize;
-        c.pixels[i] > 200 && c.pixels[i + 3] > 200
+        c.pixels()[i] > 200 && c.pixels()[i + 3] > 200
     }
 
     /// An untouched project must export exactly as it did before the camera
@@ -174,7 +175,7 @@ mod tests {
     fn offscreen_layer_appears_only_once_the_camera_arrives() {
         let mut p = dot_project(3, 5);
         p.layers[0].transform.tx = 8.0;
-        assert!(!flatten_frame(&p, 0).pixels.iter().any(|&b| b > 200));
+        assert!(!flatten_frame(&p, 0).pixels().iter().any(|&b| b > 200));
         p.camera = Camera {
             tx: 8.0,
             ..Default::default()
@@ -197,7 +198,7 @@ mod tests {
         let bid = p.alloc_cell_for(0);
         let c = p.cell_mut(bid).unwrap();
         let i = ((5 * 8 + 3) * 4) as usize;
-        c.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+        c.pixels_mut()[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
         b.set_key(0, bid);
         b.transform.tx = 8.0;
         p.layers.push(b);
@@ -225,8 +226,8 @@ mod tests {
         let f10 = flatten_frame(&p, 10);
         assert!(red_at(&f10, 3, 5), "B in frame at the end");
         assert_eq!(
-            f10.pixels.iter().filter(|&&b| b > 200).count(),
-            f0.pixels.iter().filter(|&&b| b > 200).count(),
+            f10.pixels().iter().filter(|&&b| b > 200).count(),
+            f0.pixels().iter().filter(|&&b| b > 200).count(),
             "exactly one character in frame at each end"
         );
         // Mid-move both are off to the sides, and smoothstep means the camera
@@ -245,16 +246,10 @@ pub(crate) fn sample_bilinear(src: &Canvas, x: f32, y: f32) -> [u8; 4] {
     let y0 = y.floor() as i32;
     let fx = x - x0 as f32;
     let fy = y - y0 as f32;
+    // Read in place: a packed source has no whole buffer to index.
     let at = |xi: i32, yi: i32| -> [f32; 4] {
-        let xc = xi.clamp(0, w - 1);
-        let yc = yi.clamp(0, h - 1);
-        let i = ((yc * w + xc) * 4) as usize;
-        [
-            src.pixels[i] as f32,
-            src.pixels[i + 1] as f32,
-            src.pixels[i + 2] as f32,
-            src.pixels[i + 3] as f32,
-        ]
+        let p = src.px(xi.clamp(0, w - 1) as u32, yi.clamp(0, h - 1) as u32);
+        p.map(|c| c as f32)
     };
     let p00 = at(x0, y0);
     let p10 = at(x0 + 1, y0);
@@ -274,26 +269,31 @@ fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32) {
     debug_assert_eq!(dst.width, src.width);
     debug_assert_eq!(dst.height, src.height);
     let op = opacity.clamp(0.0, 1.0);
-    let n = (dst.width * dst.height) as usize;
-    for i in 0..n {
-        let s = &src.pixels[i * 4..i * 4 + 4];
-        let d = &mut dst.pixels[i * 4..i * 4 + 4];
-        let sa = (s[3] as f32 / 255.0) * op;
-        if sa <= 0.0 {
-            continue;
+    let w = dst.width as usize;
+    let out = dst.pixels_mut();
+    // Row by row over what the source holds: a packed one skips its blank
+    // margins outright.
+    for y in 0..src.height {
+        let (x0, span) = src.row_span(y);
+        let at = (y as usize * w + x0 as usize) * 4;
+        for (s, d) in span.chunks_exact(4).zip(out[at..at + span.len()].chunks_exact_mut(4)) {
+            let sa = (s[3] as f32 / 255.0) * op;
+            if sa <= 0.0 {
+                continue;
+            }
+            let da = d[3] as f32 / 255.0;
+            let out_a = sa + da * (1.0 - sa);
+            if out_a <= 0.0 {
+                d.copy_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            for c in 0..3 {
+                let sv = s[c] as f32 / 255.0;
+                let dv = d[c] as f32 / 255.0;
+                let ov = (sv * sa + dv * da * (1.0 - sa)) / out_a;
+                d[c] = (ov * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            d[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
         }
-        let da = d[3] as f32 / 255.0;
-        let out_a = sa + da * (1.0 - sa);
-        if out_a <= 0.0 {
-            d.copy_from_slice(&[0, 0, 0, 0]);
-            continue;
-        }
-        for c in 0..3 {
-            let sv = s[c] as f32 / 255.0;
-            let dv = d[c] as f32 / 255.0;
-            let ov = (sv * sa + dv * da * (1.0 - sa)) / out_a;
-            d[c] = (ov * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-        d[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 }

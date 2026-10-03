@@ -163,11 +163,12 @@ pub fn coverage_rect(
 /// Erase through an existing mask: alpha scales by `1 - coverage`, RGB is left
 /// alone, and a fully erased pixel is zeroed so it carries no stale colour.
 pub fn erase_masked(canvas: &mut Canvas, mask: &Mask) -> bool {
-    let w = canvas.width;
+    let (w, h) = (canvas.width, canvas.height);
+    let buf = canvas.pixels_mut();
     let mut touched = false;
     for my in 0..mask.h {
         let py = mask.y + my;
-        if py >= canvas.height {
+        if py >= h {
             break;
         }
         for mx in 0..mask.w {
@@ -180,7 +181,7 @@ pub fn erase_masked(canvas: &mut Canvas, mask: &Mask) -> bool {
                 continue;
             }
             let idx = ((py * w + px) * 4) as usize;
-            let a_pre = canvas.pixels[idx + 3];
+            let a_pre = buf[idx + 3];
             if a_pre == 0 {
                 continue;
             }
@@ -190,9 +191,9 @@ pub fn erase_masked(canvas: &mut Canvas, mask: &Mask) -> bool {
                 continue;
             }
             if a_out == 0 {
-                canvas.pixels[idx..idx + 4].copy_from_slice(&[0, 0, 0, 0]);
+                buf[idx..idx + 4].copy_from_slice(&[0, 0, 0, 0]);
             } else {
-                canvas.pixels[idx + 3] = a_out;
+                buf[idx + 3] = a_out;
             }
             touched = true;
         }
@@ -238,7 +239,7 @@ mod tests {
     /// 16x16 fully opaque white.
     fn solid() -> Canvas {
         let mut c = Canvas::new(16, 16);
-        for px in c.pixels.chunks_exact_mut(4) {
+        for px in c.pixels_mut().chunks_exact_mut(4) {
             px.copy_from_slice(&[255, 255, 255, 255]);
         }
         c.dirty = None;
@@ -246,7 +247,7 @@ mod tests {
     }
 
     fn alpha(c: &Canvas, x: u32, y: u32) -> u8 {
-        c.pixels[((y * c.width + x) * 4 + 3) as usize]
+        c.pixels()[((y * c.width + x) * 4 + 3) as usize]
     }
 
     /// Axis-aligned rectangle path, corners on pixel boundaries.
@@ -276,7 +277,7 @@ mod tests {
         let mut c = solid();
         erase(&mut c, &rect(4.0, 4.0, 12.0, 12.0));
         let idx = ((8 * 16 + 8) * 4) as usize;
-        assert_eq!(&c.pixels[idx..idx + 4], &[0, 0, 0, 0]);
+        assert_eq!(&c.pixels()[idx..idx + 4], &[0, 0, 0, 0]);
     }
 
     #[test]

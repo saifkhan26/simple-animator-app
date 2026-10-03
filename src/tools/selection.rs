@@ -321,6 +321,7 @@ impl Selection {
     pub fn new(cell: CellId, canvas: &Canvas, mask: Mask, placement: Placement) -> Self {
         let (mw, mh) = (mask.w, mask.h);
         let mut pixels = vec![0u8; (mw * mh * 4) as usize];
+        let src = canvas.pixels();
         for my in 0..mh {
             let py = mask.y + my;
             if py >= canvas.height {
@@ -337,12 +338,10 @@ impl Selection {
                 }
                 let s = ((py * canvas.width + px) * 4) as usize;
                 let d = ((my * mw + mx) * 4) as usize;
-                pixels[d] = canvas.pixels[s];
-                pixels[d + 1] = canvas.pixels[s + 1];
-                pixels[d + 2] = canvas.pixels[s + 2];
+                pixels[d..d + 3].copy_from_slice(&src[s..s + 3]);
                 // Coverage rides in the alpha, so a soft lasso edge stays soft
                 // and lift + erase still sum to the original.
-                pixels[d + 3] = ((canvas.pixels[s + 3] as u32 * c as u32 + 127) / 255) as u8;
+                pixels[d + 3] = ((src[s + 3] as u32 * c as u32 + 127) / 255) as u8;
             }
         }
         Self {
@@ -768,18 +767,19 @@ pub fn grab_at(mask: &Mask, pose: &Pose, x: f32, y: f32, tol: f32) -> Option<Gra
 /// `src` is unpremultiplied RGB in `0..=1`, `sa` its alpha.
 fn blend_over(canvas: &mut Canvas, px: i32, py: i32, src: [f32; 3], sa: f32) {
     let d = ((py * canvas.width as i32 + px) * 4) as usize;
-    let da = canvas.pixels[d + 3] as f32 / 255.0;
+    let buf = canvas.pixels_mut();
+    let da = buf[d + 3] as f32 / 255.0;
     let out_a = sa + da * (1.0 - sa);
     if out_a <= 0.0 {
-        canvas.pixels[d..d + 4].copy_from_slice(&[0, 0, 0, 0]);
+        buf[d..d + 4].copy_from_slice(&[0, 0, 0, 0]);
         return;
     }
     for (c, &sv) in src.iter().enumerate() {
-        let dv = canvas.pixels[d + c] as f32 / 255.0;
+        let dv = buf[d + c] as f32 / 255.0;
         let ov = (sv * sa + dv * da * (1.0 - sa)) / out_a;
-        canvas.pixels[d + c] = (ov * 255.0).round().clamp(0.0, 255.0) as u8;
+        buf[d + c] = (ov * 255.0).round().clamp(0.0, 255.0) as u8;
     }
-    canvas.pixels[d + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+    buf[d + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
 /// Clip integer bounds to a canvas, or `None` when nothing is left.
@@ -802,7 +802,7 @@ mod tests {
 
     fn filled(w: u32, h: u32, rgba: [u8; 4]) -> Canvas {
         let mut c = Canvas::new(w, h);
-        for px in c.pixels.chunks_exact_mut(4) {
+        for px in c.pixels_mut().chunks_exact_mut(4) {
             px.copy_from_slice(&rgba);
         }
         c
@@ -819,22 +819,22 @@ mod tests {
 
     fn rgba(c: &Canvas, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * c.width + x) * 4) as usize;
-        [c.pixels[i], c.pixels[i + 1], c.pixels[i + 2], c.pixels[i + 3]]
+        [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
     }
 
     #[test]
     fn lift_then_stamp_in_place_restores_the_drawing() {
         let mut canvas = filled(8, 8, [10, 20, 30, 255]);
-        let before = canvas.pixels.clone();
+        let before = canvas.pixels().into_owned();
         let mut sel = sel_on(&canvas, square(2.0, 2.0, 6.0, 6.0));
 
         sel.lift_source(&mut canvas);
         // The hole is real.
         let mid = ((3 * 8 + 3) * 4) as usize;
-        assert_eq!(canvas.pixels[mid + 3], 0);
+        assert_eq!(canvas.pixels()[mid + 3], 0);
 
         sel.stamp(&mut canvas);
-        for (i, (&a, &b)) in before.iter().zip(canvas.pixels.iter()).enumerate() {
+        for (i, (&a, &b)) in before.iter().zip(canvas.pixels().iter()).enumerate() {
             assert!(
                 a.abs_diff(b) <= 1,
                 "byte {i}: {a} != {b} after lift+stamp round trip"
@@ -853,9 +853,9 @@ mod tests {
         // Source pixel cleared, destination pixel painted.
         let src = ((2 * 8 + 2) * 4) as usize;
         let dst = ((6 * 8 + 6) * 4) as usize;
-        assert_eq!(canvas.pixels[src + 3], 0);
-        assert_eq!(canvas.pixels[dst + 3], 255);
-        assert_eq!(canvas.pixels[dst], 200);
+        assert_eq!(canvas.pixels()[src + 3], 0);
+        assert_eq!(canvas.pixels()[dst + 3], 255);
+        assert_eq!(canvas.pixels()[dst], 200);
     }
 
     #[test]
@@ -867,7 +867,7 @@ mod tests {
         sel.stamp(&mut canvas);
         // Nothing reappeared on the far side.
         let right = ((2 * 8 + 7) * 4) as usize;
-        assert_eq!(canvas.pixels[right + 3], 255);
+        assert_eq!(canvas.pixels()[right + 3], 255);
     }
 
     #[test]
@@ -959,7 +959,7 @@ mod tests {
         for y in 5..16 {
             for x in 9..12 {
                 let i = ((y * 21 + x) * 4) as usize;
-                canvas.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+                canvas.pixels_mut()[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
             }
         }
         let mut sel = sel_on(&canvas, square(9.0, 5.0, 12.0, 16.0));
@@ -982,7 +982,7 @@ mod tests {
         for y in 16..24 {
             for x in 16..24 {
                 let i = ((y * 40 + x) * 4) as usize;
-                canvas.pixels[i..i + 4].copy_from_slice(&[0, 200, 0, 255]);
+                canvas.pixels_mut()[i..i + 4].copy_from_slice(&[0, 200, 0, 255]);
             }
         }
         let mut sel = sel_on(&canvas, square(16.0, 16.0, 24.0, 24.0));
@@ -1006,7 +1006,7 @@ mod tests {
         for y in 12..20 {
             for x in 12..20 {
                 let i = ((y * 32 + x) * 4) as usize;
-                canvas.pixels[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+                canvas.pixels_mut()[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
             }
         }
         let mut sel = sel_on(&canvas, square(12.0, 12.0, 20.0, 20.0));
@@ -1042,10 +1042,10 @@ mod tests {
         for y in 8..16 {
             for x in 8..16 {
                 let i = ((y * 24 + x) * 4) as usize;
-                canvas.pixels[i..i + 4].copy_from_slice(&[30, 40, 50, 255]);
+                canvas.pixels_mut()[i..i + 4].copy_from_slice(&[30, 40, 50, 255]);
             }
         }
-        let before = canvas.pixels.clone();
+        let before = canvas.pixels().into_owned();
         let mut sel = sel_on(&canvas, square(8.0, 8.0, 16.0, 16.0));
         sel.lift_source(&mut canvas);
         // Out to 3x, then all the way back. The buffer never changed, so the
@@ -1054,7 +1054,7 @@ mod tests {
         sel.pose.scale = (1.0, 1.0);
         assert!(sel.pose.is_pixel_aligned());
         sel.stamp(&mut canvas);
-        for (i, (&a, &b)) in before.iter().zip(canvas.pixels.iter()).enumerate() {
+        for (i, (&a, &b)) in before.iter().zip(canvas.pixels().iter()).enumerate() {
             assert!(a.abs_diff(b) <= 1, "byte {i}: {a} != {b}");
         }
     }

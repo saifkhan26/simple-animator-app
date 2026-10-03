@@ -114,9 +114,10 @@ pub struct FillSession {
     tolerance: u8,
     color: [u8; 4],
     alpha_lock: bool,
-    /// Lines from another layer, already in the cell's pixels. `None` reads
+    /// Lines from another layer, already in the cell's pixels — every pixel,
+    /// since the flood reads them one by one all press long. `None` reads
     /// the cell's own pixels as they were before the press.
-    boundary: Option<Canvas>,
+    boundary: Option<Vec<u8>>,
     clip: Option<Arc<Mask>>,
     /// A same-layer refill with the colour already there: nothing to do.
     inert: bool,
@@ -165,7 +166,8 @@ impl FillSession {
         {
             return None;
         }
-        let target = src_px(boundary.as_ref().map_or(pre, |b| &b.pixels[..]), w, x, y);
+        let boundary = boundary.map(Canvas::into_pixels);
+        let target = src_px(boundary.as_deref().unwrap_or(pre), w, x, y);
         Some(Self {
             w,
             h,
@@ -264,7 +266,7 @@ impl FillSession {
     fn fits(&self, canvas: &Canvas, pre: &[u8]) -> bool {
         canvas.width as i32 == self.w
             && canvas.height as i32 == self.h
-            && pre.len() == canvas.pixels.len()
+            && pre.len() == canvas.byte_len()
     }
 
     /// Work out the plain flood, and the region for `gap` when that is above
@@ -272,7 +274,7 @@ impl FillSession {
     fn ensure_regions(&mut self, pre: &[u8], gap: u8) {
         let (w, h, seed) = (self.w, self.h, self.seed);
         let (target, tol) = (self.target, self.tolerance);
-        let src = self.boundary.as_ref().map_or(pre, |b| &b.pixels[..]);
+        let src = self.boundary.as_deref().unwrap_or(pre);
         let plain = self.plain.get_or_insert_with(|| {
             let (mask, bbox) =
                 span_flood(w, h, seed, |x, y| matches_target(src, w, x, y, target, tol));
@@ -316,7 +318,7 @@ pub fn flood_clipped(
     opts: FillOptions,
     clip: Option<&Mask>,
 ) {
-    let pre = canvas.pixels.clone();
+    let pre = canvas.pixels().into_owned();
     let size = (canvas.width, canvas.height);
     let clip = clip.map(|m| Arc::new(m.clone()));
     if let Some(mut s) = FillSession::new(&pre, size, (x, y), &opts, boundary.cloned(), clip) {
@@ -390,10 +392,11 @@ fn put(canvas: &mut Canvas, x: i32, y: i32, color: [u8; 4], k: u8, alpha_lock: b
 /// Copy `bbox` of `pre` back over `canvas`, row by row.
 fn restore(canvas: &mut Canvas, pre: &[u8], b: Bbox) {
     let w = canvas.width as usize;
+    let px = canvas.pixels_mut();
     for y in b.1 as usize..=b.3 as usize {
         let s = (y * w + b.0 as usize) * 4;
         let e = (y * w + b.2 as usize + 1) * 4;
-        canvas.pixels[s..e].copy_from_slice(&pre[s..e]);
+        px[s..e].copy_from_slice(&pre[s..e]);
     }
 }
 
@@ -863,7 +866,7 @@ fn dilate_window(mask: &[bool], w: i32, h: i32, bbox: Bbox, r: i32) -> Grown {
 
 #[inline]
 fn read_px(canvas: &Canvas, x: i32, y: i32) -> [u8; 4] {
-    src_px(&canvas.pixels, canvas.width as i32, x, y)
+    canvas.px(x as u32, y as u32)
 }
 
 /// Pixel `(x, y)` of an RGBA8 buffer `w` pixels wide.
@@ -876,10 +879,7 @@ fn src_px(src: &[u8], w: i32, x: i32, y: i32) -> [u8; 4] {
 #[inline]
 fn write_px(canvas: &mut Canvas, x: i32, y: i32, p: [u8; 4]) {
     let idx = ((y as u32 * canvas.width + x as u32) * 4) as usize;
-    canvas.pixels[idx] = p[0];
-    canvas.pixels[idx + 1] = p[1];
-    canvas.pixels[idx + 2] = p[2];
-    canvas.pixels[idx + 3] = p[3];
+    canvas.pixels_mut()[idx..idx + 4].copy_from_slice(&p);
 }
 
 #[inline]
@@ -1006,7 +1006,7 @@ mod tests {
         let mut b = Canvas::new(16, 16);
         flood(&mut a, Some(&boundary), 2, 8, opts(0));
         flood(&mut b, Some(&boundary), 2, 8, opts(0));
-        assert_eq!(a.pixels, b.pixels);
+        assert_eq!(a.pixels(), b.pixels());
     }
 
     #[test]
@@ -1073,7 +1073,7 @@ mod tests {
         let mut target = Canvas::new(16, 16);
         target.dirty = None;
         flood_clipped(&mut target, None, 12, 8, opts(0), Some(&left_half(255)));
-        assert!(target.pixels.iter().all(|&b| b == 0));
+        assert!(target.pixels().iter().all(|&b| b == 0));
         assert!(target.dirty.is_none());
     }
 
@@ -1123,7 +1123,7 @@ mod tests {
     }
 
     fn count_filled(c: &Canvas) -> usize {
-        c.pixels.chunks_exact(4).filter(|p| *p == RED).count()
+        c.pixels().chunks_exact(4).filter(|p| *p == RED).count()
     }
 
     /// 1-px outline of the box `x0..=x1` × `y0..=y1`, its top edge broken by a
@@ -1211,7 +1211,7 @@ mod tests {
                     count_filled(&plain),
                     "{name}: gap {gap} changed a closed fill"
                 );
-                assert!(closed.pixels == plain.pixels, "{name}: gap {gap}");
+                assert!(closed.pixels() == plain.pixels(), "{name}: gap {gap}");
             }
         }
     }
@@ -1274,7 +1274,7 @@ mod tests {
         let b = lines(32, 32, box_outline(10, 10, 15, 15, 0, 0));
         let plain = fill_on(&b, 12, 12, 0, 0);
         assert_eq!(count_filled(&plain), 16);
-        assert!(fill_on(&b, 12, 12, 12, 0).pixels == plain.pixels);
+        assert!(fill_on(&b, 12, 12, 12, 0).pixels() == plain.pixels());
     }
 
     #[test]
@@ -1296,13 +1296,13 @@ mod tests {
     fn a_session_redoes_the_fill_as_the_values_change() {
         let b = lines(64, 64, box_outline(16, 16, 48, 48, 30, 4));
         let mut canvas = Canvas::new(64, 64);
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let o = opts(0);
         let mut s = FillSession::new(&pre, (64, 64), (32, 32), &o, Some(b.clone()), None).unwrap();
         for (gap, expand) in [(0, 0), (4, 0), (4, 3), (0, 2), (6, 1)] {
             s.apply(&mut canvas, &pre, gap, expand).unwrap();
             assert!(
-                canvas.pixels == fill_on(&b, 32, 32, gap, expand).pixels,
+                canvas.pixels() == fill_on(&b, 32, 32, gap, expand).pixels(),
                 "gap {gap}, expand {expand}"
             );
         }
@@ -1310,7 +1310,7 @@ mod tests {
         let t = s.touched().unwrap();
         assert_eq!((t.min_x, t.min_y, t.max_x, t.max_y), (0, 0, 64, 64));
         s.revert(&mut canvas, &pre).unwrap();
-        assert!(canvas.pixels == pre);
+        assert!(canvas.pixels() == pre);
     }
 
     #[test]
@@ -1319,14 +1319,14 @@ mod tests {
         // see them as they were.
         let lines_here = lines(64, 64, box_outline(16, 16, 48, 48, 30, 4));
         let mut canvas = lines_here.clone();
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let o = opts(0);
         let mut s = FillSession::new(&pre, (64, 64), (32, 32), &o, None, None).unwrap();
         s.apply(&mut canvas, &pre, 4, 3).unwrap();
         s.apply(&mut canvas, &pre, 4, 0).unwrap();
         let mut fresh = lines_here.clone();
         flood(&mut fresh, None, 32, 32, FillOptions { gap: 4, ..o });
-        assert!(canvas.pixels == fresh.pixels);
+        assert!(canvas.pixels() == fresh.pixels());
         assert!(filled_at(&canvas, 20, 20) && !filled_at(&canvas, 2, 2));
     }
 
@@ -1334,7 +1334,7 @@ mod tests {
     fn an_inert_press_never_paints() {
         let mut canvas = Canvas::new(8, 8);
         let pre = [255u8, 0, 0, 255].repeat(64);
-        canvas.pixels.copy_from_slice(&pre);
+        canvas.pixels_mut().copy_from_slice(&pre);
         let mut s = FillSession::new(&pre, (8, 8), (1, 1), &opts(0), None, None).unwrap();
         assert!(s.apply(&mut canvas, &pre, 4, 4).is_none());
         assert!(s.touched().is_none());
@@ -1406,7 +1406,7 @@ mod tests {
         };
         let b = lines(512, 512, room);
         let mut canvas = Canvas::new(512, 512);
-        let pre = canvas.pixels.clone();
+        let pre = canvas.pixels().into_owned();
         let mut s = FillSession::new(&pre, (512, 512), (80, 128), &opts(0), Some(b.clone()), None)
             .unwrap();
         s.apply(&mut canvas, &pre, 4, 0).unwrap();
@@ -1414,7 +1414,7 @@ mod tests {
         s.apply(&mut canvas, &pre, 48, 0).unwrap();
         assert!(!filled_at(&canvas, 170, 128), "gap 48: held");
         assert!(filled_at(&canvas, 41, 41) && filled_at(&canvas, 127, 215));
-        assert!(canvas.pixels == fill_on(&b, 80, 128, 48, 0).pixels);
+        assert!(canvas.pixels() == fill_on(&b, 80, 128, 48, 0).pixels());
     }
 
     #[test]

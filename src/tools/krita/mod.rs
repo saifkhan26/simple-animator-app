@@ -597,7 +597,7 @@ impl KritaStroke {
                 }
                 let mask = clip.map(|m| m.at(px as u32, py as u32));
                 let idx = (py as usize * canvas.width as usize + px as usize) * 4;
-                let dst = &mut canvas.pixels[idx..idx + 4];
+                let dst = &mut canvas.pixels_mut()[idx..idx + 4];
                 if self.erase {
                     composite::erase(dst, a, opacity, mask);
                 } else {

@@ -108,7 +108,7 @@ pub fn export_to(
                 Some(buf) => stdin.write_all(buf),
                 None => {
                     let flat = composite::flatten_frame(project, f);
-                    rgba_over_black(&flat.pixels, &mut rgb);
+                    rgba_over_black(&flat.pixels(), &mut rgb);
                     if remaining > 0 && (kept.len() + 1) * frame_bytes <= REUSE_BUDGET {
                         kept.insert(f, rgb.clone());
                     }
@@ -175,7 +175,7 @@ mod tests {
             for y in 10..26 {
                 for x in f * 2..f * 2 + 8 {
                     let o = (y * 64 + x) * 4;
-                    c.pixels[o..o + 4].copy_from_slice(&[240, 200, 40, 255]);
+                    c.pixels_mut()[o..o + 4].copy_from_slice(&[240, 200, 40, 255]);
                 }
             }
             p.cells.push(c.into());
