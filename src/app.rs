@@ -1088,6 +1088,8 @@ pub struct AppState {
     /// While `Some(action)`, the next key press from the user becomes the
     /// new binding for that action.
     pub rebinding: Option<Action>,
+    /// Settings lists only the bindings that clash. Session-only.
+    pub shortcut_clashes_only: bool,
     /// In-progress inline layer rename in the layers panel.
     pub layer_rename: Option<LayerRename>,
     pub show_settings: bool,
@@ -1359,6 +1361,7 @@ impl AppState {
             preview_upload_rect: None,
             shortcuts: shortcuts::load(),
             rebinding: None,
+            shortcut_clashes_only: false,
             layer_rename: None,
             show_settings: false,
             show_brush_settings: false,

@@ -528,6 +528,61 @@ fn parse_combo(s: &str) -> Option<KeyCombo> {
     })
 }
 
+// --- clashes, as the Settings list flags them ---
+
+/// Something else on a binding's combo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clash {
+    /// Another action on the same combo. On a press both fire; held for a
+    /// drag, only one of them can ever start it.
+    Action(Action),
+    /// A key the app reads outside this map; the text says what it does.
+    Builtin(&'static str),
+    /// Another action on the same combo by design, kept apart by the rule in
+    /// the text. Shown as a note, not a conflict.
+    Shared(Action, &'static str),
+}
+
+impl Clash {
+    /// A real problem, as opposed to a note.
+    pub fn is_conflict(self) -> bool {
+        !matches!(self, Clash::Shared(..))
+    }
+}
+
+/// Why `a` and `b` may share a combo, when they may. The dispatch loop in
+/// `AppState::handle_keys` lets exactly one of these through.
+fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
+    match (a.min(b), a.max(b)) {
+        (Action::SelectionDelete, Action::TrackClear) => Some(
+            "drawings selected in the timeline take the press; otherwise the selection does",
+        ),
+        _ => None,
+    }
+}
+
+/// What a combo collides with among the keys `AppState::handle_keys` and
+/// [`ShortcutMap::poll_actions`] read directly. Those read the key whatever
+/// the modifiers, except the Redo alias, which wants Ctrl and Shift.
+fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str> {
+    use egui::Key as K;
+    match c.key? {
+        K::Z if c.ctrl && c.shift && action != Action::Redo => {
+            Some("Ctrl+Shift+Z always redoes as well")
+        }
+        K::ArrowUp | K::ArrowDown | K::ArrowLeft | K::ArrowRight => {
+            Some("The arrow keys also nudge the selection while there is one")
+        }
+        K::Tab if action != Action::TogglePanels => {
+            Some("While a text field has focus, Tab toggles the panels instead")
+        }
+        K::Backtick if action != Action::ToggleCheckerBg => {
+            Some("While a text field has focus, ` toggles the checker backdrop instead")
+        }
+        _ => None,
+    }
+}
+
 // --- the map itself ---
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -711,6 +766,35 @@ impl ShortcutMap {
     }
     pub fn set(&mut self, action: Action, combo: KeyCombo) {
         self.bindings.insert(action, combo);
+    }
+
+    /// Every binding that shares its combo with something, keyed by the
+    /// action whose row shows it. Clean bindings are absent.
+    pub fn clashes(&self) -> BTreeMap<Action, Vec<Clash>> {
+        let mut out: BTreeMap<Action, Vec<Clash>> = BTreeMap::new();
+        for (&a, &ca) in &self.bindings {
+            for (&b, &cb) in &self.bindings {
+                if a != b && ca == cb {
+                    let c = match shared_on_purpose(a, b) {
+                        Some(why) => Clash::Shared(b, why),
+                        None => Clash::Action(b),
+                    };
+                    out.entry(a).or_default().push(c);
+                }
+            }
+            if let Some(why) = builtin_clash(a, ca) {
+                out.entry(a).or_default().push(Clash::Builtin(why));
+            }
+        }
+        out
+    }
+
+    /// How many bindings have a real conflict (notes don't count).
+    pub fn conflict_count(&self) -> usize {
+        self.clashes()
+            .values()
+            .filter(|v| v.iter().any(|c| c.is_conflict()))
+            .count()
     }
 
     /// Returns every action that has fired this frame. Also Ctrl+Shift+Z is
@@ -911,6 +995,83 @@ mod tests {
             |ctx| fired = map.poll_actions(ctx),
         );
         assert_eq!(fired, vec![Action::LayerPick1]);
+    }
+
+    /// No two defaults may share a combo, so a fresh install opens Settings
+    /// with nothing flagged. Delete is shared on purpose and only noted.
+    #[test]
+    fn defaults_have_no_conflicts() {
+        // Known clashes awaiting new default flip keys. Remove a pair here
+        // when its fix lands; never add one.
+        let known = [
+            (Action::FrameDuplicate, Action::FlipHorizontal),
+            (Action::FrameDelete, Action::FlipVertical),
+        ];
+        let is_known = |a: Action, b: Action| known.contains(&(a, b)) || known.contains(&(b, a));
+        for (a, clashes) in ShortcutMap::default().clashes() {
+            for c in clashes {
+                match c {
+                    Clash::Action(b) if is_known(a, b) => {}
+                    Clash::Shared(..) => {}
+                    other => panic!("{a:?} clashes: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clashes_name_the_other_action_and_note_the_delete_pair() {
+        let mut map = ShortcutMap::default();
+        map.set(Action::FlipHorizontal, KeyCombo::plain(egui::Key::Num9));
+        map.set(Action::FlipVertical, KeyCombo::plain(egui::Key::Num8));
+        let clean = map.conflict_count();
+        assert_eq!(clean, 0, "{:?}", map.clashes());
+
+        // A press combo taken twice: both rows name each other.
+        map.set(Action::ToolInk, KeyCombo::plain(egui::Key::Q));
+        let c = map.clashes();
+        assert_eq!(c[&Action::ToolInk], vec![Clash::Action(Action::ToolPencil)]);
+        assert_eq!(c[&Action::ToolPencil], vec![Clash::Action(Action::ToolInk)]);
+        // The Delete pair is a note on both rows, never a conflict.
+        assert!(matches!(
+            c[&Action::TrackClear][..],
+            [Clash::Shared(Action::SelectionDelete, _)]
+        ));
+        assert!(matches!(
+            c[&Action::SelectionDelete][..],
+            [Clash::Shared(Action::TrackClear, _)]
+        ));
+        assert_eq!(map.conflict_count(), 2);
+
+        // Two drag gestures on the same held modifiers.
+        map.set(Action::SelModeAdd, KeyCombo::modifier_only(false, true, false));
+        assert_eq!(
+            map.clashes()[&Action::CanvasPan],
+            vec![Clash::Action(Action::SelModeAdd)]
+        );
+    }
+
+    #[test]
+    fn keys_read_outside_the_map_are_flagged() {
+        let mut map = ShortcutMap::default();
+        map.bindings.clear();
+        map.set(Action::FramePrev, KeyCombo::alt(egui::Key::ArrowLeft));
+        map.set(Action::OnionToggle, KeyCombo::ctrl_shift(egui::Key::Z));
+        map.set(Action::PlayPause, KeyCombo::plain(egui::Key::Tab));
+        map.set(Action::Redo, KeyCombo::ctrl_shift(egui::Key::Z));
+        // Tab and ` belong to these two; on them they are no clash.
+        map.set(Action::TogglePanels, KeyCombo::ctrl(egui::Key::Tab));
+        map.set(Action::ToggleCheckerBg, KeyCombo::plain(egui::Key::Backtick));
+        let c = map.clashes();
+        assert!(matches!(c[&Action::FramePrev][..], [Clash::Builtin(_)]));
+        assert!(matches!(c[&Action::PlayPause][..], [Clash::Builtin(_)]));
+        // Redo's alias: a clash for the other action, and the two share the
+        // combo besides.
+        assert!(c[&Action::OnionToggle].contains(&Clash::Action(Action::Redo)));
+        assert!(c[&Action::OnionToggle].iter().any(|x| matches!(x, Clash::Builtin(_))));
+        assert_eq!(c[&Action::Redo], vec![Clash::Action(Action::OnionToggle)]);
+        assert!(!c.contains_key(&Action::TogglePanels));
+        assert!(!c.contains_key(&Action::ToggleCheckerBg));
     }
 
     #[test]

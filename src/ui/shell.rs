@@ -10,7 +10,7 @@ use crate::doc::camera::Ease;
 use crate::doc::canvas::DirtyRect;
 use crate::doc::layer::CellId;
 use crate::input::button_drag::{self, ButtonDrag};
-use crate::input::shortcuts::{Action, KeyCombo};
+use crate::input::shortcuts::{Action, Clash, KeyCombo};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, PIN_TINTS};
@@ -3179,17 +3179,55 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                     crate::input::shortcuts::save(&state.shortcuts);
                 }
             });
+            // Bindings that share their combo with something. Recomputed each
+            // frame: a few thousand comparisons, and only while this is open.
+            let clashes = state.shortcuts.clashes();
+            let n_conflicts = clashes
+                .values()
+                .filter(|v| v.iter().any(|c| c.is_conflict()))
+                .count();
+            if n_conflicts > 0 {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    let what = if n_conflicts == 1 {
+                        "1 shortcut clashes".to_string()
+                    } else {
+                        format!("{n_conflicts} shortcuts clash")
+                    };
+                    ui.label(
+                        egui::RichText::new(theme::icon_text(ic::WARNING, &what))
+                            .color(DIAG_BAD)
+                            .strong(),
+                    );
+                    ui.checkbox(&mut state.shortcut_clashes_only, "Show only these");
+                });
+            }
+            // Nothing to filter down to once the last clash is fixed.
+            let only_clashes = state.shortcut_clashes_only && n_conflicts > 0;
             ui.separator();
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     egui::Grid::new("shortcuts_grid")
-                        .num_columns(3)
+                        .num_columns(4)
                         .striped(true)
                         .min_col_width(100.0)
                         .show(ui, |ui| {
                             for &action in Action::ALL {
+                                let flags = clashes.get(&action);
+                                let bad = flags.is_some_and(|v| v.iter().any(|c| c.is_conflict()));
+                                if only_clashes && !bad {
+                                    continue;
+                                }
+                                let tint = |t: String| {
+                                    let t = egui::RichText::new(t);
+                                    if bad {
+                                        t.color(DIAG_BAD)
+                                    } else {
+                                        t
+                                    }
+                                };
                                 // Canvas nav gestures are modifier-only; show a
                                 // modifier picker instead of press-to-bind (egui
                                 // has no Key for a bare Ctrl/Shift/Alt).
@@ -3200,7 +3238,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                                         .map(|c| c.display())
                                         .unwrap_or_else(|| "(none)".to_string());
                                     egui::ComboBox::from_id_salt(("navmod", action))
-                                        .selected_text(cur_label.as_str())
+                                        .selected_text(tint(cur_label.clone()))
                                         .width(140.0)
                                         .show_ui(ui, |ui| {
                                             let choices = crate::input::shortcuts::DRAG_MODIFIERS
@@ -3233,6 +3271,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                                             }
                                         });
                                     ui.label("");
+                                    clash_cell(ui, action, flags);
                                     ui.end_row();
                                     continue;
                                 }
@@ -3244,9 +3283,9 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                                     .unwrap_or_else(|| "—".to_string());
                                 let is_active = state.rebinding == Some(action);
                                 let btn = egui::Button::new(if is_active {
-                                    "Press key…".to_string()
+                                    egui::RichText::new("Press key…")
                                 } else {
-                                    combo_text
+                                    tint(combo_text)
                                 })
                                 .min_size(egui::vec2(140.0, 22.0));
                                 if ui.add(btn).clicked() {
@@ -3260,12 +3299,40 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                                     state.shortcuts.bindings.remove(&action);
                                     crate::input::shortcuts::save(&state.shortcuts);
                                 }
+                                clash_cell(ui, action, flags);
                                 ui.end_row();
                             }
                         });
                 });
         });
     state.show_settings = open;
+}
+
+/// The last cell of a shortcut row: ⚠ when the binding clashes, a muted ⓘ
+/// when it only shares its combo on purpose, with the details on hover.
+fn clash_cell(ui: &mut egui::Ui, action: Action, flags: Option<&Vec<Clash>>) {
+    let Some(flags) = flags else {
+        ui.label("");
+        return;
+    };
+    let lines: Vec<String> = flags
+        .iter()
+        .map(|c| match *c {
+            Clash::Action(b) if action.is_drag_modifier() => {
+                format!("Also held for: {} — only one of them can start a drag", b.label())
+            }
+            Clash::Action(b) => format!("Also bound to: {} — both fire", b.label()),
+            Clash::Builtin(why) => why.to_string(),
+            Clash::Shared(b, why) => format!("Shared with {} on purpose: {why}", b.label()),
+        })
+        .collect();
+    let (icon, color) = if flags.iter().any(|c| c.is_conflict()) {
+        (ic::WARNING, DIAG_BAD)
+    } else {
+        (ic::INFO, theme::TEXT_MUTED)
+    };
+    ui.label(egui::RichText::new(icon).color(color))
+        .on_hover_text(lines.join("\n"));
 }
 
 fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3]) {
@@ -5728,7 +5795,8 @@ fn menu_window(state: &mut AppState, ctx: &egui::Context) {
 }
 
 fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
-    ui.menu_button(theme::icon_text(ic::PENCIL_SIMPLE, "Edit"), |ui| {
+    let n_conflicts = state.shortcuts.conflict_count();
+    let edit = ui.menu_button(theme::icon_text(ic::PENCIL_SIMPLE, "Edit"), |ui| {
         let can_undo = state.history.can_undo();
         let can_redo = state.history.can_redo();
         let undo_label = format!(
@@ -5768,14 +5836,26 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             ui.close_menu();
         }
         ui.separator();
-        if ui
-            .button(theme::icon_text(ic::GEAR, "Shortcuts…"))
-            .clicked()
-        {
+        let shortcuts = if n_conflicts > 0 {
+            ui.button(
+                egui::RichText::new(theme::icon_text(ic::WARNING, "Shortcuts…")).color(DIAG_BAD),
+            )
+            .on_hover_text("Some shortcuts clash. They are flagged in the list.")
+        } else {
+            ui.button(theme::icon_text(ic::GEAR, "Shortcuts…"))
+        };
+        if shortcuts.clicked() {
             state.show_settings = true;
             ui.close_menu();
         }
     });
+    // A clash is easy to make and hard to notice, so the menu that leads to
+    // the list says so.
+    if n_conflicts > 0 {
+        let r = edit.response.rect;
+        ui.painter()
+            .circle_filled(r.right_top() + egui::vec2(-3.0, 3.0), 3.0, DIAG_BAD);
+    }
     ui.menu_button(theme::icon_text(ic::FOLDER, "File"), |ui| {
         if ui
             .button(theme::icon_text(ic::FILE_PLUS, "New project…"))
@@ -8152,6 +8232,109 @@ mod button_drag_tests {
 /// The Krita brush through the real UI: the preset is offered, its summary
 /// replaces the sliders it does not use, and a drag on the canvas paints
 /// with it as one undoable stroke.
+/// Settings flags shortcuts that clash, and the Edit menu says so before
+/// the list is open.
+#[cfg(test)]
+mod shortcut_clash_tests {
+    use super::*;
+    use crate::input::shortcuts::ShortcutMap;
+    use egui::{pos2, Pos2};
+
+    /// One frame's painted shapes, flattened.
+    fn shapes(ctx: &egui::Context, state: &mut AppState) -> Vec<egui::Shape> {
+        fn walk(shape: egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(v) => v.into_iter().for_each(|s| walk(s, out)),
+                s => out.push(s),
+            }
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1280.0, 1400.0))),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for s in ctx.run(raw, |ctx| draw(state, ctx)).shapes {
+            walk(s.shape, &mut out);
+        }
+        out
+    }
+
+    /// Run frames until the windows have faded in, so colours are exact;
+    /// returns the last frame's shapes.
+    fn settle(ctx: &egui::Context, state: &mut AppState) -> Vec<egui::Shape> {
+        for _ in 0..30 {
+            shapes(ctx, state);
+        }
+        shapes(ctx, state)
+    }
+
+    fn texts(shapes: &[egui::Shape]) -> Vec<String> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The orange dot on the Edit menu.
+    fn edit_dot(shapes: &[egui::Shape]) -> bool {
+        shapes
+            .iter()
+            .any(|s| matches!(s, egui::Shape::Circle(c) if c.fill == DIAG_BAD && c.radius == 3.0))
+    }
+
+    /// Settings open on the defaults, minus their known F clashes. The test
+    /// state loads the user's own shortcuts file, so pin the map here.
+    fn setup() -> (AppState, egui::Context) {
+        let mut state = AppState::for_test();
+        state.show_panels = true;
+        state.show_settings = true;
+        state.shortcuts = ShortcutMap::default();
+        state.shortcuts.set(Action::FlipHorizontal, KeyCombo::plain(egui::Key::Num9));
+        state.shortcuts.set(Action::FlipVertical, KeyCombo::plain(egui::Key::Num8));
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        (state, ctx)
+    }
+
+    #[test]
+    fn a_clean_map_flags_nothing() {
+        let (mut state, ctx) = setup();
+        let s = settle(&ctx, &mut state);
+        let t = texts(&s);
+        assert!(!t.iter().any(|x| x.contains("clash")), "{t:?}");
+        assert!(!edit_dot(&s));
+        assert!(t.iter().any(|x| x == "Tool: Eraser"));
+    }
+
+    #[test]
+    fn a_shared_combo_is_counted_flagged_and_filterable() {
+        let (mut state, ctx) = setup();
+        state.shortcuts.set(Action::ToolInk, KeyCombo::plain(egui::Key::Q));
+        let s = settle(&ctx, &mut state);
+        let t = texts(&s);
+        let summary = theme::icon_text(ic::WARNING, "2 shortcuts clash");
+        assert!(t.contains(&summary), "{t:?}");
+        assert!(t.iter().filter(|x| *x == ic::WARNING).count() >= 2, "both rows flagged");
+        assert!(edit_dot(&s), "the Edit menu carries the dot");
+
+        state.shortcut_clashes_only = true;
+        let t = texts(&settle(&ctx, &mut state));
+        assert!(t.iter().any(|x| x == "Tool: Pencil") && t.iter().any(|x| x == "Tool: Ink"));
+        assert!(!t.iter().any(|x| x == "Tool: Eraser"), "clean rows are filtered out");
+
+        // Fixing the clash clears the summary and lifts the filter with it.
+        state.shortcuts.set(Action::ToolInk, KeyCombo::plain(egui::Key::W));
+        let s = settle(&ctx, &mut state);
+        let t = texts(&s);
+        assert!(!t.contains(&summary));
+        assert!(t.iter().any(|x| x == "Tool: Eraser"));
+        assert!(!edit_dot(&s));
+    }
+}
+
 #[cfg(test)]
 mod krita_brush_tests {
     use super::*;
