@@ -1088,6 +1088,8 @@ pub struct AppState {
     /// While `Some(action)`, the next key press from the user becomes the
     /// new binding for that action.
     pub rebinding: Option<Action>,
+    /// Settings lists only the bindings that clash. Session-only.
+    pub shortcut_clashes_only: bool,
     /// In-progress inline layer rename in the layers panel.
     pub layer_rename: Option<LayerRename>,
     pub show_settings: bool,
@@ -1359,6 +1361,7 @@ impl AppState {
             preview_upload_rect: None,
             shortcuts: shortcuts::load(),
             rebinding: None,
+            shortcut_clashes_only: false,
             layer_rename: None,
             show_settings: false,
             show_brush_settings: false,
@@ -4298,6 +4301,31 @@ impl AppState {
         }
     }
 
+    /// Make layer `i` the active one. Out of range is a no-op, which is what
+    /// stops the step keys at either end of the stack.
+    fn select_layer(&mut self, i: usize) {
+        if i < self.project.layers.len() {
+            self.project.current_layer = i;
+        }
+    }
+
+    /// Swap the active layer with its neighbour, `up` meaning towards the top
+    /// of the Layers panel. One undo step; nothing at all at the end of the
+    /// stack, so a held key leaves no empty undo entries behind.
+    pub fn move_active_layer(&mut self, up: bool) {
+        let i = self.project.current_layer;
+        if up && i + 1 < self.project.layers.len() {
+            self.structural_edit(false, Project::move_layer_up);
+        } else if !up && i > 0 {
+            self.structural_edit(false, Project::move_layer_down);
+        } else {
+            return;
+        }
+        // Both edit buffers are keyed by layer index.
+        self.layer_rename = None;
+        self.expand_cfg = None;
+    }
+
     /// Name of the layer bounding the active layer's fills, for UI hints.
     pub fn fill_boundary_name(&self) -> Option<&str> {
         let src = self
@@ -4388,6 +4416,33 @@ impl AppState {
                 }
             }
             Action::LayerLast => self.goto_last_layer(),
+            // Panel order: the top row is the last layer.
+            Action::LayerSelectAbove => self.select_layer(self.project.current_layer + 1),
+            Action::LayerSelectBelow => {
+                if let Some(i) = self.project.current_layer.checked_sub(1) {
+                    self.select_layer(i);
+                }
+            }
+            Action::LayerSelectTop => {
+                self.select_layer(self.project.layers.len().saturating_sub(1))
+            }
+            Action::LayerSelectBottom => self.select_layer(0),
+            Action::LayerMoveUp => self.move_active_layer(true),
+            Action::LayerMoveDown => self.move_active_layer(false),
+            Action::LayerPick1
+            | Action::LayerPick2
+            | Action::LayerPick3
+            | Action::LayerPick4
+            | Action::LayerPick5
+            | Action::LayerPick6
+            | Action::LayerPick7
+            | Action::LayerPick8
+            | Action::LayerPick9 => {
+                let n = action.layer_pick().unwrap_or(1);
+                if let Some(i) = self.project.layers.len().checked_sub(n) {
+                    self.select_layer(i);
+                }
+            }
             Action::FadeOthersToggle => self.fade_others = !self.fade_others,
             Action::LayerClipToggle => {
                 if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
@@ -5849,6 +5904,47 @@ mod tests {
         };
         assert_eq!(px(10, 10), [255, 0, 0, 255], "red over the base");
         assert_eq!(px(w - 10, 10)[3], 0, "the clipped-away part stays away");
+    }
+
+    #[test]
+    fn layer_keys_walk_the_stack_and_stop_at_the_ends() {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.project.add_layer();
+        st.project.current_layer = 1;
+        st.dispatch(Action::LayerSelectAbove);
+        assert_eq!(st.project.current_layer, 2);
+        st.dispatch(Action::LayerSelectAbove);
+        assert_eq!(st.project.current_layer, 2, "stops at the top, no wrap");
+        st.dispatch(Action::LayerSelectBottom);
+        assert_eq!(st.project.current_layer, 0);
+        st.dispatch(Action::LayerSelectBelow);
+        assert_eq!(st.project.current_layer, 0, "stops at the bottom, no wrap");
+        st.dispatch(Action::LayerSelectTop);
+        assert_eq!(st.project.current_layer, 2);
+        // Picks count rows down from the top of the panel.
+        st.dispatch(Action::LayerPick1);
+        assert_eq!(st.project.current_layer, 2);
+        st.dispatch(Action::LayerPick3);
+        assert_eq!(st.project.current_layer, 0);
+        st.dispatch(Action::LayerPick4);
+        assert_eq!(st.project.current_layer, 0, "no fourth row: stay put");
+    }
+
+    #[test]
+    fn moving_a_layer_by_key_is_one_undo_step_and_free_at_the_ends() {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.project.current_layer = 0;
+        let bottom = st.project.layers[0].uid;
+        st.dispatch(Action::LayerMoveUp);
+        assert_eq!(st.project.layers[1].uid, bottom, "moved up");
+        assert_eq!(st.project.current_layer, 1, "selection rides along");
+        // Already on top: no edit, so no undo entry either.
+        st.dispatch(Action::LayerMoveUp);
+        st.undo();
+        assert_eq!(st.project.layers[0].uid, bottom, "one undo puts it back");
+        assert_eq!(st.project.current_layer, 0);
     }
 
     #[test]

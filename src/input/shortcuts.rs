@@ -45,6 +45,25 @@ pub enum Action {
     LayerDelete,
     LayerToggleVisible,
     LayerLast,
+    /// Step the active layer one row up / down the Layers panel. Stops at the
+    /// ends, like the key jumps, so holding the key never wraps around.
+    LayerSelectAbove,
+    LayerSelectBelow,
+    LayerSelectTop,
+    LayerSelectBottom,
+    /// Reorder: swap the active layer with the one above / below it.
+    LayerMoveUp,
+    LayerMoveDown,
+    /// Select the Nth layer counting down from the top of the Layers panel.
+    LayerPick1,
+    LayerPick2,
+    LayerPick3,
+    LayerPick4,
+    LayerPick5,
+    LayerPick6,
+    LayerPick7,
+    LayerPick8,
+    LayerPick9,
     FadeOthersToggle,
     LayerClipToggle,
     LayerAlphaLockToggle,
@@ -130,6 +149,21 @@ impl Action {
         Action::LayerDelete,
         Action::LayerToggleVisible,
         Action::LayerLast,
+        Action::LayerSelectAbove,
+        Action::LayerSelectBelow,
+        Action::LayerSelectTop,
+        Action::LayerSelectBottom,
+        Action::LayerMoveUp,
+        Action::LayerMoveDown,
+        Action::LayerPick1,
+        Action::LayerPick2,
+        Action::LayerPick3,
+        Action::LayerPick4,
+        Action::LayerPick5,
+        Action::LayerPick6,
+        Action::LayerPick7,
+        Action::LayerPick8,
+        Action::LayerPick9,
         Action::FadeOthersToggle,
         Action::LayerClipToggle,
         Action::LayerAlphaLockToggle,
@@ -209,6 +243,21 @@ impl Action {
             Action::LayerDelete => "Delete layer",
             Action::LayerToggleVisible => "Toggle layer visibility",
             Action::LayerLast => "Go to last selected layer",
+            Action::LayerSelectAbove => "Select layer above",
+            Action::LayerSelectBelow => "Select layer below",
+            Action::LayerSelectTop => "Select top layer",
+            Action::LayerSelectBottom => "Select bottom layer",
+            Action::LayerMoveUp => "Move layer up",
+            Action::LayerMoveDown => "Move layer down",
+            Action::LayerPick1 => "Select layer 1 (from top)",
+            Action::LayerPick2 => "Select layer 2 (from top)",
+            Action::LayerPick3 => "Select layer 3 (from top)",
+            Action::LayerPick4 => "Select layer 4 (from top)",
+            Action::LayerPick5 => "Select layer 5 (from top)",
+            Action::LayerPick6 => "Select layer 6 (from top)",
+            Action::LayerPick7 => "Select layer 7 (from top)",
+            Action::LayerPick8 => "Select layer 8 (from top)",
+            Action::LayerPick9 => "Select layer 9 (from top)",
             Action::FadeOthersToggle => "Fade other layers",
             Action::LayerClipToggle => "Clip layer to the one below",
             Action::LayerAlphaLockToggle => "Lock layer alpha",
@@ -259,6 +308,23 @@ impl Action {
             Action::CameraKeyDelete => "Delete camera key",
             Action::CameraLookThrough => "Look through camera",
         }
+    }
+
+    /// `Some(n)` for the "select layer n" actions: n counts rows down from
+    /// the top of the Layers panel, starting at 1.
+    pub fn layer_pick(self) -> Option<usize> {
+        Some(match self {
+            Action::LayerPick1 => 1,
+            Action::LayerPick2 => 2,
+            Action::LayerPick3 => 3,
+            Action::LayerPick4 => 4,
+            Action::LayerPick5 => 5,
+            Action::LayerPick6 => 6,
+            Action::LayerPick7 => 7,
+            Action::LayerPick8 => 8,
+            Action::LayerPick9 => 9,
+            _ => return None,
+        })
     }
 
     /// Bound to a bare modifier combo held while a canvas drag starts, rather
@@ -337,6 +403,24 @@ impl KeyCombo {
             ctrl: true,
             shift: true,
             alt: false,
+        }
+    }
+
+    pub fn ctrl_alt(key: egui::Key) -> Self {
+        Self {
+            key: Some(key),
+            ctrl: true,
+            shift: false,
+            alt: true,
+        }
+    }
+
+    pub fn shift_alt(key: egui::Key) -> Self {
+        Self {
+            key: Some(key),
+            ctrl: false,
+            shift: true,
+            alt: true,
         }
     }
 
@@ -444,6 +528,61 @@ fn parse_combo(s: &str) -> Option<KeyCombo> {
     })
 }
 
+// --- clashes, as the Settings list flags them ---
+
+/// Something else on a binding's combo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clash {
+    /// Another action on the same combo. On a press both fire; held for a
+    /// drag, only one of them can ever start it.
+    Action(Action),
+    /// A key the app reads outside this map; the text says what it does.
+    Builtin(&'static str),
+    /// Another action on the same combo by design, kept apart by the rule in
+    /// the text. Shown as a note, not a conflict.
+    Shared(Action, &'static str),
+}
+
+impl Clash {
+    /// A real problem, as opposed to a note.
+    pub fn is_conflict(self) -> bool {
+        !matches!(self, Clash::Shared(..))
+    }
+}
+
+/// Why `a` and `b` may share a combo, when they may. The dispatch loop in
+/// `AppState::handle_keys` lets exactly one of these through.
+fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
+    match (a.min(b), a.max(b)) {
+        (Action::SelectionDelete, Action::TrackClear) => Some(
+            "drawings selected in the timeline take the press; otherwise the selection does",
+        ),
+        _ => None,
+    }
+}
+
+/// What a combo collides with among the keys `AppState::handle_keys` and
+/// [`ShortcutMap::poll_actions`] read directly. Those read the key whatever
+/// the modifiers, except the Redo alias, which wants Ctrl and Shift.
+fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str> {
+    use egui::Key as K;
+    match c.key? {
+        K::Z if c.ctrl && c.shift && action != Action::Redo => {
+            Some("Ctrl+Shift+Z always redoes as well")
+        }
+        K::ArrowUp | K::ArrowDown | K::ArrowLeft | K::ArrowRight => {
+            Some("The arrow keys also nudge the selection while there is one")
+        }
+        K::Tab if action != Action::TogglePanels => {
+            Some("While a text field has focus, Tab toggles the panels instead")
+        }
+        K::Backtick if action != Action::ToggleCheckerBg => {
+            Some("While a text field has focus, ` toggles the checker backdrop instead")
+        }
+        _ => None,
+    }
+}
+
 // --- the map itself ---
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -493,6 +632,41 @@ impl Default for ShortcutMap {
         b.insert(Action::LayerLast, KeyCombo::plain(K::Z));
         // Shifted sibling of the layer jump: push every other layer back.
         b.insert(Action::FadeOthersToggle, KeyCombo::shift(K::Z));
+        // Walk the stack: W above S, the vertical pair beside the A / S frame
+        // step. Alt keeps them off the tools; Shift goes all the way, Ctrl
+        // carries the layer along.
+        b.insert(Action::LayerSelectAbove, KeyCombo::alt(K::W));
+        b.insert(Action::LayerSelectBelow, KeyCombo::alt(K::S));
+        b.insert(Action::LayerSelectTop, KeyCombo::shift_alt(K::W));
+        b.insert(Action::LayerSelectBottom, KeyCombo::shift_alt(K::S));
+        b.insert(Action::LayerMoveUp, KeyCombo::ctrl_alt(K::W));
+        b.insert(Action::LayerMoveDown, KeyCombo::ctrl_alt(K::S));
+        // Alt+digit picks a row; the plain digits stay the x-sheet keys.
+        let digits = [
+            K::Num1,
+            K::Num2,
+            K::Num3,
+            K::Num4,
+            K::Num5,
+            K::Num6,
+            K::Num7,
+            K::Num8,
+            K::Num9,
+        ];
+        let picks = [
+            Action::LayerPick1,
+            Action::LayerPick2,
+            Action::LayerPick3,
+            Action::LayerPick4,
+            Action::LayerPick5,
+            Action::LayerPick6,
+            Action::LayerPick7,
+            Action::LayerPick8,
+            Action::LayerPick9,
+        ];
+        for (a, k) in picks.into_iter().zip(digits) {
+            b.insert(a, KeyCombo::alt(k));
+        }
         // Photoshop's keys for both.
         b.insert(
             Action::LayerClipToggle,
@@ -592,6 +766,35 @@ impl ShortcutMap {
     }
     pub fn set(&mut self, action: Action, combo: KeyCombo) {
         self.bindings.insert(action, combo);
+    }
+
+    /// Every binding that shares its combo with something, keyed by the
+    /// action whose row shows it. Clean bindings are absent.
+    pub fn clashes(&self) -> BTreeMap<Action, Vec<Clash>> {
+        let mut out: BTreeMap<Action, Vec<Clash>> = BTreeMap::new();
+        for (&a, &ca) in &self.bindings {
+            for (&b, &cb) in &self.bindings {
+                if a != b && ca == cb {
+                    let c = match shared_on_purpose(a, b) {
+                        Some(why) => Clash::Shared(b, why),
+                        None => Clash::Action(b),
+                    };
+                    out.entry(a).or_default().push(c);
+                }
+            }
+            if let Some(why) = builtin_clash(a, ca) {
+                out.entry(a).or_default().push(Clash::Builtin(why));
+            }
+        }
+        out
+    }
+
+    /// How many bindings have a real conflict (notes don't count).
+    pub fn conflict_count(&self) -> usize {
+        self.clashes()
+            .values()
+            .filter(|v| v.iter().any(|c| c.is_conflict()))
+            .count()
     }
 
     /// Returns every action that has fired this frame. Also Ctrl+Shift+Z is
@@ -731,6 +934,144 @@ mod tests {
                 assert_ne!(c, other, "shares {} with {b:?}", c.display());
             }
         }
+    }
+
+    #[test]
+    fn layer_nav_defaults_clash_with_nothing() {
+        let map = ShortcutMap::default();
+        let ours = Action::ALL.iter().copied().filter(|&a| {
+            a.layer_pick().is_some()
+                || matches!(
+                    a,
+                    Action::LayerSelectAbove
+                        | Action::LayerSelectBelow
+                        | Action::LayerSelectTop
+                        | Action::LayerSelectBottom
+                        | Action::LayerMoveUp
+                        | Action::LayerMoveDown
+                )
+        });
+        let mut n = 0;
+        for a in ours {
+            n += 1;
+            let c = map.get(a).expect("bound");
+            for (&b, &other) in &map.bindings {
+                if b != a {
+                    assert_ne!(c, other, "{a:?} and {b:?} share {}", c.display());
+                }
+            }
+        }
+        assert_eq!(n, 15);
+        assert_eq!(
+            map.get(Action::LayerSelectAbove),
+            Some(KeyCombo::alt(egui::Key::W))
+        );
+        assert_eq!(Action::LayerPick9.layer_pick(), Some(9));
+    }
+
+    /// The plain digits are x-sheet keys; Alt+digit must pick a layer
+    /// without also inserting a key.
+    #[test]
+    fn alt_digit_picks_a_layer_and_nothing_else() {
+        let map = ShortcutMap::default();
+        let ctx = egui::Context::default();
+        let alt = egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        let mut fired = Vec::new();
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Num1,
+                    physical_key: Some(egui::Key::Num1),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: alt,
+                }],
+                modifiers: alt,
+                ..Default::default()
+            },
+            |ctx| fired = map.poll_actions(ctx),
+        );
+        assert_eq!(fired, vec![Action::LayerPick1]);
+    }
+
+    /// No two defaults may share a combo, so a fresh install opens Settings
+    /// with nothing flagged. Delete is shared on purpose and only noted.
+    #[test]
+    fn defaults_have_no_conflicts() {
+        // Known clashes awaiting new default flip keys. Remove a pair here
+        // when its fix lands; never add one.
+        let known = [
+            (Action::FrameDuplicate, Action::FlipHorizontal),
+            (Action::FrameDelete, Action::FlipVertical),
+        ];
+        let is_known = |a: Action, b: Action| known.contains(&(a, b)) || known.contains(&(b, a));
+        for (a, clashes) in ShortcutMap::default().clashes() {
+            for c in clashes {
+                match c {
+                    Clash::Action(b) if is_known(a, b) => {}
+                    Clash::Shared(..) => {}
+                    other => panic!("{a:?} clashes: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clashes_name_the_other_action_and_note_the_delete_pair() {
+        let mut map = ShortcutMap::default();
+        map.set(Action::FlipHorizontal, KeyCombo::plain(egui::Key::Num9));
+        map.set(Action::FlipVertical, KeyCombo::plain(egui::Key::Num8));
+        let clean = map.conflict_count();
+        assert_eq!(clean, 0, "{:?}", map.clashes());
+
+        // A press combo taken twice: both rows name each other.
+        map.set(Action::ToolInk, KeyCombo::plain(egui::Key::Q));
+        let c = map.clashes();
+        assert_eq!(c[&Action::ToolInk], vec![Clash::Action(Action::ToolPencil)]);
+        assert_eq!(c[&Action::ToolPencil], vec![Clash::Action(Action::ToolInk)]);
+        // The Delete pair is a note on both rows, never a conflict.
+        assert!(matches!(
+            c[&Action::TrackClear][..],
+            [Clash::Shared(Action::SelectionDelete, _)]
+        ));
+        assert!(matches!(
+            c[&Action::SelectionDelete][..],
+            [Clash::Shared(Action::TrackClear, _)]
+        ));
+        assert_eq!(map.conflict_count(), 2);
+
+        // Two drag gestures on the same held modifiers.
+        map.set(Action::SelModeAdd, KeyCombo::modifier_only(false, true, false));
+        assert_eq!(
+            map.clashes()[&Action::CanvasPan],
+            vec![Clash::Action(Action::SelModeAdd)]
+        );
+    }
+
+    #[test]
+    fn keys_read_outside_the_map_are_flagged() {
+        let mut map = ShortcutMap::default();
+        map.bindings.clear();
+        map.set(Action::FramePrev, KeyCombo::alt(egui::Key::ArrowLeft));
+        map.set(Action::OnionToggle, KeyCombo::ctrl_shift(egui::Key::Z));
+        map.set(Action::PlayPause, KeyCombo::plain(egui::Key::Tab));
+        map.set(Action::Redo, KeyCombo::ctrl_shift(egui::Key::Z));
+        // Tab and ` belong to these two; on them they are no clash.
+        map.set(Action::TogglePanels, KeyCombo::ctrl(egui::Key::Tab));
+        map.set(Action::ToggleCheckerBg, KeyCombo::plain(egui::Key::Backtick));
+        let c = map.clashes();
+        assert!(matches!(c[&Action::FramePrev][..], [Clash::Builtin(_)]));
+        assert!(matches!(c[&Action::PlayPause][..], [Clash::Builtin(_)]));
+        // Redo's alias: a clash for the other action, and the two share the
+        // combo besides.
+        assert!(c[&Action::OnionToggle].contains(&Clash::Action(Action::Redo)));
+        assert!(c[&Action::OnionToggle].iter().any(|x| matches!(x, Clash::Builtin(_))));
+        assert_eq!(c[&Action::Redo], vec![Clash::Action(Action::OnionToggle)]);
+        assert!(!c.contains_key(&Action::TogglePanels));
+        assert!(!c.contains_key(&Action::ToggleCheckerBg));
     }
 
     #[test]
