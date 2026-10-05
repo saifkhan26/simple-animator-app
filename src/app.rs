@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use eframe::CreationContext;
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
+use crate::brush_library::BrushLibrary;
 use crate::color::{Harmony, HarmonySet};
 use crate::doc::camera::{Camera, Ease};
 use crate::doc::canvas::{Canvas, DirtyRect};
@@ -875,6 +876,12 @@ pub struct AppState {
 
     pub tool: ActiveTool,
     pub brush: BrushSettings,
+    /// Every brush the picker offers, Krita's included.
+    pub brush_library: BrushLibrary,
+    /// The picker's search text. Session-only.
+    pub brush_search: String,
+    /// The picker's thumbnails, uploaded as they arrive from the library.
+    pub brush_thumbs: HashMap<String, TextureHandle>,
     /// Pinned swatches, most recently added last. Capped at
     /// [`AppState::MAX_SWATCHES`].
     pub palette: Vec<[u8; 3]>,
@@ -1233,18 +1240,20 @@ impl AppState {
             .storage
             .and_then(|s| eframe::get_value(s, UI_PREFS_KEY))
             .unwrap_or_default();
-        Self::with_prefs(prefs, max_tex)
+        let root = shortcuts::config_dir().map(|d| d.join("brushes"));
+        Self::with_prefs(prefs, max_tex, root)
     }
 
     /// A state with default preferences and no window, for driving UI code
     /// from tests. `CreationContext` can't be built outside eframe.
     #[cfg(test)]
     pub fn for_test() -> Self {
-        Self::with_prefs(UiPrefs::default(), 8192)
+        Self::with_prefs(UiPrefs::default(), 8192, None)
     }
 
     /// Everything `new` does that doesn't need the window.
-    fn with_prefs(prefs: UiPrefs, max_tex: u32) -> Self {
+    /// `brush_root`: where imported Krita presets live (none in tests).
+    fn with_prefs(prefs: UiPrefs, max_tex: u32, brush_root: Option<PathBuf>) -> Self {
         let project = Project::new(1280, 720, 24.0);
         let mut cell_dirty = HashMap::new();
         for id in 0..project.cells.len() {
@@ -1274,6 +1283,9 @@ impl AppState {
             tool: ActiveTool::Pencil,
             brush: restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()]
                 .clone(),
+            brush_library: BrushLibrary::new(brush_root),
+            brush_search: String::new(),
+            brush_thumbs: HashMap::new(),
             palette: prefs.palette,
             harmony: {
                 let c = restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()].color;
@@ -1661,6 +1673,16 @@ impl AppState {
     /// radius means *screen* pixels, so it is divided back out by the current
     /// scale — the brush then keeps a constant on-screen footprint and the same
     /// gesture draws the same stroke at any zoom.
+    /// The Krita preset the current brush paints with: the library's, if
+    /// it names one the library has, else the built-in one.
+    pub fn krita_brush(&self) -> Arc<crate::tools::krita::PixelBrush> {
+        self.brush
+            .krita_id
+            .as_deref()
+            .and_then(|id| self.brush_library.brush(id))
+            .unwrap_or_else(|| self.brush.krita.brush())
+    }
+
     pub fn effective_radius(&self) -> f32 {
         if self.lock_brush_to_view {
             (self.brush.radius / self.cell_view_scale()).clamp(0.1, 4096.0)
@@ -3542,8 +3564,9 @@ impl AppState {
         // change width or smoothing behaviour partway through if the view moves.
         let mut brush = self.brush.clone();
         brush.radius = self.effective_radius();
+        let krita = self.krita_brush();
         let mut builder =
-            StrokeBuilder::new(brush, self.tool, self.cell_view_scale(), self.smoothing);
+            StrokeBuilder::new_with_krita(brush, self.tool, self.cell_view_scale(), self.smoothing, krita);
         let (rotation, mirrored) = self.cell_screen_orientation();
         builder.orient(rotation, mirrored);
         builder.push(sample);
@@ -5000,6 +5023,10 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Pick up any layer selection made last frame, whatever moved it.
         self.track_layer_change();
+        // Krita presets and thumbnails arrive from the library's loader.
+        if self.brush_library.poll() || self.brush_library.loading() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         self.blank_scans_left = Self::BLANK_SCANS_PER_FRAME;
 
         // Resolve any deferred preview-texture free now, before drawing, so the
@@ -7319,7 +7346,7 @@ mod tests {
             ..UiPrefs::default()
         };
         let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
-        let mut st = AppState::with_prefs(back, 8192);
+        let mut st = AppState::with_prefs(back, 8192, None);
         assert_eq!((st.bg_color, st.bg_opacity, st.show_checker), ([0.9, 0.85, 0.7], 0.5, true));
         // File > New starts a fresh project, not a fresh workspace.
         st.reset();

@@ -5,7 +5,9 @@
 
 use std::borrow::Cow;
 use std::io::{Cursor, Read};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use zip::ZipArchive;
@@ -44,6 +46,7 @@ pub const PRESETS: [&str; 24] = [
 ];
 
 /// The tips those presets name.
+#[cfg(test)]
 pub const TIPS: [&str; 3] = ["gradient.png", "plain_rake.png", "graphite_grain.gih"];
 
 type Archive = Mutex<ZipArchive<Cursor<&'static [u8]>>>;
@@ -83,6 +86,7 @@ pub fn load(name: &str) -> Result<PixelBrush> {
 }
 
 /// A shipped preset, loaded once and shared.
+#[cfg(test)]
 pub fn brush(name: &str) -> Result<Arc<PixelBrush>> {
     type Cache = Mutex<Vec<(String, Arc<PixelBrush>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
@@ -172,3 +176,4 @@ mod tests {
         println!("wrote {} bytes", zip.len());
     }
 }
+

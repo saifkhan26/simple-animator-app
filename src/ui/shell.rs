@@ -17,7 +17,7 @@ use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, P
 use crate::tools::fill;
 use crate::tools::select_mask::{self, SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
-use crate::tools::{ActiveTool, BrushMode, BrushSettings, ShapeKind, Smoothing, StrokeCap};
+use crate::tools::{ActiveTool, BrushMode, ShapeKind, Smoothing, StrokeCap};
 use crate::ui::{color_wheel, expr, theme};
 
 /// Tooltip text including the currently-bound shortcut (e.g. "Pencil  (Q)").
@@ -1371,18 +1371,6 @@ fn title_bar_shortfall(ctx: &egui::Context, id: PanelId) -> f32 {
 /// One-click brush presets, matched to the Krita brushes they are named
 /// after. Colour is deliberately kept: swapping preset should not change
 /// what you are drawing with.
-fn brush_presets(state: &mut AppState, ui: &mut egui::Ui) {
-    ui.horizontal_wrapped(|ui| {
-        for (label, tip, build) in BrushSettings::PRESETS {
-            if ui.button(*label).on_hover_text(*tip).clicked() {
-                let color = state.brush.color;
-                state.brush = build();
-                state.brush.color = color;
-            }
-        }
-    });
-}
-
 /// Brush shape and response. Which controls appear depends on the brush's
 /// rasterization model: flow, spacing and tilt only mean anything to a
 /// brush that stamps dabs.
@@ -1467,21 +1455,23 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
 /// Size and Opacity, which act as Krita's.
 fn krita_brush_summary(state: &AppState, ui: &mut egui::Ui) {
     use crate::tools::krita::KritaPreset;
-    let (name, lines): (&str, &[&str]) = match state.brush.krita {
-        KritaPreset::Pencil5Tilted => (
-            "Krita · Pencil-5 Tilted",
-            &[
-                "Size ← tilt: a quarter size upright, full size laid flat",
-                "Rotation ← the way the pen leans",
-                "Opacity ← pressure, on the preset's curve",
-                "Paper texture, stronger the harder you press",
-                "Builds up dab by dab in 8 bits, as Krita does",
-            ],
-        ),
-    };
-    ui.label(egui::RichText::new(name).strong());
-    for l in lines {
-        ui.label(egui::RichText::new(*l).small());
+    if !crate::ui::brush_picker::library_summary(state, ui) {
+        let (name, lines): (&str, &[&str]) = match state.brush.krita {
+            KritaPreset::Pencil5Tilted => (
+                "Krita · Pencil-5 Tilted",
+                &[
+                    "Size ← tilt: a quarter size upright, full size laid flat",
+                    "Rotation ← the way the pen leans",
+                    "Opacity ← pressure, on the preset's curve",
+                    "Paper texture, stronger the harder you press",
+                    "Builds up dab by dab in 8 bits, as Krita does",
+                ],
+            ),
+        };
+        ui.label(egui::RichText::new(name).strong());
+        for l in lines {
+            ui.label(egui::RichText::new(*l).small());
+        }
     }
     ui.label(
         egui::RichText::new("Size and Opacity work as Krita's own sliders.")
@@ -3075,7 +3065,7 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
             drag_by_title_only(ui);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 theme::section_header(ui, ic::PEN_NIB, "Preset");
-                brush_presets(state, ui);
+                crate::ui::brush_picker::brush_grid(state, ui);
 
                 ui.add_space(6.0);
                 theme::section_header(ui, ic::SLIDERS, "Dynamics");
@@ -5308,7 +5298,7 @@ fn draw_krita_outline(state: &AppState, painter: &egui::Painter, canvas_rect: Re
         _ => 1.0,
     };
     let (rotation, mirrored) = state.cell_screen_orientation();
-    let corners = state.brush.krita.brush().outline(
+    let corners = state.krita_brush().outline(
         state.effective_radius() as f64 * 2.0,
         pressure,
         tilt,
@@ -8406,6 +8396,126 @@ mod krita_brush_tests {
         let painted = c.pixels().chunks(4).filter(|p| p[3] > 0).count();
         assert!(painted > 100, "painted {painted} pixels");
         assert_eq!(state.history.undo_len(), 1, "one stroke, one undo step");
+    }
+
+    /// Where a frame drew `label`'s text, if it did.
+    fn text_at(ctx: &egui::Context, state: &mut AppState, label: &str) -> Option<Pos2> {
+        fn walk(shape: &egui::Shape, label: &str, out: &mut Option<Pos2>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, label, out)),
+                egui::Shape::Text(t) if t.galley.text() == label => {
+                    *out = Some(t.pos + t.galley.rect.center().to_vec2());
+                }
+                _ => {}
+            }
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            ..Default::default()
+        };
+        let mut out = None;
+        for s in ctx.run(raw, |ctx| draw(state, ctx)).shapes {
+            walk(&s.shape, label, &mut out);
+        }
+        out
+    }
+
+    fn click_text(ctx: &egui::Context, state: &mut AppState, label: &str) {
+        let at = text_at(ctx, state, label).unwrap_or_else(|| panic!("no `{label}` drawn"));
+        run(ctx, state, vec![egui::Event::PointerMoved(at), button(at, true)]);
+        run(ctx, state, vec![button(at, false)]);
+        run(ctx, state, vec![]);
+    }
+
+    /// Let the library's loader finish, as the app's frames would.
+    fn settle_library(state: &mut AppState) {
+        let t0 = std::time::Instant::now();
+        while state.brush_library.loading() && t0.elapsed().as_secs() < 30 {
+            state.brush_library.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        state.brush_library.poll();
+    }
+
+    fn picker_state() -> (egui::Context, AppState) {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolPencil);
+        state.show_brush_settings = true;
+        settle_library(&mut state);
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        run(&ctx, &mut state, vec![]);
+        run(&ctx, &mut state, vec![]);
+        (ctx, state)
+    }
+
+    #[test]
+    fn the_brush_picker_offers_krita_presets_and_picks_one() {
+        let (ctx, mut state) = picker_state();
+        let t = run(&ctx, &mut state, vec![]);
+        for want in ["App", "Krita", "Pencil-5", "Eraser Circle"] {
+            assert!(t.iter().any(|s| s == want), "{want} in {t:?}");
+        }
+        let colour = state.brush.color;
+        state.brush_search = "basic-5".into();
+        click_text(&ctx, &mut state, "Basic-5 Size default");
+        assert_eq!(state.brush.mode, BrushMode::Krita);
+        assert_eq!(state.brush.krita_id.as_deref(), Some("krita/b)_Basic-5_Size_default"));
+        assert_eq!(state.brush.color, colour, "the colour stays");
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "Krita · Basic-5 Size default"), "{t:?}");
+        assert!(t.iter().any(|s| s.starts_with("Wash")), "{t:?}");
+
+        // A preset the engine cannot paint yet does nothing when clicked.
+        state.brush_search = "pencil-4".into();
+        click_text(&ctx, &mut state, "Pencil-4 Soft");
+        assert_eq!(state.brush.krita_id.as_deref(), Some("krita/b)_Basic-5_Size_default"));
+    }
+
+    #[test]
+    fn the_brush_picker_searches_by_name() {
+        let (ctx, mut state) = picker_state();
+        state.brush_search = "tilted".into();
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "Pencil-5 Tilted"), "{t:?}");
+        assert!(t.iter().any(|s| s == "Tilted"), "the app's own matches too");
+        assert!(!t.iter().any(|s| s == "Eraser Circle"), "{t:?}");
+    }
+
+    /// A shipped wash preset, picked in the picker, paints through the
+    /// canvas as one undoable stroke.
+    #[test]
+    fn a_picked_krita_preset_paints_through_the_canvas() {
+        let (ctx, mut state) = picker_state();
+        state.brush_search = "basic-2".into();
+        click_text(&ctx, &mut state, "Basic-2 Opacity");
+        assert!(state.krita_brush().wash);
+        state.show_brush_settings = false;
+        run(&ctx, &mut state, vec![]);
+        let id = state.project.ensure_active_cell();
+        let from = Xform::new(&state, SCREEN).doc_to_screen(300.0, 300.0);
+        run(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=30 {
+            run(&ctx, &mut state, vec![egui::Event::PointerMoved(from + vec2(i as f32 * 6.0, 0.0))]);
+        }
+        run(&ctx, &mut state, vec![button(from + vec2(180.0, 0.0), false)]);
+        run(&ctx, &mut state, vec![]);
+        let c = state.project.cell(id).unwrap();
+        let painted = c.pixels().chunks(4).filter(|p| p[3] > 0).count();
+        assert!(painted > 500, "painted {painted} pixels");
+        assert_eq!(state.history.undo_len(), 1);
+    }
+
+    /// A brush whose library preset has gone falls back to the built-in
+    /// one rather than failing.
+    #[test]
+    fn a_missing_library_preset_falls_back() {
+        let mut state = AppState::for_test();
+        state.brush = BrushSettings::pencil5_krita();
+        state.brush.krita_id = Some("user/gone".into());
+        assert_eq!(state.krita_brush().diameter(), crate::tools::krita::KritaPreset::Pencil5Tilted.brush().diameter());
     }
 
     /// Every closed outline one frame drew.

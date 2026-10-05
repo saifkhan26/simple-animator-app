@@ -615,6 +615,7 @@ impl KritaStroke {
     }
 
     /// Fix the stroke's random source, so a test sees the same stroke twice.
+    #[cfg(test)]
     pub fn seed(&mut self, seed: u32) {
         self.random = Rc::new(RefCell::new(RandomSource::new(seed)));
         if let Some(t) = &mut self.auto_tip {
@@ -1291,5 +1292,17 @@ mod tests {
         let mut fresh = Canvas::new(200, 80);
         wash_stroke(&mut fresh, &mut StrokeWorkspace::new(), "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 60.0), |_| {});
         assert_eq!(second.pixels(), fresh.pixels());
+    }
+
+    /// An auto tip's cursor is its ellipse at the dab's size.
+    #[test]
+    fn an_auto_tip_outline_is_its_ellipse() {
+        let b = defaults::brush("b)_Basic-5_Size_default.kpp").unwrap();
+        let pts = b.outline(30.0, 1.0, (0.0, 0.0), 0.0, (false, false));
+        assert!(pts.len() > 8, "a round outline");
+        for (x, y) in &pts {
+            let r = x.hypot(*y);
+            assert!((r - 15.0).abs() < 0.6, "radius {r}");
+        }
     }
 }

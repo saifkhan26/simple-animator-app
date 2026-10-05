@@ -194,6 +194,7 @@ impl StrokeBuilder {
 
     /// Fix a Krita-mode stroke's random source (scatter, fuzzy sensors):
     /// for tests, which need the same stroke twice.
+    #[cfg(test)]
     pub fn seed_random(&mut self, seed: u32) {
         if let Some(k) = &mut self.krita {
             k.seed(seed);

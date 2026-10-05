@@ -207,6 +207,11 @@ pub struct BrushSettings {
     /// texture replace everything above except radius (Krita's size),
     /// opacity (its opacity slider) and colour.
     pub krita: krita::KritaPreset,
+    /// A Krita preset from the brush library (`krita/…` shipped,
+    /// `user/…` imported), which takes the place of `krita` when set. Kept
+    /// as an id so a preferences file names the brush, not its contents; an
+    /// id the library no longer has falls back to `krita`.
+    pub krita_id: Option<String>,
     /// Shape of the stroke's two ends. `Ribbon` mode only: a dab brush's
     /// coverage builds up, so its ends cannot be re-cut after the fact.
     pub cap: StrokeCap,
@@ -247,6 +252,7 @@ impl Default for BrushSettings {
             tilt_size: 0.0,
             mode: BrushMode::Ribbon,
             krita: krita::KritaPreset::default(),
+            krita_id: None,
             cap: StrokeCap::Round,
             fill_tolerance: 16,
             fill_expand: 0,

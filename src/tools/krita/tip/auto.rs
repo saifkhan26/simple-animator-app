@@ -648,6 +648,7 @@ impl AutoTip {
     }
 
     /// Fix the mask applicator's random source.
+    #[cfg(test)]
     pub fn seed(&mut self, seed: u32) {
         *self.random.get_mut() = RandomSource::new(seed);
     }
