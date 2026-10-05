@@ -12,6 +12,7 @@ pub mod ribbon;
 pub mod select_mask;
 pub mod selection;
 pub mod shape;
+pub mod stabilizer;
 pub mod stroke;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +69,10 @@ pub enum Smoothing {
     /// to distance travelled rather than to time (timings are too unstable to
     /// key a filter on), then the same Bezier fit.
     Weighted,
+    /// Krita's "Stabilizer": the line follows the pen on a timer, averaging
+    /// the last `distance_max` milliseconds of movement, and with the delay
+    /// on it trails the pen on a string `delay_distance` long.
+    Stabilizer,
 }
 
 /// Smoothing parameters. Defaults are Krita's own, read from
@@ -92,6 +97,18 @@ pub struct SmoothingOptions {
     /// pixels, so the filter feels identical at every zoom. This is what
     /// keeps a zoomed-out line as clean as a zoomed-in one.
     pub scalable_distance: bool,
+    /// Stabilizer: the string's length, screen pixels. Krita's
+    /// `LineSmoothingDelayDistance`.
+    pub delay_distance: f32,
+    /// Stabilizer: hold the line back on the string at all.
+    pub use_delay: bool,
+    /// Stabilizer: at pen-up, draw the line on to where the pen lifted.
+    pub finish_stabilized: bool,
+    /// Stabilizer: average pressure and tilt with position.
+    pub stabilize_sensors: bool,
+    /// Stabilizer: how often the line catches up, milliseconds. Krita's
+    /// `stabilizerSampleSize`.
+    pub stabilizer_poll_ms: u32,
 }
 
 impl Default for SmoothingOptions {
@@ -103,6 +120,13 @@ impl Default for SmoothingOptions {
             tail_aggressiveness: 0.15,
             smooth_pressure: false,
             scalable_distance: true,
+            delay_distance: 50.0,
+            use_delay: true,
+            finish_stabilized: true,
+            stabilize_sensors: true,
+            // KisConfig::stabilizerSampleSize: longer on Windows, whose
+            // timers are coarse.
+            stabilizer_poll_ms: if cfg!(windows) { 50 } else { 15 },
         }
     }
 }
