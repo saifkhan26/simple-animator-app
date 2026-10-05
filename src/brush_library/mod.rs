@@ -332,7 +332,7 @@ impl BrushLibrary {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn settle(lib: &mut BrushLibrary) {
@@ -361,8 +361,15 @@ mod tests {
         assert_eq!(pencil.status, Status::Ready);
         assert!(lib.thumbnail("krita/c)_Pencil-5_Tilted").is_some());
         assert!(lib.thumbnail("app/Pencil").is_some());
-        let refused = lib.entry("krita/c)_Pencil-4_Soft").unwrap();
-        assert!(matches!(&refused.status, Status::Refused(why) if why.contains("gbr_brush")), "{:?}", refused.status);
+        assert!(lib.entries.iter().filter(|e| e.group == Group::Krita).all(|e| e.status == Status::Ready));
+    }
+
+    /// An imported preset this engine cannot paint: a Krita hairy brush.
+    pub(crate) fn write_hairy(root: &Path) {
+        let dir = root.join("Hairy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let xml = r#"<Preset paintopid="hairybrush" name="Hairy"><param name="x" type="string">1</param></Preset>"#;
+        std::fs::write(dir.join("Hairy.kpp"), crate::tools::krita::kpp::with_xml(xml)).unwrap();
     }
 
     /// The shipped Pencil-5 is the same preset as the app's built-in one,
@@ -389,6 +396,12 @@ mod tests {
         assert_eq!(e.group, Group::Imported);
         assert_eq!(e.status, Status::Ready);
         assert!(lib.brush("user/Basic").unwrap().wash);
+        // Refusals say why, and have no brush.
+        write_hairy(&root);
+        lib.rescan();
+        settle(&mut lib);
+        let hairy = lib.entry("user/Hairy").expect("listed even though refused");
+        assert!(matches!(&hairy.status, Status::Refused(why) if why.contains("hairybrush")), "{:?}", hairy.status);
         std::fs::remove_dir_all(&root).ok();
     }
 }

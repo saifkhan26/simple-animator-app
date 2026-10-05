@@ -51,6 +51,20 @@ pub struct Preset {
     pub resources: Vec<EmbeddedResource>,
 }
 
+/// A `.kpp` holding `xml`: just the text chunk, which is all the reader
+/// looks at.
+#[cfg(test)]
+pub fn with_xml(xml: &str) -> Vec<u8> {
+    let mut body = b"preset\0".to_vec();
+    body.extend_from_slice(xml.as_bytes());
+    let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+    v.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    v.extend_from_slice(b"tEXt");
+    v.extend_from_slice(&body);
+    v.extend_from_slice(&[0; 4]);
+    v
+}
+
 /// The value of a PNG text chunk (`tEXt`, `zTXt` or `iTXt`) by keyword.
 fn png_text(png: &[u8], key: &str) -> Result<Vec<u8>> {
     const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";

@@ -172,6 +172,7 @@ pub fn describe(b: &PixelBrush) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(match &b.tip {
         Tip::Png(_) => "Tip: a picture".to_owned(),
+        Tip::Pipe { cells, .. } => format!("Tip: {} pictures, one per dab", cells.len()),
         Tip::Auto(d) => {
             let shape = if d.shape == Shape::Circle { "round" } else { "square" };
             let edge = match d.profile {

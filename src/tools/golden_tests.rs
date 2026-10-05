@@ -631,7 +631,7 @@ fn perf_brushes_1080p() {
         rows.push((label.to_owned(), best.0, best.1));
     }
     // Krita's shipped presets in wash and build-up, auto and bitmap tips.
-    for name in ["b)_Basic-5_Size_default.kpp", "a)_Eraser_Soft.kpp", "b)_Airbrush_Soft.kpp", "e)_Marker_Dry.kpp"] {
+    for name in ["b)_Basic-5_Size_default.kpp", "a)_Eraser_Soft.kpp", "b)_Airbrush_Soft.kpp", "e)_Marker_Dry.kpp", "c)_Pencil-6_Quick_Shade.kpp"] {
         let Ok(kb) = crate::tools::krita::defaults::brush(name) else { continue };
         let settings = BrushSettings {
             radius: (kb.diameter() / 2.0) as f32,

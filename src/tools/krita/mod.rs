@@ -58,6 +58,7 @@ use sensors::{CurveOption, PaintInfo};
 use spacing::{effective_spacing, Distance, Spacing};
 use texture::{TextureMask, TextureSettings};
 use tip::auto::{AutoDef, AutoTip};
+use tip::gbr::{Parasite, PipeInput, PipeState};
 use tip::{DabShape, PngTip};
 
 pub(crate) const PENCIL5_KPP: &[u8] = include_bytes!("assets/Pencil-5_Tilted.kpp");
@@ -171,6 +172,8 @@ pub enum Tip {
     /// Generated: the size slider resizes the generator itself, so each
     /// stroke builds its own [`AutoTip`] from this.
     Auto(AutoDef),
+    /// A GIMP image pipe: several bitmaps, one picked per dab.
+    Pipe { cells: Vec<PngTip>, parasite: Parasite },
 }
 
 /// A pixel-brush preset, loaded and checked.
@@ -285,7 +288,7 @@ impl PixelBrush {
         let attr = |k: &str| b.attribute(k);
         let num = |k: &str, d: f64| attr(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
         let (tip, tip_scale, spacing, auto_spacing) = match attr("type") {
-            Some("png_brush") => {
+            Some("png_brush") | Some("gbr_brush") => {
                 let file = attr("filename").unwrap_or_default();
                 let embedded = p
                     .resources
@@ -302,10 +305,25 @@ impl PixelBrush {
                     tip_scale *= 2.0;
                 }
                 let angle = num("angle", 0.0);
-                let spacing = num("spacing", 0.1).max(0.02);
+                // KisPredefinedBrushFactory's default.
+                let spacing = num("spacing", 0.25).max(0.02);
                 let auto_spacing = (attr("useAutoSpacing") == Some("1")).then(|| num("autoSpacingCoeff", 1.0));
-                let tip = PngTip::load(&png, angle).with_context(|| format!("tip `{file}`"))?;
-                (Tip::Png(tip), tip_scale, spacing, auto_spacing)
+                // The resource is found by name, whatever the type says.
+                let ext = file.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+                let tip = match ext.as_str() {
+                    "png" => Tip::Png(PngTip::load(&png, angle).with_context(|| format!("tip `{file}`"))?),
+                    "gbr" => {
+                        let (c, _) = tip::gbr::parse_gbr(&png).with_context(|| format!("tip `{file}`"))?;
+                        Tip::Png(PngTip::from_gray(c.width, c.height, &c.gray, angle))
+                    }
+                    "gih" => {
+                        let (parasite, cells) = tip::gbr::parse_gih(&png).with_context(|| format!("tip `{file}`"))?;
+                        let cells = cells.iter().map(|c| PngTip::from_gray(c.width, c.height, &c.gray, angle)).collect();
+                        Tip::Pipe { cells, parasite }
+                    }
+                    other => bail!("`{}` uses a `.{other}` tip, which is not supported yet", p.name),
+                };
+                (tip, tip_scale, spacing, auto_spacing)
             }
             Some("auto_brush") => {
                 let def = AutoDef::parse(b).with_context(|| format!("`{}`", p.name))?;
@@ -412,6 +430,11 @@ impl PixelBrush {
                 let (w, h) = t.size();
                 w.max(h) as f64 * self.tip_scale
             }
+            // A pipe's size is its first cell's.
+            Tip::Pipe { cells, .. } => {
+                let (w, h) = cells[0].size();
+                w.max(h) as f64 * self.tip_scale
+            }
             Tip::Auto(d) => d.diameter,
         }
     }
@@ -421,16 +444,16 @@ impl PixelBrush {
     /// a rounded diameter, so an untouched brush is the preset. An auto tip
     /// is resized through its generator instead, so its scale stays 1.
     fn brush_scale(&self, diameter: f64) -> f64 {
-        match &self.tip {
-            Tip::Png(t) => {
-                let (w, h) = t.size();
-                if (diameter - self.diameter()).abs() < 0.01 {
-                    self.tip_scale
-                } else {
-                    diameter / w.max(h) as f64
-                }
-            }
-            Tip::Auto(_) => 1.0,
+        let first = match &self.tip {
+            Tip::Png(t) => t,
+            Tip::Pipe { cells, .. } => &cells[0],
+            Tip::Auto(_) => return 1.0,
+        };
+        let (w, h) = first.size();
+        if (diameter - self.diameter()).abs() < 0.01 {
+            self.tip_scale
+        } else {
+            diameter / w.max(h) as f64
         }
     }
 
@@ -463,6 +486,7 @@ impl PixelBrush {
         };
         match &self.tip {
             Tip::Png(t) => t.outline(self.brush_scale(diameter), shape).to_vec(),
+            Tip::Pipe { cells, .. } => cells[0].outline(self.brush_scale(diameter), shape).to_vec(),
             Tip::Auto(d) => AutoTip::new(d, diameter, RandomSource::new(0)).outline(shape),
         }
     }
@@ -502,6 +526,8 @@ struct DabRequest {
     opacity: f64,
     /// Wash mode's alpha-darken flow; build-up ignores it.
     flow: f64,
+    /// A pipe tip's cell for this dab.
+    cell: usize,
     /// The Softness option's factor for an auto tip's fade.
     softness: f64,
     texture_strength: f64,
@@ -566,6 +592,10 @@ pub struct KritaStroke {
     random: Rc<RefCell<RandomSource>>,
     /// An auto tip, built at this stroke's size.
     auto_tip: Option<AutoTip>,
+    /// A pipe tip's walk through its cells, and the dabs queued so far
+    /// (`KisDabRenderingQueue`'s sequence number).
+    pipe: PipeState,
+    queued: i32,
     pending: Vec<DabRequest>,
     cache: Option<CachedDab>,
 }
@@ -623,7 +653,7 @@ impl KritaStroke {
         let brush_scale = brush.brush_scale(diameter);
         let auto_tip = match &brush.tip {
             Tip::Auto(d) => Some(AutoTip::new(d, diameter, RandomSource::for_stroke())),
-            Tip::Png(_) => None,
+            Tip::Png(_) | Tip::Pipe { .. } => None,
         };
         let mut opacity_option = brush.opacity.clone();
         opacity_option.strength = opacity.clamp(0.0, 1.0);
@@ -644,6 +674,8 @@ impl KritaStroke {
             speed: speed::SpeedSmoother::default(),
             random: Rc::new(RefCell::new(RandomSource::for_stroke())),
             auto_tip,
+            pipe: PipeState::new(),
+            queued: 0,
             pending: Vec::new(),
             cache: None,
         }
@@ -667,17 +699,24 @@ impl KritaStroke {
 
     // The tip's geometry, whichever kind it is.
 
+    /// The bitmap tip in use: the tip, or the pipe's current cell.
     fn png(&self) -> &PngTip {
+        self.png_cell(self.pipe.current)
+    }
+
+    fn png_cell(&self, cell: usize) -> &PngTip {
         match &self.brush.tip {
             Tip::Png(t) => t,
+            Tip::Pipe { cells, .. } => &cells[cell.min(cells.len() - 1)],
             Tip::Auto(_) => unreachable!("an auto tip's stroke has its own"),
         }
     }
 
+    /// `KisBrush::width` / `height`: a pipe's are its first cell's.
     fn tip_size(&self) -> (i32, i32) {
         match &self.auto_tip {
             Some(t) => t.size(),
-            None => self.png().size(),
+            None => self.png_cell(0).size(),
         }
     }
 
@@ -727,10 +766,6 @@ impl KritaStroke {
             s.time_ms,
         );
         s.speed = v as f32;
-    }
-
-    fn info(&self, s: &PointerSample) -> PaintInfo {
-        self.info_with(s, None)
     }
 
     /// `angle`: a fan dab's drawing angle, overriding the stroke's.
@@ -856,12 +891,29 @@ impl KritaStroke {
         let flow = b.flow.apply(&info);
         let softness = b.softness.apply(&info);
         let texture_strength = b.texture_strength.apply(&info);
+        // KisDabRenderingQueue::addDab → prepareForSeqNo: a pipe picks the
+        // dab's cell, after every option has had its say.
+        let seq = self.queued;
+        self.queued += 1;
+        if let Tip::Pipe { cells, parasite } = &b.tip {
+            let input = PipeInput {
+                pressure: info.pressure,
+                drawing_angle: info.drawing_angle,
+                x_tilt: info.x_tilt,
+                y_tilt: info.y_tilt,
+                speed: info.speed,
+            };
+            let random = self.random.clone();
+            let mut draw = |lo: i32, hi: i32| random.borrow_mut().generate_range(lo, hi);
+            self.pipe.prepare(parasite, cells.len(), &input, seq, &mut draw);
+        }
         self.pending.push(DabRequest {
             x: s.x as f64 + dx,
             y: s.y as f64 + dy,
             shape,
             opacity,
             flow,
+            cell: self.pipe.current,
             softness,
             texture_strength,
         });
@@ -918,6 +970,8 @@ impl KritaStroke {
     /// The dab's alpha, textured, and where it lands: `(alpha, x, y, w, h)`.
     fn dab(&mut self, req: &DabRequest) -> Option<(Vec<u8>, i32, i32, usize, usize)> {
         let b = self.brush.clone();
+        // The cell this dab picked; geometry and mask come from it.
+        self.pipe.current = req.cell;
         // calculateDabRect.
         let (hx, hy) = self.hot_spot(req.shape);
         let (x, sub_x) = split(req.x - hx);
@@ -931,7 +985,7 @@ impl KritaStroke {
             sub_y,
             softness: req.softness,
             ratio: req.shape.ratio,
-            index: 0,
+            index: req.cell as i32,
         };
         let precision = b.precision.for_dab(w.min(h));
         let reuse = self.supports_caching()
@@ -1179,18 +1233,7 @@ mod tests {
         assert!((d - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "{}", d.to_degrees());
     }
 
-    /// A `.kpp` holding `xml`: just the text chunk, which is all the
-    /// reader looks at.
-    fn kpp_with(xml: &str) -> Vec<u8> {
-        let mut body = b"preset\0".to_vec();
-        body.extend_from_slice(xml.as_bytes());
-        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
-        v.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        v.extend_from_slice(b"tEXt");
-        v.extend_from_slice(&body);
-        v.extend_from_slice(&[0; 4]);
-        v
-    }
+    use kpp::with_xml as kpp_with;
 
     /// A Krita 5 preset (`version` 5.0) carries its tip in `<resources>`,
     /// so it loads with nothing else supplied.

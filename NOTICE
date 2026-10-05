@@ -27,3 +27,9 @@ The brush presets and tips there are copied unchanged from Krita's
 Krita_4_Default_Resources.bundle, whose meta.xml gives the author as
 "Deevad with derivations of the brushes of Ramon Miranda, Razvanc, Radian,
 Wolthera, Storm, Scottyp and other" and the license as CC-0.
+
+Krita test data — src/tools/krita/tip/testdata/
+-----------------------------------------------
+result_autobrush_3.png, brush.gbr, brush.gih and pepper.gbr are copied
+unchanged from Krita's libs/brush/tests/data and fall under the Krita terms
+above. They are read by unit tests only and are not built into the app.

@@ -8,6 +8,7 @@
 //! the mask is then `255 - gray`, times the drawn alpha.
 
 pub mod auto;
+pub mod gbr;
 pub mod simd_math;
 
 use anyhow::{bail, Context, Result};
@@ -272,13 +273,23 @@ impl PngTip {
             .context("decoding the brush tip")?
             .to_rgba8();
         let (w, h) = img.dimensions();
-        let mut gray = Image32::new(w as usize, h as usize);
-        let mut footprint = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        for (i, p) in img.pixels().enumerate() {
+        let mut values = Vec::with_capacity((w * h) as usize);
+        for p in img.pixels() {
             let [r, g, b, a] = p.0;
             if a != 255 || r != g || g != b {
                 bail!("only opaque grayscale tips are supported");
             }
+            values.push(r);
+        }
+        Ok(Self::from_gray(w, h, &values, angle))
+    }
+
+    /// A tip from gray values, row-major (255 = nothing, as Krita holds a
+    /// mask tip's image): a PNG's pixels, or a GIMP brush cell's.
+    pub fn from_gray(w: u32, h: u32, values: &[u8], angle: f64) -> Self {
+        let mut gray = Image32::new(w as usize, h as usize);
+        let mut footprint = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for (i, &r) in values.iter().enumerate() {
             if r < 255 {
                 let (x, y) = ((i as u32 % w) as i32, (i as u32 / w) as i32);
                 footprint = (
@@ -288,11 +299,11 @@ impl PngTip {
                     footprint.3.max(y + 1),
                 );
             }
-            // Grayscale8 expanded to RGB32, as smoothScaled and
-            // convertToFormat(ARGB32) both see it.
+            // Grayscale8 (or a gray Indexed8) expanded to RGB32, as
+            // smoothScaled and convertToFormat(ARGB32) both see it.
             gray.px[i] = 0xff00_0000 | ((r as u32) * 0x0001_0101);
         }
-        Ok(Self {
+        Self {
             pyramid: Pyramid::new(&gray),
             width: w as i32,
             height: h as i32,
@@ -302,7 +313,7 @@ impl PngTip {
             } else {
                 footprint
             },
-        })
+        }
     }
 
     fn original_rect(&self) -> RectF {
