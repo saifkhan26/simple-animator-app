@@ -101,9 +101,13 @@ pub fn fuzzy_compare(p1: f64, p2: f64) -> bool {
 /// this instruction in their pixel loops; its result is the CPU's own table
 /// lookup, so the only way to agree with them bit for bit is to ask the same
 /// instruction.
+///
+/// The `exact-rcp` feature swaps it for a true division, which no Krita
+/// matches but every CPU agrees on: the golden tests use that build for
+/// hashes that do not depend on the machine.
 #[inline]
 pub fn rcp(x: f32) -> f32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(feature = "exact-rcp")))]
     {
         // SAFETY: SSE is part of the x86_64 baseline.
         unsafe {
@@ -111,10 +115,27 @@ pub fn rcp(x: f32) -> f32 {
             _mm_cvtss_f32(_mm_rcp_ss(_mm_set_ss(x)))
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(any(not(target_arch = "x86_64"), feature = "exact-rcp"))]
     {
         1.0 / x
     }
+}
+
+/// A fingerprint of this CPU's [`rcp`] table: two machines with the same
+/// signature divide identically, so they paint Krita strokes identically.
+#[cfg(test)]
+pub fn rcp_signature() -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    // `_mm_rcp_ss` reads 12 mantissa bits; 2^16 steps across [1, 2) sees
+    // every table entry several times.
+    for i in 0..1u32 << 16 {
+        let x = f32::from_bits(0x3f80_0000 | (i << 7));
+        for b in rcp(x).to_bits().to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
 }
 
 /// `reciprocal_mul_ss` / `reciprocal_mul_ps`: the approximate reciprocal

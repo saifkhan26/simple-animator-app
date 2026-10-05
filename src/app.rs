@@ -7142,6 +7142,91 @@ mod tests {
         assert_eq!(state.perspective.active, 0);
     }
 
+    /// `eframe::Storage` in memory, so prefs go through the same RON
+    /// serialisation the app's `ui.ron` does.
+    #[derive(Default)]
+    struct MemStorage(HashMap<String, String>);
+
+    impl eframe::Storage for MemStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn flush(&mut self) {}
+    }
+
+    const PREFS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/ui_prefs_v1.ron");
+
+    /// The brushes in the prefs fixture: every slot tuned away from its
+    /// default, the Krita Pencil-5 among them.
+    fn fixture_brushes() -> Vec<BrushSettings> {
+        let mut v = default_tool_brushes().to_vec();
+        v[0] = BrushSettings::pencil5_krita();
+        v[0].radius = 21.0;
+        v[0].color = [10, 20, 30, 255];
+        v[1].radius = 7.5;
+        v[1].cap = crate::tools::StrokeCap::Flat;
+        v[2].mode = crate::tools::BrushMode::Dab;
+        v[2].opacity = 0.5;
+        v[3].fill_gap = 4;
+        v[4].shape_kind = ShapeKind::Ellipse;
+        v
+    }
+
+    fn fixture_prefs() -> UiPrefs {
+        UiPrefs {
+            show_panels: false,
+            frame_step: 3,
+            smoothing: SmoothingOptions {
+                kind: crate::tools::Smoothing::Weighted,
+                distance_max: 33.0,
+                ..SmoothingOptions::default()
+            },
+            tool_brushes: Some(fixture_brushes()),
+            palette: vec![[1, 2, 3], [250, 128, 0]],
+            krita_path: Some(PathBuf::from("C:/Krita (x64)/bin/krita.exe")),
+            bg_color: [0.1, 0.2, 0.3],
+            ..UiPrefs::default()
+        }
+    }
+
+    /// Writes the prefs fixture. Run once, by the build whose prefs format
+    /// the fixture pins (it was, before the Krita brush library existed):
+    ///
+    /// ```text
+    /// cargo test write_prefs_fixture -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn write_prefs_fixture() {
+        let mut storage = MemStorage::default();
+        eframe::set_value(&mut storage, UI_PREFS_KEY, &fixture_prefs());
+        std::fs::write(PREFS_FIXTURE, &storage.0[UI_PREFS_KEY]).unwrap();
+    }
+
+    /// A `ui.ron` written before the Krita brush library still loads, every
+    /// brush as it was. One field this build can't read would make
+    /// `get_value` fail and silently reset *every* preference.
+    #[test]
+    fn prefs_written_before_the_brush_library_still_load() {
+        let mut storage = MemStorage::default();
+        let text = std::fs::read_to_string(PREFS_FIXTURE).expect("fixture");
+        eframe::Storage::set_string(&mut storage, UI_PREFS_KEY, text);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).expect("prefs reset");
+        let want = fixture_prefs();
+        assert!(!prefs.show_panels);
+        assert_eq!(prefs.frame_step, 3);
+        assert_eq!(format!("{:?}", prefs.smoothing), format!("{:?}", want.smoothing));
+        assert_eq!(prefs.palette, want.palette);
+        assert_eq!(prefs.krita_path, want.krita_path);
+        assert_eq!(prefs.bg_color, want.bg_color);
+        let brushes = restore_tool_brushes(prefs.tool_brushes);
+        assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
+        assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
+    }
+
     #[test]
     fn brushes_saved_before_the_perspective_tool_survive() {
         let mut old: Vec<BrushSettings> = default_tool_brushes()[..7].to_vec();

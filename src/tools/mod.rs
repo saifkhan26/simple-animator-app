@@ -2,6 +2,8 @@
 
 pub mod dab;
 pub mod fill;
+#[cfg(test)]
+mod golden_tests;
 pub mod krita;
 pub mod lasso;
 pub mod perspective;

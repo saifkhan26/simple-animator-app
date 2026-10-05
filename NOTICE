@@ -1,0 +1,29 @@
+animator-app — third-party notices
+==================================
+
+The crate's own code is offered under MIT OR Apache-2.0 (see Cargo.toml).
+Some of it is not original work, and those parts carry their own terms.
+
+Krita brush engine port — src/tools/krita/
+------------------------------------------
+The code under src/tools/krita/ is a close port of parts of Krita 5.2
+(https://invent.kde.org/graphics/krita): the pixel brush paintop, its
+options and sensors, brush tips, dab caching and the 8-bit composite ops it
+paints through. That source is licensed GPL-2.0-or-later (a few files
+LGPL-2.0/2.1-or-later), and a translation of it is a derivative work.
+
+It also ports Qt 5.15's raster image scaling and drawing routines
+(qtbase, https://code.qt.io/qt/qtbase.git), licensed LGPL-3.0 / GPL-2.0 /
+GPL-3.0.
+
+UNRESOLVED: distributing a build that contains this code under MIT OR
+Apache-2.0 alone is not compatible with those licenses. Decide the licensing
+(for example GPL-3.0-or-later for the whole app, or removing the port)
+before any binary or source release.
+
+Krita brush resources — src/tools/krita/assets/
+-----------------------------------------------
+The brush presets and tips there are copied unchanged from Krita's
+Krita_4_Default_Resources.bundle, whose meta.xml gives the author as
+"Deevad with derivations of the brushes of Ramon Miranda, Razvanc, Radian,
+Wolthera, Storm, Scottyp and other" and the license as CC-0.
