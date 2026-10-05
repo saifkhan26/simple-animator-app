@@ -556,7 +556,9 @@ fn golden_strokes() {
             None if record => {
                 let _ = writeln!(new_rows, "{}\t{var}\t{hash:016x}", case.name);
             }
-            None if var.starts_with("rcp-") && !strict => unknown_cpu += 1,
+            // A CPU with no hashes at all is new to the table; on one that
+            // has some, a missing row is a case nobody recorded.
+            None if var.starts_with("rcp-") && !strict && !table.keys().any(|(_, v)| *v == var) => unknown_cpu += 1,
             None => failures.push(format!("{} [{var}]: no recorded hash (GOLDEN_RECORD=1 adds it)", case.name)),
         }
     }

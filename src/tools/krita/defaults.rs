@@ -115,22 +115,11 @@ mod tests {
                 Err(e) => refused.push((name, format!("{e:#}"))),
             }
         }
-        let want_loading = [
-            "a)_Eraser_Circle.kpp",
-            "a)_Eraser_Small.kpp",
-            "a)_Eraser_Soft.kpp",
-            "b)_Airbrush_Soft.kpp",
-            "b)_Basic-2_Opacity.kpp",
-            "b)_Basic-3_Flow.kpp",
-            "b)_Basic-4_Flow_Opacity.kpp",
-            "b)_Basic-5_Size_Opacity.kpp",
-            "b)_Basic-5_Size_default.kpp",
-            "c)_Pencil-5_Tilted.kpp",
-            "d)_Ink-3_Gpen.kpp",
-            "d)_Ink-4_Pen_Rough.kpp",
-            "e)_Marker_Details.kpp",
-            "e)_Marker_Dry.kpp",
-        ];
+        let want_loading: Vec<&str> = PRESETS
+            .iter()
+            .copied()
+            .filter(|n| !matches!(*n, "c)_Pencil-4_Soft.kpp" | "c)_Pencil-6_Quick_Shade.kpp"))
+            .collect();
         for (name, why) in &refused {
             println!("refused {name}: {why}");
         }
