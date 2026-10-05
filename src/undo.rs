@@ -15,6 +15,11 @@ use crate::tools::select_mask::{PackedMask, SelectionMask};
 /// Bounded undo capacity — prevents memory blow-up on long sessions.
 const MAX_HISTORY: usize = 80;
 
+/// Bytes of paint patches the undo history may hold before its oldest steps
+/// go, however few steps that leaves. A stroke across an 8K cell keeps ~70 MB
+/// of before and after, so 80 of them would be several GB.
+const MAX_PATCH_BYTES: usize = 2 << 30;
+
 /// What an undo/redo touched, so the caller knows what to re-upload.
 pub enum Touched {
     /// One cell's pixels changed; its `Canvas::dirty` says where.
@@ -134,6 +139,18 @@ pub enum Command {
     Compound(Vec<Command>),
 }
 
+impl Command {
+    /// Bytes of pixels this step holds of its own. Shared canvases aren't
+    /// counted: the pool holds those anyway.
+    fn patch_bytes(&self) -> usize {
+        match self {
+            Command::PixelPatch { before, after, .. } => before.len() + after.len(),
+            Command::Compound(cmds) => cmds.iter().map(Command::patch_bytes).sum(),
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct History {
     undo_stack: Vec<Command>,
@@ -145,16 +162,34 @@ pub struct History {
 
 impl History {
     pub fn push(&mut self, cmd: Command) {
+        self.push_within(cmd, MAX_PATCH_BYTES);
+    }
+
+    /// `push`, dropping the oldest steps until at most `MAX_HISTORY` are left
+    /// and they hold at most `max_bytes` of patches. The newest always stays.
+    fn push_within(&mut self, cmd: Command, max_bytes: usize) {
         self.redo_stack.clear();
-        if self.undo_stack.len() >= MAX_HISTORY {
-            self.undo_stack.remove(0);
-        }
         self.undo_stack.push(cmd);
+        let mut bytes: usize = self.undo_stack.iter().map(Command::patch_bytes).sum();
+        let mut drop = 0;
+        while self.undo_stack.len() - drop > 1
+            && (self.undo_stack.len() - drop > MAX_HISTORY || bytes > max_bytes)
+        {
+            bytes -= self.undo_stack[drop].patch_bytes();
+            drop += 1;
+        }
+        self.undo_stack.drain(..drop);
         self.revision += 1;
     }
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Bytes of pixels the undo stack holds in paint patches.
+    #[cfg(test)]
+    pub fn patch_bytes(&self) -> usize {
+        self.undo_stack.iter().map(Command::patch_bytes).sum()
     }
 
     /// Every cell an undo or redo could put back on a layer or write to:
@@ -317,16 +352,6 @@ fn blit_subrect(canvas: &mut Canvas, x: u32, y: u32, w: u32, h: u32, bytes: &[u8
     }
 }
 
-/// Capture an RGBA8 sub-rect from `canvas` into a fresh owned buffer.
-pub fn snapshot_subrect(canvas: &Canvas, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
-    canvas.read_rect(crate::doc::canvas::DirtyRect {
-        min_x: x,
-        min_y: y,
-        max_x: x + w,
-        max_y: y + h,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +373,38 @@ mod tests {
             Some(Touched::Selection(m)) => m,
             _ => panic!("not a selection change"),
         }
+    }
+
+    /// A paint step holding `n` bytes of before and `n` of after.
+    fn patch(n: usize) -> Command {
+        Command::PixelPatch {
+            cell: 0,
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            before: vec![0; n],
+            after: vec![1; n],
+        }
+    }
+
+    /// Big patches push the oldest out before the step count would; the
+    /// newest stays even when it alone is over.
+    #[test]
+    fn the_history_keeps_its_patches_within_a_byte_cap() {
+        let mut h = History::default();
+        for _ in 0..5 {
+            h.push_within(patch(100), 500);
+        }
+        assert_eq!((h.undo_len(), h.patch_bytes()), (2, 400), "two 200-byte steps fit 500");
+        h.push_within(Command::Compound(vec![patch(50), patch(50)]), 500);
+        assert_eq!((h.undo_len(), h.patch_bytes()), (2, 400), "a compound counts its parts");
+        h.push_within(patch(1000), 500);
+        assert_eq!((h.undo_len(), h.patch_bytes()), (1, 2000), "the newest stays");
+        for _ in 0..MAX_HISTORY + 5 {
+            h.push_within(patch(1), usize::MAX);
+        }
+        assert_eq!(h.undo_len(), MAX_HISTORY, "and the step count still holds");
     }
 
     #[test]

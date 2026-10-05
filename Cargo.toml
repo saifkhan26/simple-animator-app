@@ -45,7 +45,9 @@ flate2 = "1"
 zip       = { version = "4.2", default-features = false, features = ["deflate-flate2"] }
 roxmltree = "0.19"
 
-bytemuck = { version = "1", features = ["derive"] }
+# `extern_crate_alloc` for `zeroed_vec`: a big texture image allocated
+# zeroed is paged in by the threads that fill it, not up front.
+bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
 glam     = { version = "0.29", features = ["bytemuck"] }
 
 serde    = { version = "1", features = ["derive", "rc"] }

@@ -21,7 +21,7 @@ use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 use crate::brush_library::BrushLibrary;
 use crate::color::{Harmony, HarmonySet};
 use crate::doc::camera::{Camera, Ease};
-use crate::doc::canvas::{Canvas, DirtyRect};
+use crate::doc::canvas::{par_rows, Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
 use crate::doc::project::{Block, Project};
 use crate::doc::transform::Transform;
@@ -513,6 +513,10 @@ const PACK_BUDGET: Duration = Duration::from_millis(4);
 /// Seconds the playhead rests before a ghost that isn't built yet gets built.
 const GHOST_REST: f64 = 0.12;
 
+/// Seconds a drawing stays the one the pen would land on before its stroke
+/// snapshot is taken ahead of the pen. See `AppState::warm_pre`.
+const WARM_REST: f64 = GHOST_REST;
+
 /// One resident texture, for the budget.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TexEntry {
@@ -614,25 +618,68 @@ enum TexPlan {
     Rebuild(DirtyRect),
 }
 
+/// Least room a stroke's texture gets on each side of what it must hold.
+const STROKE_ROOM: u32 = 512;
+
+/// A texture for a live stroke that has to hold `need` of a `cw`×`ch` cell:
+/// `need` with room around it to grow into — half its longer side, at least
+/// `STROKE_ROOM` — so a stroke spreading out re-makes its texture a few
+/// times, each bigger, rather than every frame. Once that is most of the
+/// cell, the whole cell, which never needs re-making.
+fn stroke_room(need: Option<DirtyRect>, cw: u32, ch: u32) -> DirtyRect {
+    let whole = DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: cw,
+        max_y: ch,
+    };
+    let Some(r) = need.filter(|r| r.max_x > r.min_x && r.max_y > r.min_y) else {
+        return tex_rect(None, cw, ch);
+    };
+    let m = ((r.max_x - r.min_x).max(r.max_y - r.min_y) / 2).max(STROKE_ROOM);
+    let g = DirtyRect {
+        min_x: r.min_x.saturating_sub(m),
+        min_y: r.min_y.saturating_sub(m),
+        max_x: (r.max_x + m).min(cw),
+        max_y: (r.max_y + m).min(ch),
+    };
+    let area = |r: DirtyRect| (r.max_x - r.min_x) as u64 * (r.max_y - r.min_y) as u64;
+    if area(g) * 2 > area(whole) {
+        whole
+    } else {
+        g
+    }
+}
+
+/// `a` and `b` together; an empty rect adds nothing.
+fn rect_join(a: Option<DirtyRect>, b: Option<DirtyRect>) -> Option<DirtyRect> {
+    let some = |r: Option<DirtyRect>| r.filter(|r| r.max_x > r.min_x && r.max_y > r.min_y);
+    match (some(a), some(b)) {
+        (Some(a), b) => Some(b.map_or(a, |b| union_rect(Some(a), b))),
+        (None, b) => b,
+    }
+}
+
 /// What a texture holding `have` of cell `c` (`None`: no usable texture)
 /// needs after `dirty` changed. A change inside the texture is a patch. One
-/// that reaches past it, where the drawing may have grown, re-crops — unless
-/// a live stroke is painting the cell (`stroking`): that takes the whole
-/// cell at once, so the rest of the stroke streams in as patches instead of
-/// re-cropping on every frame it grows the drawing.
-fn plan_upload(c: &Canvas, have: Option<DirtyRect>, dirty: Dirty, stroking: bool) -> TexPlan {
+/// that reaches past it, where the drawing may have grown, re-crops.
+///
+/// Unless a live stroke is painting the cell. `stroke` then says where the
+/// cell held anything before the stroke began (`Some(None)`: blank), and
+/// the texture grows around the drawing with room to spare (`stroke_room`),
+/// so the rest of the stroke streams in as patches. Nothing is scanned: the
+/// drawing is what was there plus what the stroke touched (`Canvas::dirty`),
+/// or what the texture holds plus what changed.
+fn plan_upload(c: &Canvas, have: Option<DirtyRect>, dirty: Dirty, stroke: Option<Option<DirtyRect>>) -> TexPlan {
     let whole = DirtyRect {
         min_x: 0,
         min_y: 0,
         max_x: c.width,
         max_y: c.height,
     };
-    let fresh = || {
-        if stroking {
-            whole
-        } else {
-            tex_rect(c.content_bounds(), c.width, c.height)
-        }
+    let fresh = || match stroke {
+        Some(base) => stroke_room(rect_join(base, c.dirty), c.width, c.height),
+        None => tex_rect(c.content_bounds(), c.width, c.height),
     };
     let Some(have) = have else {
         return TexPlan::Rebuild(fresh());
@@ -647,6 +694,9 @@ fn plan_upload(c: &Canvas, have: Option<DirtyRect>, dirty: Dirty, stroking: bool
     };
     if rect_within(r, have) {
         return TexPlan::Patch(r);
+    }
+    if stroke.is_some() {
+        return TexPlan::Rebuild(stroke_room(rect_join(Some(have), Some(r)), c.width, c.height));
     }
     let want = fresh();
     if rect_within(want, have) {
@@ -666,9 +716,28 @@ fn crop_image(rect: DirtyRect, straight: impl FnOnce() -> Vec<u8>) -> ColorImage
     }
 }
 
-/// `rect` of `c`'s pixels, straight alpha, row by row.
-fn crop_pixels(c: &Canvas, rect: DirtyRect) -> Vec<u8> {
-    c.read_rect(rect)
+/// `rect` of `c` as a texture image — premultiplied exactly as
+/// `premultiplied_image` does, but read straight from the cell, with no
+/// straight-alpha copy in between, and on several threads once it's big: a
+/// whole 8K cell is 33 Mpx. An empty rect gets one clear texel.
+fn cell_image(c: &Canvas, rect: DirtyRect) -> ColorImage {
+    if rect.max_x <= rect.min_x || rect.max_y <= rect.min_y {
+        return ColorImage::new([1, 1], Color32::TRANSPARENT);
+    }
+    let [w, h] = tex_dims(rect);
+    // Zeroed, so its pages come in as each thread fills its own rows rather
+    // than all up front on this one.
+    let mut pixels: Vec<Color32> = bytemuck::zeroed_vec(w * h);
+    par_rows(&mut pixels, w, |first, band| {
+        let mut row = vec![0u8; w * 4];
+        for (y, dst) in (rect.min_y + first as u32..).zip(band.chunks_exact_mut(w)) {
+            c.read_row_into(y, rect.min_x, &mut row);
+            for (d, p) in dst.iter_mut().zip(row.chunks_exact(4)) {
+                *d = premultiplied(p);
+            }
+        }
+    });
+    ColorImage { size: [w, h], pixels }
 }
 
 /// A clipped drawing's texture as the canvas shows it: cut to its base.
@@ -1089,6 +1158,26 @@ pub struct AppState {
     /// because allocating a fresh 100 MB one at every pen-down on a big layer
     /// was a hitch of its own.
     stroke_pre_live: bool,
+    /// The cell, and its `Canvas::rev`, that `stroke_pre_pixels` still holds
+    /// exactly: set when an edit lands, so the next edit of the same cell
+    /// needs nothing copied at pen-down. On an 8K cell the copy was 10 ms,
+    /// and with the unpack it forced, 40–60 ms.
+    pre_mirror: Option<(CellId, u64)>,
+    /// The cell `stroke_pre_pixels` was taken from for the edit in hand.
+    pre_cell: Option<CellId>,
+    /// Where `stroke_pre_pixels` may hold anything but zeros; `None` when it
+    /// is all zeros. Snapshotting another cell clears just this.
+    pre_inked: Option<DirtyRect>,
+    /// Pixels per row of what `stroke_pre_pixels` holds.
+    pre_w: u32,
+    /// The drawing the pen would land on (`None`: a new blank one) and since
+    /// when, while waiting to take its snapshot ahead of the pen. See
+    /// `warm_pre`.
+    warm_wait: Option<(Option<CellId>, f64)>,
+    /// Under a stroke, where the target cell held anything before the
+    /// stroke began (`None`: blank). With the stroke's own `Canvas::dirty`
+    /// it bounds the drawing, so the texture can grow without a scan.
+    stroke_base: Option<DirtyRect>,
     /// Reusable per-stroke coverage workspace for the ribbon rasterizer.
     stroke_ws: StrokeWorkspace,
     /// Canvas region updated by stroke flushes since the last texture sync;
@@ -1374,6 +1463,12 @@ impl AppState {
             history: History::default(),
             stroke_pre_pixels: Vec::new(),
             stroke_pre_live: false,
+            pre_mirror: None,
+            pre_cell: None,
+            pre_inked: None,
+            pre_w: 0,
+            warm_wait: None,
+            stroke_base: None,
             stroke_clock: None,
             stroke_ws: StrokeWorkspace::new(),
             preview_upload_rect: None,
@@ -1698,15 +1793,7 @@ impl AppState {
         let (Some(target), Some(t0)) = (self.stroke_target, self.stroke_clock) else { return false };
         let Some(builder) = self.stroke.as_mut().filter(|b| b.stabilized()) else { return false };
         builder.tick(t0.elapsed().as_secs_f64() * 1000.0);
-        if let (Some(pre), Some(c)) = (
-            self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
-            self.project.cell_mut(target),
-        ) {
-            if let Some(r) = builder.flush(c, &mut self.stroke_ws, pre) {
-                self.preview_upload_rect = Some(union_rect(self.preview_upload_rect, r));
-                self.mark_dirty(target);
-            }
-        }
+        self.flush_stroke(target);
         true
     }
 
@@ -3089,8 +3176,16 @@ impl AppState {
                 || (0..self.project.layers.len()).any(|i| self.project.clip_base(i) == Some(cur));
             if !clipping && self.cell_textures.contains_key(&target) {
                 self.cell_tex_used.insert(target, now);
-                if let Some(rect) = self.preview_upload_rect.take() {
-                    self.upload_cell(ctx, target, Dirty::Rect(rect));
+                // What the stroke flushed, and anything left over from
+                // before it. Sent now, so pen-up has only the last flush left
+                // to send rather than the whole stroke again.
+                let pending = self.cell_dirty.insert(target, Dirty::Clean).unwrap_or(Dirty::Full);
+                let dirty = match self.preview_upload_rect.take() {
+                    Some(r) => pending.with(Dirty::Rect(r)),
+                    None => pending,
+                };
+                if dirty != Dirty::Clean {
+                    self.upload_cell(ctx, target, dirty);
                 }
                 return;
             }
@@ -3225,12 +3320,12 @@ impl AppState {
             };
             let cell = [clip.width, clip.height];
             let aligned = pair.at.aligned(clip, base);
-            let stroking = self.stroke.is_some() && self.stroke_target == Some(pair.cell);
+            let stroke = (self.stroke.is_some() && self.stroke_target == Some(pair.cell)).then_some(self.stroke_base);
             let (have, pending) = match self.clip_textures.get(&key) {
                 Some(t) if t.cell == cell && t.at == pair.at => (Some(t.rect), t.pending),
                 _ => (None, Dirty::Full),
             };
-            match plan_upload(clip, have, pending, stroking) {
+            match plan_upload(clip, have, pending, stroke) {
                 TexPlan::Keep => {}
                 TexPlan::Patch(r) => {
                     if let Some(t) = self.clip_textures.get_mut(&key) {
@@ -3273,21 +3368,21 @@ impl AppState {
             return;
         };
         let cell = [c.width, c.height];
-        let stroking = self.stroke.is_some() && self.stroke_target == Some(id);
+        let stroke = (self.stroke.is_some() && self.stroke_target == Some(id)).then_some(self.stroke_base);
         // Expanding a layer's canvas resizes cells under their textures, so
         // only a texture made for this size can be patched.
         let have = self.cell_textures.get(&id).filter(|t| t.cell == cell).map(|t| t.rect);
-        match plan_upload(c, have, dirty, stroking) {
+        match plan_upload(c, have, dirty, stroke) {
             TexPlan::Keep => {}
             TexPlan::Patch(r) => {
                 if let Some(t) = self.cell_textures.get_mut(&id) {
-                    let image = premultiplied_image(tex_dims(r), &crop_pixels(c, r));
+                    let image = cell_image(c, r);
                     let at = [(r.min_x - t.rect.min_x) as usize, (r.min_y - t.rect.min_y) as usize];
                     t.tex.set_partial(at, image, TextureOptions::LINEAR);
                 }
             }
             TexPlan::Rebuild(rect) => {
-                let image = crop_image(rect, || crop_pixels(c, rect));
+                let image = cell_image(c, rect);
                 match self.cell_textures.get_mut(&id) {
                     // Same size: re-fill the handle rather than swap it.
                     Some(t) if t.tex.size() == image.size => {
@@ -3321,6 +3416,7 @@ impl AppState {
                     .map(move |s| (s.cell, tint))
             })
             .chain(self.onion_pin_ghosts().into_iter().map(|(pin, cell)| (cell, pin.tint)))
+            .chain(self.ghost_ahead())
             .collect();
 
         let time = ctx.input(|i| i.time);
@@ -3348,7 +3444,7 @@ impl AppState {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(GHOST_REST - rested));
                 continue;
             }
-            let image = ghost_image(c.width, c.height, &c.pixels(), tint);
+            let image = ghost_image(c, tint);
             // Same reuse rule as the cell textures: keep the handle when the
             // dimensions still match — re-uploading into it avoids freeing a
             // texture the last frame may still have queued a mesh against.
@@ -3532,6 +3628,9 @@ impl AppState {
 
         // Snapshot pre-stroke state so undo can roll back the dirty sub-rect.
         self.snapshot_pre(target);
+        // The snapshot mirrors the cell, so where it holds anything bounds
+        // the drawing as the stroke found it.
+        self.stroke_base = self.pre_inked;
         if let Some(c) = self.project.cell_mut(target) {
             c.dirty = None;
         }
@@ -3622,16 +3721,30 @@ impl AppState {
         self.stroke_clock = Some(Instant::now());
         builder.tick(0.0);
         builder.push(sample);
-        if let (Some(pre), Some(c)) = (
+        self.stroke = Some(builder);
+        self.flush_stroke(target);
+    }
+
+    /// Paint what the stroke on `target` has decided so far, and mark just
+    /// that for upload. Marking the stroke's whole rect instead, as
+    /// `mark_dirty` would, re-sent everything already streamed at pen-up.
+    fn flush_stroke(&mut self, target: CellId) {
+        let (Some(builder), Some(pre), Some(c)) = (
+            self.stroke.as_mut(),
             self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
-            self.project.cell_mut(target),
-        ) {
-            if let Some(r) = builder.flush(c, &mut self.stroke_ws, pre) {
-                self.preview_upload_rect = Some(union_rect(self.preview_upload_rect, r));
+            self.project.cells.get_mut(target).map(Arc::make_mut),
+        ) else {
+            return;
+        };
+        if let Some(r) = builder.flush(c, &mut self.stroke_ws, pre) {
+            self.preview_upload_rect = Some(union_rect(self.preview_upload_rect, r));
+            self.mark_region(target, Dirty::Rect(r));
+            // Marking forgets whether the cell is blank. Paint says it isn't;
+            // asking again had the timeline scan the whole cell every frame.
+            if self.tool != ActiveTool::Eraser {
+                self.painted(target);
             }
         }
-        self.stroke = Some(builder);
-        self.mark_dirty(target);
     }
 
     pub fn pointer_move(&mut self, sample: PointerSample) {
@@ -3649,15 +3762,7 @@ impl AppState {
         if let Some(t0) = self.stroke_clock {
             builder.tick(t0.elapsed().as_secs_f64() * 1000.0);
         }
-        if let (Some(pre), Some(c)) = (
-            self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
-            self.project.cell_mut(target),
-        ) {
-            if let Some(r) = builder.flush(c, &mut self.stroke_ws, pre) {
-                self.preview_upload_rect = Some(union_rect(self.preview_upload_rect, r));
-            }
-        }
-        self.mark_dirty(target);
+        self.flush_stroke(target);
     }
 
     pub fn pointer_up(&mut self) {
@@ -3699,17 +3804,20 @@ impl AppState {
             if let Some(t0) = self.stroke_clock.take() {
                 builder.tick(t0.elapsed().as_secs_f64() * 1000.0);
             }
+            let mut last = None;
             if let (Some(pre), Some(c)) = (
                 self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
                 self.project.cell_mut(target),
             ) {
-                builder.finish(c, &mut self.stroke_ws, pre);
+                last = builder.finish(c, &mut self.stroke_ws, pre);
             }
-            self.mark_dirty(target);
+            // Only the last of it: the rest went up while it was drawn, and
+            // what hadn't yet is still marked.
+            if let Some(r) = last {
+                self.mark_region(target, Dirty::Rect(r));
+            }
             paints = self.tool != ActiveTool::Eraser;
         }
-        // Any pending partial upload is superseded by the stroke's own rect,
-        // which the dirty mark above uploads now that the stroke ended.
         self.preview_upload_rect = None;
         // Only a stroke that changed something marks the drawing as painted:
         // one the selection clipped away entirely left the cell as it was.
@@ -3817,17 +3925,172 @@ impl AppState {
     }
 
     /// Snapshot `cell`'s pixels as they are before an edit, for the stroke
-    /// compositor and for undo. Into the kept buffer: `extend_from_slice` into
-    /// capacity already there is a plain copy, with no allocation and no page
-    /// faults to pay at pen-down.
+    /// compositor and for undo, into the kept buffer.
+    ///
+    /// Usually there's nothing to copy: the buffer still mirrors the cell
+    /// the last edit landed on (see `pre_mirror`), and drawing goes on in
+    /// one drawing for many strokes. Otherwise only what either drawing
+    /// holds is touched — the old one's ink cleared, the new one's copied
+    /// from where it's packed — not the whole canvas.
     fn snapshot_pre(&mut self, cell: CellId) {
-        self.stroke_pre_pixels.clear();
-        // About to be painted, so unpacked now: the snapshot copies the buffer
-        // the edit will write, instead of building a whole one to copy.
-        if let Some(c) = self.project.cell_mut(cell) {
-            self.stroke_pre_pixels.extend_from_slice(c.pixels_mut());
-        }
         self.stroke_pre_live = true;
+        self.pre_cell = Some(cell);
+        let mirror = self.pre_mirror.take();
+        let Some((len, width, rev)) = self.project.cell(cell).map(|c| (c.byte_len(), c.width, c.rev())) else {
+            self.stroke_pre_pixels.clear();
+            self.pre_inked = None;
+            return;
+        };
+        if self.stroke_pre_pixels.len() != len || self.pre_w != width {
+            // Fresh zeroed pages cost nothing until they're written.
+            self.stroke_pre_pixels = vec![0; len];
+            self.pre_inked = None;
+            self.pre_w = width;
+        } else if mirror == Some((cell, rev)) {
+            return;
+        } else {
+            self.clear_pre();
+        }
+        let c = &self.project.cells[cell];
+        let w = width as usize * 4;
+        self.pre_inked = c.held_rect();
+        if let Some(r) = self.pre_inked {
+            let rows = &mut self.stroke_pre_pixels[r.min_y as usize * w..r.max_y as usize * w];
+            par_rows(rows, w, |first, band| {
+                for (y, out) in (r.min_y + first as u32..).zip(band.chunks_exact_mut(w)) {
+                    let (x0, span) = c.row_span(y);
+                    out[x0 as usize * 4..x0 as usize * 4 + span.len()].copy_from_slice(span);
+                }
+            });
+        }
+    }
+
+    /// Clear what `stroke_pre_pixels` holds, back to all zeros.
+    fn clear_pre(&mut self) {
+        self.pre_mirror = None;
+        let Some(r) = self.pre_inked.take() else {
+            return;
+        };
+        let (x0, x1, w) = (r.min_x as usize * 4, r.max_x as usize * 4, self.pre_w as usize * 4);
+        let rows = &mut self.stroke_pre_pixels[r.min_y as usize * w..r.max_y as usize * w];
+        par_rows(rows, w, |_, band| {
+            for out in band.chunks_exact_mut(w) {
+                out[x0..x1].fill(0);
+            }
+        });
+    }
+
+    /// Where the pen would paint if it went down now: `Some(Some(id))` on
+    /// drawing `id`, `Some(None)` on a new blank one (what auto-key or an
+    /// empty slot makes), and `None` nowhere. See `begin_edit_cell`.
+    fn pen_cell(&self) -> Option<Option<CellId>> {
+        let p = &self.project;
+        let l = p.layers.get(p.current_layer)?;
+        if l.locked || l.reference {
+            return None;
+        }
+        match self.held_for_auto_key() {
+            Some(_) => Some(None),
+            None => Some(l.resolve(p.current_frame)),
+        }
+    }
+
+    /// The drawing this frame holds when the pen, with auto-key on, would
+    /// start a new one here instead: the drawing about to become the one
+    /// before. See `begin_edit_cell`.
+    fn held_for_auto_key(&self) -> Option<CellId> {
+        let p = &self.project;
+        let l = p.layers.get(p.current_layer)?;
+        let f = p.current_frame;
+        if !self.auto_key_draw || l.locked || l.reference || l.is_key(f) {
+            return None;
+        }
+        l.resolve(f)
+    }
+
+    /// The onion ghost the next stroke would bring on: with auto-key about
+    /// to start a new drawing here, the held one becomes the drawing before,
+    /// ghosted. Built ahead with the others while the playhead rests, so the
+    /// first frame of the stroke doesn't build it — on a big 8K drawing,
+    /// tens of ms.
+    fn ghost_ahead(&self) -> Option<(CellId, [u8; 3])> {
+        let on = self.onion.enabled && self.onion.prev > 0 && !self.playback.playing;
+        let id = self.held_for_auto_key().filter(|_| on)?;
+        Some((id, self.onion.tint_rgb(OnionDirection::Prev)))
+    }
+
+    /// Get the drawing the pen would land on ready to paint, once it has
+    /// been that one for `WARM_REST`, so pen-down doesn't pay for it: on a
+    /// big 8K drawing that was 30–60 ms. Its stroke snapshot taken, it
+    /// unpacked — kept so it packs again for free if nothing gets drawn —
+    /// and the last stroke's coverage cleared. For a new blank drawing, the
+    /// snapshot cleared. Only for the tools that paint, and not while an
+    /// edit holds the snapshot, nor while playing or flipping through
+    /// frames, which would pay for every drawing passed.
+    fn warm_pre(&mut self, ctx: &egui::Context) {
+        let paints = matches!(
+            self.tool,
+            ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser | ActiveTool::Fill | ActiveTool::Shape
+        );
+        let busy = self.stroke_pre_live || self.playback.playing || self.selection.is_some() || !paints;
+        let Some(target) = self.pen_cell().filter(|_| !busy) else {
+            self.warm_wait = None;
+            return;
+        };
+        let ready = self.stroke_ws.is_clear()
+            && match target {
+                Some(id) => self
+                    .project
+                    .cell(id)
+                    .is_some_and(|c| !c.is_packed() && self.pre_mirror == Some((id, c.rev()))),
+                None => self.pre_inked.is_none(),
+            };
+        if ready {
+            self.warm_wait = None;
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        let since = match self.warm_wait {
+            Some((t, since)) if t == target => since,
+            _ => {
+                self.warm_wait = Some((target, now));
+                now
+            }
+        };
+        let left = WARM_REST - (now - since);
+        if left > 0.0 {
+            ctx.request_repaint_after(Duration::from_secs_f64(left));
+            return;
+        }
+        self.warm_wait = None;
+        self.stroke_ws.clear_last();
+        match target {
+            Some(id) => {
+                // Snapshot first, from the packed drawing: just its rect.
+                self.snapshot_pre(id);
+                self.stroke_pre_live = false;
+                if let Some(c) = self.project.cell_mut(id) {
+                    c.unpack();
+                }
+                self.pre_mirror = self.project.cell(id).map(|c| (id, c.rev()));
+            }
+            None => self.clear_pre(),
+        }
+    }
+
+    /// `stroke_pre_pixels` was swapped for another snapshot of `cell` — the
+    /// cell as it was before a float lifted — so all that's known of it is
+    /// that it may hold anything, anywhere in that cell.
+    pub(crate) fn pre_replaced(&mut self, cell: CellId) {
+        self.pre_mirror = None;
+        self.pre_cell = Some(cell);
+        self.pre_w = self.project.cell(cell).map_or(0, |c| c.width);
+        self.pre_inked = self.project.cell(cell).map(|c| DirtyRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: c.width,
+            max_y: c.height,
+        });
     }
 
     /// Push a PixelPatch covering the dirty rect accumulated since the last
@@ -3848,7 +4111,6 @@ impl AppState {
         if !std::mem::take(&mut self.stroke_pre_live) {
             return None;
         }
-        let pre = &self.stroke_pre_pixels;
         let canvas = self.project.cells.get(cell)?;
         let rect = canvas.dirty?;
         let w = rect.max_x.saturating_sub(rect.min_x);
@@ -3857,11 +4119,42 @@ impl AppState {
             return None;
         }
 
-        let before = subrect_from_buffer(pre, canvas.width, rect.min_x, rect.min_y, w, h);
-        let after = undo::snapshot_subrect(canvas, rect.min_x, rect.min_y, w, h);
+        // The before from the snapshot and the after from the cell, each
+        // split across threads: on a stroke across an 8K cell these are tens
+        // of MB. Then, the edit having landed, the after goes into the
+        // snapshot. Past `rect` it already matches the cell, so it then
+        // mirrors the cell and the next edit of this cell copies nothing.
+        let pre = &mut self.stroke_pre_pixels;
+        let (cw, row, x0) = (canvas.width as usize * 4, w as usize * 4, rect.min_x as usize * 4);
+        // The snapshot's rows the rect spans, whole.
+        let span = rect.min_y as usize * cw..rect.max_y as usize * cw;
+        let mut after = vec![0u8; row * h as usize];
+        par_rows(&mut after, row, |first, band| {
+            for (y, out) in (rect.min_y + first as u32..).zip(band.chunks_exact_mut(row)) {
+                canvas.read_row_into(y, rect.min_x, out);
+            }
+        });
+        let mut before = vec![0u8; row * h as usize];
+        let was = &pre[span.clone()];
+        par_rows(&mut before, row, |first, band| {
+            for (i, out) in (first..).zip(band.chunks_exact_mut(row)) {
+                out.copy_from_slice(&was[i * cw + x0..i * cw + x0 + row]);
+            }
+        });
+        let changed = before != after;
+        if self.pre_cell == Some(cell) && pre.len() == canvas.byte_len() {
+            let after = &after;
+            par_rows(&mut pre[span], cw, |first, band| {
+                for (i, out) in (first..).zip(band.chunks_exact_mut(cw)) {
+                    out[x0..x0 + row].copy_from_slice(&after[i * row..(i + 1) * row]);
+                }
+            });
+            self.pre_inked = Some(union_rect(self.pre_inked, rect));
+            self.pre_mirror = Some((cell, canvas.rev()));
+        }
 
         // Skip recording no-op strokes (before == after).
-        if before == after {
+        if !changed {
             return None;
         }
 
@@ -5169,6 +5462,7 @@ impl eframe::App for AppState {
 
         self.collect_cells();
         self.pack_idle_cells();
+        self.warm_pre(ctx);
         self.sync_textures(ctx);
         ui::shell::draw(self, ctx);
 
@@ -5181,18 +5475,21 @@ impl eframe::App for AppState {
 /// space, which over-brightens fractional-alpha AA edges once egui blends
 /// them in gamma space — light strokes get a white rim.
 pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
-    let pixels = rgba
-        .chunks_exact(4)
-        .map(|p| match p[3] {
-            0 => Color32::TRANSPARENT,
-            255 => Color32::from_rgb(p[0], p[1], p[2]),
-            a => {
-                let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
-                Color32::from_rgba_premultiplied(m(p[0]), m(p[1]), m(p[2]), a)
-            }
-        })
-        .collect();
+    let pixels = rgba.chunks_exact(4).map(premultiplied).collect();
     ColorImage { size, pixels }
+}
+
+/// One straight-alpha RGBA8 pixel, premultiplied in gamma space. See
+/// `premultiplied_image`.
+fn premultiplied(p: &[u8]) -> Color32 {
+    match p[3] {
+        0 => Color32::TRANSPARENT,
+        255 => Color32::from_rgb(p[0], p[1], p[2]),
+        a => {
+            let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
+            Color32::from_rgba_premultiplied(m(p[0]), m(p[1]), m(p[2]), a)
+        }
+    }
 }
 
 /// Box-filter factor that brings a `w`×`h` cell within `GHOST_MAX_SIDE`.
@@ -5214,40 +5511,37 @@ pub(crate) fn ghost_dims(w: u32, h: u32) -> [usize; 2] {
 /// Painting the cell texture with a tinted vertex color only *multiplies*, and
 /// black line art times any tint is still black. The canvas stretches it back
 /// over the cell's corners, so its smaller size never shows as misplacement.
-pub(crate) fn ghost_image(w: u32, h: u32, rgba: &[u8], tint: [u8; 3]) -> ColorImage {
-    let k = ghost_step(w, h);
-    let [ow, oh] = ghost_dims(w, h);
-    let (w, h) = (w as usize, h as usize);
-    // Alpha summed per ghost texel, one source row at a time.
-    let mut sum = vec![0u32; ow * oh];
-    for y in 0..h {
-        let src = &rgba[y * w * 4..(y + 1) * w * 4];
-        let dst = &mut sum[(y / k) * ow..(y / k + 1) * ow];
-        // One destination texel per k-pixel run of the row; the last run can
-        // be shorter.
-        for (d, run) in dst.iter_mut().zip(src.chunks(k * 4)) {
-            *d += run.chunks_exact(4).map(|p| p[3] as u32).sum::<u32>();
-        }
-    }
-    // Premultiplied in gamma space, matching `premultiplied_image`.
-    let pixels = sum
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| {
-            let (ox, oy) = (i % ow, i / ow);
-            // Texels on the right and bottom edges can cover fewer pixels.
-            let n = ((w - ox * k).min(k) * (h - oy * k).min(k)) as u32;
-            let a = ((s + n / 2) / n) as u8;
-            match a {
-                0 => Color32::TRANSPARENT,
-                255 => Color32::from_rgb(tint[0], tint[1], tint[2]),
-                a => {
-                    let m = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
-                    Color32::from_rgba_premultiplied(m(tint[0]), m(tint[1]), m(tint[2]), a)
+pub(crate) fn ghost_image(c: &Canvas, tint: [u8; 3]) -> ColorImage {
+    let k = ghost_step(c.width, c.height);
+    let [ow, oh] = ghost_dims(c.width, c.height);
+    let (w, h) = (c.width as usize, c.height as usize);
+    // Read where the cell holds anything: on a packed 8K cell, just the
+    // drawing, never a whole buffer built to read.
+    let mut pixels: Vec<Color32> = bytemuck::zeroed_vec(ow * oh);
+    par_rows(&mut pixels, ow, |first, band| {
+        // Alpha summed per ghost texel of the row.
+        let mut sum = vec![0u32; ow];
+        for (oy, dst) in (first..).zip(band.chunks_exact_mut(ow)) {
+            sum.fill(0);
+            for y in oy * k..((oy + 1) * k).min(h) {
+                let (x0, mut rest) = c.row_span(y as u32);
+                let mut x = x0 as usize;
+                // One texel per k-pixel run; a run can start partway.
+                while !rest.is_empty() {
+                    let n = (k - x % k).min(rest.len() / 4);
+                    let (run, tail) = rest.split_at(n * 4);
+                    sum[x / k] += run.chunks_exact(4).map(|p| p[3] as u32).sum::<u32>();
+                    (x, rest) = (x + n, tail);
                 }
             }
-        })
-        .collect();
+            for (ox, (d, &s)) in dst.iter_mut().zip(&sum).enumerate() {
+                // Texels on the right and bottom edges can cover fewer pixels.
+                let n = ((w - ox * k).min(k) * (h - oy * k).min(k)) as u32;
+                // Premultiplied in gamma space, matching `premultiplied_image`.
+                *d = premultiplied(&[tint[0], tint[1], tint[2], ((s + n / 2) / n) as u8]);
+            }
+        }
+    });
     ColorImage {
         size: [ow, oh],
         pixels,
@@ -5855,18 +6149,6 @@ fn doc_to_cell(
     out
 }
 
-/// Slice a sub-rectangle (RGBA8) out of a buffer of width `full_w`.
-fn subrect_from_buffer(buf: &[u8], full_w: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
-    let row_bytes = w as usize * 4;
-    let mut out = vec![0u8; (w * h * 4) as usize];
-    for row in 0..h as usize {
-        let src_off = ((y as usize + row) * full_w as usize + x as usize) * 4;
-        let dst_off = row * row_bytes;
-        out[dst_off..dst_off + row_bytes].copy_from_slice(&buf[src_off..src_off + row_bytes]);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5902,7 +6184,12 @@ mod tests {
 
     /// Run one texture sync and hand back what egui was asked to upload.
     fn sync(st: &mut AppState, ctx: &egui::Context) -> egui::TexturesDelta {
-        ctx.run(egui::RawInput::default(), |ctx| st.sync_textures(ctx)).textures_delta
+        // The app's limit (see `AppState::new`), not egui's headless 2048.
+        let raw = egui::RawInput {
+            max_texture_side: Some(8192),
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| st.sync_textures(ctx)).textures_delta
     }
 
     /// Alpha of the uploaded image for texture `id` at `(x, y)` of the image.
@@ -6578,33 +6865,67 @@ mod tests {
     fn uploads_patch_inside_the_texture_and_recrop_past_it() {
         let mut c = Canvas::new(100, 50);
         c.dirty = None;
-        assert_eq!(plan_upload(&c, None, Dirty::Full, false), TexPlan::Rebuild(rect(0, 0, 0, 0)));
+        assert_eq!(plan_upload(&c, None, Dirty::Full, None), TexPlan::Rebuild(rect(0, 0, 0, 0)));
         for x in 10..20 {
             c.pixels_mut()[(5 * 100 + x) * 4 + 3] = 255;
         }
         let have = rect(8, 3, 22, 8);
-        assert_eq!(plan_upload(&c, None, Dirty::Clean, false), TexPlan::Rebuild(have), "no texture yet");
-        assert_eq!(plan_upload(&c, Some(have), Dirty::Clean, false), TexPlan::Keep);
+        assert_eq!(plan_upload(&c, None, Dirty::Clean, None), TexPlan::Rebuild(have), "no texture yet");
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Clean, None), TexPlan::Keep);
         let inside = rect(12, 4, 15, 6);
-        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(inside), false), TexPlan::Patch(inside));
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(inside), None), TexPlan::Patch(inside));
         // An edit out in the clear that left it clear (an eraser pass):
         // just the part over the texture.
         let erased = rect(0, 0, 12, 4);
         assert_eq!(
-            plan_upload(&c, Some(have), Dirty::Rect(erased), false),
+            plan_upload(&c, Some(have), Dirty::Rect(erased), None),
             TexPlan::Patch(rect(8, 3, 12, 4))
         );
-        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(50, 30, 60, 40)), false), TexPlan::Keep);
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(50, 30, 60, 40)), None), TexPlan::Keep);
         // The drawing spread: crop around all of it.
         c.pixels_mut()[(40 * 100 + 70) * 4 + 3] = 255;
         let grown = rect(8, 3, 73, 43);
-        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(70, 40, 71, 41)), false), TexPlan::Rebuild(grown));
-        assert_eq!(plan_upload(&c, Some(have), Dirty::Full, false), TexPlan::Rebuild(grown));
-        // Under a live stroke, the whole cell in one go.
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(70, 40, 71, 41)), None), TexPlan::Rebuild(grown));
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Full, None), TexPlan::Rebuild(grown));
+        // Under a live stroke a cell this small grows to all of itself.
         let whole = rect(0, 0, 100, 50);
-        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(70, 40, 71, 41)), true), TexPlan::Rebuild(whole));
-        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(inside), true), TexPlan::Patch(inside));
+        let stroke = Some(Some(have));
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(rect(70, 40, 71, 41)), stroke), TexPlan::Rebuild(whole));
+        assert_eq!(plan_upload(&c, Some(have), Dirty::Rect(inside), stroke), TexPlan::Patch(inside));
     }
+
+    /// On a big cell a stroke's texture grows around the stroke, by half
+    /// again and at least `STROKE_ROOM`, never to the whole cell at once.
+    #[test]
+    fn a_stroke_texture_grows_with_room_to_spare() {
+        let (w, h) = (4320, 7680);
+        let dab = rect(2000, 3000, 2100, 3050);
+        let room = rect(1488, 2488, 2612, 3562);
+        assert_eq!(stroke_room(Some(dab), w, h), room);
+        assert_eq!(stroke_room(None, w, h), rect(0, 0, 0, 0), "blank: nothing to hold");
+        assert_eq!(stroke_room(Some(rect(0, 0, 3000, 5000)), w, h), rect(0, 0, w, h), "most of it: all of it");
+        // A new drawing: blank before the stroke, so its first dab is all
+        // there is. Nothing is scanned — the cell is never even unpacked.
+        let mut c = Canvas::new(w, h);
+        c.dirty = Some(dab);
+        assert_eq!(plan_upload(&c, None, Dirty::Full, Some(None)), TexPlan::Rebuild(room));
+        // On a drawing, around it and the dab.
+        let drawn = rect(100, 100, 300, 300);
+        assert_eq!(
+            plan_upload(&c, None, Dirty::Full, Some(Some(drawn))),
+            TexPlan::Rebuild(stroke_room(Some(rect(100, 100, 2100, 3050)), w, h))
+        );
+        // Inside the room: a patch. Past it: room around the texture and
+        // what reached past it.
+        let inside = rect(1500, 2500, 1600, 2600);
+        assert_eq!(plan_upload(&c, Some(room), Dirty::Rect(inside), Some(None)), TexPlan::Patch(inside));
+        let past = rect(2600, 3500, 2700, 3700);
+        assert_eq!(
+            plan_upload(&c, Some(room), Dirty::Rect(past), Some(None)),
+            TexPlan::Rebuild(stroke_room(Some(rect(1488, 2488, 2700, 3700)), w, h))
+        );
+    }
+
 
     #[test]
     fn a_cell_texture_holds_just_its_drawing() {
@@ -6633,6 +6954,8 @@ mod tests {
         assert_eq!(st.layer_texture(0).unwrap().2, rect(98, 48, 312, 207), "re-cropped around both");
     }
 
+    /// On a cell this small the room a stroke's texture gets is most of it,
+    /// so the texture takes all of it, once.
     #[test]
     fn a_stroke_past_the_drawing_takes_the_whole_cell_once() {
         let mut st = AppState::for_test();
@@ -6652,6 +6975,203 @@ mod tests {
         let (_, d) = delta.set.iter().find(|(t, _)| *t == tex).expect("streamed");
         assert!(d.pos.is_some(), "the rest of the stroke is patches");
         st.pointer_up();
+    }
+
+    /// Resting on a drawing takes its stroke snapshot ahead of the pen, so
+    /// pen-down has nothing to copy. On a frame where auto-key would start
+    /// a new drawing it clears the snapshot instead. Passing through, or
+    /// playing, it does nothing.
+    #[test]
+    fn resting_on_a_drawing_readies_its_stroke_snapshot() {
+        let mut st = AppState::for_test();
+        st.auto_key_draw = false;
+        let ctx = egui::Context::default();
+        let at = |st: &mut AppState, t: f64| {
+            let raw = egui::RawInput {
+                time: Some(t),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| st.warm_pre(ctx));
+        };
+        let id = st.project.layers[0].resolve(0).unwrap();
+        ink(&mut st, id, rect(100, 50, 120, 60));
+        Arc::make_mut(&mut st.project.cells[id]).pack();
+        at(&mut st, 0.0);
+        at(&mut st, 0.05);
+        assert_eq!(st.pre_mirror, None, "not yet: it may only be passing");
+        at(&mut st, 0.2);
+        let c = st.project.cell(id).unwrap();
+        assert_eq!(st.pre_mirror, Some((id, c.rev())));
+        assert!(st.stroke_pre_pixels == *c.pixels(), "the snapshot is the drawing");
+        assert!(!st.stroke_pre_live, "and no edit is open");
+
+        // A stroke from it, undone, leaves the drawing as it was.
+        let before = c.pixels().into_owned();
+        st.dispatch(Action::ToolInk);
+        st.pointer_down(st.make_sample(300.0, 300.0, 0.0));
+        st.pointer_move(st.make_sample(400.0, 320.0, 0.1));
+        st.pointer_up();
+        st.undo();
+        assert!(*st.project.cell(id).unwrap().pixels() == before[..]);
+
+        // Held, under auto-key: the pen would start a blank drawing.
+        st.auto_key_draw = true;
+        st.project.add_frame();
+        at(&mut st, 1.0);
+        at(&mut st, 1.2);
+        assert!(st.pre_inked.is_none() && st.stroke_pre_pixels.iter().all(|&b| b == 0), "cleared");
+
+        // Playing: nothing, whatever the rest.
+        st.auto_key_draw = false;
+        st.project.goto(0);
+        st.playback.playing = true;
+        at(&mut st, 2.0);
+        at(&mut st, 3.0);
+        assert_eq!(st.pre_mirror, None);
+    }
+
+    /// With auto-key on, resting on a frame that holds a drawing builds that
+    /// drawing's ghost: the next stroke makes it the drawing before, and its
+    /// first frame then finds the ghost made.
+    #[test]
+    fn auto_key_ghosts_the_held_drawing_ahead_of_the_stroke() {
+        let mut st = AppState::for_test();
+        st.auto_key_draw = true;
+        st.onion.enabled = true;
+        let id = st.project.layers[0].resolve(0).unwrap();
+        ink(&mut st, id, rect(10, 10, 20, 20));
+        st.project.add_frame();
+        let ctx = egui::Context::default();
+        let at = |st: &mut AppState, t: f64| {
+            let raw = egui::RawInput {
+                time: Some(t),
+                ..Default::default()
+            };
+            ctx.run(raw, |ctx| st.sync_textures(ctx)).textures_delta
+        };
+        let _ = at(&mut st, 0.0);
+        assert!(!st.ghost_textures.contains_key(&id), "not while passing through");
+        let _ = at(&mut st, 0.5);
+        let tex = st.ghost_textures.get(&id).expect("built while resting").1.id();
+
+        st.dispatch(Action::ToolInk);
+        st.pointer_down(st.make_sample(300.0, 300.0, 0.0));
+        assert_ne!(st.project.layers[0].resolve(1), Some(id), "a drawing of its own");
+        let delta = at(&mut st, 0.6);
+        assert!(st.ghost_textures.contains_key(&id));
+        assert!(!delta.set.iter().any(|(t, _)| *t == tex), "the ghost wasn't built again");
+        st.pointer_up();
+    }
+
+    /// Read straight from the cell, on threads or not, packed or not: the
+    /// same image as premultiplying a copy of its pixels.
+    #[test]
+    fn a_cell_image_is_its_premultiplied_pixels() {
+        let (w, h) = (1100u32, 1000u32);
+        let mut c = Canvas::new(w, h);
+        let px = c.pixels_mut();
+        for y in 200..900usize {
+            for x in 100..1000usize {
+                let i = (y * w as usize + x) * 4;
+                let v = (x * 7 + y * 13) as u8;
+                px[i..i + 4].copy_from_slice(&[v, v.wrapping_mul(3), 255 - v, v.wrapping_add(x as u8)]);
+            }
+        }
+        let rects = [rect(0, 0, w, h), rect(50, 150, 1050, 950), rect(300, 400, 310, 401), rect(5, 5, 5, 9)];
+        for packed in [false, true] {
+            if packed {
+                c.pack();
+            }
+            for r in rects {
+                let want = crop_image(r, || c.read_rect(r));
+                let got = cell_image(&c, r);
+                assert!(got.size == want.size && got.pixels == want.pixels, "{r:?}, packed: {packed}");
+            }
+        }
+    }
+
+    /// The GPU's copy of every texture, kept by replaying what egui was told
+    /// to upload.
+    #[derive(Default)]
+    struct GpuCopy(HashMap<egui::TextureId, ColorImage>);
+
+    impl GpuCopy {
+        fn apply(&mut self, delta: &egui::TexturesDelta) -> usize {
+            let mut sent = 0;
+            for (id, d) in &delta.set {
+                let egui::ImageData::Color(img) = &d.image else {
+                    continue;
+                };
+                sent += img.pixels.len();
+                match d.pos {
+                    None => {
+                        self.0.insert(*id, (**img).clone());
+                    }
+                    Some([x, y]) => {
+                        let t = self.0.get_mut(id).expect("patch of a texture that exists");
+                        for row in 0..img.size[1] {
+                            let at = (y + row) * t.size[0] + x;
+                            t.pixels[at..at + img.size[0]]
+                                .copy_from_slice(&img.pixels[row * img.size[0]..(row + 1) * img.size[0]]);
+                        }
+                    }
+                }
+            }
+            for id in &delta.free {
+                self.0.remove(id);
+            }
+            sent
+        }
+
+        /// The texture layer `li` shows matches its cell, pixel for pixel.
+        fn assert_shows(&self, st: &AppState, li: usize, what: &str) {
+            let (id, tex, r) = st.layer_texture(li).expect("a texture");
+            let img = &self.0[&tex.id()];
+            let c = st.project.cell(id).unwrap();
+            let want = crop_image(r, || c.read_rect(r));
+            assert!(img.size == want.size && img.pixels == want.pixels, "{what}: the texture is the cell");
+            let outside = c.content_bounds().map_or(true, |b| rect_within(b, r));
+            assert!(outside, "{what}: every inked pixel is inside the texture");
+        }
+    }
+
+    /// A stroke that spreads across a big cell: the texture grows around it
+    /// a few times rather than taking the whole cell, stays exactly the
+    /// cell the whole way, and pen-up sends only what hadn't gone up yet —
+    /// for a Krita brush too, which lays no dab at pen-down.
+    #[test]
+    fn a_spreading_stroke_streams_and_pen_up_sends_only_the_rest() {
+        use crate::tools::BrushMode;
+        for mode in [BrushMode::Ribbon, BrushMode::Krita] {
+            let mut st = AppState::for_test();
+            st.load_project(Project::new(3000, 4000, 24.0), None);
+            st.tool = ActiveTool::Pencil;
+            st.brush.mode = mode;
+            st.brush.radius = 6.0;
+            let ctx = egui::Context::default();
+            let mut gpu = GpuCopy::default();
+            gpu.apply(&sync(&mut st, &ctx));
+            st.pointer_down(st.make_sample(200.0, 300.0, 0.0));
+            gpu.apply(&sync(&mut st, &ctx));
+            let mut sizes = Vec::new();
+            for i in 1..=120 {
+                let t = i as f32 / 120.0;
+                st.pointer_move(st.make_sample(200.0 + 2400.0 * t, 300.0 + 1500.0 * t, i as f32 * 0.01));
+                gpu.apply(&sync(&mut st, &ctx));
+                gpu.assert_shows(&st, 0, &format!("{mode:?} mid-stroke"));
+                let size = st.layer_texture(0).unwrap().1.size();
+                if sizes.last() != Some(&size) {
+                    sizes.push(size);
+                }
+            }
+            assert!(sizes.len() <= 6, "{mode:?}: re-made {} times: {sizes:?}", sizes.len());
+            st.pointer_up();
+            let sent = gpu.apply(&sync(&mut st, &ctx));
+            gpu.assert_shows(&st, 0, &format!("{mode:?} after pen-up"));
+            let r = st.project.cell(st.project.resolved_current().unwrap()).unwrap().dirty.unwrap();
+            let bbox = ((r.max_x - r.min_x) * (r.max_y - r.min_y)) as usize;
+            assert!(sent * 20 < bbox, "{mode:?}: pen-up sent {sent} px of a {bbox} px stroke");
+        }
     }
 
     fn entry(id: CellId, used: u64, mb: usize) -> TexEntry {
@@ -6697,20 +7217,43 @@ mod tests {
         for p in px.chunks_exact_mut(4) {
             p[3] = 255;
         }
-        let g = ghost_image(w, h, &px, [255, 0, 0]);
+        let g = ghost_image(&Canvas::from_pixels(w, h, px.clone()), [255, 0, 0]);
         assert_eq!(g.size, [2048, 4]);
         assert!(g.pixels.iter().all(|&c| c == Color32::from_rgb(255, 0, 0)));
         for (i, p) in px.chunks_exact_mut(4).enumerate() {
             p[3] = if i % 2 == 0 { 255 } else { 0 };
         }
-        let g = ghost_image(w, h, &px, [255, 0, 0]);
+        let g = ghost_image(&Canvas::from_pixels(w, h, px), [255, 0, 0]);
         assert!(g.pixels.iter().all(|c| (127..=128).contains(&c.a())));
+    }
+
+    /// A ghost is read from where the cell holds anything, so packed or not
+    /// it's the same ghost, down to a drawing that starts partway through a
+    /// ghost texel and edge texels that cover fewer pixels.
+    #[test]
+    fn a_packed_cell_makes_the_same_ghost() {
+        let (w, h) = (4100u32, 2050u32);
+        let mut c = Canvas::new(w, h);
+        let px = c.pixels_mut();
+        for y in 301..1777usize {
+            for x in 1003..4100usize {
+                px[(y * w as usize + x) * 4 + 3] = ((x * 3 + y) % 256) as u8;
+            }
+        }
+        let full = ghost_image(&c, [10, 20, 30]);
+        assert_eq!(full.size, [1367, 684]);
+        c.pack();
+        let packed = ghost_image(&c, [10, 20, 30]);
+        assert!(packed.pixels == full.pixels);
+        let one = |a: u8| ghost_image(&Canvas::from_pixels(1, 1, vec![0, 0, 0, a]), [0, 0, 255]).pixels[0];
+        assert_eq!(one(255), Color32::from_rgb(0, 0, 255));
+        assert_eq!(one(0), Color32::TRANSPARENT);
     }
 
     #[test]
     fn a_ghost_that_needs_no_shrinking_is_the_plain_silhouette() {
         let px = [9, 9, 9, 0, 9, 9, 9, 255, 9, 9, 9, 128, 9, 9, 9, 1];
-        let g = ghost_image(4, 1, &px, [0, 0, 255]);
+        let g = ghost_image(&Canvas::from_pixels(4, 1, px.to_vec()), [0, 0, 255]);
         let alphas: Vec<u8> = g.pixels.iter().map(|c| c.a()).collect();
         assert_eq!(alphas, vec![0, 255, 128, 1]);
     }
@@ -7840,7 +8383,7 @@ mod tests {
             black_box(pixels);
         });
         time("onion ghost, downsampled (new)", &mut || {
-            black_box(ghost_image(w, h, &px, [0, 0, 255]));
+            black_box(ghost_image(&Canvas::from_pixels(w, h, px.clone()), [0, 0, 255]));
         });
         time("blank scan of a blank cell, per pixel (old)", &mut || {
             black_box(blank.chunks_exact(4).all(|p| p[3] == 0));
@@ -7857,5 +8400,176 @@ mod tests {
             kept.extend_from_slice(&px);
             black_box(&kept);
         });
+    }
+
+    /// `n` frames of a `w`×`h` project, each keyed with its own drawing: a
+    /// few dozen thick lines across the middle of the canvas, packed.
+    fn probe_project(w: u32, h: u32, n: usize) -> Project {
+        let mut p = Project::new(w, h, 24.0);
+        for f in 0..n {
+            if f > 0 {
+                p.add_frame();
+                p.goto(f);
+                p.insert_blank_key_here();
+            }
+            let id = p.ensure_active_cell();
+            let c = p.cell_mut(id).expect("keyed cell");
+            let (x0, x1) = (w as usize / 5, w as usize * 4 / 5);
+            let px = c.pixels_mut();
+            for k in 0..40 {
+                let y0 = h as usize / 5 + k * (h as usize * 3 / 5) / 40 + f * 7;
+                for y in y0..y0 + 6 {
+                    let row = y * w as usize * 4;
+                    for x in x0..x1 {
+                        px[row + x * 4..row + x * 4 + 4].copy_from_slice(&[20, 20, 20, 255]);
+                    }
+                }
+            }
+            c.pack();
+        }
+        p.goto(0);
+        p
+    }
+
+    /// One frame as the app runs it: housekeeping, texture sync, the whole
+    /// UI, tessellation. Its time in ms and the bytes it sent to the GPU.
+    fn probe_frame(st: &mut AppState, ctx: &egui::Context) -> (f64, usize) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0))),
+            ..Default::default()
+        };
+        let start = Instant::now();
+        let out = ctx.run(raw, |ctx| {
+            st.collect_cells();
+            st.pack_idle_cells();
+            st.warm_pre(ctx);
+            st.sync_textures(ctx);
+            ui::shell::draw(st, ctx);
+        });
+        std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        let bytes = out
+            .textures_delta
+            .set
+            .iter()
+            .map(|(_, d)| d.image.width() * d.image.height() * 4)
+            .sum();
+        (ms, bytes)
+    }
+
+    /// Draw a straight stroke from `a` to `b`, four pen samples a frame,
+    /// and print what each stage cost.
+    fn probe_stroke(st: &mut AppState, ctx: &egui::Context, label: &str, a: (f32, f32), b: (f32, f32)) {
+        const MB: f64 = 1024.0 * 1024.0;
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        let steps = ((b.0 - a.0).hypot(b.1 - a.1) / 6.0).ceil().max(1.0) as usize;
+        let sample = |i: usize| {
+            let t = i as f32 / steps as f32;
+            PointerSample {
+                x: a.0 + (b.0 - a.0) * t,
+                y: a.1 + (b.1 - a.1) * t,
+                pressure: 0.8,
+                t: i as f32 / 240.0,
+                time_ms: i as f64 * 1000.0 / 240.0,
+                ..Default::default()
+            }
+        };
+        let undo_before = st.history.patch_bytes();
+        let start = Instant::now();
+        st.pointer_down(sample(0));
+        let down = ms(start);
+        let (first, mut sent) = probe_frame(st, ctx);
+        let mut frames = Vec::new();
+        let moves: Vec<usize> = (1..=steps).collect();
+        for chunk in moves.chunks(4) {
+            let start = Instant::now();
+            for &i in chunk {
+                st.pointer_move(sample(i));
+            }
+            let pushed = ms(start);
+            let (f, bytes) = probe_frame(st, ctx);
+            frames.push(pushed + f);
+            sent += bytes;
+        }
+        let start = Instant::now();
+        st.pointer_up();
+        let up = ms(start);
+        let (after, after_bytes) = probe_frame(st, ctx);
+        for _ in 0..5 {
+            probe_frame(st, ctx);
+        }
+        let mean = frames.iter().sum::<f64>() / frames.len().max(1) as f64;
+        let max = frames.iter().copied().fold(0.0, f64::max);
+        let undo = st.history.patch_bytes().saturating_sub(undo_before);
+        eprintln!(
+            "{label:<30} down {down:>6.1} +{first:>6.1} | stroke mean {mean:>5.1} max {max:>6.1} \
+             sent {:>6.1} MB | up {up:>6.1} +{after:>6.1} sent {:>6.1} MB | undo {:>5.1} MB",
+            sent as f64 / MB,
+            after_bytes as f64 / MB,
+            undo as f64 / MB,
+        );
+    }
+
+    /// Stroke timings on a big portrait canvas, stage by stage: pen-down
+    /// (the call, then the frame after it), the frames of the stroke, and
+    /// pen-up. Not a pass/fail test — run it for the numbers:
+    /// `cargo test --release perf_big_canvas_stroke -- --ignored --nocapture`
+    /// With `ANIM_PROBE` set to an `.anim` path it measures that project,
+    /// read only, instead of a made-up 4320×7680 one.
+    #[test]
+    #[ignore]
+    fn perf_big_canvas_stroke() {
+        use crate::tools::BrushMode;
+        // Loaded afresh each time: a project the probe kept a copy of would
+        // share its cells, and the first write to each would copy it.
+        let project = || match std::env::var_os("ANIM_PROBE") {
+            Some(p) => crate::io::project_file::load_from(std::path::Path::new(&p)).expect("probe project"),
+            None => probe_project(4320, 7680, 3),
+        };
+        for mode in [BrushMode::Ribbon, BrushMode::Krita] {
+            let mut st = AppState::for_test();
+            st.load_project(project(), None);
+            let (w, h) = (st.project.width as f32, st.project.height as f32);
+            st.auto_key_draw = true;
+            st.lock_brush_to_view = false;
+            // As drawn with: one ghost each side.
+            st.onion.enabled = true;
+            (st.onion.prev, st.onion.next) = (1, 1);
+            st.tool = ActiveTool::Pencil;
+            st.brush.mode = mode;
+            st.brush.radius = 30.0;
+            let ctx = egui::Context::default();
+            let settle = |st: &mut AppState| {
+                for _ in 0..30 {
+                    probe_frame(st, &ctx);
+                }
+            };
+            settle(&mut st);
+            eprintln!(
+                "\n{mode:?} brush, {}x{}, {} cells. Times in ms.",
+                st.project.width,
+                st.project.height,
+                st.project.cells.len()
+            );
+            // A frame past the end holds the last drawing; auto-key gives
+            // the first stroke there a new blank one.
+            st.project.goto(st.project.frame_count - 1);
+            st.project.add_frame();
+            settle(&mut st);
+            let (cx, cy) = (w / 2.0, h / 2.0);
+            probe_stroke(&mut st, &ctx, "new drawing, 600 px", (cx - 300.0, cy), (cx + 300.0, cy + 100.0));
+            probe_stroke(&mut st, &ctx, "same drawing, 600 px", (cx - 300.0, cy + 200.0), (cx + 300.0, cy + 300.0));
+            probe_stroke(&mut st, &ctx, "same drawing, long diagonal", (w * 0.15, h * 0.2), (w * 0.85, h * 0.6));
+            // Back to an old drawing, inside what's drawn there.
+            st.project.goto(0);
+            settle(&mut st);
+            let mid = st
+                .project
+                .resolved_current()
+                .and_then(|id| st.project.cell(id))
+                .and_then(Canvas::content_bounds)
+                .map_or((cx, cy), |r| ((r.min_x + r.max_x) as f32 / 2.0, (r.min_y + r.max_y) as f32 / 2.0));
+            probe_stroke(&mut st, &ctx, "old drawing, 600 px", (mid.0 - 300.0, mid.1), (mid.0 + 300.0, mid.1 + 100.0));
+        }
     }
 }

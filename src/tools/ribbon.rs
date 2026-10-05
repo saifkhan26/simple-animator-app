@@ -132,18 +132,7 @@ impl StrokeWorkspace {
             // Reallocated at the new size by the next wash stroke.
             self.wash = Vec::new();
         } else {
-            if let Some(r) = self.stroke_rect {
-                for y in r.min_y..r.max_y {
-                    let row = (y * self.w) as usize;
-                    self.cov[row + r.min_x as usize..row + r.max_x as usize].fill(0);
-                }
-            }
-            if let (Some(r), false) = (self.wash_rect, self.wash.is_empty()) {
-                for y in r.min_y..r.max_y {
-                    let row = (y * self.w) as usize;
-                    self.wash[row + r.min_x as usize..row + r.max_x as usize].fill(0);
-                }
-            }
+            self.clear_last();
         }
         self.stroke_rect = None;
         self.wash_rect = None;
@@ -154,6 +143,29 @@ impl StrokeWorkspace {
         self.build_up = brush.mode == BrushMode::Dab;
         self.clip = None;
         self.alpha_lock = false;
+    }
+
+    /// Clear what the last stroke left in the buffers, so the next `begin()`
+    /// has nothing to clear: after a stroke across an 8K cell that's ~5 ms,
+    /// better spent while the app is idle than at pen-down.
+    pub fn clear_last(&mut self) {
+        if let Some(r) = self.stroke_rect.take() {
+            for y in r.min_y..r.max_y {
+                let row = (y * self.w) as usize;
+                self.cov[row + r.min_x as usize..row + r.max_x as usize].fill(0);
+            }
+        }
+        if let (Some(r), false) = (self.wash_rect.take(), self.wash.is_empty()) {
+            for y in r.min_y..r.max_y {
+                let row = (y * self.w) as usize;
+                self.wash[row + r.min_x as usize..row + r.max_x as usize].fill(0);
+            }
+        }
+    }
+
+    /// Whether the last stroke has been cleared away. See `clear_last`.
+    pub fn is_clear(&self) -> bool {
+        self.stroke_rect.is_none() && self.wash_rect.is_none()
     }
 
     /// Lock the stroke begun by the last `begin()` to the alpha already on
