@@ -16,6 +16,8 @@ use std::sync::Arc;
 use crate::tools::krita::{defaults, PixelBrush, Resources};
 use crate::tools::BrushSettings;
 
+pub mod import;
+
 /// Thumbnails are this many pixels on their long side.
 pub const THUMB: u32 = 64;
 
@@ -174,7 +176,8 @@ fn scan_imported(root: &Path) -> Vec<Entry> {
     let mut out = Vec::new();
     for d in dirs.flatten() {
         let dir = d.path();
-        if !dir.is_dir() {
+        // `.import-*` is an import still being written.
+        if !dir.is_dir() || d.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
         let Ok(files) = std::fs::read_dir(&dir) else { continue };
@@ -235,10 +238,12 @@ impl BrushLibrary {
         lib
     }
 
+    /// Load, on a thread, every entry not yet loaded or thumbnailed.
     fn start_loading(&mut self) {
         let jobs: Vec<(String, Source)> = self
             .entries
             .iter()
+            .filter(|e| e.status == Status::Loading || !self.thumbs.contains_key(&e.id))
             .map(|e| (e.id.clone(), e.source.clone()))
             .collect();
         let (tx, rx) = mpsc::channel();
@@ -315,12 +320,11 @@ impl BrushLibrary {
 
     /// Re-read the imported folder, after an import.
     pub fn rescan(&mut self) {
-        let keep: Vec<Entry> = self.entries.iter().filter(|e| e.group != Group::Imported).cloned().collect();
-        self.entries = keep;
+        self.entries.retain(|e| e.group != Group::Imported);
+        self.brushes.borrow_mut().retain(|id, _| !id.starts_with("user/"));
+        self.thumbs.retain(|id, _| !id.starts_with("user/"));
         if let Some(root) = &self.root {
-            let imported = scan_imported(root);
-            self.brushes.borrow_mut().retain(|id, _| !id.starts_with("user/"));
-            self.entries.extend(imported);
+            self.entries.extend(scan_imported(root));
         }
         self.start_loading();
     }

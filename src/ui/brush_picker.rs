@@ -19,7 +19,7 @@ const TILE_W: f32 = TILE + 16.0;
 const TILE_H: f32 = TILE + 32.0;
 /// What thumbnails sit on: a paper colour, so dark strokes read on the
 /// dark theme.
-const PAPER: egui::Color32 = egui::Color32::from_rgb(226, 226, 222);
+pub(crate) const PAPER: egui::Color32 = egui::Color32::from_rgb(226, 226, 222);
 
 /// One brush in the grid: a fixed-size tile, so the grid lines up however
 /// long the names are. A brush that cannot paint is drawn faded.

@@ -882,6 +882,8 @@ pub struct AppState {
     pub brush_search: String,
     /// The picker's thumbnails, uploaded as they arrive from the library.
     pub brush_thumbs: HashMap<String, TextureHandle>,
+    /// The Import Krita brushes window, while open.
+    pub krita_import: Option<crate::brush_library::import::KritaImport>,
     /// Pinned swatches, most recently added last. Capped at
     /// [`AppState::MAX_SWATCHES`].
     pub palette: Vec<[u8; 3]>,
@@ -1286,6 +1288,7 @@ impl AppState {
             brush_library: BrushLibrary::new(brush_root),
             brush_search: String::new(),
             brush_thumbs: HashMap::new(),
+            krita_import: None,
             palette: prefs.palette,
             harmony: {
                 let c = restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()].color;
@@ -1673,10 +1676,6 @@ impl AppState {
         (self.view_scale * t.scale.abs()).max(1e-6)
     }
 
-    /// Brush radius in active-cell pixels. With `lock_brush_to_view` the stored
-    /// radius means *screen* pixels, so it is divided back out by the current
-    /// scale — the brush then keeps a constant on-screen footprint and the same
-    /// gesture draws the same stroke at any zoom.
     /// The Krita preset the current brush paints with: the library's, if
     /// it names one the library has, else the built-in one.
     pub fn krita_brush(&self) -> Arc<crate::tools::krita::PixelBrush> {
@@ -1687,6 +1686,29 @@ impl AppState {
             .unwrap_or_else(|| self.brush.krita.brush())
     }
 
+    /// Open the Import Krita brushes window, which starts reading Krita's
+    /// presets. Already open: left as it is.
+    pub fn open_krita_import(&mut self) {
+        if self.krita_import.is_some() {
+            return;
+        }
+        let exe = krita_link::find_krita(self.krita_path.as_deref());
+        let places = crate::brush_library::import::KritaPlaces::find(exe.as_deref());
+        let root = self.brush_library.root().map(|p| p.to_path_buf());
+        self.krita_import = Some(crate::brush_library::import::KritaImport::start(places, root));
+    }
+
+    /// Re-read the imported brushes after an import, dropping thumbnails
+    /// a reused folder name would otherwise keep.
+    pub fn rescan_brushes(&mut self) {
+        self.brush_library.rescan();
+        self.brush_thumbs.retain(|id, _| !id.starts_with("user/"));
+    }
+
+    /// Brush radius in active-cell pixels. With `lock_brush_to_view` the stored
+    /// radius means *screen* pixels, so it is divided back out by the current
+    /// scale — the brush then keeps a constant on-screen footprint and the same
+    /// gesture draws the same stroke at any zoom.
     pub fn effective_radius(&self) -> f32 {
         if self.lock_brush_to_view {
             (self.brush.radius / self.cell_view_scale()).clamp(0.1, 4096.0)

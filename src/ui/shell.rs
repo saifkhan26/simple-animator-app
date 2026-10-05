@@ -77,6 +77,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     // `settings_window`: hiding the panels is what you do to draw, and
     // drawing is when brush feel wants adjusting.
     brush_settings_window(state, ctx);
+    crate::ui::krita_import::krita_import_window(state, ctx);
     // Outside it too: snapping is set per grid, and set while drawing.
     grid_settings_window(state, ctx);
     new_project_dialog(state, ctx);
@@ -768,7 +769,7 @@ fn panel_window(
 ///
 /// Call it first thing in the window's contents. A collapsed window has no
 /// contents, so it still drags from its header.
-fn drag_by_title_only(ui: &mut egui::Ui) {
+pub(crate) fn drag_by_title_only(ui: &mut egui::Ui) {
     // Contents live on the window's own layer, whose id is the window's.
     let id = ui.layer_id().id;
     let Some(outer) = egui::AreaState::load(ui.ctx(), id).map(|s| s.rect()) else {
@@ -3079,6 +3080,13 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 theme::section_header(ui, ic::PEN_NIB, "Preset");
                 crate::ui::brush_picker::brush_grid(state, ui);
+                if ui
+                    .small_button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import from Krita…"))
+                    .on_hover_text("Copy brushes from your Krita into this app")
+                    .clicked()
+                {
+                    state.open_krita_import();
+                }
 
                 ui.add_space(6.0);
                 theme::section_header(ui, ic::SLIDERS, "Dynamics");
@@ -3345,7 +3353,7 @@ fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3]) {
     });
 }
 
-fn floating_frame() -> Frame {
+pub(crate) fn floating_frame() -> Frame {
     Frame::window(&egui::Style::default())
         .fill(theme::BG_PANEL)
         .stroke(Stroke::new(1.0, theme::STROKE_THIN))
@@ -5950,6 +5958,14 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             state.install_krita_helper();
             ui.close_menu();
         }
+        if ui
+            .button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import Krita brushes…"))
+            .on_hover_text("Copy brushes from your Krita into this app's brush picker")
+            .clicked()
+        {
+            state.open_krita_import();
+            ui.close_menu();
+        }
         ui.separator();
         if ui
             .button(theme::icon_text(
@@ -8492,6 +8508,67 @@ mod krita_brush_tests {
         state.brush_search = "hairy".into();
         click_text(&ctx, &mut state, "Hairy");
         assert_eq!(state.brush.krita_id.as_deref(), Some("krita/b)_Basic-5_Size_default"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The import window against a fake Krita: unpaintable presets are
+    /// hidden, Import copies one into the brushes folder, and Use paints
+    /// with it.
+    #[test]
+    fn the_krita_import_window_imports_and_uses_a_brush() {
+        use crate::brush_library::import::{tests as fake, KritaImport};
+        let (ctx, mut state) = picker_state();
+        let (root, places) = fake::fake_krita("window");
+        let brushes = root.join("brushes");
+        state.brush_library = crate::brush_library::BrushLibrary::new(Some(brushes.clone()));
+        settle_library(&mut state);
+        // Brush settings offers it; the test opens it on the fake Krita
+        // rather than this machine's.
+        let open = theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import from Krita…");
+        assert!(text_at(&ctx, &mut state, &open).is_some(), "the button under the picker");
+        // So does File, on the top bar the panels bring.
+        state.show_panels = true;
+        run(&ctx, &mut state, vec![]);
+        click_text(&ctx, &mut state, &theme::icon_text(ic::FOLDER, "File"));
+        let item = theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import Krita brushes…");
+        assert!(text_at(&ctx, &mut state, &item).is_some(), "in the File menu");
+        run(&ctx, &mut state, vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert!(state.krita_import.is_none(), "looking does not open it");
+        state.show_panels = false;
+        run(&ctx, &mut state, vec![]);
+        state.krita_import = Some(KritaImport::start(places, Some(brushes.clone())));
+        fake::settle(state.krita_import.as_mut().unwrap());
+        // A new window's first frame only measures it.
+        run(&ctx, &mut state, vec![]);
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "Your Krita presets  ·  2 of 3 paint"), "{t:?}");
+        assert!(t.iter().any(|s| s == "My Grain"), "{t:?}");
+        assert!(!t.iter().any(|s| s == "Hairy"), "unpaintable presets wait for Show the rest");
+        // Its rows fill the width without pushing the window wider.
+        let size = || egui::AreaState::load(&ctx, egui::Id::new("window_krita_import")).map(|a| a.rect().size());
+        let before = size();
+        for _ in 0..5 {
+            run(&ctx, &mut state, vec![]);
+        }
+        assert!(before.is_some());
+        assert_eq!(size(), before);
+
+        state.krita_import.as_mut().unwrap().search = "grain".into();
+        click_text(&ctx, &mut state, "Import");
+        assert!(brushes.join("My Grain").join("graphite_grain.gih").is_file());
+        assert!(state.brush_library.entry("user/My Grain").is_some(), "the picker lists it");
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s.starts_with("Imported My Grain.")), "{t:?}");
+
+        click_text(&ctx, &mut state, "Use");
+        assert_eq!(state.brush.mode, BrushMode::Krita);
+        assert_eq!(state.brush.krita_id.as_deref(), Some("user/My Grain"));
         std::fs::remove_dir_all(&root).ok();
     }
 
