@@ -212,6 +212,9 @@ pub struct BrushSettings {
     /// as an id so a preferences file names the brush, not its contents; an
     /// id the library no longer has falls back to `krita`.
     pub krita_id: Option<String>,
+    /// The brush editor's changes to that preset: `(param, value)` pairs
+    /// set over its own. Empty for the preset as it comes.
+    pub krita_overrides: Vec<(String, String)>,
     /// Shape of the stroke's two ends. `Ribbon` mode only: a dab brush's
     /// coverage builds up, so its ends cannot be re-cut after the fact.
     pub cap: StrokeCap,
@@ -253,6 +256,7 @@ impl Default for BrushSettings {
             mode: BrushMode::Ribbon,
             krita: krita::KritaPreset::default(),
             krita_id: None,
+            krita_overrides: Vec::new(),
             cap: StrokeCap::Round,
             fill_tolerance: 16,
             fill_expand: 0,

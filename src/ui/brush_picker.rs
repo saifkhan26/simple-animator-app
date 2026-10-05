@@ -204,15 +204,3 @@ pub fn describe(b: &PixelBrush) -> Vec<String> {
     lines
 }
 
-/// The summary for a brush picked from the library, or `None` for the
-/// built-in Pencil-5.
-pub fn library_summary(state: &AppState, ui: &mut egui::Ui) -> bool {
-    let Some(id) = state.brush.krita_id.as_deref() else { return false };
-    let Some(entry) = state.brush_library.entry(id) else { return false };
-    let Some(b) = state.brush_library.brush(id) else { return false };
-    ui.label(RichText::new(format!("Krita · {}", entry.name)).strong());
-    for l in describe(&b) {
-        ui.label(RichText::new(l).small());
-    }
-    true
-}

@@ -1679,11 +1679,13 @@ impl AppState {
     /// The Krita preset the current brush paints with: the library's, if
     /// it names one the library has, else the built-in one.
     pub fn krita_brush(&self) -> Arc<crate::tools::krita::PixelBrush> {
-        self.brush
-            .krita_id
-            .as_deref()
-            .and_then(|id| self.brush_library.brush(id))
-            .unwrap_or_else(|| self.brush.krita.brush())
+        if let Some(id) = self.brush.krita_id.as_deref() {
+            // An edit that no longer builds paints the preset unedited.
+            if let Some(b) = self.brush_library.brush_with(id, &self.brush.krita_overrides).ok().or_else(|| self.brush_library.brush(id)) {
+                return b;
+            }
+        }
+        self.brush.krita.brush()
     }
 
     /// Open the Import Krita brushes window, which starts reading Krita's

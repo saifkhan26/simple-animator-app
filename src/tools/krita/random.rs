@@ -88,6 +88,7 @@ impl RandomSource {
     }
 
     /// `generate()`.
+    #[cfg(test)]
     pub fn generate(&mut self) -> u32 {
         self.rng.next_u32()
     }

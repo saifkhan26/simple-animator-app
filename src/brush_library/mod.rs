@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
+use crate::tools::krita::kpp::Preset;
 use crate::tools::krita::{defaults, PixelBrush, Resources};
 use crate::tools::BrushSettings;
 
@@ -75,10 +76,18 @@ struct Loaded {
     thumb: Option<egui::ColorImage>,
 }
 
+/// Brushes built from edited presets lately, newest last.
+type Edited = Vec<(String, Vec<(String, String)>, Result<Arc<PixelBrush>, String>)>;
+/// The last edited preset asked for.
+type EditedPreset = Option<(String, Vec<(String, String)>, Arc<Preset>)>;
+
 pub struct BrushLibrary {
     root: Option<PathBuf>,
     pub entries: Vec<Entry>,
     brushes: RefCell<HashMap<String, Arc<PixelBrush>>>,
+    presets: RefCell<HashMap<String, Arc<Preset>>>,
+    edited: RefCell<Edited>,
+    edited_preset: RefCell<EditedPreset>,
     thumbs: HashMap<String, egui::ColorImage>,
     incoming: Option<Receiver<Loaded>>,
 }
@@ -103,6 +112,76 @@ impl Resources for FolderTips<'_> {
         std::fs::read(self.0.join(name)).ok().map(std::borrow::Cow::Owned)
     }
 }
+
+/// One source of tips, then another.
+struct Chain<'a>(&'a dyn Resources, &'a dyn Resources);
+
+impl Resources for Chain<'_> {
+    fn tip(&self, filename: &str) -> Option<std::borrow::Cow<'_, [u8]>> {
+        self.0.tip(filename).or_else(|| self.1.tip(filename))
+    }
+}
+
+/// Build `preset` with the tips `source` can reach, and the shipped ones
+/// (an edit may switch to one of those).
+fn build_edited(source: &Source, preset: &Preset) -> Result<PixelBrush, String> {
+    let r = match source {
+        Source::Folder(dir, _) => PixelBrush::from_preset(preset, &Chain(&FolderTips(dir), &defaults::DefaultTips)),
+        _ => PixelBrush::from_preset(preset, &defaults::DefaultTips),
+    };
+    r.map_err(|e| format!("{e:#}"))
+}
+
+/// A tip `source` can reach, or a shipped one.
+fn source_tip(source: &Source, file: &str) -> Option<Vec<u8>> {
+    let found = match source {
+        Source::Folder(dir, _) => Chain(&FolderTips(dir), &defaults::DefaultTips).tip(file).map(|c| c.into_owned()),
+        _ => defaults::DefaultTips.tip(file).map(|c| c.into_owned()),
+    };
+    found
+}
+
+/// A Krita brush's S-stroke on paper: a saved preset's picture.
+fn krita_picture(brush: Arc<PixelBrush>, size: u32) -> image::RgbaImage {
+    use crate::doc::canvas::Canvas;
+    use crate::input::pointer::PointerSample;
+    use crate::tools::ribbon::StrokeWorkspace;
+    use crate::tools::stroke::StrokeBuilder;
+    use crate::tools::{ActiveTool, BrushMode, SmoothingOptions};
+    let mut c = Canvas::new(size, size);
+    let b = BrushSettings {
+        mode: BrushMode::Krita,
+        radius: (brush.diameter() / 2.0).min(size as f64 / 8.0) as f32,
+        color: [20, 20, 20, 255],
+        ..BrushSettings::default()
+    };
+    let pre = c.pixels().into_owned();
+    let mut ws = StrokeWorkspace::new();
+    ws.begin(size, size, &b);
+    let mut s = StrokeBuilder::new_with_krita(b, ActiveTool::Pencil, 1.0, SmoothingOptions::default(), brush);
+    let f = size as f32;
+    for i in 0..=60 {
+        let t = i as f32 / 60.0;
+        let p = (t * std::f32::consts::PI).sin().powf(0.6).clamp(0.05, 1.0);
+        let mut sample = PointerSample::at(f * 0.12 + t * f * 0.76, f / 2.0 + (t * 6.0).sin() * f * 0.22, p);
+        sample.tilt_x = 35.0;
+        sample.time_ms = i as f64 * 8.0;
+        s.push(sample);
+        s.flush(&mut c, &mut ws, &pre);
+    }
+    s.finish(&mut c, &mut ws, &pre);
+    // Over paper, so it reads in Krita's chooser as in ours.
+    let px = c.pixels();
+    image::RgbaImage::from_fn(size, size, |x, y| {
+        let i = ((y * size + x) * 4) as usize;
+        let a = px[i + 3] as u32;
+        let over = |ch: u32, paper: u32| ((ch * a + paper * (255 - a) + 127) / 255) as u8;
+        image::Rgba([over(px[i] as u32, 226), over(px[i + 1] as u32, 226), over(px[i + 2] as u32, 222), 255])
+    })
+}
+
+/// Tip files that sit beside an imported preset.
+const TIP_EXTENSIONS: [&str; 3] = ["png", "gbr", "gih"];
 
 fn load_source(source: &Source) -> Result<PixelBrush, String> {
     match source {
@@ -231,6 +310,9 @@ impl BrushLibrary {
             root,
             entries,
             brushes: RefCell::new(HashMap::new()),
+            presets: RefCell::new(HashMap::new()),
+            edited: RefCell::new(Vec::new()),
+            edited_preset: RefCell::new(None),
             thumbs: HashMap::new(),
             incoming: None,
         };
@@ -314,6 +396,96 @@ impl BrushLibrary {
         Some(b)
     }
 
+    /// A Krita entry's preset, as its file says it.
+    pub fn preset(&self, id: &str) -> Option<Arc<Preset>> {
+        if let Some(p) = self.presets.borrow().get(id) {
+            return Some(p.clone());
+        }
+        let bytes = kpp_bytes(&self.entry(id)?.source)?;
+        let p = Arc::new(Preset::read(&bytes).ok()?);
+        self.presets.borrow_mut().insert(id.to_owned(), p.clone());
+        Some(p)
+    }
+
+    /// A Krita entry's brush with the editor's `overrides` set over its
+    /// preset, or why that does not build.
+    pub fn brush_with(&self, id: &str, overrides: &[(String, String)]) -> Result<Arc<PixelBrush>, String> {
+        if overrides.is_empty() {
+            return self.brush(id).ok_or_else(|| format!("no brush `{id}`"));
+        }
+        if let Some((_, _, b)) = self.edited.borrow().iter().find(|(i, o, _)| i == id && o == overrides) {
+            return b.clone();
+        }
+        let built = match (self.entry(id), self.preset(id)) {
+            (Some(e), Some(p)) => build_edited(&e.source, &p.with_overrides(overrides)).map(Arc::new),
+            _ => Err(format!("no brush `{id}`")),
+        };
+        let mut edited = self.edited.borrow_mut();
+        edited.push((id.to_owned(), overrides.to_vec(), built.clone()));
+        // A slider drag builds one per frame; only the last few matter.
+        if edited.len() > 4 {
+            edited.drain(..1);
+        }
+        built
+    }
+
+    /// Entry `id`'s preset with `overrides` set over it: what the editor
+    /// shows. Rebuilt only when the overrides change.
+    pub fn edited_preset(&self, id: &str, overrides: &[(String, String)]) -> Option<Arc<Preset>> {
+        if let Some((i, o, p)) = &*self.edited_preset.borrow() {
+            if i == id && o == overrides {
+                return Some(p.clone());
+            }
+        }
+        let p = Arc::new(self.preset(id)?.with_overrides(overrides));
+        *self.edited_preset.borrow_mut() = Some((id.to_owned(), overrides.to_vec(), p.clone()));
+        Some(p)
+    }
+
+    /// Save entry `id` with `overrides` as a new imported preset called
+    /// `name`, carrying its tip, and return the new entry's id.
+    pub fn save_as_new(&mut self, id: &str, overrides: &[(String, String)], name: &str) -> anyhow::Result<String> {
+        use crate::tools::krita::{edit, kpp_write};
+        let root = self.root.clone().ok_or_else(|| anyhow::anyhow!("there is no brushes folder to save into"))?;
+        let source = self.entry(id).ok_or_else(|| anyhow::anyhow!("no brush `{id}`"))?.source.clone();
+        let mut p = self.preset(id).ok_or_else(|| anyhow::anyhow!("no preset for `{id}`"))?.with_overrides(overrides);
+        p.name = name.trim().to_owned();
+        let def = p.string("brush_definition").unwrap_or_default();
+        if let Some(file) = edit::attr(&def, "Brush", "filename").filter(|f| !f.is_empty()) {
+            if !p.resources.iter().any(|r| r.kind == "brushes" && r.filename == file) {
+                let data = source_tip(&source, &file).ok_or_else(|| anyhow::anyhow!("the tip `{file}` is missing"))?;
+                kpp_write::embed_tip(&mut p, &file, data);
+            }
+        }
+        let brush = build_edited(&source, &p).map_err(|e| anyhow::anyhow!(e))?;
+        let kpp = kpp_write::write(&p, &krita_picture(Arc::new(brush), 128))?;
+        let file = format!("{}.kpp", import::folder_name(&p.name));
+        let info = import::SourceInfo {
+            origin: format!("edited from {id}"),
+            file: file.clone(),
+            hash: format!("{:016x}", import::hash(&kpp)),
+        };
+        let new_id = import::install(&root, &p.name, vec![(file, kpp)], info)?;
+        self.rescan();
+        Ok(new_id)
+    }
+
+    /// The tip files an edit of entry `id` can switch to: the shipped
+    /// ones, and any beside an imported preset.
+    pub fn tips_for(&self, id: &str) -> Vec<String> {
+        let mut tips: Vec<String> = defaults::TIPS.iter().map(|s| s.to_string()).collect();
+        if let Some(Entry { source: Source::Folder(dir, _), .. }) = self.entry(id) {
+            for f in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = f.file_name().to_string_lossy().into_owned();
+                let ext = name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+                if TIP_EXTENSIONS.contains(&ext.as_str()) && !tips.contains(&name) {
+                    tips.push(name);
+                }
+            }
+        }
+        tips
+    }
+
     pub fn thumbnail(&self, id: &str) -> Option<&egui::ColorImage> {
         self.thumbs.get(id)
     }
@@ -322,6 +494,9 @@ impl BrushLibrary {
     pub fn rescan(&mut self) {
         self.entries.retain(|e| e.group != Group::Imported);
         self.brushes.borrow_mut().retain(|id, _| !id.starts_with("user/"));
+        self.presets.borrow_mut().retain(|id, _| !id.starts_with("user/"));
+        self.edited.borrow_mut().retain(|(id, _, _)| !id.starts_with("user/"));
+        *self.edited_preset.borrow_mut() = None;
         self.thumbs.retain(|id, _| !id.starts_with("user/"));
         if let Some(root) = &self.root {
             self.entries.extend(scan_imported(root));
@@ -386,6 +561,36 @@ pub(crate) mod tests {
         assert_eq!(a.diameter(), b.diameter());
         assert_eq!(a.wash, b.wash);
         assert!(lib.brush("krita/nope").is_none());
+    }
+
+    /// An edit paints differently, and Save as new keeps it: the saved
+    /// preset carries its tip and loads as the edited brush.
+    #[test]
+    fn edits_build_and_save_as_new_presets() {
+        let root = crate::brush_library::import::tests::tmp("save-as");
+        let mut lib = BrushLibrary::new(Some(root.clone()));
+        let id = "krita/c)_Pencil-5_Tilted";
+        let edit = vec![("FlowValue".to_owned(), "0.3".to_owned()), ("PaintOpAction".to_owned(), "2".to_owned())];
+        let b = lib.brush_with(id, &edit).unwrap();
+        assert!(b.wash, "the edit applies");
+        assert!(!lib.brush(id).unwrap().wash, "the preset itself is untouched");
+        assert!(Arc::ptr_eq(&b, &lib.brush_with(id, &edit).unwrap()), "built once");
+        assert_eq!(lib.edited_preset(id, &edit).unwrap().string("FlowValue").as_deref(), Some("0.3"));
+        let bad = vec![("brush_definition".to_owned(), "<Brush type=\"nope\"/>".to_owned())];
+        assert!(lib.brush_with(id, &bad).is_err());
+
+        let new_id = lib.save_as_new(id, &edit, "Soft wash").unwrap();
+        assert_eq!(new_id, "user/Soft wash");
+        let dir = root.join("Soft wash");
+        assert!(dir.join("Soft wash.kpp").is_file());
+        assert!(!dir.join("gradient.png").exists(), "the tip travels inside the preset");
+        settle(&mut lib);
+        assert_eq!(lib.entry(&new_id).unwrap().status, Status::Ready);
+        let saved = lib.brush(&new_id).unwrap();
+        assert!(saved.wash);
+        assert_eq!(saved.diameter(), b.diameter());
+        assert!(lib.thumbnail(&new_id).is_some(), "its picture is the engine's stroke");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

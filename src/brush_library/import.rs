@@ -112,7 +112,7 @@ pub struct Candidate {
 }
 
 /// FNV-1a over a preset's bytes: identical files are the same preset.
-fn hash(bytes: &[u8]) -> u64 {
+pub(super) fn hash(bytes: &[u8]) -> u64 {
     bytes
         .iter()
         .fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
@@ -385,7 +385,7 @@ pub fn scan(
 
 /// A folder name from a preset's name: no path separators or characters
 /// Windows refuses, and not one of its reserved device names.
-fn folder_name(name: &str) -> String {
+pub(super) fn folder_name(name: &str) -> String {
     let mut s: String = name
         .chars()
         .map(|c| if c.is_alphanumeric() || " -_()+,.'".contains(c) { c } else { '_' })
@@ -408,10 +408,10 @@ fn folder_name(name: &str) -> String {
 
 /// Where an imported preset came from, kept beside it.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct SourceInfo {
-    origin: String,
-    file: String,
-    hash: String,
+pub(super) struct SourceInfo {
+    pub origin: String,
+    pub file: String,
+    pub hash: String,
 }
 
 /// Copy a preset and the tips it uses into a new folder under `root`.
@@ -424,35 +424,42 @@ pub fn import(pool: &Pool, group: &SourceGroup, c: &Candidate, root: &Path) -> R
         used: RefCell::new(Vec::new()),
     };
     PixelBrush::load(&bytes, &rec).with_context(|| c.name.clone())?;
+    let kpp_name = c.file.rsplit('/').next().unwrap_or(&c.file).to_owned();
+    let mut files = vec![(kpp_name, bytes)];
+    files.extend(rec.used.into_inner());
+    let info = SourceInfo {
+        origin: group.path.display().to_string(),
+        file: c.file.clone(),
+        hash: format!("{:016x}", c.hash),
+    };
+    install(root, &c.name, files, info)
+}
+
+/// Put a preset's `files` (the `.kpp` first) and its `source.toml` into a
+/// new folder under `root` named after `name`, and return its library id.
+/// The folder is built aside and renamed into place, so the library never
+/// sees half of it, and must load on its own before it is.
+pub(super) fn install(root: &Path, name: &str, files: Vec<(String, Vec<u8>)>, info: SourceInfo) -> Result<String> {
     std::fs::create_dir_all(root).with_context(|| root.display().to_string())?;
-    // Built aside and renamed into place, so the library never sees half
-    // an import.
     let tmp = root.join(format!(".import-{}", std::process::id()));
     if tmp.exists() {
         std::fs::remove_dir_all(&tmp).ok();
     }
     std::fs::create_dir(&tmp).with_context(|| tmp.display().to_string())?;
     let written = (|| -> Result<()> {
-        let kpp_name = c.file.rsplit('/').next().unwrap_or(&c.file);
-        std::fs::write(tmp.join(kpp_name), &bytes)?;
-        for (name, data) in rec.used.borrow().iter() {
-            std::fs::write(tmp.join(name), data)?;
+        for (file, data) in &files {
+            std::fs::write(tmp.join(file), data)?;
         }
-        let info = SourceInfo {
-            origin: group.path.display().to_string(),
-            file: c.file.clone(),
-            hash: format!("{:016x}", c.hash),
-        };
         std::fs::write(tmp.join("source.toml"), toml::to_string(&info)?)?;
-        // What the library will read must load on its own.
-        PixelBrush::load(&bytes, &FolderTips(&tmp)).context("the copy does not load")?;
+        let kpp = &files.first().ok_or_else(|| anyhow!("no preset to install"))?.1;
+        PixelBrush::load(kpp, &FolderTips(&tmp)).context("the copy does not load")?;
         Ok(())
     })();
     if let Err(e) = written {
         std::fs::remove_dir_all(&tmp).ok();
         return Err(e);
     }
-    let base = folder_name(&c.name);
+    let base = folder_name(name);
     let mut folder = base.clone();
     let mut n = 2;
     while root.join(&folder).exists() {
@@ -461,7 +468,7 @@ pub fn import(pool: &Pool, group: &SourceGroup, c: &Candidate, root: &Path) -> R
     }
     if let Err(e) = std::fs::rename(&tmp, root.join(&folder)) {
         std::fs::remove_dir_all(&tmp).ok();
-        bail!("moving the import into place: {e}");
+        bail!("moving the brush into place: {e}");
     }
     Ok(format!("user/{folder}"))
 }
