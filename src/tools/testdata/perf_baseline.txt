@@ -1,0 +1,12 @@
+# machine	case	total_ms	worst_flush_ms (release, best of 3)
+DESKTOP-ODBQ8JD	Pencil	17.98	0.081
+DESKTOP-ODBQ8JD	4B	40.34	0.165
+DESKTOP-ODBQ8JD	Tilted	71.79	0.298
+DESKTOP-ODBQ8JD	Pencil-5	30.42	0.144
+DESKTOP-ODBQ8JD	G-Pen	5.48	0.031
+DESKTOP-ODBQ8JD	Airbrush	45.55	0.236
+DESKTOP-ODBQ8JD	Shape-ellipse	6.41	6.413
+DESKTOP-ODBQ8JD	krita/b)_Basic-5_Size_default	10.42	0.062
+DESKTOP-ODBQ8JD	krita/a)_Eraser_Soft	14.34	0.162
+DESKTOP-ODBQ8JD	krita/b)_Airbrush_Soft	125.87	5.451
+DESKTOP-ODBQ8JD	krita/e)_Marker_Dry	59.21	0.246

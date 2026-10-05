@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use eframe::CreationContext;
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
+use crate::brush_library::BrushLibrary;
 use crate::color::{Harmony, HarmonySet};
 use crate::doc::camera::{Camera, Ease};
 use crate::doc::canvas::{Canvas, DirtyRect};
@@ -875,6 +876,12 @@ pub struct AppState {
 
     pub tool: ActiveTool,
     pub brush: BrushSettings,
+    /// Every brush the picker offers, Krita's included.
+    pub brush_library: BrushLibrary,
+    /// The picker's search text. Session-only.
+    pub brush_search: String,
+    /// The picker's thumbnails, uploaded as they arrive from the library.
+    pub brush_thumbs: HashMap<String, TextureHandle>,
     /// Pinned swatches, most recently added last. Capped at
     /// [`AppState::MAX_SWATCHES`].
     pub palette: Vec<[u8; 3]>,
@@ -1233,18 +1240,20 @@ impl AppState {
             .storage
             .and_then(|s| eframe::get_value(s, UI_PREFS_KEY))
             .unwrap_or_default();
-        Self::with_prefs(prefs, max_tex)
+        let root = shortcuts::config_dir().map(|d| d.join("brushes"));
+        Self::with_prefs(prefs, max_tex, root)
     }
 
     /// A state with default preferences and no window, for driving UI code
     /// from tests. `CreationContext` can't be built outside eframe.
     #[cfg(test)]
     pub fn for_test() -> Self {
-        Self::with_prefs(UiPrefs::default(), 8192)
+        Self::with_prefs(UiPrefs::default(), 8192, None)
     }
 
     /// Everything `new` does that doesn't need the window.
-    fn with_prefs(prefs: UiPrefs, max_tex: u32) -> Self {
+    /// `brush_root`: where imported Krita presets live (none in tests).
+    fn with_prefs(prefs: UiPrefs, max_tex: u32, brush_root: Option<PathBuf>) -> Self {
         let project = Project::new(1280, 720, 24.0);
         let mut cell_dirty = HashMap::new();
         for id in 0..project.cells.len() {
@@ -1274,6 +1283,9 @@ impl AppState {
             tool: ActiveTool::Pencil,
             brush: restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()]
                 .clone(),
+            brush_library: BrushLibrary::new(brush_root),
+            brush_search: String::new(),
+            brush_thumbs: HashMap::new(),
             palette: prefs.palette,
             harmony: {
                 let c = restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()].color;
@@ -1435,9 +1447,11 @@ impl AppState {
         for id in 0..self.project.cells.len() {
             self.cell_dirty.insert(id, Dirty::Full);
         }
+        // Brushes are the artist's, not the project's: keep every tool's,
+        // the active one included, and come back on the pencil.
+        self.tool_brushes[self.tool.idx()] = self.brush.clone();
         self.tool = ActiveTool::Pencil;
-        self.brush = BrushSettings::default_pencil();
-        self.tool_brushes = default_tool_brushes();
+        self.brush = self.tool_brushes[ActiveTool::Pencil.idx()].clone();
         self.grid_drag = None;
         self.snap_lock = None;
         self.stroke = None;
@@ -1607,6 +1621,8 @@ impl AppState {
             tilt_x,
             tilt_y,
             t,
+            time_ms: t as f64 * 1000.0,
+            ..Default::default()
         }
     }
 
@@ -1621,6 +1637,8 @@ impl AppState {
             tilt_x: p.tilt_x,
             tilt_y: p.tilt_y,
             t,
+            time_ms: t as f64 * 1000.0,
+            ..Default::default()
         }
     }
 
@@ -1655,6 +1673,16 @@ impl AppState {
     /// radius means *screen* pixels, so it is divided back out by the current
     /// scale — the brush then keeps a constant on-screen footprint and the same
     /// gesture draws the same stroke at any zoom.
+    /// The Krita preset the current brush paints with: the library's, if
+    /// it names one the library has, else the built-in one.
+    pub fn krita_brush(&self) -> Arc<crate::tools::krita::PixelBrush> {
+        self.brush
+            .krita_id
+            .as_deref()
+            .and_then(|id| self.brush_library.brush(id))
+            .unwrap_or_else(|| self.brush.krita.brush())
+    }
+
     pub fn effective_radius(&self) -> f32 {
         if self.lock_brush_to_view {
             (self.brush.radius / self.cell_view_scale()).clamp(0.1, 4096.0)
@@ -3536,8 +3564,9 @@ impl AppState {
         // change width or smoothing behaviour partway through if the view moves.
         let mut brush = self.brush.clone();
         brush.radius = self.effective_radius();
+        let krita = self.krita_brush();
         let mut builder =
-            StrokeBuilder::new(brush, self.tool, self.cell_view_scale(), self.smoothing);
+            StrokeBuilder::new_with_krita(brush, self.tool, self.cell_view_scale(), self.smoothing, krita);
         let (rotation, mirrored) = self.cell_screen_orientation();
         builder.orient(rotation, mirrored);
         builder.push(sample);
@@ -4190,6 +4219,9 @@ impl AppState {
     /// Commit a sampled colour: apply it to every tool, restore the drawing tool
     /// that was active before picking, and leave pick mode.
     pub fn commit_screen_pick(&mut self, color: [u8; 4]) {
+        // The active brush may have changed since its slot was last written
+        // (a preset, a slider); keep that before reloading from the slots.
+        self.tool_brushes[self.tool.idx()] = self.brush.clone();
         // Apply to the active brush and every tool's stored colour so the sample
         // sticks across tool switches.
         for b in &mut self.tool_brushes {
@@ -4932,6 +4964,10 @@ impl eframe::App for AppState {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Only a tool switch writes the active brush back to its slot, so a
+        // change made since the last switch lives in `brush` alone.
+        let mut tool_brushes = self.tool_brushes.to_vec();
+        tool_brushes[self.tool.idx()] = self.brush.clone();
         eframe::set_value(
             storage,
             UI_PREFS_KEY,
@@ -4951,7 +4987,7 @@ impl eframe::App for AppState {
                 right_drag: self.right_drag,
                 loop_timeline: self.loop_timeline,
                 smoothing: self.smoothing,
-                tool_brushes: Some(self.tool_brushes.to_vec()),
+                tool_brushes: Some(tool_brushes),
                 palette: self.palette.clone(),
                 track_frame_w: self.track_frame_w,
                 perspective: PerspectiveConfig {
@@ -4987,6 +5023,10 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Pick up any layer selection made last frame, whatever moved it.
         self.track_layer_change();
+        // Krita presets and thumbnails arrive from the library's loader.
+        if self.brush_library.poll() || self.brush_library.loading() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         self.blank_scans_left = Self::BLANK_SCANS_PER_FRAME;
 
         // Resolve any deferred preview-texture free now, before drawing, so the
@@ -7142,6 +7182,133 @@ mod tests {
         assert_eq!(state.perspective.active, 0);
     }
 
+    /// `eframe::Storage` in memory, so prefs go through the same RON
+    /// serialisation the app's `ui.ron` does.
+    #[derive(Default)]
+    struct MemStorage(HashMap<String, String>);
+
+    impl eframe::Storage for MemStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn flush(&mut self) {}
+    }
+
+    const PREFS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/ui_prefs_v1.ron");
+
+    /// The brushes in the prefs fixture: every slot tuned away from its
+    /// default, the Krita Pencil-5 among them.
+    fn fixture_brushes() -> Vec<BrushSettings> {
+        let mut v = default_tool_brushes().to_vec();
+        v[0] = BrushSettings::pencil5_krita();
+        v[0].radius = 21.0;
+        v[0].color = [10, 20, 30, 255];
+        v[1].radius = 7.5;
+        v[1].cap = crate::tools::StrokeCap::Flat;
+        v[2].mode = crate::tools::BrushMode::Dab;
+        v[2].opacity = 0.5;
+        v[3].fill_gap = 4;
+        v[4].shape_kind = ShapeKind::Ellipse;
+        v
+    }
+
+    fn fixture_prefs() -> UiPrefs {
+        UiPrefs {
+            show_panels: false,
+            frame_step: 3,
+            smoothing: SmoothingOptions {
+                kind: crate::tools::Smoothing::Weighted,
+                distance_max: 33.0,
+                ..SmoothingOptions::default()
+            },
+            tool_brushes: Some(fixture_brushes()),
+            palette: vec![[1, 2, 3], [250, 128, 0]],
+            krita_path: Some(PathBuf::from("C:/Krita (x64)/bin/krita.exe")),
+            bg_color: [0.1, 0.2, 0.3],
+            ..UiPrefs::default()
+        }
+    }
+
+    /// Writes the prefs fixture. Run once, by the build whose prefs format
+    /// the fixture pins (it was, before the Krita brush library existed):
+    ///
+    /// ```text
+    /// cargo test write_prefs_fixture -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn write_prefs_fixture() {
+        let mut storage = MemStorage::default();
+        eframe::set_value(&mut storage, UI_PREFS_KEY, &fixture_prefs());
+        std::fs::write(PREFS_FIXTURE, &storage.0[UI_PREFS_KEY]).unwrap();
+    }
+
+    /// A `ui.ron` written before the Krita brush library still loads, every
+    /// brush as it was. One field this build can't read would make
+    /// `get_value` fail and silently reset *every* preference.
+    #[test]
+    fn prefs_written_before_the_brush_library_still_load() {
+        let mut storage = MemStorage::default();
+        let text = std::fs::read_to_string(PREFS_FIXTURE).expect("fixture");
+        eframe::Storage::set_string(&mut storage, UI_PREFS_KEY, text);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).expect("prefs reset");
+        let want = fixture_prefs();
+        assert!(!prefs.show_panels);
+        assert_eq!(prefs.frame_step, 3);
+        assert_eq!(format!("{:?}", prefs.smoothing), format!("{:?}", want.smoothing));
+        assert_eq!(prefs.palette, want.palette);
+        assert_eq!(prefs.krita_path, want.krita_path);
+        assert_eq!(prefs.bg_color, want.bg_color);
+        let brushes = restore_tool_brushes(prefs.tool_brushes);
+        assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
+        assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
+    }
+
+    /// The active tool's brush is saved as it is now, not as it was at the
+    /// last tool switch.
+    #[test]
+    fn the_active_brush_is_saved_with_its_latest_changes() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.brush = BrushSettings::pencil5_krita();
+        st.brush.radius = 33.0;
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let pencil = &restore_tool_brushes(prefs.tool_brushes)[ActiveTool::Pencil.idx()];
+        assert_eq!(pencil.mode, crate::tools::BrushMode::Krita);
+        assert_eq!(pencil.radius, 33.0);
+    }
+
+    /// Picking a colour off the screen changes the colour and nothing else.
+    #[test]
+    fn a_screen_pick_keeps_the_brush() {
+        let mut st = AppState::for_test();
+        st.brush = BrushSettings::pencil5_krita();
+        st.brush.radius = 33.0;
+        st.begin_screen_pick();
+        st.commit_screen_pick([1, 2, 3, 255]);
+        assert_eq!(st.brush.mode, crate::tools::BrushMode::Krita);
+        assert_eq!(st.brush.radius, 33.0);
+        assert_eq!(st.brush.color, [1, 2, 3, 255]);
+    }
+
+    /// A new project keeps every tool's brush and comes back on the pencil.
+    #[test]
+    fn a_new_project_keeps_the_brushes() {
+        let mut st = AppState::for_test();
+        st.brush.radius = 33.0;
+        st.set_tool(ActiveTool::Ink);
+        st.brush.radius = 9.0;
+        st.reset_with(640, 480, 24.0);
+        assert_eq!(st.tool, ActiveTool::Pencil);
+        assert_eq!(st.brush.radius, 33.0);
+        assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
+    }
+
     #[test]
     fn brushes_saved_before_the_perspective_tool_survive() {
         let mut old: Vec<BrushSettings> = default_tool_brushes()[..7].to_vec();
@@ -7179,7 +7346,7 @@ mod tests {
             ..UiPrefs::default()
         };
         let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
-        let mut st = AppState::with_prefs(back, 8192);
+        let mut st = AppState::with_prefs(back, 8192, None);
         assert_eq!((st.bg_color, st.bg_opacity, st.show_checker), ([0.9, 0.85, 0.7], 0.5, true));
         // File > New starts a fresh project, not a fresh workspace.
         st.reset();

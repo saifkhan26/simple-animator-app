@@ -23,7 +23,9 @@
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::input::pointer::PointerSample;
 use crate::tools::dab::Dab;
-use crate::tools::krita::{qt_tilt, KritaStroke};
+use std::sync::Arc;
+
+use crate::tools::krita::{qt_tilt, KritaStroke, PixelBrush};
 use crate::tools::ribbon::{union_rect, CapPlane, SpineNode, StrokeWorkspace};
 use crate::tools::{
     ActiveTool, BrushMode, BrushSettings, Smoothing, SmoothingOptions, StrokeCap,
@@ -112,6 +114,20 @@ impl StrokeBuilder {
         view_scale: f32,
         opts: SmoothingOptions,
     ) -> Self {
+        let krita = brush.krita.brush();
+        Self::new_with_krita(brush, tool, view_scale, opts, krita)
+    }
+
+    /// [`new`](Self::new) with the Krita preset given rather than taken from
+    /// `brush.krita`: for presets the app loads at run time. Ignored unless
+    /// `brush.mode` is `Krita`.
+    pub fn new_with_krita(
+        brush: BrushSettings,
+        tool: ActiveTool,
+        view_scale: f32,
+        opts: SmoothingOptions,
+        krita_brush: Arc<PixelBrush>,
+    ) -> Self {
         let spacing = match brush.mode {
             // Fine enough that the capsule polyline reads as a curve.
             BrushMode::Ribbon => (brush.radius * 0.3).max(1.0),
@@ -122,7 +138,7 @@ impl StrokeBuilder {
         };
         let krita = (brush.mode == BrushMode::Krita).then(|| {
             KritaStroke::new(
-                brush.krita,
+                krita_brush,
                 brush.radius as f64 * 2.0,
                 brush.color,
                 brush.opacity as f64,
@@ -165,7 +181,7 @@ impl StrokeBuilder {
     pub fn orient(&mut self, rotation_deg: f64, mirrored: (bool, bool)) {
         if let Some(k) = &mut self.krita {
             *k = KritaStroke::new(
-                self.brush.krita,
+                k.brush().clone(),
                 self.brush.radius as f64 * 2.0,
                 self.brush.color,
                 self.brush.opacity as f64,
@@ -173,6 +189,15 @@ impl StrokeBuilder {
                 rotation_deg,
                 mirrored,
             );
+        }
+    }
+
+    /// Fix a Krita-mode stroke's random source (scatter, fuzzy sensors):
+    /// for tests, which need the same stroke twice.
+    #[cfg(test)]
+    pub fn seed_random(&mut self, seed: u32) {
+        if let Some(k) = &mut self.krita {
+            k.seed(seed);
         }
     }
 
@@ -202,6 +227,9 @@ impl StrokeBuilder {
         self.smooth_pressure = Some(info.pressure);
 
         let Some(previous) = self.previous else {
+            if let Some(k) = &mut self.krita {
+                k.start(&info);
+            }
             // Pen-down: ink immediately, exactly where the user pressed.
             // Krita does not: its first dab comes half a pixel along the
             // first segment, or at pen-up for a stroke that never moved.
@@ -256,7 +284,7 @@ impl StrokeBuilder {
         // pen-down dab included; there is no coverage to composite.
         if let Some(k) = &mut self.krita {
             self.dot_pending = false;
-            return k.drain(canvas, ws.clip(), ws.alpha_lock());
+            return k.drain(canvas, ws, pre);
         }
 
         // Pen-down dot: instant ink with zero latency. A lone disc rather
@@ -328,7 +356,7 @@ impl StrokeBuilder {
 
         // Krita stops at the last whole step: no extra dab on the end point.
         if let Some(k) = &mut self.krita {
-            if let Some(r) = k.drain(canvas, ws.clip(), ws.alpha_lock()) {
+            if let Some(r) = k.drain(canvas, ws, pre) {
                 acc = Some(union_rect(acc, r));
             }
             return acc;
@@ -389,6 +417,7 @@ impl StrokeBuilder {
             tilt_x: 0.0,
             tilt_y: 0.0,
             t: 0.0,
+            ..Default::default()
         };
         Some(self.node_at(&s))
     }
@@ -999,6 +1028,32 @@ fn mix(a: PointerSample, b: PointerSample, t: f32) -> PointerSample {
         tilt_x: lerp(a.tilt_x, b.tilt_x, t),
         tilt_y: lerp(a.tilt_y, b.tilt_y, t),
         t: lerp(a.t, b.t, t),
+        time_ms: a.time_ms + (b.time_ms - a.time_ms) * t as f64,
+        rotation: mix_rotation(a.rotation, b.rotation, t),
+        tangential: lerp(a.tangential, b.tangential, t),
+        speed: lerp(a.speed, b.speed, t),
+    }
+}
+
+/// Barrel rotation between two samples the short way round, as
+/// `KisPaintInformation::mixOtherImpl` does it, degrees in -180..=180.
+fn mix_rotation(a: f32, b: f32, t: f32) -> f32 {
+    if a == b {
+        return a;
+    }
+    let mut d = (b - a) % 360.0;
+    if d > 180.0 {
+        d -= 360.0;
+    } else if d < -180.0 {
+        d += 360.0;
+    }
+    let r = a + d * t;
+    if r > 180.0 {
+        r - 360.0
+    } else if r < -180.0 {
+        r + 360.0
+    } else {
+        r
     }
 }
 
@@ -1014,6 +1069,7 @@ mod tests {
             tilt_x: 0.0,
             tilt_y: 0.0,
             t: 0.0,
+            ..Default::default()
         }
     }
 
@@ -1507,6 +1563,7 @@ mod tests {
                 tilt_x: tilt.0,
                 tilt_y: tilt.1,
                 t: 0.0,
+                ..Default::default()
             });
             b.flush(canvas, &mut ws, &pre);
         }
@@ -1636,6 +1693,7 @@ mod tests {
             tilt_x: 0.0,
             tilt_y: 60.0,
             t: 0.0,
+            ..Default::default()
         };
         b.push(at(60.0));
         assert!(b.flush(&mut c, &mut ws, &pre).is_none(), "painted at pen-down");
@@ -1733,6 +1791,7 @@ mod tests {
                 tilt_x: 50.0 * (t * 9.0).cos(),
                 tilt_y: 50.0 * (t * 9.0).sin(),
                 t: 0.0,
+                ..Default::default()
             });
             let f0 = std::time::Instant::now();
             b.flush(&mut c, &mut ws, &pre);
@@ -1794,6 +1853,71 @@ mod tests {
         println!("wrote {path}");
     }
 
+    /// Krita's shipped presets, one S-stroke each with pressure easing in
+    /// and out, for comparing against the same presets in Krita. Ignored by
+    /// default — it writes a file:
+    ///
+    /// ```text
+    /// PREVIEW_OUT=krita.png cargo test krita_preset_sheet -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn krita_preset_sheet() {
+        let Ok(path) = std::env::var("PREVIEW_OUT") else {
+            panic!("set PREVIEW_OUT to the .png to write");
+        };
+        use crate::tools::krita::defaults;
+        let names: Vec<&str> = defaults::PRESETS.iter().copied().filter(|n| defaults::brush(n).is_ok()).collect();
+        let (w, h) = (900u32, 70 * names.len() as u32 + 20);
+        let mut canvas = Canvas::new(w, h);
+        for px in canvas.pixels_mut().chunks_mut(4) {
+            px.copy_from_slice(&[235, 235, 235, 255]);
+        }
+        for (i, name) in names.iter().enumerate() {
+            let brush = defaults::brush(name).unwrap();
+            let y0 = 45.0 + i as f32 * 70.0;
+            if brush.erase {
+                // Something to erase.
+                for y in (y0 as u32 - 25)..(y0 as u32 + 25) {
+                    for x in 30..870 {
+                        let k = ((y * w + x) * 4) as usize;
+                        canvas.pixels_mut()[k..k + 4].copy_from_slice(&[40, 40, 40, 255]);
+                    }
+                }
+            }
+            let settings = BrushSettings {
+                radius: (brush.diameter() / 2.0).min(30.0) as f32,
+                color: [20, 20, 20, 255],
+                mode: BrushMode::Krita,
+                ..BrushSettings::default()
+            };
+            let pre = canvas.pixels().into_owned();
+            let mut ws = StrokeWorkspace::new();
+            ws.begin(w, h, &settings);
+            let mut b = StrokeBuilder::new_with_krita(settings, ActiveTool::Pencil, 1.0, SmoothingOptions::default(), brush);
+            b.seed_random(1);
+            for k in 0..=120 {
+                let t = k as f32 / 120.0;
+                let p = (t * std::f32::consts::PI).sin().powf(0.6).clamp(0.02, 1.0);
+                b.push(PointerSample {
+                    x: 40.0 + t * 820.0,
+                    y: y0 + (t * 6.0).sin() * 12.0,
+                    pressure: p,
+                    tilt_x: 40.0 * (t * 3.0).cos(),
+                    tilt_y: 40.0 * (t * 3.0).sin(),
+                    ..Default::default()
+                });
+                b.flush(&mut canvas, &mut ws, &pre);
+            }
+            b.finish(&mut canvas, &mut ws, &pre);
+        }
+        image::RgbaImage::from_raw(w, h, canvas.pixels().into_owned())
+            .expect("canvas is RGBA8")
+            .save(&path)
+            .expect("write preview");
+        println!("wrote {path}: {}", names.join(", "));
+    }
+
     /// The airbrush preset sprays: one pass leaves a soft band that is
     /// densest along the stroke, fades toward its edge, and is still far from
     /// opaque — the rest comes from going over it again.
@@ -1815,6 +1939,7 @@ mod tests {
                     tilt_x: 0.0,
                     tilt_y: 0.0,
                     t: 0.0,
+                    ..Default::default()
                 });
                 b.flush(canvas, &mut ws, &pre);
             }
@@ -1855,6 +1980,7 @@ mod tests {
                 tilt_x: tilt.0,
                 tilt_y: tilt.1,
                 t: 0.0,
+                ..Default::default()
             });
             b.flush(canvas, &mut ws, &pre);
         }

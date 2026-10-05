@@ -95,6 +95,12 @@ pub struct StrokeWorkspace {
     /// paint and adds none, and the eraser does nothing. Set after `begin()`,
     /// which clears it.
     alpha_lock: bool,
+    /// A Krita wash stroke's buffer: the alpha its dabs have built up, in
+    /// the brush colour, before it is merged onto the layer. Canvas-sized,
+    /// allocated on the first wash stroke only.
+    wash: Vec<u8>,
+    /// What the last wash stroke touched, cleared lazily by `begin()`.
+    wash_rect: Option<DirtyRect>,
 }
 
 impl StrokeWorkspace {
@@ -111,6 +117,8 @@ impl StrokeWorkspace {
             build_up: false,
             clip: None,
             alpha_lock: false,
+            wash: Vec::new(),
+            wash_rect: None,
         }
     }
 
@@ -121,13 +129,24 @@ impl StrokeWorkspace {
             self.cov = vec![0u16; (w * h) as usize];
             self.w = w;
             self.h = h;
-        } else if let Some(r) = self.stroke_rect {
-            for y in r.min_y..r.max_y {
-                let row = (y * self.w) as usize;
-                self.cov[row + r.min_x as usize..row + r.max_x as usize].fill(0);
+            // Reallocated at the new size by the next wash stroke.
+            self.wash = Vec::new();
+        } else {
+            if let Some(r) = self.stroke_rect {
+                for y in r.min_y..r.max_y {
+                    let row = (y * self.w) as usize;
+                    self.cov[row + r.min_x as usize..row + r.max_x as usize].fill(0);
+                }
+            }
+            if let (Some(r), false) = (self.wash_rect, self.wash.is_empty()) {
+                for y in r.min_y..r.max_y {
+                    let row = (y * self.w) as usize;
+                    self.wash[row + r.min_x as usize..row + r.max_x as usize].fill(0);
+                }
             }
         }
         self.stroke_rect = None;
+        self.wash_rect = None;
         self.hardness = brush.hardness.clamp(0.0, 1.0);
         self.softness = brush.softness.clamp(0.1, 8.0);
         self.grain = brush.grain.clamp(0.0, 1.0);
@@ -153,6 +172,21 @@ impl StrokeWorkspace {
     /// the canvas themselves rather than through the coverage buffer.
     pub fn clip(&self) -> Option<&Arc<Mask>> {
         self.clip.as_ref()
+    }
+
+    /// The wash buffer for the stroke begun by the last `begin()`, all
+    /// clear at the start of the stroke, and its row width.
+    pub fn wash(&mut self) -> (&mut [u8], u32) {
+        if self.wash.len() != (self.w * self.h) as usize {
+            self.wash = vec![0u8; (self.w * self.h) as usize];
+        }
+        (&mut self.wash, self.w)
+    }
+
+    /// Record that the wash buffer was written within `r`, so the next
+    /// `begin()` clears it.
+    pub fn note_wash(&mut self, r: DirtyRect) {
+        self.wash_rect = Some(union_rect(self.wash_rect, r));
     }
 
     /// Whether the current stroke's layer has its alpha locked.

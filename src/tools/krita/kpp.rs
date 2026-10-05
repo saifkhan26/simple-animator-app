@@ -5,6 +5,8 @@
 //! the `KisPropertiesConfiguration` of the paintop. Values are read the way
 //! Krita's `getBool` / `getDouble` / `getString` read them, defaults
 //! included, since a preset only stores what its author's Krita wrote.
+//! A version-5.0 preset also carries the files it needs (tips, patterns)
+//! base64-encoded in a `<resources>` element.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -12,14 +14,41 @@ use std::io::Read;
 use anyhow::{anyhow, bail, Context, Result};
 
 use super::curve::CubicCurve;
+use super::options::OptionSpec;
 use super::sensors::{CurveOption, Sensor, SensorKind};
+
+const DEFAULT_CURVE: &str = "0,0;1,1;";
+
+/// One `<param>`: its value, and its declared type (`string`, `bytearray`
+/// …), kept so a preset can be written back the way Krita wrote it.
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub kind: String,
+    pub value: Vec<u8>,
+}
+
+/// A file a version-5.0 preset carries inside itself.
+#[derive(Clone, Debug)]
+pub struct EmbeddedResource {
+    /// `brushes`, `patterns`, …
+    pub kind: String,
+    pub name: String,
+    pub filename: String,
+    pub md5sum: String,
+    pub data: Vec<u8>,
+}
 
 /// The flat settings of one preset.
 #[derive(Clone, Debug)]
 pub struct Preset {
     pub name: String,
     pub paintop: String,
-    params: HashMap<String, Vec<u8>>,
+    /// The `version` text chunk; `5.0` for a Krita 5 preset.
+    pub version: String,
+    params: HashMap<String, Param>,
+    /// Parameter names in the order the preset lists them.
+    pub order: Vec<String>,
+    pub resources: Vec<EmbeddedResource>,
 }
 
 /// The value of a PNG text chunk (`tEXt`, `zTXt` or `iTXt`) by keyword.
@@ -82,7 +111,7 @@ fn inflate(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// `QByteArray::fromBase64`: forgiving of whitespace and missing padding.
-fn base64(text: &[u8]) -> Vec<u8> {
+pub(crate) fn base64(text: &[u8]) -> Vec<u8> {
     let val = |c: u8| -> Option<u32> {
         Some(match c {
             b'A'..=b'Z' => c - b'A',
@@ -116,38 +145,181 @@ pub fn preset_xml(kpp: &[u8]) -> Result<String> {
     String::from_utf8(xml).context("preset XML is not UTF-8")
 }
 
+/// One sensor slot of an option, as `KisSensorData` keeps it.
+#[derive(Clone, Debug)]
+struct Slot {
+    id: &'static str,
+    active: bool,
+    curve: String,
+    // KisDrawingAngleSensorData
+    fan_corners_enabled: bool,
+    fan_corners_step: i32,
+    angle_offset: i32,
+    locked_angle_mode: bool,
+    // KisSensorWithLengthData (fade)
+    length: i32,
+    periodic: bool,
+}
+
+/// Every sensor `KisKritaSensorData` holds, in `detail::sensors` order.
+const SLOTS: [&str; 16] = [
+    "pressure",
+    "pressurein",
+    "tangentialpressure",
+    "drawingangle",
+    "xtilt",
+    "ytilt",
+    "ascension",
+    "declination",
+    "rotation",
+    "fuzzy",
+    "fuzzystroke",
+    "speed",
+    "fade",
+    "distance",
+    "time",
+    "perspective",
+];
+
+impl Slot {
+    /// `KisSensorData(id)` / `reset()`.
+    fn new(id: &'static str) -> Self {
+        Self {
+            id,
+            active: false,
+            curve: DEFAULT_CURVE.to_owned(),
+            fan_corners_enabled: false,
+            fan_corners_step: 30,
+            angle_offset: 0,
+            locked_angle_mode: false,
+            length: if id == "fade" { 1000 } else { 30 },
+            periodic: false,
+        }
+    }
+
+    /// `KisSensorData::read` and its subclasses' (which reset first).
+    fn read(&mut self, e: roxmltree::Node) {
+        let active = self.active;
+        *self = Slot::new(self.id);
+        self.active = active;
+        if let Some(c) = e.children().find(|c| c.has_tag_name("curve")) {
+            self.curve = c.text().unwrap_or_default().to_owned();
+        }
+        let int = |k: &str| e.attribute(k).map(|v| v.trim().parse::<i32>().unwrap_or(0));
+        if self.id == "drawingangle" {
+            if let Some(v) = int("fanCornersEnabled") {
+                self.fan_corners_enabled = v != 0;
+            }
+            if let Some(v) = int("fanCornersStep") {
+                self.fan_corners_step = v;
+            }
+            if let Some(v) = int("angleOffset") {
+                self.angle_offset = v;
+            }
+            if let Some(v) = int("lockedAngleMode") {
+                self.locked_angle_mode = v != 0;
+            }
+        }
+        if self.id == "fade" {
+            if let Some(v) = int("periodic") {
+                self.periodic = v != 0;
+            }
+            if let Some(v) = int("length") {
+                self.length = v;
+            }
+        }
+    }
+
+    /// The sensor this slot paints with, or why it can't.
+    fn kind(&self, option: &str) -> Result<SensorKind> {
+        if self.id == "drawingangle" {
+            if self.locked_angle_mode {
+                bail!("{option}: a locked drawing angle is not supported yet");
+            }
+            return Ok(SensorKind::DrawingAngle {
+                offset: self.angle_offset,
+            });
+        }
+        if self.id == "fade" {
+            return Ok(SensorKind::Fade {
+                length: self.length,
+                periodic: self.periodic,
+            });
+        }
+        SensorKind::from_id(self.id).ok_or_else(|| anyhow!("{option}: the `{}` sensor is not supported yet", self.id))
+    }
+}
+
 impl Preset {
     pub fn read(kpp: &[u8]) -> Result<Self> {
-        let xml = preset_xml(kpp)?;
+        // KisPaintOpPreset::loadFromDevice: a workaround for presets saved
+        // with a CDATA section nested in another.
+        let xml = preset_xml(kpp)?
+            .replace("<curve><![CDATA[", "<curve>")
+            .replace("]]></curve>", "</curve>");
+        let version = png_text(kpp, "version")
+            .map(|v| String::from_utf8_lossy(&v).trim().to_owned())
+            .unwrap_or_default();
         let doc = parse_xml(&xml).context("parsing the preset XML")?;
         let root = doc.root_element();
         if root.tag_name().name() != "Preset" {
             bail!("not a brush preset");
         }
         let mut params = HashMap::new();
+        let mut order = Vec::new();
         for p in root.children().filter(|n| n.has_tag_name("param")) {
             let Some(name) = p.attribute("name") else { continue };
             let text: String = p.children().filter_map(|c| c.text()).collect();
-            let value = if p.attribute("type") == Some("bytearray") {
+            let kind = p.attribute("type").unwrap_or("string").to_owned();
+            let value = if kind == "bytearray" {
                 base64(text.as_bytes())
             } else {
                 text.into_bytes()
             };
-            params.insert(name.to_owned(), value);
+            if params.insert(name.to_owned(), Param { kind, value }).is_none() {
+                order.push(name.to_owned());
+            }
+        }
+        let mut resources = Vec::new();
+        if version == "5.0" {
+            if let Some(list) = root.children().find(|n| n.has_tag_name("resources")) {
+                for r in list.children().filter(|n| n.has_tag_name("resource")) {
+                    let text: String = r.children().filter_map(|c| c.text()).collect();
+                    let attr = |k: &str| r.attribute(k).unwrap_or_default().to_owned();
+                    resources.push(EmbeddedResource {
+                        kind: attr("type"),
+                        name: attr("name"),
+                        filename: attr("filename"),
+                        md5sum: attr("md5sum"),
+                        data: base64(text.as_bytes()),
+                    });
+                }
+            }
         }
         Ok(Self {
             name: root.attribute("name").unwrap_or_default().to_owned(),
             paintop: root.attribute("paintopid").unwrap_or_default().to_owned(),
+            version,
             params,
+            order,
+            resources,
         })
     }
 
+    pub fn has(&self, key: &str) -> bool {
+        self.params.contains_key(key)
+    }
+
+    pub fn param(&self, key: &str) -> Option<&Param> {
+        self.params.get(key)
+    }
+
     pub fn string(&self, key: &str) -> Option<String> {
-        self.params.get(key).map(|v| String::from_utf8_lossy(v).into_owned())
+        self.params.get(key).map(|v| String::from_utf8_lossy(&v.value).into_owned())
     }
 
     pub fn bytes(&self, key: &str) -> Option<&[u8]> {
-        self.params.get(key).map(|v| v.as_slice())
+        self.params.get(key).map(|v| v.value.as_slice())
     }
 
     /// `getBool`: `QVariant(QString).toBool()`.
@@ -173,79 +345,111 @@ impl Preset {
             .unwrap_or(default)
     }
 
-    /// A curve option, read the way `KisKritaSensorPack::read` reads it.
-    ///
-    /// `checkable` is the option's checkability: a non-checkable option
-    /// (Opacity, Flow) is always on.
-    pub fn curve_option(&self, id: &str, checkable: bool) -> Result<CurveOption> {
-        const DEFAULT_CURVE: &str = "0,0;1,1;";
-        let checked = !checkable || self.bool(&format!("Pressure{id}"), false);
-        let definition = self.string(&format!("{id}Sensor")).unwrap_or_default();
+    /// A curve option, read the way `KisKritaSensorPack::read` reads it,
+    /// down to its legacy quirks: a sensor the preset does not mention is
+    /// reset, except that the old `Custom<id>` curve format keeps every
+    /// sensor's state, which leaves pressure on beside whatever was read.
+    pub fn curve_option(&self, spec: &OptionSpec) -> Result<CurveOption> {
+        let id = spec.id;
+        let checked = !spec.checkable || self.bool(&format!("Pressure{id}"), false);
 
-        let mut active: Vec<(SensorKind, String)> = Vec::new();
-        let mut common = DEFAULT_CURVE.to_owned();
-        if !definition.is_empty() {
-            if definition.contains("sensorslist") {
-                bail!("{id}: several sensors on one option are not supported yet");
-            }
-            let doc = parse_xml(&definition).with_context(|| format!("{id}Sensor"))?;
-            let e = doc.root_element();
+        let mut slots: Vec<Slot> = SLOTS.iter().map(|&s| Slot::new(s)).collect();
+        // KisKritaSensorData(): pressure starts active.
+        slots[0].active = true;
+        let mut reset = vec![true; slots.len()];
+        let mut common = String::new();
+
+        let definition = self.string(&format!("{id}Sensor")).unwrap_or_default();
+        let read_one = |e: roxmltree::Node, slots: &mut Vec<Slot>, reset: &mut Vec<bool>| -> Result<String> {
             let sid = e.attribute("id").unwrap_or_default();
-            let kind = SensorKind::from_id(sid).ok_or_else(|| anyhow!("{id}: sensor `{sid}` is not supported yet"))?;
-            let curve = e
-                .children()
-                .find(|c| c.has_tag_name("curve"))
-                .and_then(|c| c.text())
-                .map(str::to_owned)
-                .unwrap_or_else(|| DEFAULT_CURVE.to_owned());
-            common = curve.clone();
-            active.push((kind, curve));
+            let i = SLOTS
+                .iter()
+                .position(|&s| s == sid)
+                .ok_or_else(|| anyhow!("{id}: unknown sensor `{sid}`"))?;
+            slots[i].read(e);
+            slots[i].active = true;
+            reset[i] = false;
+            Ok(slots[i].curve.clone())
+        };
+        if definition.is_empty() {
+            // noop
+        } else if !definition.contains("sensorslist") {
+            let doc = parse_xml(&definition).with_context(|| format!("{id}Sensor"))?;
+            common = read_one(doc.root_element(), &mut slots, &mut reset)?;
+        } else {
+            let doc = parse_xml(&definition).with_context(|| format!("{id}Sensor"))?;
+            let mut proposed = String::new();
+            for child in doc.root_element().children().filter(|c| c.has_tag_name("ChildSensor")) {
+                // Due to legacy reasons the common curve starts as the
+                // last curve read.
+                proposed = read_one(child, &mut slots, &mut reset)?;
+            }
+            common = if proposed.is_empty() { DEFAULT_CURVE.to_owned() } else { proposed };
         }
+
         let use_same = self.bool(&format!("{id}UseSameCurve"), true);
+        // Only load the old curve format if the sensor didn't save its own.
         if !definition.contains("curve") {
             if self.bool(&format!("Custom{id}"), false) {
                 common = self.string(&format!("Curve{id}")).unwrap_or_else(|| DEFAULT_CURVE.to_owned());
-                for s in &mut active {
-                    s.1 = common.clone();
+                for (s, r) in slots.iter_mut().zip(reset.iter_mut()) {
+                    s.curve = common.clone();
+                    *r = false;
                 }
             } else {
                 common = DEFAULT_CURVE.to_owned();
             }
         }
         if use_same {
-            if let Some(c) = self.string(&format!("{id}commonCurve")) {
-                common = c;
-            }
+            let fallback = if common.is_empty() { DEFAULT_CURVE.to_owned() } else { common.clone() };
+            common = self.string(&format!("{id}commonCurve")).unwrap_or(fallback);
             if common.is_empty() {
                 common = DEFAULT_CURVE.to_owned();
             }
         }
-        // At least one sensor is always active: pressure.
-        if active.is_empty() {
-            active.push((SensorKind::Pressure, DEFAULT_CURVE.to_owned()));
+        for (s, r) in slots.iter_mut().zip(reset.iter()) {
+            if *r {
+                *s = Slot::new(s.id);
+            }
+        }
+        // At least one sensor is always active.
+        if !slots.iter().any(|s| s.active) {
+            slots[0].active = true;
+        }
+
+        let mut strength = self.double(&format!("{id}Value"), spec.max);
+        // KisScatterOptionData's fix-up for presets from before ScatterValue.
+        if id == "Scatter" && self.has("Scattering/Amount") && !self.has("ScatterValue") {
+            strength = self.double("Scattering/Amount", 0.0);
         }
 
         let mut sensors = Vec::new();
-        for (kind, curve) in active {
-            let text = if use_same { &common } else { &curve };
+        let mut fan_corners = None;
+        for s in slots.iter().filter(|s| s.active) {
+            let kind = s.kind(id)?;
+            let text = if use_same { &common } else { &s.curve };
             let curve = CubicCurve::parse(text).ok_or_else(|| anyhow!("{id}: bad curve `{text}`"))?;
             sensors.push(Sensor::new(kind, &curve));
+            if s.id == "drawingangle" && s.fan_corners_enabled && !s.locked_angle_mode {
+                fan_corners = Some(s.fan_corners_step as f64);
+            }
         }
-        sensors.sort_by_key(|s| s.kind.order());
         Ok(CurveOption {
             checked,
             use_curve: self.bool(&format!("{id}UseCurve"), true),
             curve_mode: self.int(&format!("{id}curveMode"), 0),
-            strength: self.double(&format!("{id}Value"), 1.0),
-            min: 0.0,
-            max: 1.0,
+            strength,
+            min: spec.min,
+            max: spec.max,
             sensors,
+            fan_corners,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::options;
     use super::*;
 
     #[test]
@@ -265,5 +469,100 @@ mod tests {
         // The pattern is stored as base64 text inside a base64 bytearray.
         let inner = base64(p.bytes("Texture/Pattern/Pattern").unwrap());
         assert!(inner.starts_with(b"\x89PNG"));
+        assert_eq!(p.param("Texture/Pattern/Pattern").unwrap().kind, "bytearray");
+        assert!(p.order.len() > 50);
+    }
+
+    /// A preset holding just `params`, for exercising the option reader.
+    fn preset(params: &[(&str, &str)]) -> Preset {
+        let mut map = HashMap::new();
+        for (k, v) in params {
+            map.insert(
+                k.to_string(),
+                Param {
+                    kind: "string".into(),
+                    value: v.as_bytes().to_vec(),
+                },
+            );
+        }
+        Preset {
+            name: "t".into(),
+            paintop: "paintbrush".into(),
+            version: String::new(),
+            params: map,
+            order: Vec::new(),
+            resources: Vec::new(),
+        }
+    }
+
+    fn kinds(o: &CurveOption) -> Vec<SensorKind> {
+        o.sensors.iter().map(|s| s.kind).collect()
+    }
+
+    #[test]
+    fn a_sensor_list_reads_every_child_and_the_common_curve() {
+        let p = preset(&[
+            ("PressureSize", "true"),
+            (
+                "SizeSensor",
+                r#"<params id="sensorslist"><ChildSensor id="speed"><curve>0,1;1,0;</curve></ChildSensor><ChildSensor id="pressure"/></params>"#,
+            ),
+            ("SizecurveMode", "1"),
+        ]);
+        let o = p.curve_option(&options::SIZE).unwrap();
+        assert!(o.checked);
+        assert_eq!(o.curve_mode, 1);
+        // Sorted into generateSensors order, pressure first.
+        assert_eq!(kinds(&o), vec![SensorKind::Pressure, SensorKind::Speed]);
+        assert_eq!(o.strength, 1.0, "missing strength reads as the top of the range");
+    }
+
+    #[test]
+    fn scatter_defaults_to_five_and_honours_the_old_amount() {
+        let p = preset(&[("PressureScatter", "true")]);
+        assert_eq!(p.curve_option(&options::SCATTER).unwrap().strength, 5.0);
+        let p = preset(&[("PressureScatter", "true"), ("Scattering/Amount", "1.5")]);
+        assert_eq!(p.curve_option(&options::SCATTER).unwrap().strength, 1.5);
+    }
+
+    #[test]
+    fn the_drawing_angle_brings_its_offset_and_fan_corners() {
+        let p = preset(&[
+            ("PressureRotation", "true"),
+            (
+                "RotationSensor",
+                r#"<params id="drawingangle" fanCornersEnabled="1" fanCornersStep="90" angleOffset="30" lockedAngleMode="0"/>"#,
+            ),
+        ]);
+        let o = p.curve_option(&options::ROTATION).unwrap();
+        assert_eq!(kinds(&o), vec![SensorKind::DrawingAngle { offset: 30 }]);
+        assert_eq!(o.fan_corners, Some(90.0));
+
+        let locked = preset(&[(
+            "RotationSensor",
+            r#"<params id="drawingangle" lockedAngleMode="1"/>"#,
+        )]);
+        let err = locked.curve_option(&options::ROTATION).err().unwrap();
+        assert!(err.to_string().contains("locked"), "{err}");
+    }
+
+    #[test]
+    fn the_old_custom_curve_format_leaves_pressure_on() {
+        // Krita's legacy branch keeps every slot's state, so the sensor
+        // read sits beside the pressure that was active from the start.
+        let p = preset(&[
+            ("SizeSensor", r#"<params id="speed"/>"#),
+            ("CustomSize", "true"),
+            ("CurveSize", "0,0;1,0.5;"),
+        ]);
+        let o = p.curve_option(&options::SIZE).unwrap();
+        assert_eq!(kinds(&o), vec![SensorKind::Pressure, SensorKind::Speed]);
+    }
+
+    #[test]
+    fn unsupported_sensors_are_refused_by_name() {
+        let p = preset(&[("SizeSensor", r#"<params id="distance"/>"#)]);
+        let err = p.curve_option(&options::SIZE).err().unwrap();
+        assert!(err.to_string().contains("distance"), "{err}");
     }
 }

@@ -148,6 +148,17 @@ impl CubicCurve {
         Some(Self { points })
     }
 
+    /// `KisCubicCurve(QList<QPointF>)`: the points, sorted by x.
+    pub fn from_points(mut points: Vec<(f64, f64)>) -> Self {
+        points.sort_by(|p, q| p.0.total_cmp(&q.0));
+        Self { points }
+    }
+
+    /// The curve's points, sorted by x.
+    pub fn points(&self) -> &[(f64, f64)] {
+        &self.points
+    }
+
     /// `KisCubicCurve::isIdentity`. A sensor with an identity curve skips
     /// the transfer table entirely and reports its raw value.
     pub fn is_identity(&self) -> bool {
