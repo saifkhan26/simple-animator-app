@@ -159,6 +159,12 @@ impl CubicCurve {
         &self.points
     }
 
+    /// `KisCubicCurve::toString`: `"x,y;x,y;"`, each number as
+    /// `QString::number` prints it (six significant digits).
+    pub fn to_krita_string(&self) -> String {
+        self.points.iter().map(|&(x, y)| format!("{},{};", qnum(x), qnum(y))).collect()
+    }
+
     /// `KisCubicCurve::isIdentity`. A sensor with an identity curve skips
     /// the transfer table entirely and reports its raw value.
     pub fn is_identity(&self) -> bool {
@@ -183,6 +189,36 @@ impl CubicCurve {
             })
             .collect()
     }
+}
+
+/// `QString::number(double)`: `%g` with six significant digits.
+fn qnum(v: f64) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return "0".to_owned();
+    }
+    let e = v.abs().log10().floor() as i32;
+    let trim = |s: String| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            s
+        }
+    };
+    if !(-5..6).contains(&e) {
+        let m = format!("{:.5e}", v);
+        let (mant, exp) = m.split_once('e').unwrap_or((&m, "0"));
+        let exp: i32 = exp.parse().unwrap_or(0);
+        let sign = if exp < 0 { '-' } else { '+' };
+        return format!("{}e{sign}{:02}", trim(mant.to_owned()), exp.abs());
+    }
+    // `%g` switches to exponents below 1e-4.
+    if e < -4 {
+        let m = format!("{:.5e}", v);
+        let (mant, exp) = m.split_once('e').unwrap_or((&m, "0"));
+        let exp: i32 = exp.parse().unwrap_or(0);
+        return format!("{}e-{:02}", trim(mant.to_owned()), exp.abs());
+    }
+    trim(format!("{:.*}", (5 - e).max(0) as usize, v))
 }
 
 /// `KisCubicCurve::interpolateLinear`.
@@ -213,6 +249,17 @@ pub fn interpolate_linear(normalized: f64, transfer: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Curves Krita wrote read back to the same text.
+    #[test]
+    fn curves_print_as_krita_prints_them() {
+        for s in ["0,0;1,1;", "0.163266,0;0.914286,1;", "0.00803213,0;0.722992,0.172691;1,1;", "0,0.963855;0.20482,0.558233;1,0;"] {
+            assert_eq!(CubicCurve::parse(s).unwrap().to_krita_string(), s);
+        }
+        assert_eq!(qnum(1.0 / 3.0), "0.333333");
+        assert_eq!(qnum(0.00001), "1e-05");
+        assert_eq!(qnum(1234567.0), "1.23457e+06");
+    }
 
     #[test]
     fn identity_is_recognised() {

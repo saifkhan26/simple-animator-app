@@ -17,7 +17,7 @@ use super::curve::CubicCurve;
 use super::options::OptionSpec;
 use super::sensors::{CurveOption, Sensor, SensorKind};
 
-const DEFAULT_CURVE: &str = "0,0;1,1;";
+pub const DEFAULT_CURVE: &str = "0,0;1,1;";
 
 /// One `<param>`: its value, and its declared type (`string`, `bytearray`
 /// …), kept so a preset can be written back the way Krita wrote it.
@@ -43,7 +43,9 @@ pub struct EmbeddedResource {
 pub struct Preset {
     pub name: String,
     pub paintop: String,
-    /// The `version` text chunk; `5.0` for a Krita 5 preset.
+    /// The `version` text chunk; `5.0` for a Krita 5 preset. Only the
+    /// reader acts on it (embedded resources), so the app never reads it back.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub version: String,
     params: HashMap<String, Param>,
     /// Parameter names in the order the preset lists them.
@@ -160,23 +162,37 @@ pub fn preset_xml(kpp: &[u8]) -> Result<String> {
 }
 
 /// One sensor slot of an option, as `KisSensorData` keeps it.
-#[derive(Clone, Debug)]
-struct Slot {
-    id: &'static str,
-    active: bool,
-    curve: String,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Slot {
+    pub id: &'static str,
+    pub active: bool,
+    pub curve: String,
     // KisDrawingAngleSensorData
-    fan_corners_enabled: bool,
-    fan_corners_step: i32,
-    angle_offset: i32,
-    locked_angle_mode: bool,
+    pub fan_corners_enabled: bool,
+    pub fan_corners_step: i32,
+    pub angle_offset: i32,
+    pub locked_angle_mode: bool,
     // KisSensorWithLengthData (fade)
-    length: i32,
-    periodic: bool,
+    pub length: i32,
+    pub periodic: bool,
+}
+
+/// One curve option as `KisCurveOptionData` holds it: what a preset says,
+/// before it becomes sensors. The editor changes this and writes it back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionData {
+    pub checked: bool,
+    pub use_curve: bool,
+    pub use_same_curve: bool,
+    pub strength: f64,
+    pub curve_mode: i32,
+    pub common_curve: String,
+    /// Every sensor Krita knows, in its order; the active ones apply.
+    pub slots: Vec<Slot>,
 }
 
 /// Every sensor `KisKritaSensorData` holds, in `detail::sensors` order.
-const SLOTS: [&str; 16] = [
+pub const SLOTS: [&str; 16] = [
     "pressure",
     "pressurein",
     "tangentialpressure",
@@ -197,7 +213,7 @@ const SLOTS: [&str; 16] = [
 
 impl Slot {
     /// `KisSensorData(id)` / `reset()`.
-    fn new(id: &'static str) -> Self {
+    pub fn new(id: &'static str) -> Self {
         Self {
             id,
             active: false,
@@ -244,8 +260,28 @@ impl Slot {
         }
     }
 
+    /// `KisSensorData::write` and its subclasses', into `<tag …>…</tag>`
+    /// with QDom's line breaks folded to spaces, as Krita's presets hold it.
+    fn write(&self, tag: &str) -> String {
+        let mut attrs = format!(" id=\"{}\"", self.id);
+        if self.id == "drawingangle" {
+            attrs += &format!(
+                " fanCornersEnabled=\"{}\" fanCornersStep=\"{}\" angleOffset=\"{}\" lockedAngleMode=\"{}\"",
+                self.fan_corners_enabled as i32, self.fan_corners_step, self.angle_offset, self.locked_angle_mode as i32
+            );
+        }
+        if self.id == "fade" {
+            attrs += &format!(" periodic=\"{}\" length=\"{}\"", self.periodic as i32, self.length);
+        }
+        if self.curve == DEFAULT_CURVE {
+            format!("<{tag}{attrs}/>")
+        } else {
+            format!("<{tag}{attrs}> <curve>{}</curve> </{tag}>", self.curve)
+        }
+    }
+
     /// The sensor this slot paints with, or why it can't.
-    fn kind(&self, option: &str) -> Result<SensorKind> {
+    pub fn kind(&self, option: &str) -> Result<SensorKind> {
         if self.id == "drawingangle" {
             if self.locked_angle_mode {
                 bail!("{option}: a locked drawing angle is not supported yet");
@@ -324,6 +360,7 @@ impl Preset {
         self.params.contains_key(key)
     }
 
+    #[cfg(test)]
     pub fn param(&self, key: &str) -> Option<&Param> {
         self.params.get(key)
     }
@@ -364,6 +401,12 @@ impl Preset {
     /// reset, except that the old `Custom<id>` curve format keeps every
     /// sensor's state, which leaves pressure on beside whatever was read.
     pub fn curve_option(&self, spec: &OptionSpec) -> Result<CurveOption> {
+        self.option_data(spec)?.curve_option(spec)
+    }
+
+    /// An option's data, without judging its sensors: see
+    /// [`Preset::curve_option`].
+    pub fn option_data(&self, spec: &OptionSpec) -> Result<OptionData> {
         let id = spec.id;
         let checked = !spec.checkable || self.bool(&format!("Pressure{id}"), false);
 
@@ -436,12 +479,90 @@ impl Preset {
         if id == "Scatter" && self.has("Scattering/Amount") && !self.has("ScatterValue") {
             strength = self.double("Scattering/Amount", 0.0);
         }
+        Ok(OptionData {
+            checked,
+            use_curve: self.bool(&format!("{id}UseCurve"), true),
+            use_same_curve: use_same,
+            strength,
+            curve_mode: self.int(&format!("{id}curveMode"), 0),
+            common_curve: common,
+            slots,
+        })
+    }
 
+    /// Set one parameter, keeping its declared type (a new one is typed
+    /// as Krita would: numbers and booleans `internal`, text `string`).
+    pub fn set(&mut self, key: &str, value: &str) {
+        if let Some(p) = self.params.get_mut(key) {
+            p.value = value.as_bytes().to_vec();
+            return;
+        }
+        let internal = value == "true" || value == "false" || value.parse::<f64>().is_ok();
+        let kind = if internal { "internal" } else { "string" };
+        self.params.insert(
+            key.to_owned(),
+            Param {
+                kind: kind.to_owned(),
+                value: value.as_bytes().to_vec(),
+            },
+        );
+        self.order.push(key.to_owned());
+    }
+
+    /// This preset with `overrides` (key, value) set over it.
+    pub fn with_overrides(&self, overrides: &[(String, String)]) -> Preset {
+        let mut p = self.clone();
+        for (k, v) in overrides {
+            p.set(k, v);
+        }
+        p
+    }
+
+    /// The `preset` XML, as `KisPaintOpPreset` saves it: each param in
+    /// order, text in CDATA, byte arrays in base64, and (for a version 5.0
+    /// preset) the files it carries.
+    pub fn to_xml(&self) -> String {
+        fn esc(s: &str) -> String {
+            s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+        }
+        let mut out = format!("<Preset paintopid=\"{}\" name=\"{}\">", esc(&self.paintop), esc(&self.name));
+        for key in &self.order {
+            let Some(p) = self.params.get(key) else { continue };
+            let value = match p.kind.as_str() {
+                "bytearray" => base64_encode(&p.value),
+                "string" => format!("<![CDATA[{}]]>", String::from_utf8_lossy(&p.value)),
+                _ => esc(&String::from_utf8_lossy(&p.value)),
+            };
+            out += &format!(" <param type=\"{}\" name=\"{}\">{value}</param>", esc(&p.kind), esc(key));
+        }
+        if !self.resources.is_empty() {
+            out += " <resources>";
+            for r in &self.resources {
+                out += &format!(
+                    " <resource type=\"{}\" md5sum=\"{}\" name=\"{}\" filename=\"{}\"><![CDATA[{}]]></resource>",
+                    esc(&r.kind),
+                    esc(&r.md5sum),
+                    esc(&r.name),
+                    esc(&r.filename),
+                    base64_encode(&r.data)
+                );
+            }
+            out += " </resources>";
+        }
+        out += " </Preset>";
+        out
+    }
+}
+
+impl OptionData {
+    /// The option's sensors, or why one can't paint.
+    pub fn curve_option(&self, spec: &OptionSpec) -> Result<CurveOption> {
+        let id = spec.id;
         let mut sensors = Vec::new();
         let mut fan_corners = None;
-        for s in slots.iter().filter(|s| s.active) {
+        for s in self.slots.iter().filter(|s| s.active) {
             let kind = s.kind(id)?;
-            let text = if use_same { &common } else { &s.curve };
+            let text = if self.use_same_curve { &self.common_curve } else { &s.curve };
             let curve = CubicCurve::parse(text).ok_or_else(|| anyhow!("{id}: bad curve `{text}`"))?;
             sensors.push(Sensor::new(kind, &curve));
             if s.id == "drawingangle" && s.fan_corners_enabled && !s.locked_angle_mode {
@@ -449,16 +570,61 @@ impl Preset {
             }
         }
         Ok(CurveOption {
-            checked,
-            use_curve: self.bool(&format!("{id}UseCurve"), true),
-            curve_mode: self.int(&format!("{id}curveMode"), 0),
-            strength,
+            checked: self.checked,
+            use_curve: self.use_curve,
+            curve_mode: self.curve_mode,
+            strength: self.strength,
             min: spec.min,
             max: spec.max,
             sensors,
             fan_corners,
         })
     }
+
+    /// `KisKritaSensorPack::write`: the params that say this.
+    pub fn write(&self, spec: &OptionSpec) -> Vec<(String, String)> {
+        let id = spec.id;
+        let active: Vec<&Slot> = self.slots.iter().filter(|s| s.active).collect();
+        let body = if active.len() == 1 {
+            active[0].write("params")
+        } else {
+            let children: Vec<String> = active.iter().map(|s| s.write("ChildSensor")).collect();
+            format!("<params id=\"sensorslist\"> {} </params>", children.join(" "))
+        };
+        vec![
+            (format!("Pressure{id}"), (self.checked || !spec.checkable).to_string()),
+            (format!("{id}Sensor"), format!("<!DOCTYPE params> {body} ")),
+            (format!("{id}UseCurve"), self.use_curve.to_string()),
+            (format!("{id}UseSameCurve"), self.use_same_curve.to_string()),
+            (format!("{id}Value"), self.strength.to_string()),
+            (format!("{id}curveMode"), self.curve_mode.to_string()),
+            (format!("{id}commonCurve"), self.common_curve.clone()),
+            // A default curve is left out of the sensor XML, which would
+            // send a preset that still has the legacy `Custom<id>` key down
+            // the old-format path on the next read.
+            (format!("Custom{id}"), "false".to_owned()),
+        ]
+    }
+}
+
+/// `QByteArray::toBase64`.
+pub(crate) fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+impl Preset {
 }
 
 #[cfg(test)]
@@ -470,6 +636,70 @@ mod tests {
     fn base64_is_lenient() {
         assert_eq!(base64(b"aGVsbG8="), b"hello");
         assert_eq!(base64(b"aGVs\nbG8"), b"hello");
+        for s in [&b""[..], b"h", b"he", b"hel", b"hello"] {
+            assert_eq!(base64(base64_encode(s).as_bytes()), s);
+        }
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    }
+
+    /// Writing an option back and reading it again changes nothing, for
+    /// every option of every shipped preset: the editor's edits round-trip.
+    #[test]
+    fn options_write_back_as_they_read() {
+        use options::*;
+        for name in super::super::defaults::PRESETS {
+            let p = Preset::read(&super::super::defaults::kpp(name).unwrap()).unwrap();
+            for spec in [SIZE, RATIO, ROTATION, OPACITY, FLOW, SOFTNESS, SCATTER, TEXTURE_STRENGTH] {
+                let data = p.option_data(&spec).unwrap();
+                let written = p.with_overrides(&data.write(&spec));
+                let again = written.option_data(&spec).unwrap();
+                // Inactive slots are not written, so only the active ones,
+                // and the curves that apply, have to survive.
+                let active = |d: &OptionData| -> Vec<Slot> { d.slots.iter().filter(|s| s.active).cloned().collect() };
+                assert_eq!(active(&again), active(&data), "{name} {}", spec.id);
+                assert_eq!(
+                    (again.checked || !spec.checkable, again.use_curve, again.use_same_curve, again.strength, again.curve_mode),
+                    (data.checked || !spec.checkable, data.use_curve, data.use_same_curve, data.strength, data.curve_mode),
+                    "{name} {}",
+                    spec.id
+                );
+                if data.use_same_curve {
+                    assert_eq!(again.common_curve, data.common_curve, "{name} {}", spec.id);
+                }
+            }
+        }
+    }
+
+    /// The XML writer's output reads back as the same preset.
+    #[test]
+    fn the_preset_xml_reads_back() {
+        let p = Preset::read(super::super::PENCIL5_KPP).unwrap();
+        let mut edited = p.with_overrides(&[("FlowValue".into(), "0.5".into()), ("NewThing".into(), "a<b".into())]);
+        edited.resources.push(EmbeddedResource {
+            kind: "brushes".into(),
+            name: "tip".into(),
+            filename: "tip.png".into(),
+            md5sum: "x".into(),
+            data: vec![1, 2, 3],
+        });
+        let xml = edited.to_xml();
+        let mut kpp = with_xml(&xml);
+        let body = b"version\x005.0";
+        let mut chunk = (body.len() as u32).to_be_bytes().to_vec();
+        chunk.extend_from_slice(b"tEXt");
+        chunk.extend_from_slice(body);
+        chunk.extend_from_slice(&[0; 4]);
+        kpp.splice(8..8, chunk);
+        let back = Preset::read(&kpp).unwrap();
+        assert_eq!(back.order, edited.order);
+        for k in &back.order {
+            assert_eq!(back.param(k).unwrap().value, edited.param(k).unwrap().value, "{k}");
+            assert_eq!(back.param(k).unwrap().kind, edited.param(k).unwrap().kind, "{k}");
+        }
+        assert_eq!(back.param("NewThing").unwrap().kind, "string");
+        assert_eq!(back.param("FlowValue").unwrap().kind, "internal");
+        assert_eq!(back.resources[0].data, vec![1, 2, 3]);
+        assert_eq!(back.name, p.name);
     }
 
     #[test]

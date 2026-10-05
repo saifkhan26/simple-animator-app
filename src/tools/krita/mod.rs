@@ -28,7 +28,9 @@ pub mod composite;
 pub mod curve;
 pub mod defaults;
 pub mod distance;
+pub mod edit;
 pub mod kpp;
+pub mod kpp_write;
 pub mod options;
 pub mod qt;
 pub mod random;
@@ -250,7 +252,11 @@ impl PixelBrush {
     /// Load a `.kpp`. A tip the preset embeds (a Krita 5 preset carries
     /// its own) is used first; otherwise `resources` supplies it.
     pub fn load<R: Resources + ?Sized>(kpp: &[u8], resources: &R) -> Result<Self> {
-        let p = Preset::read(kpp)?;
+        Self::from_preset(&Preset::read(kpp)?, resources)
+    }
+
+    /// Build from an already-read preset (one the editor has changed).
+    pub fn from_preset<R: Resources + ?Sized>(p: &Preset, resources: &R) -> Result<Self> {
         if p.paintop != "paintbrush" {
             bail!("`{}` uses the `{}` engine; only the pixel brush is supported", p.name, p.paintop);
         }

@@ -46,7 +46,6 @@ pub const PRESETS: [&str; 24] = [
 ];
 
 /// The tips those presets name.
-#[cfg(test)]
 pub const TIPS: [&str; 3] = ["gradient.png", "plain_rake.png", "graphite_grain.gih"];
 
 type Archive = Mutex<ZipArchive<Cursor<&'static [u8]>>>;

@@ -19,7 +19,7 @@ const TILE_W: f32 = TILE + 16.0;
 const TILE_H: f32 = TILE + 32.0;
 /// What thumbnails sit on: a paper colour, so dark strokes read on the
 /// dark theme.
-const PAPER: egui::Color32 = egui::Color32::from_rgb(226, 226, 222);
+pub(crate) const PAPER: egui::Color32 = egui::Color32::from_rgb(226, 226, 222);
 
 /// One brush in the grid: a fixed-size tile, so the grid lines up however
 /// long the names are. A brush that cannot paint is drawn faded.
@@ -204,15 +204,3 @@ pub fn describe(b: &PixelBrush) -> Vec<String> {
     lines
 }
 
-/// The summary for a brush picked from the library, or `None` for the
-/// built-in Pencil-5.
-pub fn library_summary(state: &AppState, ui: &mut egui::Ui) -> bool {
-    let Some(id) = state.brush.krita_id.as_deref() else { return false };
-    let Some(entry) = state.brush_library.entry(id) else { return false };
-    let Some(b) = state.brush_library.brush(id) else { return false };
-    ui.label(RichText::new(format!("Krita · {}", entry.name)).strong());
-    for l in describe(&b) {
-        ui.label(RichText::new(l).small());
-    }
-    true
-}

@@ -142,30 +142,6 @@ impl SensorKind {
         matches!(self, Self::DrawingAngle { .. })
     }
 
-    /// Whether the sensor draws on the stroke's random source.
-    pub fn is_random(self) -> bool {
-        self == Self::FuzzyPerDab
-    }
-
-    /// The order `generateSensors` adds sensors in: the order several
-    /// scaling sensors on one option are combined in, and the order fuzzy
-    /// sensors take their random numbers.
-    pub fn order(self) -> u8 {
-        match self {
-            Self::Pressure => 0,
-            Self::TangentialPressure => 2,
-            Self::DrawingAngle { .. } => 3,
-            Self::XTilt => 4,
-            Self::YTilt => 5,
-            Self::TiltDirection => 6,
-            Self::TiltElevation => 7,
-            Self::Rotation => 8,
-            Self::FuzzyPerDab => 9,
-            Self::Speed => 11,
-            Self::Fade { .. } => 12,
-        }
-    }
-
     fn value(self, info: &PaintInfo) -> f64 {
         match self {
             Self::Pressure => info.pressure,

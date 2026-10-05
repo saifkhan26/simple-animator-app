@@ -77,6 +77,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     // `settings_window`: hiding the panels is what you do to draw, and
     // drawing is when brush feel wants adjusting.
     brush_settings_window(state, ctx);
+    crate::ui::krita_import::krita_import_window(state, ctx);
     // Outside it too: snapping is set per grid, and set while drawing.
     grid_settings_window(state, ctx);
     new_project_dialog(state, ctx);
@@ -768,7 +769,7 @@ fn panel_window(
 ///
 /// Call it first thing in the window's contents. A collapsed window has no
 /// contents, so it still drags from its header.
-fn drag_by_title_only(ui: &mut egui::Ui) {
+pub(crate) fn drag_by_title_only(ui: &mut egui::Ui) {
     // Contents live on the window's own layer, whose id is the window's.
     let id = ui.layer_id().id;
     let Some(outer) = egui::AreaState::load(ui.ctx(), id).map(|s| s.rect()) else {
@@ -1391,7 +1392,8 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
     });
 
     if state.brush.mode == BrushMode::Krita {
-        krita_brush_summary(state, ui);
+        crate::ui::krita_editor::krita_editor(state, ui);
+        krita_notes(state, ui);
         return;
     }
 
@@ -1450,29 +1452,9 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
-/// What a Krita preset does, in place of the sliders it does not use: its
-/// response is the preset's own, so the only controls that still apply are
-/// Size and Opacity, which act as Krita's.
-fn krita_brush_summary(state: &AppState, ui: &mut egui::Ui) {
-    use crate::tools::krita::KritaPreset;
-    if !crate::ui::brush_picker::library_summary(state, ui) {
-        let (name, lines): (&str, &[&str]) = match state.brush.krita {
-            KritaPreset::Pencil5Tilted => (
-                "Krita · Pencil-5 Tilted",
-                &[
-                    "Size ← tilt: a quarter size upright, full size laid flat",
-                    "Rotation ← the way the pen leans",
-                    "Opacity ← pressure, on the preset's curve",
-                    "Paper texture, stronger the harder you press",
-                    "Builds up dab by dab in 8 bits, as Krita does",
-                ],
-            ),
-        };
-        ui.label(egui::RichText::new(name).strong());
-        for l in lines {
-            ui.label(egui::RichText::new(*l).small());
-        }
-    }
+/// What still holds under a Krita preset: Size and Opacity are Krita's own
+/// sliders, and tilt needs a pen.
+fn krita_notes(state: &AppState, ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new("Size and Opacity work as Krita's own sliders.")
             .small()
@@ -3079,6 +3061,13 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 theme::section_header(ui, ic::PEN_NIB, "Preset");
                 crate::ui::brush_picker::brush_grid(state, ui);
+                if ui
+                    .small_button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import from Krita…"))
+                    .on_hover_text("Copy brushes from your Krita into this app")
+                    .clicked()
+                {
+                    state.open_krita_import();
+                }
 
                 ui.add_space(6.0);
                 theme::section_header(ui, ic::SLIDERS, "Dynamics");
@@ -3345,7 +3334,7 @@ fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3]) {
     });
 }
 
-fn floating_frame() -> Frame {
+pub(crate) fn floating_frame() -> Frame {
     Frame::window(&egui::Style::default())
         .fill(theme::BG_PANEL)
         .stroke(Stroke::new(1.0, theme::STROKE_THIN))
@@ -5950,6 +5939,14 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             state.install_krita_helper();
             ui.close_menu();
         }
+        if ui
+            .button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import Krita brushes…"))
+            .on_hover_text("Copy brushes from your Krita into this app's brush picker")
+            .clicked()
+        {
+            state.open_krita_import();
+            ui.close_menu();
+        }
         ui.separator();
         if ui
             .button(theme::icon_text(
@@ -8492,6 +8489,137 @@ mod krita_brush_tests {
         state.brush_search = "hairy".into();
         click_text(&ctx, &mut state, "Hairy");
         assert_eq!(state.brush.krita_id.as_deref(), Some("krita/b)_Basic-5_Size_default"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The import window against a fake Krita: unpaintable presets are
+    /// hidden, Import copies one into the brushes folder, and Use paints
+    /// with it.
+    #[test]
+    fn the_krita_import_window_imports_and_uses_a_brush() {
+        use crate::brush_library::import::{tests as fake, KritaImport};
+        let (ctx, mut state) = picker_state();
+        let (root, places) = fake::fake_krita("window");
+        let brushes = root.join("brushes");
+        state.brush_library = crate::brush_library::BrushLibrary::new(Some(brushes.clone()));
+        settle_library(&mut state);
+        // Brush settings offers it; the test opens it on the fake Krita
+        // rather than this machine's.
+        let open = theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import from Krita…");
+        assert!(text_at(&ctx, &mut state, &open).is_some(), "the button under the picker");
+        // So does File, on the top bar the panels bring.
+        state.show_panels = true;
+        run(&ctx, &mut state, vec![]);
+        click_text(&ctx, &mut state, &theme::icon_text(ic::FOLDER, "File"));
+        let item = theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import Krita brushes…");
+        assert!(text_at(&ctx, &mut state, &item).is_some(), "in the File menu");
+        run(&ctx, &mut state, vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert!(state.krita_import.is_none(), "looking does not open it");
+        state.show_panels = false;
+        run(&ctx, &mut state, vec![]);
+        state.krita_import = Some(KritaImport::start(places, Some(brushes.clone())));
+        fake::settle(state.krita_import.as_mut().unwrap());
+        // A new window's first frame only measures it.
+        run(&ctx, &mut state, vec![]);
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "Your Krita presets  ·  2 of 3 paint"), "{t:?}");
+        assert!(t.iter().any(|s| s == "My Grain"), "{t:?}");
+        assert!(!t.iter().any(|s| s == "Hairy"), "unpaintable presets wait for Show the rest");
+        // Its rows fill the width without pushing the window wider.
+        let size = || egui::AreaState::load(&ctx, egui::Id::new("window_krita_import")).map(|a| a.rect().size());
+        let before = size();
+        for _ in 0..5 {
+            run(&ctx, &mut state, vec![]);
+        }
+        assert!(before.is_some());
+        assert_eq!(size(), before);
+
+        state.krita_import.as_mut().unwrap().search = "grain".into();
+        click_text(&ctx, &mut state, "Import");
+        assert!(brushes.join("My Grain").join("graphite_grain.gih").is_file());
+        assert!(state.brush_library.entry("user/My Grain").is_some(), "the picker lists it");
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s.starts_with("Imported My Grain.")), "{t:?}");
+
+        click_text(&ctx, &mut state, "Use");
+        assert_eq!(state.brush.mode, BrushMode::Krita);
+        assert_eq!(state.brush.krita_id.as_deref(), Some("user/My Grain"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The editor under a picked Krita preset: an edit is an override the
+    /// stroke paints with, Reset drops it, and Save as new keeps it as a
+    /// brush of its own.
+    #[test]
+    fn the_krita_editor_edits_resets_and_saves() {
+        let (ctx, mut state) = picker_state();
+        let root = crate::brush_library::import::tests::tmp("editor");
+        state.brush_library = crate::brush_library::BrushLibrary::new(Some(root.clone()));
+        settle_library(&mut state);
+        state.brush_search = "tilted".into();
+        click_text(&ctx, &mut state, "Pencil-5 Tilted");
+        assert_eq!(state.brush.krita_id.as_deref(), Some("krita/c)_Pencil-5_Tilted"));
+        // An empty grid leaves the editor room.
+        state.brush_search = "nothing matches this".into();
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "Krita · Pencil-5 Tilted"), "{t:?}");
+        // The editor runs below the window's default height: drag the
+        // window's corner down, as a user would.
+        let r = egui::AreaState::load(&ctx, egui::Id::new("window_brush_settings")).unwrap().rect();
+        let grip = r.max - egui::vec2(3.0, 3.0);
+        run(&ctx, &mut state, vec![egui::Event::PointerMoved(grip), button(grip, true)]);
+        for i in 1..=10 {
+            let p = egui::pos2(grip.x, grip.y + (895.0 - grip.y) * i as f32 / 10.0);
+            run(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+        }
+        run(&ctx, &mut state, vec![button(egui::pos2(grip.x, 895.0), false)]);
+        run(&ctx, &mut state, vec![]);
+        assert!(!state.krita_brush().wash);
+
+        click_text(&ctx, &mut state, "Wash");
+        assert_eq!(state.brush.krita_overrides, vec![("PaintOpAction".to_owned(), "2".to_owned())]);
+        assert!(state.krita_brush().wash, "the stroke paints the edit");
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "edited"), "{t:?}");
+        assert!(t.iter().any(|s| s == "Flow"), "wash shows its flow: {t:?}");
+
+        click_text(&ctx, &mut state, "Reset");
+        assert!(state.brush.krita_overrides.is_empty());
+        assert!(!state.krita_brush().wash);
+
+        // A sensor on: Size reads speed too. Off again: nothing to keep.
+        use crate::tools::krita::sensors::SensorKind;
+        click_text(&ctx, &mut state, "Size ← Tilt amount");
+        // Opening is animated.
+        for _ in 0..30 {
+            run(&ctx, &mut state, vec![]);
+        }
+        click_text(&ctx, &mut state, "Speed");
+        assert!(state.brush.krita_overrides.iter().any(|(k, v)| k == "SizeSensor" && v.contains("speed")), "{:?}", state.brush.krita_overrides);
+        assert!(state.krita_brush().size.sensors.iter().any(|s| s.kind == SensorKind::Speed));
+        click_text(&ctx, &mut state, "Speed");
+        assert!(state.brush.krita_overrides.is_empty(), "{:?}", state.brush.krita_overrides);
+        click_text(&ctx, &mut state, "Size ← Tilt amount");
+        for _ in 0..30 {
+            run(&ctx, &mut state, vec![]);
+        }
+
+        click_text(&ctx, &mut state, "Wash");
+        click_text(&ctx, &mut state, "Save as new…");
+        click_text(&ctx, &mut state, "Save");
+        assert_eq!(state.brush.krita_id.as_deref(), Some("user/Pencil-5 Tilted edited"));
+        assert!(state.brush.krita_overrides.is_empty(), "the new preset holds the edit itself");
+        assert!(state.krita_brush().wash);
+        assert!(root.join("Pencil-5 Tilted edited").join("Pencil-5 Tilted edited.kpp").is_file());
+        settle_library(&mut state);
+        let entry = state.brush_library.entry("user/Pencil-5 Tilted edited").expect("it joins the picker");
+        assert_eq!(entry.group, crate::brush_library::Group::Imported);
         std::fs::remove_dir_all(&root).ok();
     }
 
