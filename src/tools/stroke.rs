@@ -283,7 +283,7 @@ impl StrokeBuilder {
         // pen-down dab included; there is no coverage to composite.
         if let Some(k) = &mut self.krita {
             self.dot_pending = false;
-            return k.drain(canvas, ws.clip(), ws.alpha_lock());
+            return k.drain(canvas, ws, pre);
         }
 
         // Pen-down dot: instant ink with zero latency. A lone disc rather
@@ -355,7 +355,7 @@ impl StrokeBuilder {
 
         // Krita stops at the last whole step: no extra dab on the end point.
         if let Some(k) = &mut self.krita {
-            if let Some(r) = k.drain(canvas, ws.clip(), ws.alpha_lock()) {
+            if let Some(r) = k.drain(canvas, ws, pre) {
                 acc = Some(union_rect(acc, r));
             }
             return acc;
@@ -1850,6 +1850,71 @@ mod tests {
             .save(&path)
             .expect("write preview");
         println!("wrote {path}");
+    }
+
+    /// Krita's shipped presets, one S-stroke each with pressure easing in
+    /// and out, for comparing against the same presets in Krita. Ignored by
+    /// default — it writes a file:
+    ///
+    /// ```text
+    /// PREVIEW_OUT=krita.png cargo test krita_preset_sheet -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn krita_preset_sheet() {
+        let Ok(path) = std::env::var("PREVIEW_OUT") else {
+            panic!("set PREVIEW_OUT to the .png to write");
+        };
+        use crate::tools::krita::defaults;
+        let names: Vec<&str> = defaults::PRESETS.iter().copied().filter(|n| defaults::brush(n).is_ok()).collect();
+        let (w, h) = (900u32, 70 * names.len() as u32 + 20);
+        let mut canvas = Canvas::new(w, h);
+        for px in canvas.pixels_mut().chunks_mut(4) {
+            px.copy_from_slice(&[235, 235, 235, 255]);
+        }
+        for (i, name) in names.iter().enumerate() {
+            let brush = defaults::brush(name).unwrap();
+            let y0 = 45.0 + i as f32 * 70.0;
+            if brush.erase {
+                // Something to erase.
+                for y in (y0 as u32 - 25)..(y0 as u32 + 25) {
+                    for x in 30..870 {
+                        let k = ((y * w + x) * 4) as usize;
+                        canvas.pixels_mut()[k..k + 4].copy_from_slice(&[40, 40, 40, 255]);
+                    }
+                }
+            }
+            let settings = BrushSettings {
+                radius: (brush.diameter() / 2.0).min(30.0) as f32,
+                color: [20, 20, 20, 255],
+                mode: BrushMode::Krita,
+                ..BrushSettings::default()
+            };
+            let pre = canvas.pixels().into_owned();
+            let mut ws = StrokeWorkspace::new();
+            ws.begin(w, h, &settings);
+            let mut b = StrokeBuilder::new_with_krita(settings, ActiveTool::Pencil, 1.0, SmoothingOptions::default(), brush);
+            b.seed_random(1);
+            for k in 0..=120 {
+                let t = k as f32 / 120.0;
+                let p = (t * std::f32::consts::PI).sin().powf(0.6).clamp(0.02, 1.0);
+                b.push(PointerSample {
+                    x: 40.0 + t * 820.0,
+                    y: y0 + (t * 6.0).sin() * 12.0,
+                    pressure: p,
+                    tilt_x: 40.0 * (t * 3.0).cos(),
+                    tilt_y: 40.0 * (t * 3.0).sin(),
+                    ..Default::default()
+                });
+                b.flush(&mut canvas, &mut ws, &pre);
+            }
+            b.finish(&mut canvas, &mut ws, &pre);
+        }
+        image::RgbaImage::from_raw(w, h, canvas.pixels().into_owned())
+            .expect("canvas is RGBA8")
+            .save(&path)
+            .expect("write preview");
+        println!("wrote {path}: {}", names.join(", "));
     }
 
     /// The airbrush preset sprays: one pass leaves a soft band that is

@@ -15,12 +15,16 @@
 //!
 //! xsimd is BSD-3-Clause; boost is the Boost Software License 1.0.
 
+// boost's coefficients are copied digit for digit, more than f64 holds.
+#![allow(clippy::excessive_precision)]
+
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::sync::OnceLock;
 
 /// xsimd `exp(batch<float, fma3<avx2>>)`, one lane.
 pub fn xsimd_exp(a: f32) -> f32 {
-    const INVLOG_2: f32 = 1.442_695_040_888_963_407_359_924_681_001_892_137_426_645_954_152_986_f32;
+    // xsimd's `invlog_2`, which is log2(e) to the last bit.
+    const INVLOG_2: f32 = std::f32::consts::LOG2_E;
     let log_2hi = f32::from_bits(0x3f31_8000);
     let log_2lo = f32::from_bits(0xb95e_8083);
     const MAXLOG: f32 = 88.376_262_664_794_9;

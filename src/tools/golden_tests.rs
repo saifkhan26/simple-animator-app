@@ -197,6 +197,7 @@ fn brushes() -> Vec<(&'static str, BrushSettings, ActiveTool)> {
     v
 }
 
+#[allow(clippy::too_many_arguments)]
 fn freehand_case(
     name: String,
     brush: BrushSettings,
@@ -346,6 +347,66 @@ fn cases() -> Vec<Case> {
                 c
             }),
         });
+    }
+
+    // Krita's shipped presets, each as it loads: added as the engine learns
+    // to paint them, pinned from then on. Random features are seeded.
+    for name in crate::tools::krita::defaults::PRESETS {
+        let Ok(brush) = crate::tools::krita::defaults::brush(name) else {
+            continue;
+        };
+        let short = name.trim_end_matches(".kpp");
+        let settings = BrushSettings {
+            radius: (brush.diameter() / 2.0) as f32,
+            color: [30, 60, 90, 255],
+            mode: BrushMode::Krita,
+            ..BrushSettings::default()
+        };
+        let erases = brush.erase;
+        let conds: &[(&str, Ground, Hold, &str)] = if erases {
+            &[("ink", Ground::Ink, Hold::Free, "s"), ("ink-sel", Ground::Ink, Hold::Selection, "s"), ("ink", Ground::Ink, Hold::Free, "tilt")]
+        } else {
+            &[
+                ("clear", Ground::Clear, Hold::Free, "s"),
+                ("clear", Ground::Clear, Hold::Free, "tilt"),
+                ("clear", Ground::Clear, Hold::Free, "tap"),
+                ("stripes", Ground::Stripes, Hold::Free, "line"),
+                ("sel", Ground::Grey, Hold::Selection, "s"),
+                ("lock", Ground::Stripes, Hold::AlphaLock, "s"),
+            ]
+        };
+        for &(cond, ground, hold, input) in conds {
+            let (brush, settings) = (brush.clone(), settings.clone());
+            out.push(Case {
+                name: format!("krita/{short}/{input}/{cond}"),
+                rcp: true,
+                run: Box::new(move || {
+                    let mut c = canvas(ground);
+                    let pre = c.pixels().into_owned();
+                    let mut ws = StrokeWorkspace::new();
+                    ws.begin(W, H, &settings);
+                    match hold {
+                        Hold::Free => {}
+                        Hold::Selection => ws.set_clip(Some(selection())),
+                        Hold::AlphaLock => ws.set_alpha_lock(true),
+                    }
+                    let mut b = StrokeBuilder::new_with_krita(
+                        settings.clone(),
+                        ActiveTool::Pencil,
+                        1.0,
+                        SmoothingOptions::default(),
+                        brush.clone(),
+                    );
+                    b.seed_random(1);
+                    for s in gesture(input) {
+                        b.push(s);
+                        b.flush(&mut c, &mut ws, &pre);
+                    }
+                    b.finish(&mut c, &mut ws, &pre);
+                    c
+                }),
+            });
+        }
     }
 
     // The Shape tool shares the ribbon workspace.
@@ -525,7 +586,8 @@ const PERF_TABLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tools/testdat
 ///
 /// ```text
 /// cargo test --release perf_ -- --ignored --nocapture     # report
-/// PERF_RECORD=1 cargo test --release perf_ -- --ignored   # (re)baseline this machine
+/// PERF_RECORD=1 cargo test --release perf_ -- --ignored   # add missing rows
+/// PERF_RERECORD=1 cargo test --release perf_ -- --ignored # re-baseline this machine
 /// PERF_STRICT=1 cargo test --release perf_ -- --ignored   # fail beyond +15%
 /// ```
 #[test]
@@ -565,6 +627,43 @@ fn perf_brushes_1080p() {
             best = (best.0.min(total), best.1.min(worst.as_secs_f64() * 1e3));
         }
         rows.push((label.to_owned(), best.0, best.1));
+    }
+    // Krita's shipped presets in wash and build-up, auto and bitmap tips.
+    for name in ["b)_Basic-5_Size_default.kpp", "a)_Eraser_Soft.kpp", "b)_Airbrush_Soft.kpp", "e)_Marker_Dry.kpp"] {
+        let Ok(kb) = crate::tools::krita::defaults::brush(name) else { continue };
+        let settings = BrushSettings {
+            radius: (kb.diameter() / 2.0) as f32,
+            mode: BrushMode::Krita,
+            ..BrushSettings::default()
+        };
+        let mut best = (f64::MAX, f64::MAX);
+        for _ in 0..3 {
+            let mut c = Canvas::new(1920, 1080);
+            let pre = c.pixels().into_owned();
+            let mut ws = StrokeWorkspace::new();
+            ws.begin(c.width, c.height, &settings);
+            let mut b = StrokeBuilder::new_with_krita(settings.clone(), ActiveTool::Pencil, 1.0, SmoothingOptions::default(), kb.clone());
+            b.seed_random(1);
+            let t0 = std::time::Instant::now();
+            let mut worst = std::time::Duration::ZERO;
+            let n = 400;
+            for i in 0..=n {
+                let t = i as f32 / n as f32;
+                b.push(sample(
+                    40.0 + t * 1840.0,
+                    40.0 + t * 1000.0 + (t * 20.0).sin() * 30.0,
+                    0.3 + 0.7 * (t * std::f32::consts::PI).sin(),
+                    (50.0 * (t * 9.0).cos(), 50.0 * (t * 9.0).sin()),
+                ));
+                let f0 = std::time::Instant::now();
+                b.flush(&mut c, &mut ws, &pre);
+                worst = worst.max(f0.elapsed());
+            }
+            b.finish(&mut c, &mut ws, &pre);
+            let total = t0.elapsed().as_secs_f64() * 1e3;
+            best = (best.0.min(total), best.1.min(worst.as_secs_f64() * 1e3));
+        }
+        rows.push((format!("krita/{}", name.trim_end_matches(".kpp")), best.0, best.1));
     }
     {
         let brush = BrushSettings::default_shape();
@@ -607,17 +706,22 @@ fn perf_brushes_1080p() {
             }
         }
     }
-    if std::env::var_os("PERF_RECORD").is_some() {
+    // PERF_RECORD adds rows this machine has none for; PERF_RERECORD
+    // replaces all of this machine's rows.
+    let rerecord = std::env::var_os("PERF_RERECORD").is_some();
+    if rerecord || std::env::var_os("PERF_RECORD").is_some() {
         let mut out: String = text
             .lines()
-            .filter(|l| !l.starts_with(&format!("{machine}\t")))
+            .filter(|l| !(rerecord && l.starts_with(&format!("{machine}\t"))))
             .map(|l| format!("{l}\n"))
             .collect();
         if out.is_empty() {
             out.push_str("# machine\tcase\ttotal_ms\tworst_flush_ms (release, best of 3)\n");
         }
         for (label, total, worst) in &rows {
-            let _ = writeln!(out, "{machine}\t{label}\t{total:.2}\t{worst:.3}");
+            if rerecord || !baseline.contains_key(label) {
+                let _ = writeln!(out, "{machine}\t{label}\t{total:.2}\t{worst:.3}");
+            }
         }
         std::fs::write(PERF_TABLE, out).expect("write perf baseline");
     }

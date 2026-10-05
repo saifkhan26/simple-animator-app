@@ -49,3 +49,15 @@ impl Default for PointerSample {
     }
 }
 
+
+impl PointerSample {
+    /// An upright sample at `(x, y)` with `pressure`.
+    pub fn at(x: f32, y: f32, pressure: f32) -> Self {
+        Self {
+            x,
+            y,
+            pressure,
+            ..Self::default()
+        }
+    }
+}

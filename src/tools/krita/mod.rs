@@ -26,6 +26,7 @@
 
 pub mod composite;
 pub mod curve;
+pub mod defaults;
 pub mod distance;
 pub mod kpp;
 pub mod options;
@@ -46,6 +47,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::input::pointer::PointerSample;
 use crate::tools::lasso::Mask;
+use crate::tools::ribbon::StrokeWorkspace;
 
 use distance::DabHistory;
 use kpp::Preset;
@@ -178,12 +180,20 @@ pub struct PixelBrush {
     pub size: CurveOption,
     pub rotation: CurveOption,
     pub opacity: CurveOption,
+    pub flow: CurveOption,
     pub texture_strength: CurveOption,
     pub texture: Option<TextureMask>,
     spacing: f64,
     auto_spacing: Option<f64>,
     isotropic_spacing: bool,
     precision: PrecisionOption,
+    /// Wash mode: dabs build up in a stroke buffer with alpha darken, and
+    /// the buffer is merged onto the layer. Otherwise build-up: each dab
+    /// goes straight onto the layer.
+    pub wash: bool,
+    /// The preset erases (its blend is `erase`, or it was saved in eraser
+    /// mode), whatever tool paints with it.
+    pub erase: bool,
 }
 
 /// Settings a preset may carry only switched off: each is a Krita feature
@@ -205,7 +215,6 @@ const MUST_BE_OFF: &[&str] = &[
     "MaskingBrush/Enabled",
     "PaintOpSettings/isAirbrushing",
     "PaintOpSettings/updateSpacingBetweenDabs",
-    "EraserMode",
 ];
 // Not here, though presets set them: `Texture/Pattern/isRandomOffsetX/Y`.
 // Krita 5.2 reads and writes them (KisTextureOptionData) but nothing paints
@@ -246,14 +255,17 @@ impl PixelBrush {
         // Build-up (1) paints dabs straight onto the layer; wash (2) goes
         // through a stroke buffer with alpha-darken. A preset without the
         // key is build-up (`KisBrushBasedPaintOpSettings::paintIncremental`).
-        if p.int("PaintOpAction", 1) != 1 {
-            bail!("`{}` paints in wash mode; only build-up is supported yet", p.name);
-        }
-        if let Some(op) = p.string("CompositeOp") {
-            if op != "normal" {
-                bail!("`{}` blends with `{op}`; only normal is supported", p.name);
-            }
-        }
+        let wash = match p.int("PaintOpAction", 1) {
+            1 => false,
+            2 => true,
+            m => bail!("`{}` has an unknown painting mode {m}", p.name),
+        };
+        let erase_op = match p.string("CompositeOp").as_deref() {
+            None | Some("normal") => false,
+            Some("erase") => true,
+            Some(op) => bail!("`{}` blends with `{op}`; only normal and erase are supported", p.name),
+        };
+        let erase = erase_op || p.bool("EraserMode", false);
         if let Some(src) = p.string("ColorSource/Type") {
             if src != "plain" {
                 bail!("`{}` takes its colour from `{src}`; only plain colour is supported", p.name);
@@ -305,7 +317,7 @@ impl PixelBrush {
 
         let texture = if p.bool("Texture/Pattern/Enabled", false) {
             if p.int("Texture/Pattern/TexturingMode", 0) != 0 {
-                bail!("`{}` uses a texturing mode other than multiply", p.name);
+                bail!("`{}` uses a texturing mode other than multiply, which is not supported yet", p.name);
             }
             let outer = p
                 .bytes("Texture/Pattern/Pattern")
@@ -351,7 +363,17 @@ impl PixelBrush {
         let size = p.curve_option(&options::SIZE)?;
         let rotation = p.curve_option(&options::ROTATION)?;
         let opacity = p.curve_option(&options::OPACITY)?;
+        let flow = p.curve_option(&options::FLOW)?;
         let texture_strength = p.curve_option(&options::TEXTURE_STRENGTH)?;
+        // Read but not painted yet: refuse rather than paint them wrong.
+        for (name, o) in [("Size", &size), ("Rotation", &rotation), ("Opacity", &opacity), ("Flow", &flow), ("Texture strength", &texture_strength)] {
+            if o.checked && o.sensors.iter().any(|s| s.kind == sensors::SensorKind::Speed) {
+                bail!("`{}`: {name} follows the speed sensor, which is not supported yet", p.name);
+            }
+        }
+        if rotation.checked && rotation.fan_corners.is_some() {
+            bail!("`{}`: drawing-angle fan corners are not supported yet", p.name);
+        }
         let precision = PrecisionOption {
             level: p.int("KisPrecisionOption/precisionLevel", 5).clamp(1, 5),
             auto: p.bool("KisPrecisionOption/AutoPrecisionEnabled", false),
@@ -364,12 +386,15 @@ impl PixelBrush {
             size,
             rotation,
             opacity,
+            flow,
             texture_strength,
             texture,
             spacing,
             auto_spacing,
             isotropic_spacing: p.bool("Spacing/Isotropic", false),
             precision,
+            wash,
+            erase,
         })
     }
 
@@ -468,6 +493,8 @@ struct DabRequest {
     y: f64,
     shape: DabShape,
     opacity: f64,
+    /// Wash mode's alpha-darken flow; build-up ignores it.
+    flow: f64,
     texture_strength: f64,
 }
 
@@ -515,6 +542,8 @@ pub struct KritaStroke {
     /// strength, which is what Krita's own opacity slider sets.
     opacity: CurveOption,
     erase: bool,
+    /// Wash mode's running `averageOpacity`, dab to dab.
+    average_opacity: f64,
     canvas_rotation: f64,
     mirrored: (bool, bool),
     distance: Distance,
@@ -558,12 +587,14 @@ impl KritaStroke {
         };
         let mut opacity_option = brush.opacity.clone();
         opacity_option.strength = opacity.clamp(0.0, 1.0);
+        let erase = erase || brush.erase;
         Self {
             brush,
             brush_scale,
             color: [color[0], color[1], color[2]],
             opacity: opacity_option,
             erase,
+            average_opacity: 0.0,
             canvas_rotation: rotation_deg,
             mirrored,
             // KisSpacingInformation(): zero spacing until the first dab.
@@ -636,7 +667,7 @@ impl KritaStroke {
     }
 
     fn supports_caching(&self) -> bool {
-        self.auto_tip.as_ref().is_none_or(AutoTip::supports_caching)
+        self.auto_tip.as_ref().map_or(true, AutoTip::supports_caching)
     }
 
     /// The preset this stroke paints with.
@@ -697,20 +728,23 @@ impl KritaStroke {
             ratio: 1.0,
             rotation,
         };
-        // KisFlowOpacityOption2::apply in build-up: the opacity option's
-        // value, strength included. Flow is computed there too, but the
-        // 8-bit "normal" op build-up paints with never reads it.
+        // KisFlowOpacityOption2::apply: the opacity option's value, with
+        // its strength in build-up only; in wash the strength is the merge's
+        // opacity instead. Flow is computed either way, but the 8-bit
+        // "normal" op build-up paints with never reads it.
         let opacity = if self.opacity.checked {
-            self.opacity.size_like(&info, true)
+            self.opacity.size_like(&info, !b.wash)
         } else {
             1.0
         };
+        let flow = b.flow.apply(&info);
         let texture_strength = b.texture_strength.apply(&info);
         self.pending.push(DabRequest {
             x: s.x as f64,
             y: s.y as f64,
             shape,
             opacity,
+            flow,
             texture_strength,
         });
 
@@ -737,18 +771,35 @@ impl KritaStroke {
     }
 
     /// Paint every dab decided since the last drain onto `canvas`.
-    pub fn drain(&mut self, canvas: &mut Canvas, clip: Option<&Arc<Mask>>, alpha_lock: bool) -> Option<DirtyRect> {
+    /// Paint every dab decided since the last drain onto `canvas`. A wash
+    /// stroke builds them up in `ws`'s buffer and merges the buffer over
+    /// `pre`, the layer as it was before the stroke.
+    pub fn drain(&mut self, canvas: &mut Canvas, ws: &mut StrokeWorkspace, pre: &[u8]) -> Option<DirtyRect> {
         let mut acc: Option<DirtyRect> = None;
         let pending = std::mem::take(&mut self.pending);
+        if !self.brush.wash {
+            let clip = ws.clip().cloned();
+            for req in pending {
+                if let Some(r) = self.render(req, canvas, clip.as_ref(), ws.alpha_lock()) {
+                    acc = Some(crate::tools::ribbon::union_rect(acc, r));
+                }
+            }
+            return acc;
+        }
+        // The app's rule: the eraser does nothing on an alpha-locked layer.
+        if self.erase && ws.alpha_lock() {
+            return None;
+        }
         for req in pending {
-            if let Some(r) = self.render(req, canvas, clip, alpha_lock) {
+            if let Some(r) = self.darken(req, ws) {
                 acc = Some(crate::tools::ribbon::union_rect(acc, r));
             }
         }
-        acc
+        acc.map(|r| self.merge(canvas, ws, pre, r))
     }
 
-    fn render(&mut self, req: DabRequest, canvas: &mut Canvas, clip: Option<&Arc<Mask>>, alpha_lock: bool) -> Option<DirtyRect> {
+    /// The dab's alpha, textured, and where it lands: `(alpha, x, y, w, h)`.
+    fn dab(&mut self, req: &DabRequest) -> Option<(Vec<u8>, i32, i32, usize, usize)> {
         let b = self.brush.clone();
         // calculateDabRect.
         let (hx, hy) = self.hot_spot(req.shape);
@@ -791,7 +842,96 @@ impl KritaStroke {
         // KisDabRenderingJob::dstDabOffset: centre the mask in the rect.
         let ox = x + qround((w - dw as i32) as f64 / 2.0);
         let oy = y + qround((h - dh as i32) as f64 / 2.0);
+        Some((alpha, ox, oy, dw, dh))
+    }
 
+    /// Wash: alpha-darken one dab into the stroke buffer, in the order
+    /// Krita's dab queue hands them over. Returns the buffer rect touched.
+    fn darken(&mut self, req: DabRequest, ws: &mut StrokeWorkspace) -> Option<DirtyRect> {
+        let (alpha, ox, oy, dw, dh) = self.dab(&req)?;
+        // KisDabRenderingQueue::takeReadyDabs.
+        self.average_opacity = composite::blend_average_opacity(req.opacity, self.average_opacity);
+        let p = composite::Darken::new(req.opacity as f32, req.flow as f32, self.average_opacity as f32);
+        let (buf, stride) = ws.wash();
+        let (cw, ch) = (stride as i32, (buf.len() / stride.max(1) as usize) as i32);
+        let (x0, y0) = (ox.max(0), oy.max(0));
+        let (x1, y1) = ((ox + dw as i32).min(cw), (oy + dh as i32).min(ch));
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        const TILE: i32 = 64;
+        let mut dst = [0u8; TILE as usize];
+        for y in y0..y1 {
+            let src_row = &alpha[(y - oy) as usize * dw..(y - oy + 1) as usize * dw];
+            let row = y as usize * stride as usize;
+            // KisPainter::bltFixed composites a dab tile by tile, so each
+            // run stops at a 64-px tile edge. Pixels off the canvas join
+            // in as empty.
+            let mut x = ox;
+            while x < ox + dw as i32 {
+                let end = ((x.div_euclid(TILE) + 1) * TILE).min(ox + dw as i32);
+                let n = (end - x) as usize;
+                for (i, d) in dst[..n].iter_mut().enumerate() {
+                    let cx = x + i as i32;
+                    *d = if (0..cw).contains(&cx) { buf[row + cx as usize] } else { 0 };
+                }
+                let src = &src_row[(x - ox) as usize..(end - ox) as usize];
+                composite::darken_run(&mut dst[..n], src, x, &p);
+                for (i, &d) in dst[..n].iter().enumerate() {
+                    let cx = x + i as i32;
+                    if (0..cw).contains(&cx) {
+                        buf[row + cx as usize] = d;
+                    }
+                }
+                x = end;
+            }
+        }
+        let r = DirtyRect {
+            min_x: x0 as u32,
+            min_y: y0 as u32,
+            max_x: x1 as u32,
+            max_y: y1 as u32,
+        };
+        ws.note_wash(r);
+        Some(r)
+    }
+
+    /// Wash: the stroke buffer merged onto the pre-stroke layer within `r`
+    /// (`KisIndirectPaintingSupport::mergeToLayer`): the preset's blend at
+    /// the opacity slider's strength, held to the selection and the alpha
+    /// lock. A pure function of `pre` and the buffer, so redoing it every
+    /// flush is exact.
+    fn merge(&self, canvas: &mut Canvas, ws: &mut StrokeWorkspace, pre: &[u8], r: DirtyRect) -> DirtyRect {
+        let clip = ws.clip().cloned();
+        let alpha_lock = ws.alpha_lock();
+        let opacity = self.opacity.strength as f32;
+        let (buf, stride) = ws.wash();
+        let w = canvas.width as usize;
+        let px = canvas.pixels_mut();
+        for y in r.min_y..r.max_y {
+            for x in r.min_x..r.max_x {
+                let a = buf[y as usize * stride as usize + x as usize];
+                if a == 0 {
+                    continue;
+                }
+                let idx = (y as usize * w + x as usize) * 4;
+                let mut d = [pre[idx], pre[idx + 1], pre[idx + 2], pre[idx + 3]];
+                let mask = clip.as_ref().map(|m| m.at(x, y));
+                if self.erase {
+                    composite::erase(&mut d, a, opacity, mask);
+                } else if !(alpha_lock && d[3] == 0) {
+                    composite::over(&mut d, self.color, a, opacity, mask, alpha_lock);
+                }
+                px[idx..idx + 4].copy_from_slice(&d);
+            }
+        }
+        canvas.mark_dirty(r.min_x, r.min_y, r.max_x - r.min_x, r.max_y - r.min_y);
+        r
+    }
+
+    /// Build-up: one dab straight onto the layer.
+    fn render(&mut self, req: DabRequest, canvas: &mut Canvas, clip: Option<&Arc<Mask>>, alpha_lock: bool) -> Option<DirtyRect> {
+        let (alpha, ox, oy, dw, dh) = self.dab(&req)?;
         let (cw, ch) = (canvas.width as i32, canvas.height as i32);
         let x0 = ox.max(0);
         let y0 = oy.max(0);
@@ -980,8 +1120,15 @@ mod tests {
         assert!(PixelBrush::load(&kpp_with(&xml), tips).is_ok());
 
         let wash = xml.replace(r#"name="PaintOpAction">1<"#, r#"name="PaintOpAction">2<"#);
-        let err = PixelBrush::load(&kpp_with(&wash), tips).err().unwrap();
-        assert!(err.to_string().contains("wash"), "{err}");
+        assert!(PixelBrush::load(&kpp_with(&wash), tips).unwrap().wash);
+
+        let multiply = xml.replace(
+            r#"name="CompositeOp"><![CDATA[normal]]>"#,
+            r#"name="CompositeOp"><![CDATA[multiply]]>"#,
+        );
+        assert!(multiply != xml, "the preset names its blend");
+        let err = PixelBrush::load(&kpp_with(&multiply), tips).err().unwrap();
+        assert!(err.to_string().contains("multiply"), "{err}");
 
         let scatter = xml.replace(r#"name="PressureScatter">false<"#, r#"name="PressureScatter">true<"#);
         let err = PixelBrush::load(&kpp_with(&scatter), tips).err().unwrap();
@@ -989,5 +1136,160 @@ mod tests {
 
         let err = PixelBrush::load(&kpp_with(&xml), &[]).err().unwrap();
         assert!(err.to_string().contains("gradient.png"), "{err}");
+    }
+
+    // --- Wash mode, on the shipped presets ---
+
+    use crate::doc::canvas::Canvas;
+    use crate::input::pointer::PointerSample;
+    use crate::tools::ribbon::StrokeWorkspace;
+    use crate::tools::stroke::StrokeBuilder;
+    use crate::tools::{ActiveTool, BrushMode, BrushSettings, SmoothingOptions};
+
+    /// Draw `path` with a shipped preset at full pressure, the app's way.
+    fn wash_stroke(
+        c: &mut Canvas,
+        ws: &mut StrokeWorkspace,
+        preset: &str,
+        tool: ActiveTool,
+        opacity: f32,
+        path: &[(f32, f32)],
+        setup: impl FnOnce(&mut StrokeWorkspace),
+    ) {
+        let brush = defaults::brush(preset).unwrap();
+        let settings = BrushSettings {
+            radius: (brush.diameter() / 2.0) as f32,
+            opacity,
+            color: [200, 30, 40, 255],
+            mode: BrushMode::Krita,
+            ..BrushSettings::default()
+        };
+        let pre = c.pixels().into_owned();
+        ws.begin(c.width, c.height, &settings);
+        setup(ws);
+        let mut b = StrokeBuilder::new_with_krita(settings, tool, 1.0, SmoothingOptions::default(), brush);
+        b.seed_random(7);
+        for &(x, y) in path {
+            b.push(PointerSample::at(x, y, 1.0));
+            b.flush(c, ws, &pre);
+        }
+        b.finish(c, ws, &pre);
+    }
+
+    fn line(x0: f32, x1: f32, y: f32) -> Vec<(f32, f32)> {
+        (0..=60).map(|i| (x0 + (x1 - x0) * i as f32 / 60.0, y)).collect()
+    }
+
+    fn alpha_at(c: &Canvas, x: u32, y: u32) -> u8 {
+        c.pixels()[((y * c.width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn the_wash_presets_are_wash() {
+        assert!(defaults::brush("b)_Basic-2_Opacity.kpp").unwrap().wash);
+        assert!(!defaults::brush("c)_Pencil-5_Tilted.kpp").unwrap().wash);
+        assert!(defaults::brush("a)_Eraser_Circle.kpp").unwrap().erase);
+    }
+
+    /// Going back over the same place within one wash stroke adds nothing:
+    /// the buffer's alpha darken stops at the dab's opacity.
+    #[test]
+    fn a_wash_stroke_does_not_darken_where_it_crosses_itself() {
+        let mut once = Canvas::new(200, 80);
+        let mut ws = StrokeWorkspace::new();
+        wash_stroke(&mut once, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |_| {});
+        let mut there_and_back = Canvas::new(200, 80);
+        let mut path = line(20.0, 180.0, 40.0);
+        path.extend(line(180.0, 20.0, 40.0));
+        wash_stroke(&mut there_and_back, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &path, |_| {});
+        let a = alpha_at(&once, 100, 40);
+        let b = alpha_at(&there_and_back, 100, 40);
+        assert!(a > 0, "painted");
+        assert!((a as i32 - b as i32).abs() <= 1, "{a} vs {b}");
+    }
+
+    /// The opacity slider is the merge's opacity: a stroke at half opacity
+    /// lands at about half the alpha.
+    #[test]
+    fn the_opacity_slider_sets_the_merge() {
+        let mut ws = StrokeWorkspace::new();
+        let mut full = Canvas::new(200, 80);
+        wash_stroke(&mut full, &mut ws, "b)_Basic-5_Size_default.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |_| {});
+        let mut half = Canvas::new(200, 80);
+        wash_stroke(&mut half, &mut ws, "b)_Basic-5_Size_default.kpp", ActiveTool::Pencil, 0.5, &line(20.0, 180.0, 40.0), |_| {});
+        let (f, h) = (alpha_at(&full, 100, 40) as f32, alpha_at(&half, 100, 40) as f32);
+        assert!(f > 200.0, "{f}");
+        assert!((h - f * 0.5).abs() <= 2.0, "{f} → {h}");
+    }
+
+    /// The dabs build up unclipped; the selection holds the merge.
+    #[test]
+    fn a_wash_stroke_stays_in_the_selection() {
+        let mut c = Canvas::new(200, 80);
+        let mut ws = StrokeWorkspace::new();
+        let clip = Arc::new(Mask {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 80,
+            cov: vec![255; 100 * 80],
+        });
+        wash_stroke(&mut c, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |ws| {
+            ws.set_clip(Some(clip.clone()))
+        });
+        assert!(alpha_at(&c, 60, 40) > 0);
+        assert!((100..200).all(|x| (0..80).all(|y| alpha_at(&c, x, y) == 0)), "painted outside");
+    }
+
+    /// Alpha locked, a wash recolours paint and adds none.
+    #[test]
+    fn a_wash_stroke_honours_the_alpha_lock() {
+        let mut c = Canvas::new(200, 80);
+        for x in 0..100usize {
+            for y in 0..80usize {
+                c.pixels_mut()[(y * 200 + x) * 4..(y * 200 + x) * 4 + 4].copy_from_slice(&[0, 0, 255, 120]);
+            }
+        }
+        let mut ws = StrokeWorkspace::new();
+        wash_stroke(&mut c, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |ws| {
+            ws.set_alpha_lock(true)
+        });
+        let px = |x: u32, y: u32| {
+            let i = ((y * 200 + x) * 4) as usize;
+            [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
+        };
+        assert_eq!(px(60, 40)[3], 120, "alpha kept");
+        assert!(px(60, 40)[0] > 150, "recoloured: {:?}", px(60, 40));
+        assert_eq!(px(150, 40)[3], 0, "nothing added");
+    }
+
+    /// Krita's erasers carry an erase blend: they erase on any tool, in
+    /// wash mode, softly at a soft edge.
+    #[test]
+    fn the_eraser_presets_erase() {
+        for preset in ["a)_Eraser_Circle.kpp", "a)_Eraser_Soft.kpp"] {
+            let mut c = Canvas::new(200, 80);
+            for p in c.pixels_mut().chunks_mut(4) {
+                p.copy_from_slice(&[10, 10, 10, 255]);
+            }
+            let mut ws = StrokeWorkspace::new();
+            wash_stroke(&mut c, &mut ws, preset, ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |_| {});
+            assert!(alpha_at(&c, 100, 40) < 30, "{preset}: {}", alpha_at(&c, 100, 40));
+            assert_eq!(alpha_at(&c, 100, 2), 255, "{preset}: untouched away from the stroke");
+        }
+    }
+
+    /// Two strokes through one workspace: the second starts with a clear
+    /// buffer, so it is the same as on a fresh one.
+    #[test]
+    fn the_wash_buffer_is_cleared_between_strokes() {
+        let mut ws = StrokeWorkspace::new();
+        let mut first = Canvas::new(200, 80);
+        wash_stroke(&mut first, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |_| {});
+        let mut second = Canvas::new(200, 80);
+        wash_stroke(&mut second, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 60.0), |_| {});
+        let mut fresh = Canvas::new(200, 80);
+        wash_stroke(&mut fresh, &mut StrokeWorkspace::new(), "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 60.0), |_| {});
+        assert_eq!(second.pixels(), fresh.pixels());
     }
 }

@@ -712,6 +712,8 @@ impl AutoTip {
 
     /// `generateMaskAndApplyMaskOrCreateDab` for a plain colour: the dab's
     /// alpha, row-major, with its size.
+    // `!(density >= random)` is Krita's own test, kept as written.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn mask(&self, shape: DabShape, sub_x: f64, sub_y: f64, softness: f64) -> (Vec<u8>, usize, usize) {
         let (w, h) = self.mask_size(shape, sub_x, sub_y);
         let (w, h) = (w.max(0) as usize, h.max(0) as usize);
@@ -731,7 +733,7 @@ impl AutoTip {
         let mut alpha = vec![0u8; w * h];
 
         // The random part both paths share, per pixel.
-        let mut finish = |value: f64, rng: &mut RandomSource| -> u8 {
+        let finish = |value: f64, rng: &mut RandomSource| -> u8 {
             let mut random = 1.0;
             if d.randomness != 0.0 {
                 random = (1.0 - d.randomness) + d.randomness * rng.generate_normalized();
@@ -970,7 +972,7 @@ mod tests {
         let d = def(r#"<Brush type="auto_brush"><MaskGenerator diameter="10" ratio="0.5" hfade="1" vfade="1" spikes="2" type="circle" antialiasEdges="0" id="default"/></Brush>"#);
         let t = AutoTip::new(&d, 10.0, RandomSource::new(1));
         assert_eq!(t.size(), (10, 5));
-        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+        use std::f64::consts::FRAC_PI_4;
         let s = |scale, ratio, rotation| DabShape { scale, ratio, rotation };
         for (shape, want) in [
             (s(1.0, 1.0, 0.0), (10, 5)),
