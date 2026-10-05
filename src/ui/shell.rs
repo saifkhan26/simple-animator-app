@@ -1542,6 +1542,19 @@ fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
             d.layout.orientation
         ),
     );
+    // What Krita's rotation, tangential and speed sensors read from the pen.
+    if let Some(p) = state.pen.last_packet() {
+        diag_row(
+            ui,
+            "twist / wheel",
+            format!(
+                "{:.1}° / {:.2}{}",
+                p.rotation,
+                p.tangential,
+                if d.layout.time.is_some() { ", packet time" } else { ", frame time" }
+            ),
+        );
+    }
     diag_row(
         ui,
         "rejected",
@@ -7552,6 +7565,9 @@ mod stroke_source_tests {
             pressure: 0.5,
             tilt_x: 0.0,
             tilt_y: 0.0,
+            time_ms: 0.0,
+            rotation: 0.0,
+            tangential: 0.0,
         }
     }
 
@@ -8468,10 +8484,15 @@ mod krita_brush_tests {
         assert!(t.iter().any(|s| s == "Krita · Basic-5 Size default"), "{t:?}");
         assert!(t.iter().any(|s| s.starts_with("Wash")), "{t:?}");
 
-        // A preset the engine cannot paint yet does nothing when clicked.
-        state.brush_search = "pencil-4".into();
-        click_text(&ctx, &mut state, "Pencil-4 Soft");
+        // A preset the engine cannot paint does nothing when clicked.
+        let root = std::env::temp_dir().join(format!("animator-picker-{}", std::process::id()));
+        crate::brush_library::tests::write_hairy(&root);
+        state.brush_library = crate::brush_library::BrushLibrary::new(Some(root.clone()));
+        settle_library(&mut state);
+        state.brush_search = "hairy".into();
+        click_text(&ctx, &mut state, "Hairy");
         assert_eq!(state.brush.krita_id.as_deref(), Some("krita/b)_Basic-5_Size_default"));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

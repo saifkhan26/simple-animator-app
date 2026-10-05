@@ -556,7 +556,9 @@ fn golden_strokes() {
             None if record => {
                 let _ = writeln!(new_rows, "{}\t{var}\t{hash:016x}", case.name);
             }
-            None if var.starts_with("rcp-") && !strict => unknown_cpu += 1,
+            // A CPU with no hashes at all is new to the table; on one that
+            // has some, a missing row is a case nobody recorded.
+            None if var.starts_with("rcp-") && !strict && !table.keys().any(|(_, v)| *v == var) => unknown_cpu += 1,
             None => failures.push(format!("{} [{var}]: no recorded hash (GOLDEN_RECORD=1 adds it)", case.name)),
         }
     }
@@ -629,7 +631,7 @@ fn perf_brushes_1080p() {
         rows.push((label.to_owned(), best.0, best.1));
     }
     // Krita's shipped presets in wash and build-up, auto and bitmap tips.
-    for name in ["b)_Basic-5_Size_default.kpp", "a)_Eraser_Soft.kpp", "b)_Airbrush_Soft.kpp", "e)_Marker_Dry.kpp"] {
+    for name in ["b)_Basic-5_Size_default.kpp", "a)_Eraser_Soft.kpp", "b)_Airbrush_Soft.kpp", "e)_Marker_Dry.kpp", "c)_Pencil-6_Quick_Shade.kpp"] {
         let Ok(kb) = crate::tools::krita::defaults::brush(name) else { continue };
         let settings = BrushSettings {
             radius: (kb.diameter() / 2.0) as f32,

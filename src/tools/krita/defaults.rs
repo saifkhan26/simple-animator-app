@@ -103,8 +103,7 @@ pub fn brush(name: &str) -> Result<Arc<PixelBrush>> {
 mod tests {
     use super::*;
 
-    /// Which shipped presets the engine paints so far. Each phase of the
-    /// port moves names from the refused list to the loading one.
+    /// The engine paints every shipped preset.
     #[test]
     fn the_shipped_presets_load_or_say_why_not() {
         let mut loading = Vec::new();
@@ -115,28 +114,10 @@ mod tests {
                 Err(e) => refused.push((name, format!("{e:#}"))),
             }
         }
-        let want_loading = [
-            "a)_Eraser_Circle.kpp",
-            "a)_Eraser_Small.kpp",
-            "a)_Eraser_Soft.kpp",
-            "b)_Airbrush_Soft.kpp",
-            "b)_Basic-2_Opacity.kpp",
-            "b)_Basic-3_Flow.kpp",
-            "b)_Basic-4_Flow_Opacity.kpp",
-            "b)_Basic-5_Size_Opacity.kpp",
-            "b)_Basic-5_Size_default.kpp",
-            "c)_Pencil-5_Tilted.kpp",
-            "d)_Ink-3_Gpen.kpp",
-            "d)_Ink-4_Pen_Rough.kpp",
-            "e)_Marker_Details.kpp",
-            "e)_Marker_Dry.kpp",
-        ];
         for (name, why) in &refused {
             println!("refused {name}: {why}");
         }
-        assert_eq!(loading, want_loading);
-        // Every refusal names its reason.
-        assert!(refused.iter().all(|(_, why)| why.contains("not supported")), "{refused:#?}");
+        assert_eq!(loading, PRESETS.to_vec(), "all of them, since bitmap tips");
     }
 
     /// Rebuild `assets/defaults.zip` from an installed Krita's CC-0 bundle.

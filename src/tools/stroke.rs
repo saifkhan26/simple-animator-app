@@ -207,10 +207,12 @@ impl StrokeBuilder {
     /// `older -> previous` is only determined once the sample after
     /// `previous` has arrived.
     pub fn push(&mut self, mut s: PointerSample) {
-        if self.krita.is_some() {
-            // Krita gets tilt from Qt in whole degrees.
+        if let Some(k) = &mut self.krita {
+            // Krita gets tilt from Qt in whole degrees, and measures speed
+            // on every raw event.
             s.tilt_x = qt_tilt(s.tilt_x);
             s.tilt_y = qt_tilt(s.tilt_y);
+            k.note_speed(&mut s, self.view_scale);
         }
         // Drop duplicate positions (egui emits zero-delta moves, and a
         // stationary pen still reports pressure changes). Expressed in screen

@@ -1356,12 +1356,254 @@ pub fn draw_image(dst: &mut Image32, src: &Image32, matrix: &QTransform) {
         return;
     }
 
-    assert!(no_shear(matrix), "Krita's dab shapes here have no shear");
+    if !no_shear(matrix) {
+        // A tip squeezed unevenly and turned: `fillPath` over the
+        // transformed rect, aliased.
+        for (x, len, y) in fill_transformed_rect(r, matrix, dw, dh) {
+            blend_span(dst, src, &tm, x, y, len as usize);
+        }
+        return;
+    }
     // The rect's left and right edge midpoints, mapped.
     let a = matrix.map((r.x + r.x) * 0.5, (r.y + (r.y + r.h)) * 0.5);
     let b = matrix.map(((r.x + r.w) + (r.x + r.w)) * 0.5, (r.y + (r.y + r.h)) * 0.5);
     for (x, len, y) in rasterize_line(a, b, r.h / r.w, dw, dh) {
         blend_span(dst, src, &tm, x, y, len as usize);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Aliased path filling: QOutlineMapper + QRasterizer::rasterize(outline),
+// for a rect drawn through a sheared transform.
+
+/// A `QScanConverter::Line`: an edge, with x in 16.16 fixed point.
+#[derive(Clone, Copy, Debug)]
+struct ScanLine {
+    x: i32,
+    delta: i32,
+    top: i32,
+    bottom: i32,
+    winding: i32,
+}
+
+#[inline]
+fn q16_mul(x: i32, y: i32) -> i32 {
+    ((x as i64 * y as i64) >> 16) as i32
+}
+
+/// `QScanConverter` with no legacy rounding.
+struct ScanConverter {
+    top: i32,
+    bottom: i32,
+    left_fp: i32,
+    right_fp: i32,
+    lines: Vec<ScanLine>,
+}
+
+impl ScanConverter {
+    /// `QScanConverter::clip`.
+    fn clip(&mut self, x_fp: &mut i32, i_top: &mut i32, i_bottom: &mut i32, slope_fp: i32, edge_fp: i32, winding: i32) -> bool {
+        let right = edge_fp == self.right_fp;
+        if *x_fp == edge_fp {
+            if (slope_fp > 0) ^ right {
+                return false;
+            }
+            self.lines.push(ScanLine { x: edge_fp, delta: 0, top: *i_top, bottom: *i_bottom, winding });
+            return true;
+        }
+        let last_fp = x_fp.wrapping_add(slope_fp.wrapping_mul(*i_bottom - *i_top));
+        if last_fp == edge_fp {
+            if (slope_fp < 0) ^ right {
+                return false;
+            }
+            self.lines.push(ScanLine { x: edge_fp, delta: 0, top: *i_top, bottom: *i_bottom, winding });
+            return true;
+        }
+        if (last_fp < edge_fp) ^ (*x_fp < edge_fp) {
+            let delta_y = ((edge_fp - *x_fp) as f64 / (slope_fp as f64 / 65536.0)) as i32;
+            if (*x_fp < edge_fp) ^ right {
+                // The top segment is clipped.
+                let i_height = (delta_y + 1) >> 16;
+                let i_middle = *i_top + i_height;
+                self.lines.push(ScanLine { x: edge_fp, delta: 0, top: *i_top, bottom: i_middle, winding });
+                if i_middle != *i_bottom {
+                    *x_fp += slope_fp * (i_height + 1);
+                    *i_top = i_middle + 1;
+                } else {
+                    return true;
+                }
+            } else {
+                // The bottom segment is clipped.
+                let i_height = delta_y >> 16;
+                let i_middle = *i_top + i_height;
+                if i_middle != *i_bottom {
+                    self.lines.push(ScanLine { x: edge_fp, delta: 0, top: i_middle + 1, bottom: *i_bottom, winding });
+                    *i_bottom = i_middle;
+                }
+            }
+            return false;
+        } else if (*x_fp < edge_fp) ^ right {
+            self.lines.push(ScanLine { x: edge_fp, delta: 0, top: *i_top, bottom: *i_bottom, winding });
+            return true;
+        }
+        false
+    }
+
+    /// `QScanConverter::mergeLine`, points in 26.6.
+    fn merge_line(&mut self, mut a: (i32, i32), mut b: (i32, i32)) {
+        let mut winding = 1;
+        if a.1 > b.1 {
+            std::mem::swap(&mut a, &mut b);
+            winding = -1;
+        }
+        let mut i_top = self.top.max((a.1 + 32) >> 6);
+        let mut i_bottom = self.bottom.min((b.1 - 32) >> 6);
+        if i_top > i_bottom {
+            return;
+        }
+        let a_fp = 65536 / 2 + a.0 * (1 << 10);
+        if b.0 == a.0 {
+            let x = a_fp.clamp(self.left_fp, self.right_fp);
+            self.lines.push(ScanLine { x, delta: 0, top: i_top, bottom: i_bottom, winding });
+            return;
+        }
+        let slope = (b.0 - a.0) as f64 / (b.1 - a.1) as f64;
+        let slope_fp = (slope * 65536.0) as i32;
+        let mut x_fp = a_fp + q16_mul(slope_fp, i_top * 65536 + 65536 / 2 - a.1 * (1 << 10));
+        let (left, right) = (self.left_fp, self.right_fp);
+        if self.clip(&mut x_fp, &mut i_top, &mut i_bottom, slope_fp, left, winding) {
+            return;
+        }
+        if self.clip(&mut x_fp, &mut i_top, &mut i_bottom, slope_fp, right, winding) {
+            return;
+        }
+        self.lines.push(ScanLine { x: x_fp, delta: slope_fp, top: i_top, bottom: i_bottom, winding });
+    }
+
+    /// `qScanConvert` with the odd-even rule (a path's default): the spans
+    /// as `(x, len, y)`.
+    fn end(mut self) -> Vec<(i32, u32, i32)> {
+        let mut spans = Vec::new();
+        if self.lines.is_empty() {
+            return spans;
+        }
+        let all_vertical = self.lines.iter().all(|l| l.delta == 0);
+        self.lines.sort_by_key(|l| l.top);
+        let mut active: Vec<usize> = Vec::new();
+        let mut line = 0;
+        let mut y = self.lines[0].top;
+        while y <= self.bottom {
+            while line < self.lines.len() && self.lines[line].top == y {
+                if all_vertical {
+                    let lx = self.lines[line].x;
+                    let at = active.iter().rposition(|&j| lx >= self.lines[j].x).map_or(0, |p| p + 1);
+                    active.insert(at, line);
+                } else {
+                    active.push(line);
+                }
+                line += 1;
+            }
+            if !all_vertical {
+                // Insertion sort by x, as Qt does.
+                for i in 1..active.len() {
+                    let l = active[i];
+                    let mut j = i;
+                    while j > 0 && self.lines[l].x < self.lines[active[j - 1]].x {
+                        active[j] = active[j - 1];
+                        j -= 1;
+                    }
+                    active[j] = l;
+                }
+            }
+            let (mut x, mut winding) = (0i32, 0i32);
+            let mut i = 0;
+            while i < active.len() {
+                let node = active[i];
+                let current = self.lines[node].x >> 16;
+                if winding & 1 != 0 && current > x {
+                    spans.push((x, (current - x) as u32, y));
+                }
+                x = current;
+                winding += self.lines[node].winding;
+                if self.lines[node].bottom == y {
+                    active.remove(i);
+                    continue;
+                } else if !all_vertical {
+                    self.lines[node].x += self.lines[node].delta;
+                }
+                i += 1;
+            }
+            y += 1;
+        }
+        spans
+    }
+}
+
+/// `fillPath(rect)` through `matrix`, aliased: the outline mapper maps the
+/// rect's corners and rounds them to 26.6, and the scan converter fills
+/// the pixel centres inside, clipped to the `dw` × `dh` device.
+fn fill_transformed_rect(r: RectF, matrix: &QTransform, dw: i32, dh: i32) -> Vec<(i32, u32, i32)> {
+    // qreal_to_fixed_26_6: qRound(f * 64).
+    let fixed = |v: f64| qround(v * 64.0);
+    let corners = [(r.x, r.y), (r.x + r.w, r.y), (r.x + r.w, r.y + r.h), (r.x, r.y + r.h), (r.x, r.y)];
+    let pts: Vec<(i32, i32)> = corners
+        .iter()
+        .map(|&(x, y)| {
+            let (mx, my) = matrix.map(x, y);
+            (fixed(mx), fixed(my))
+        })
+        .collect();
+    let min_y = pts.iter().map(|p| p.1).min().unwrap_or(0);
+    let max_y = pts.iter().map(|p| p.1).max().unwrap_or(0);
+    let top = 0.max((min_y + 32) >> 6);
+    let bottom = (dh - 1).min((max_y - 32) >> 6);
+    if top > bottom {
+        return Vec::new();
+    }
+    let mut sc = ScanConverter {
+        top,
+        bottom,
+        left_fp: 0,
+        right_fp: dw * 65536,
+        lines: Vec::new(),
+    };
+    for w in pts.windows(2) {
+        sc.merge_line(w[0], w[1]);
+    }
+    sc.end()
+}
+
+#[cfg(test)]
+mod shear_tests {
+    use super::*;
+
+    /// Filling an unsheared square through the path filler covers exactly
+    /// the pixel centres inside it, like any aliased fill.
+    #[test]
+    fn the_path_filler_covers_pixel_centres() {
+        let mut m = QTransform::identity();
+        m.translate(2.25, 3.75);
+        let r = RectF { x: 0.0, y: 0.0, w: 4.0, h: 3.0 };
+        let spans = fill_transformed_rect(r, &m, 20, 20);
+        // Columns 2.25..6.25 hold centres 2.5..5.5; rows 3.75..6.75 hold 4.5..6.5.
+        assert_eq!(spans, vec![(2, 4, 4), (2, 4, 5), (2, 4, 6)]);
+    }
+
+    /// A sheared rect fills a parallelogram, clipped to the device.
+    #[test]
+    fn a_sheared_rect_fills_a_parallelogram() {
+        let mut m = QTransform::identity();
+        m.scale(2.0, 1.0);
+        let mut rot = QTransform::identity();
+        rot.rotate_radians(0.4);
+        let m = m.mul(&rot).mul(&QTransform::from_translate(10.0, 2.0));
+        assert!(!no_shear(&m));
+        let r = RectF { x: 0.0, y: 0.0, w: 6.0, h: 6.0 };
+        let spans = fill_transformed_rect(r, &m, 40, 40);
+        let area: u32 = spans.iter().map(|s| s.1).sum();
+        // The parallelogram's area is 6 · 6 · 2 (the determinant).
+        assert!((area as i32 - 72).abs() <= 10, "{area}");
+        assert!(spans.iter().all(|&(x, len, y)| x >= 0 && x + len as i32 <= 40 && (0..40).contains(&y)));
     }
 }
 

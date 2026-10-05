@@ -33,6 +33,7 @@ pub mod options;
 pub mod qt;
 pub mod random;
 pub mod sensors;
+pub mod speed;
 pub mod spacing;
 pub mod texture;
 pub mod tip;
@@ -57,6 +58,7 @@ use sensors::{CurveOption, PaintInfo};
 use spacing::{effective_spacing, Distance, Spacing};
 use texture::{TextureMask, TextureSettings};
 use tip::auto::{AutoDef, AutoTip};
+use tip::gbr::{Parasite, PipeInput, PipeState};
 use tip::{DabShape, PngTip};
 
 pub(crate) const PENCIL5_KPP: &[u8] = include_bytes!("assets/Pencil-5_Tilted.kpp");
@@ -170,6 +172,8 @@ pub enum Tip {
     /// Generated: the size slider resizes the generator itself, so each
     /// stroke builds its own [`AutoTip`] from this.
     Auto(AutoDef),
+    /// A GIMP image pipe: several bitmaps, one picked per dab.
+    Pipe { cells: Vec<PngTip>, parasite: Parasite },
 }
 
 /// A pixel-brush preset, loaded and checked.
@@ -181,6 +185,12 @@ pub struct PixelBrush {
     pub rotation: CurveOption,
     pub opacity: CurveOption,
     pub flow: CurveOption,
+    pub ratio: CurveOption,
+    pub softness: CurveOption,
+    pub scatter: CurveOption,
+    /// `Scattering/AxisX`, `AxisY`: which ways scatter throws a dab. Both
+    /// is in any direction; one is along or across the stroke.
+    pub scatter_axes: (bool, bool),
     pub texture_strength: CurveOption,
     pub texture: Option<TextureMask>,
     spacing: f64,
@@ -199,10 +209,7 @@ pub struct PixelBrush {
 /// Settings a preset may carry only switched off: each is a Krita feature
 /// this port does not paint.
 const MUST_BE_OFF: &[&str] = &[
-    "PressureRatio",
-    "PressureScatter",
     "PressureMirror",
-    "PressureSoftness",
     "PressureSharpness",
     "PressureDarken",
     "PressureMix",
@@ -281,7 +288,7 @@ impl PixelBrush {
         let attr = |k: &str| b.attribute(k);
         let num = |k: &str, d: f64| attr(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
         let (tip, tip_scale, spacing, auto_spacing) = match attr("type") {
-            Some("png_brush") => {
+            Some("png_brush") | Some("gbr_brush") => {
                 let file = attr("filename").unwrap_or_default();
                 let embedded = p
                     .resources
@@ -298,10 +305,25 @@ impl PixelBrush {
                     tip_scale *= 2.0;
                 }
                 let angle = num("angle", 0.0);
-                let spacing = num("spacing", 0.1).max(0.02);
+                // KisPredefinedBrushFactory's default.
+                let spacing = num("spacing", 0.25).max(0.02);
                 let auto_spacing = (attr("useAutoSpacing") == Some("1")).then(|| num("autoSpacingCoeff", 1.0));
-                let tip = PngTip::load(&png, angle).with_context(|| format!("tip `{file}`"))?;
-                (Tip::Png(tip), tip_scale, spacing, auto_spacing)
+                // The resource is found by name, whatever the type says.
+                let ext = file.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+                let tip = match ext.as_str() {
+                    "png" => Tip::Png(PngTip::load(&png, angle).with_context(|| format!("tip `{file}`"))?),
+                    "gbr" => {
+                        let (c, _) = tip::gbr::parse_gbr(&png).with_context(|| format!("tip `{file}`"))?;
+                        Tip::Png(PngTip::from_gray(c.width, c.height, &c.gray, angle))
+                    }
+                    "gih" => {
+                        let (parasite, cells) = tip::gbr::parse_gih(&png).with_context(|| format!("tip `{file}`"))?;
+                        let cells = cells.iter().map(|c| PngTip::from_gray(c.width, c.height, &c.gray, angle)).collect();
+                        Tip::Pipe { cells, parasite }
+                    }
+                    other => bail!("`{}` uses a `.{other}` tip, which is not supported yet", p.name),
+                };
+                (tip, tip_scale, spacing, auto_spacing)
             }
             Some("auto_brush") => {
                 let def = AutoDef::parse(b).with_context(|| format!("`{}`", p.name))?;
@@ -315,9 +337,10 @@ impl PixelBrush {
             other => bail!("`{}` uses a `{}` tip, which is not supported yet", p.name, other.unwrap_or("?")),
         };
 
-        let texture = if p.bool("Texture/Pattern/Enabled", false) {
-            if p.int("Texture/Pattern/TexturingMode", 0) != 0 {
-                bail!("`{}` uses a texturing mode other than multiply, which is not supported yet", p.name);
+        let mut texture = if p.bool("Texture/Pattern/Enabled", false) {
+            let mode = p.int("Texture/Pattern/TexturingMode", 0);
+            if mode > 1 {
+                bail!("`{}` uses a texturing mode other than multiply or subtract, which is not supported yet", p.name);
             }
             let outer = p
                 .bytes("Texture/Pattern/Pattern")
@@ -359,26 +382,24 @@ impl PixelBrush {
         } else {
             None
         };
+        if let Some(t) = texture.as_mut() {
+            t.subtract = p.int("Texture/Pattern/TexturingMode", 0) == 1;
+        }
 
         let size = p.curve_option(&options::SIZE)?;
         let rotation = p.curve_option(&options::ROTATION)?;
         let opacity = p.curve_option(&options::OPACITY)?;
         let flow = p.curve_option(&options::FLOW)?;
+        let ratio = p.curve_option(&options::RATIO)?;
+        let softness = p.curve_option(&options::SOFTNESS)?;
+        let scatter = p.curve_option(&options::SCATTER)?;
+        let scatter_axes = (p.bool("Scattering/AxisX", true), p.bool("Scattering/AxisY", true));
         let texture_strength = p.curve_option(&options::TEXTURE_STRENGTH)?;
-        // Read but not painted yet: refuse rather than paint them wrong.
-        for (name, o) in [("Size", &size), ("Rotation", &rotation), ("Opacity", &opacity), ("Flow", &flow), ("Texture strength", &texture_strength)] {
-            if o.checked && o.sensors.iter().any(|s| s.kind == sensors::SensorKind::Speed) {
-                bail!("`{}`: {name} follows the speed sensor, which is not supported yet", p.name);
-            }
-        }
-        if rotation.checked && rotation.fan_corners.is_some() {
-            bail!("`{}`: drawing-angle fan corners are not supported yet", p.name);
-        }
         let precision = PrecisionOption {
             level: p.int("KisPrecisionOption/precisionLevel", 5).clamp(1, 5),
             auto: p.bool("KisPrecisionOption/AutoPrecisionEnabled", false),
             // KisBrushOp and KisBrushBasedPaintOp's imprecise options.
-            imprecise: rotation.checked || texture.is_some(),
+            imprecise: scatter.checked || rotation.checked || texture.is_some(),
         };
         Ok(Self {
             tip,
@@ -387,6 +408,10 @@ impl PixelBrush {
             rotation,
             opacity,
             flow,
+            ratio,
+            softness,
+            scatter,
+            scatter_axes,
             texture_strength,
             texture,
             spacing,
@@ -405,6 +430,11 @@ impl PixelBrush {
                 let (w, h) = t.size();
                 w.max(h) as f64 * self.tip_scale
             }
+            // A pipe's size is its first cell's.
+            Tip::Pipe { cells, .. } => {
+                let (w, h) = cells[0].size();
+                w.max(h) as f64 * self.tip_scale
+            }
             Tip::Auto(d) => d.diameter,
         }
     }
@@ -414,16 +444,16 @@ impl PixelBrush {
     /// a rounded diameter, so an untouched brush is the preset. An auto tip
     /// is resized through its generator instead, so its scale stays 1.
     fn brush_scale(&self, diameter: f64) -> f64 {
-        match &self.tip {
-            Tip::Png(t) => {
-                let (w, h) = t.size();
-                if (diameter - self.diameter()).abs() < 0.01 {
-                    self.tip_scale
-                } else {
-                    diameter / w.max(h) as f64
-                }
-            }
-            Tip::Auto(_) => 1.0,
+        let first = match &self.tip {
+            Tip::Png(t) => t,
+            Tip::Pipe { cells, .. } => &cells[0],
+            Tip::Auto(_) => return 1.0,
+        };
+        let (w, h) = first.size();
+        if (diameter - self.diameter()).abs() < 0.01 {
+            self.tip_scale
+        } else {
+            diameter / w.max(h) as f64
         }
     }
 
@@ -456,6 +486,7 @@ impl PixelBrush {
         };
         match &self.tip {
             Tip::Png(t) => t.outline(self.brush_scale(diameter), shape).to_vec(),
+            Tip::Pipe { cells, .. } => cells[0].outline(self.brush_scale(diameter), shape).to_vec(),
             Tip::Auto(d) => AutoTip::new(d, diameter, RandomSource::new(0)).outline(shape),
         }
     }
@@ -495,6 +526,10 @@ struct DabRequest {
     opacity: f64,
     /// Wash mode's alpha-darken flow; build-up ignores it.
     flow: f64,
+    /// A pipe tip's cell for this dab.
+    cell: usize,
+    /// The Softness option's factor for an auto tip's fade.
+    softness: f64,
     texture_strength: f64,
 }
 
@@ -550,11 +585,46 @@ pub struct KritaStroke {
     /// The dabs painted so far, for the sensors that read the stroke's
     /// history. Set by [`start`](Self::start) at pen-down.
     history: DabHistory,
+    /// The last dab painted: where a fan round a corner starts from.
+    last_dab: Option<PointerSample>,
+    /// The speed sensor's input, fed every raw sample.
+    speed: speed::SpeedSmoother,
     random: Rc<RefCell<RandomSource>>,
     /// An auto tip, built at this stroke's size.
     auto_tip: Option<AutoTip>,
+    /// A pipe tip's walk through its cells, and the dabs queued so far
+    /// (`KisDabRenderingQueue`'s sequence number).
+    pipe: PipeState,
+    queued: i32,
     pending: Vec<DabRequest>,
     cache: Option<CachedDab>,
+}
+
+/// `KisPaintInformation::mix(t, pi1, pi2)`: pressure, tilt, tangential
+/// pressure, speed and time lerped in double precision, barrel rotation the
+/// short way round.
+fn mix_krita(t: f64, a: &PointerSample, b: &PointerSample) -> PointerSample {
+    let lerp = |x: f32, y: f32| ((1.0 - t) * x as f64 + t * y as f64) as f32;
+    let rotation = if a.rotation == b.rotation {
+        a.rotation
+    } else {
+        let a1 = (a.rotation as f64).to_radians();
+        let a2 = (b.rotation as f64).to_radians();
+        let d = distance::shortest_angular_distance(a2, a1);
+        distance::increment_in_direction(a1, t * d, a2).to_degrees() as f32
+    };
+    PointerSample {
+        x: (a.x as f64 + t * (b.x as f64 - a.x as f64)) as f32,
+        y: (a.y as f64 + t * (b.y as f64 - a.y as f64)) as f32,
+        pressure: lerp(a.pressure, b.pressure),
+        tilt_x: lerp(a.tilt_x, b.tilt_x),
+        tilt_y: lerp(a.tilt_y, b.tilt_y),
+        t: lerp(a.t, b.t),
+        time_ms: (1.0 - t) * a.time_ms + t * b.time_ms,
+        rotation,
+        tangential: lerp(a.tangential, b.tangential),
+        speed: lerp(a.speed, b.speed),
+    }
 }
 
 /// Qt hands tilt to Krita in whole degrees, truncated.
@@ -583,7 +653,7 @@ impl KritaStroke {
         let brush_scale = brush.brush_scale(diameter);
         let auto_tip = match &brush.tip {
             Tip::Auto(d) => Some(AutoTip::new(d, diameter, RandomSource::for_stroke())),
-            Tip::Png(_) => None,
+            Tip::Png(_) | Tip::Pipe { .. } => None,
         };
         let mut opacity_option = brush.opacity.clone();
         opacity_option.strength = opacity.clamp(0.0, 1.0);
@@ -600,8 +670,12 @@ impl KritaStroke {
             // KisSpacingInformation(): zero spacing until the first dab.
             distance: Distance::new(Spacing::isotropic(0.0)),
             history: DabHistory::start((0.0, 0.0), 0.0),
+            last_dab: None,
+            speed: speed::SpeedSmoother::default(),
             random: Rc::new(RefCell::new(RandomSource::for_stroke())),
             auto_tip,
+            pipe: PipeState::new(),
+            queued: 0,
             pending: Vec::new(),
             cache: None,
         }
@@ -625,17 +699,24 @@ impl KritaStroke {
 
     // The tip's geometry, whichever kind it is.
 
+    /// The bitmap tip in use: the tip, or the pipe's current cell.
     fn png(&self) -> &PngTip {
+        self.png_cell(self.pipe.current)
+    }
+
+    fn png_cell(&self, cell: usize) -> &PngTip {
         match &self.brush.tip {
             Tip::Png(t) => t,
+            Tip::Pipe { cells, .. } => &cells[cell.min(cells.len() - 1)],
             Tip::Auto(_) => unreachable!("an auto tip's stroke has its own"),
         }
     }
 
+    /// `KisBrush::width` / `height`: a pipe's are its first cell's.
     fn tip_size(&self) -> (i32, i32) {
         match &self.auto_tip {
             Some(t) => t.size(),
-            None => self.png().size(),
+            None => self.png_cell(0).size(),
         }
     }
 
@@ -676,7 +757,19 @@ impl KritaStroke {
         &self.brush
     }
 
-    fn info(&self, s: &PointerSample) -> PaintInfo {
+    /// The speed sensor's reading for a raw pen sample (`view_scale`
+    /// screen pixels per canvas pixel), as `KisPaintingInformationBuilder`
+    /// takes it before smoothing.
+    pub fn note_speed(&mut self, s: &mut PointerSample, view_scale: f32) {
+        let v = self.speed.normalized(
+            (s.x as f64 * view_scale as f64, s.y as f64 * view_scale as f64),
+            s.time_ms,
+        );
+        s.speed = v as f32;
+    }
+
+    /// `angle`: a fan dab's drawing angle, overriding the stroke's.
+    fn info_with(&self, s: &PointerSample, angle: Option<f64>) -> PaintInfo {
         let pos = (s.x as f64, s.y as f64);
         PaintInfo {
             pressure: s.pressure.clamp(0.0, 1.0) as f64,
@@ -685,7 +778,7 @@ impl KritaStroke {
             rotation: s.rotation as f64,
             tangential_pressure: s.tangential as f64,
             speed: s.speed as f64,
-            drawing_angle: self.history.drawing_angle(pos),
+            drawing_angle: angle.unwrap_or_else(|| self.history.drawing_angle(pos)),
             dab_seq_no: self.history.dab_seq_no,
             canvas_rotation: self.canvas_rotation,
             canvas_mirrored_h: self.mirrored.0,
@@ -706,15 +799,73 @@ impl KritaStroke {
     /// `KisBrushOp::paintAt`: decide the dab at `s` and the spacing to the
     /// next one. The dab is painted by the next [`drain`](Self::drain).
     pub fn paint_at(&mut self, s: &PointerSample) {
-        self.dab_at(s);
-        // KisPaintInformation::paintAt: every dab is registered, even one
-        // too small to paint.
-        self.history.register_painted_dab((s.x as f64, s.y as f64), s.pressure.clamp(0.0, 1.0) as f64);
+        // KisPaintOpUtils::paintLine: with a drawing-angle rotation, a sharp
+        // turn since the last dab is first filled with a fan of dabs.
+        let fan = self.brush.rotation.fan_corners.filter(|_| self.brush.rotation.checked);
+        if let (Some(step), Some(last)) = (fan, self.last_dab) {
+            self.paint_fan(last, *s, step.to_radians());
+        }
+        self.paint_one(s, None);
     }
 
-    fn dab_at(&mut self, s: &PointerSample) {
+    /// `KisPaintInformation::paintAt`: decide the dab, then register it,
+    /// even one too small to paint.
+    fn paint_one(&mut self, s: &PointerSample, angle: Option<f64>) {
+        let info = self.info_with(s, angle);
+        let drawn_angle = info.drawing_angle;
+        self.dab_at(s, info);
+        self.history.register_painted_dab((s.x as f64, s.y as f64), s.pressure.clamp(0.0, 1.0) as f64);
+        self.history.last_angle = drawn_angle;
+        self.last_dab = Some(*s);
+    }
+
+    /// `KisPaintOpUtils::paintFan`: dabs every `step` radians from the last
+    /// dab's angle round to the new one, walked from the last dab towards
+    /// the new one.
+    fn paint_fan(&mut self, pi1: PointerSample, pi2: PointerSample, step: f64) {
+        let initial = self.history.last_angle;
+        let target = self.history.drawing_angle((pi2.x as f64, pi2.y as f64));
+        let full = distance::shortest_angular_distance(initial, target);
+        let mut last = initial;
+        let mut i = 0;
+        while distance::shortest_angular_distance(last, target) > step {
+            last = distance::increment_in_direction(last, step, target);
+            let t = step * i as f64 / full;
+            i += 1;
+            let pi = mix_krita(t, &pi1, &pi2);
+            self.paint_one(&pi, Some(last));
+        }
+    }
+
+    /// `KisScatterOption::apply`: where scatter throws the dab, given its
+    /// unscattered mask size.
+    fn scatter(&self, info: &PaintInfo, w: i32, h: i32) -> (f64, f64) {
+        let b = &self.brush;
+        let (ax, ay) = b.scatter_axes;
+        if (!ax && !ay) || !b.scatter.checked {
+            return (0.0, 0.0);
+        }
+        let diameter = w.max(h) as f64;
+        let sensor = b.scatter.size_like(info, true);
+        let mut rng = self.random.borrow_mut();
+        let jitter = (2.0 * rng.generate_normalized() - 1.0) * diameter * sensor;
+        if ax && ay {
+            let jy = (2.0 * rng.generate_normalized() - 1.0) * diameter * sensor;
+            return (jitter, jy);
+        }
+        // QVector2D: single precision.
+        let a = info.drawing_angle;
+        let (mx, my) = (a.cos() as f32, a.sin() as f32);
+        let j = jitter as f32;
+        if ax {
+            ((mx * j) as f64, (my * j) as f64)
+        } else {
+            ((-my * j) as f64, (mx * j) as f64)
+        }
+    }
+
+    fn dab_at(&mut self, s: &PointerSample, info: PaintInfo) {
         let b = self.brush.clone();
-        let info = self.info(s);
         let scale = b.size.apply(&info);
         let (w, h) = self.tip_size();
         // checkSizeTooSmall.
@@ -724,11 +875,10 @@ impl KritaStroke {
             return;
         }
         let rotation = sensors::rotation(&b.rotation, &info);
-        let shape = DabShape {
-            scale,
-            ratio: 1.0,
-            rotation,
-        };
+        let ratio = b.ratio.apply(&info);
+        let shape = DabShape { scale, ratio, rotation };
+        let (mw, mh) = self.mask_size(shape, 0.0, 0.0);
+        let (dx, dy) = self.scatter(&info, mw, mh);
         // KisFlowOpacityOption2::apply: the opacity option's value, with
         // its strength in build-up only; in wash the strength is the merge's
         // opacity instead. Flow is computed either way, but the 8-bit
@@ -739,13 +889,32 @@ impl KritaStroke {
             1.0
         };
         let flow = b.flow.apply(&info);
+        let softness = b.softness.apply(&info);
         let texture_strength = b.texture_strength.apply(&info);
+        // KisDabRenderingQueue::addDab → prepareForSeqNo: a pipe picks the
+        // dab's cell, after every option has had its say.
+        let seq = self.queued;
+        self.queued += 1;
+        if let Tip::Pipe { cells, parasite } = &b.tip {
+            let input = PipeInput {
+                pressure: info.pressure,
+                drawing_angle: info.drawing_angle,
+                x_tilt: info.x_tilt,
+                y_tilt: info.y_tilt,
+                speed: info.speed,
+            };
+            let random = self.random.clone();
+            let mut draw = |lo: i32, hi: i32| random.borrow_mut().generate_range(lo, hi);
+            self.pipe.prepare(parasite, cells.len(), &input, seq, &mut draw);
+        }
         self.pending.push(DabRequest {
-            x: s.x as f64,
-            y: s.y as f64,
+            x: s.x as f64 + dx,
+            y: s.y as f64 + dy,
             shape,
             opacity,
             flow,
+            cell: self.pipe.current,
+            softness,
             texture_strength,
         });
 
@@ -771,7 +940,6 @@ impl KritaStroke {
         self.distance.set_spacing(spacing);
     }
 
-    /// Paint every dab decided since the last drain onto `canvas`.
     /// Paint every dab decided since the last drain onto `canvas`. A wash
     /// stroke builds them up in `ws`'s buffer and merges the buffer over
     /// `pre`, the layer as it was before the stroke.
@@ -802,6 +970,8 @@ impl KritaStroke {
     /// The dab's alpha, textured, and where it lands: `(alpha, x, y, w, h)`.
     fn dab(&mut self, req: &DabRequest) -> Option<(Vec<u8>, i32, i32, usize, usize)> {
         let b = self.brush.clone();
+        // The cell this dab picked; geometry and mask come from it.
+        self.pipe.current = req.cell;
         // calculateDabRect.
         let (hx, hy) = self.hot_spot(req.shape);
         let (x, sub_x) = split(req.x - hx);
@@ -813,9 +983,9 @@ impl KritaStroke {
             h,
             sub_x,
             sub_y,
-            softness: 1.0,
+            softness: req.softness,
             ratio: req.shape.ratio,
-            index: 0,
+            index: req.cell as i32,
         };
         let precision = b.precision.for_dab(w.min(h));
         let reuse = self.supports_caching()
@@ -824,7 +994,7 @@ impl KritaStroke {
                 .as_ref()
                 .is_some_and(|c| params.matches(&c.params, precision));
         if !reuse {
-            let (alpha, mw, mh) = self.tip_mask(req.shape, sub_x, sub_y, 1.0);
+            let (alpha, mw, mh) = self.tip_mask(req.shape, sub_x, sub_y, req.softness);
             self.cache = Some(CachedDab {
                 params,
                 alpha,
@@ -1063,18 +1233,7 @@ mod tests {
         assert!((d - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "{}", d.to_degrees());
     }
 
-    /// A `.kpp` holding `xml`: just the text chunk, which is all the
-    /// reader looks at.
-    fn kpp_with(xml: &str) -> Vec<u8> {
-        let mut body = b"preset\0".to_vec();
-        body.extend_from_slice(xml.as_bytes());
-        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
-        v.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        v.extend_from_slice(b"tEXt");
-        v.extend_from_slice(&body);
-        v.extend_from_slice(&[0; 4]);
-        v
-    }
+    use kpp::with_xml as kpp_with;
 
     /// A Krita 5 preset (`version` 5.0) carries its tip in `<resources>`,
     /// so it loads with nothing else supplied.
@@ -1131,9 +1290,10 @@ mod tests {
         let err = PixelBrush::load(&kpp_with(&multiply), tips).err().unwrap();
         assert!(err.to_string().contains("multiply"), "{err}");
 
-        let scatter = xml.replace(r#"name="PressureScatter">false<"#, r#"name="PressureScatter">true<"#);
-        let err = PixelBrush::load(&kpp_with(&scatter), tips).err().unwrap();
-        assert!(err.to_string().contains("PressureScatter"), "{err}");
+        let mirror = xml.replace(r#"name="PressureMirror">false<"#, r#"name="PressureMirror">true<"#);
+        assert!(mirror != xml, "the preset names its mirror option");
+        let err = PixelBrush::load(&kpp_with(&mirror), tips).err().unwrap();
+        assert!(err.to_string().contains("PressureMirror"), "{err}");
 
         let err = PixelBrush::load(&kpp_with(&xml), &[]).err().unwrap();
         assert!(err.to_string().contains("gradient.png"), "{err}");
@@ -1303,6 +1463,120 @@ mod tests {
         for (x, y) in &pts {
             let r = x.hypot(*y);
             assert!((r - 15.0).abs() < 0.6, "radius {r}");
+        }
+    }
+
+    // --- Options and sensors on the shipped presets ---
+
+    fn stroke_for(preset: &str) -> KritaStroke {
+        let b = defaults::brush(preset).unwrap();
+        let d = b.diameter();
+        let mut k = KritaStroke::new(b, d, [0, 0, 0, 255], 1.0, false, 0.0, (false, false));
+        k.seed(5);
+        k
+    }
+
+    /// A sharp turn on a drawing-angle preset is filled with a fan of dabs,
+    /// one every fan step of the turn.
+    #[test]
+    fn a_sharp_turn_fans_its_dabs() {
+        let mut k = stroke_for("c)_Pencil-1_Hard.kpp");
+        let step = k.brush.rotation.fan_corners.expect("Pencil-1 fans its corners");
+        k.start(&PointerSample::at(0.0, 0.0, 1.0));
+        for x in [10.0, 20.0, 30.0] {
+            k.paint_at(&PointerSample::at(x, 0.0, 1.0));
+        }
+        let before = k.history.dab_seq_no;
+        // Turning back by 135°: a fan dab every step of the swing, until
+        // less than a step is left. (Exactly 90° would sit on the edge:
+        // Krita's single-precision atan2 lands a hair past it.)
+        k.paint_at(&PointerSample::at(20.0, 10.0, 1.0));
+        let fan = k.history.dab_seq_no - before - 1;
+        let want = ((135.0 / step).ceil() as i32 - 1).max(0);
+        assert_eq!(fan, want, "step {step}°");
+        assert!((k.history.last_angle - 3.0 * std::f64::consts::FRAC_PI_4).abs() < 1e-6);
+    }
+
+    /// Scatter throws dabs off the path by up to the dab's size times the
+    /// strength, both ways, the same for the same seed.
+    #[test]
+    fn scatter_throws_dabs_off_the_path() {
+        let run = || {
+            let mut k = stroke_for("c)_Pencil-2.kpp");
+            k.start(&PointerSample::at(0.0, 50.0, 1.0));
+            for i in 1..=40 {
+                k.paint_at(&PointerSample::at(i as f32 * 3.0, 50.0, 1.0));
+            }
+            k.pending.iter().map(|r| r.y - 50.0).collect::<Vec<_>>()
+        };
+        let a = run();
+        assert_eq!(a, run(), "a fixed seed repeats");
+        let spread = a.iter().fold(0.0f64, |m, d| m.max(d.abs()));
+        assert!(spread > 0.05, "scattered: {spread}");
+        assert!(a.iter().any(|d| *d > 0.0) && a.iter().any(|d| *d < 0.0));
+    }
+
+    /// Ink-2's size follows speed: the same line drawn faster comes out
+    /// differently.
+    #[test]
+    fn speed_changes_a_speed_driven_preset() {
+        let mut ws = StrokeWorkspace::new();
+        let draw = |ws: &mut StrokeWorkspace, ms_per_px: f64| {
+            let mut c = Canvas::new(240, 80);
+            let brush = defaults::brush("d)_Ink-2_Fineliner.kpp").unwrap();
+            let settings = BrushSettings {
+                radius: 8.0,
+                mode: BrushMode::Krita,
+                ..BrushSettings::default()
+            };
+            let pre = c.pixels().into_owned();
+            ws.begin(240, 80, &settings);
+            let mut b = StrokeBuilder::new_with_krita(settings, ActiveTool::Ink, 1.0, SmoothingOptions::default(), brush);
+            b.seed_random(1);
+            for i in 0..=100 {
+                let mut s = PointerSample::at(20.0 + i as f32 * 2.0, 40.0, 0.8);
+                s.time_ms = i as f64 * 2.0 * ms_per_px;
+                b.push(s);
+                b.flush(&mut c, ws, &pre);
+            }
+            b.finish(&mut c, ws, &pre);
+            c.pixels().chunks(4).filter(|p| p[3] > 0).count()
+        };
+        let slow = draw(&mut ws, 2.0);
+        let fast = draw(&mut ws, 0.02);
+        assert!(slow > 0 && fast > 0);
+        assert_ne!(slow, fast, "speed made no difference");
+    }
+
+    /// The subtract-textured presets paint, grainy: some pixels inside the
+    /// stroke are taken back by the paper.
+    #[test]
+    fn subtract_textured_presets_paint_with_grain() {
+        for preset in ["c)_Pencil-3_Large_4B.kpp", "d)_Ink-7_Brush_Rough.kpp"] {
+            let b = defaults::brush(preset).unwrap();
+            assert!(b.texture.as_ref().is_some_and(|t| t.subtract), "{preset}");
+            // At a light touch: the texture's strength follows pressure,
+            // and a weaker texture takes more away.
+            let mut c = Canvas::new(240, 100);
+            let mut ws = StrokeWorkspace::new();
+            let settings = BrushSettings {
+                radius: (b.diameter() / 2.0) as f32,
+                mode: BrushMode::Krita,
+                ..BrushSettings::default()
+            };
+            let pre = c.pixels().into_owned();
+            ws.begin(240, 100, &settings);
+            let mut s = StrokeBuilder::new_with_krita(settings, ActiveTool::Pencil, 1.0, SmoothingOptions::default(), b.clone());
+            s.seed_random(3);
+            for &(x, y) in &line(20.0, 220.0, 50.0) {
+                s.push(PointerSample::at(x, y, 0.4));
+                s.flush(&mut c, &mut ws, &pre);
+            }
+            s.finish(&mut c, &mut ws, &pre);
+            let row: Vec<u8> = (60..180).map(|x| alpha_at(&c, x, 50)).collect();
+            let (lo, hi) = (*row.iter().min().unwrap(), *row.iter().max().unwrap());
+            assert!(hi > 40, "{preset} painted: {hi}");
+            assert!(hi - lo > 20, "{preset} has grain: {lo}..{hi}");
         }
     }
 }

@@ -30,6 +30,9 @@ pub struct TextureMask {
     pub w: usize,
     pub h: usize,
     pub data: Vec<u8>,
+    /// Texturing mode 1: the texture is taken away from the dab rather
+    /// than multiplied into it.
+    pub subtract: bool,
     offset_x: i32,
     offset_y: i32,
 }
@@ -96,6 +99,7 @@ impl TextureMask {
             w: mask.w,
             h: mask.h,
             data,
+            subtract: false,
             offset_x: s.offset_x,
             offset_y: s.offset_y,
         }
@@ -110,8 +114,10 @@ impl TextureMask {
         self.data[ty * self.w + tx]
     }
 
-    /// `KisTextureOption::apply` in multiply mode: every dab pixel's alpha
-    /// times the texel under it times the strength.
+    /// `KisTextureOption::apply`: in multiply mode every dab pixel's alpha
+    /// times the texel under it times the strength; in subtract mode
+    /// (`KisMaskingBrushCompositeOp` SUBTRACT with strength) the texel and
+    /// the strength's inverse taken off the alpha.
     pub fn apply(&self, alpha: &mut [u8], w: usize, h: usize, top_left: (i32, i32), strength: f64) {
         let strength = scale_to_u8(strength);
         // Krita starts the pattern patch at `offset % width - offsetX` and
@@ -121,7 +127,11 @@ impl TextureMask {
             for i in 0..w {
                 let t = self.at(top_left.0 + i as i32, top_left.1 + j as i32);
                 let a = &mut alpha[j * w + i];
-                *a = mul3(t, *a, strength);
+                *a = if self.subtract {
+                    (*a as i32 - (t as i32 + (255 - strength) as i32)).clamp(0, 255) as u8
+                } else {
+                    mul3(t, *a, strength)
+                };
             }
         }
     }
