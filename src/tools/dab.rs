@@ -94,6 +94,7 @@ mod tests {
             tilt_x,
             tilt_y,
             t: 0.0,
+            ..Default::default()
         }
     }
 

@@ -1609,6 +1609,8 @@ impl AppState {
             tilt_x,
             tilt_y,
             t,
+            time_ms: t as f64 * 1000.0,
+            ..Default::default()
         }
     }
 
@@ -1623,6 +1625,8 @@ impl AppState {
             tilt_x: p.tilt_x,
             tilt_y: p.tilt_y,
             t,
+            time_ms: t as f64 * 1000.0,
+            ..Default::default()
         }
     }
 

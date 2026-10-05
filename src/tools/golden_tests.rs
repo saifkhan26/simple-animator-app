@@ -108,6 +108,7 @@ fn sample(x: f32, y: f32, pressure: f32, tilt: (f32, f32)) -> PointerSample {
         tilt_x: tilt.0,
         tilt_y: tilt.1,
         t: 0.0,
+        ..Default::default()
     }
 }
 

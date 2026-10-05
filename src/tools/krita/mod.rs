@@ -26,13 +26,19 @@
 
 pub mod composite;
 pub mod curve;
+pub mod distance;
 pub mod kpp;
+pub mod options;
 pub mod qt;
+pub mod random;
 pub mod sensors;
 pub mod spacing;
 pub mod texture;
 pub mod tip;
 
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -41,7 +47,9 @@ use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::input::pointer::PointerSample;
 use crate::tools::lasso::Mask;
 
+use distance::DabHistory;
 use kpp::Preset;
+use random::RandomSource;
 use qt::{qround, Image32};
 use sensors::{CurveOption, PaintInfo};
 use spacing::{effective_spacing, Distance, Spacing};
@@ -61,13 +69,17 @@ pub enum KritaPreset {
 impl KritaPreset {
     /// The loaded preset. Built once; the embedded files are checked by the
     /// tests, so a failure here is a build that should never have shipped.
-    pub fn brush(self) -> &'static PixelBrush {
-        static PENCIL5: OnceLock<PixelBrush> = OnceLock::new();
+    pub fn brush(self) -> Arc<PixelBrush> {
+        static PENCIL5: OnceLock<Arc<PixelBrush>> = OnceLock::new();
         match self {
-            KritaPreset::Pencil5Tilted => PENCIL5.get_or_init(|| {
-                PixelBrush::load(PENCIL5_KPP, &[("gradient.png", GRADIENT_PNG)])
-                    .expect("embedded Pencil-5 Tilted preset")
-            }),
+            KritaPreset::Pencil5Tilted => PENCIL5
+                .get_or_init(|| {
+                    Arc::new(
+                        PixelBrush::load(PENCIL5_KPP, &[("gradient.png", GRADIENT_PNG)])
+                            .expect("embedded Pencil-5 Tilted preset"),
+                    )
+                })
+                .clone(),
         }
     }
 }
@@ -79,6 +91,7 @@ struct Precision {
     angle: f64,
     size_frac: f64,
     sub_pixel: f64,
+    softness: f64,
     ratio: f64,
 }
 
@@ -87,33 +100,65 @@ const PRECISION_LEVELS: [Precision; 5] = [
         angle: std::f64::consts::PI / 180.0,
         size_frac: 0.05,
         sub_pixel: 1.0,
+        softness: 0.01,
         ratio: 0.05,
     },
     Precision {
         angle: std::f64::consts::PI / 180.0,
         size_frac: 0.01,
         sub_pixel: 1.0,
+        softness: 0.01,
         ratio: 0.01,
     },
     Precision {
         angle: std::f64::consts::PI / 180.0,
         size_frac: 0.0,
         sub_pixel: 1.0,
+        softness: 0.01,
         ratio: 1e-6,
     },
     Precision {
         angle: std::f64::consts::PI / 180.0,
         size_frac: 0.0,
         sub_pixel: 0.5,
+        softness: 0.01,
         ratio: 1e-6,
     },
     Precision {
         angle: 1e-6,
         size_frac: 0.0,
         sub_pixel: 1e-6,
+        softness: 1e-6,
         ratio: 1e-6,
     },
 ];
+
+/// `KisPrecisionOption`: the preset's precision level, or with auto
+/// precision one chosen per dab from its size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PrecisionOption {
+    /// 1..=5.
+    level: i32,
+    auto: bool,
+    /// Scatter, rotation or a texture is on: dab positions are imprecise
+    /// anyway, so auto precision may reuse masks more freely.
+    imprecise: bool,
+}
+
+impl PrecisionOption {
+    /// `effectivePrecisionLevel`, as the index `SavedDabParameters::compare`
+    /// takes. `dab_size` is the smaller side of the dab's mask.
+    fn for_dab(&self, dab_size: i32) -> &'static Precision {
+        let level = if !self.auto {
+            self.level
+        } else if (dab_size as f64) < 30.0 || !self.imprecise {
+            5
+        } else {
+            3
+        };
+        &PRECISION_LEVELS[(level.clamp(1, 5) - 1) as usize]
+    }
+}
 
 /// A pixel-brush preset, loaded and checked.
 pub struct PixelBrush {
@@ -128,7 +173,7 @@ pub struct PixelBrush {
     spacing: f64,
     auto_spacing: Option<f64>,
     isotropic_spacing: bool,
-    precision: Precision,
+    precision: PrecisionOption,
 }
 
 /// Settings a preset may carry only switched off: each is a Krita feature
@@ -150,17 +195,35 @@ const MUST_BE_OFF: &[&str] = &[
     "MaskingBrush/Enabled",
     "PaintOpSettings/isAirbrushing",
     "PaintOpSettings/updateSpacingBetweenDabs",
-    "KisPrecisionOption/AutoPrecisionEnabled",
     "EraserMode",
-    "Texture/Pattern/isRandomOffsetX",
-    "Texture/Pattern/isRandomOffsetY",
-    "Texture/Pattern/Invert",
 ];
+// Not here, though presets set them: `Texture/Pattern/isRandomOffsetX/Y`.
+// Krita 5.2 reads and writes them (KisTextureOptionData) but nothing paints
+// with them, so they change nothing.
+
+/// Where a preset's tips come from when it does not carry them itself:
+/// the folder or bundle it was found in, or files embedded in the app.
+pub trait Resources {
+    /// A brush tip, by the file name the preset gives.
+    fn tip(&self, filename: &str) -> Option<Cow<'_, [u8]>>;
+}
+
+impl Resources for [(&str, &[u8])] {
+    fn tip(&self, filename: &str) -> Option<Cow<'_, [u8]>> {
+        self.iter().find(|(n, _)| *n == filename).map(|(_, d)| Cow::Borrowed(*d))
+    }
+}
+
+impl<const N: usize> Resources for [(&str, &[u8]); N] {
+    fn tip(&self, filename: &str) -> Option<Cow<'_, [u8]>> {
+        self[..].tip(filename)
+    }
+}
 
 impl PixelBrush {
-    /// Load a `.kpp`. `resources` supplies the tip files the preset names,
-    /// by file name.
-    pub fn load(kpp: &[u8], resources: &[(&str, &[u8])]) -> Result<Self> {
+    /// Load a `.kpp`. A tip the preset embeds (a Krita 5 preset carries
+    /// its own) is used first; otherwise `resources` supplies it.
+    pub fn load<R: Resources + ?Sized>(kpp: &[u8], resources: &R) -> Result<Self> {
         let p = Preset::read(kpp)?;
         if p.paintop != "paintbrush" {
             bail!("`{}` uses the `{}` engine; only the pixel brush is supported", p.name, p.paintop);
@@ -170,9 +233,10 @@ impl PixelBrush {
                 bail!("`{}` turns on `{key}`, which is not supported yet", p.name);
             }
         }
-        // Build-up (1) paints dabs straight onto the layer; wash (2, the
-        // default) goes through a stroke buffer with alpha-darken.
-        if p.int("PaintOpAction", 2) != 1 {
+        // Build-up (1) paints dabs straight onto the layer; wash (2) goes
+        // through a stroke buffer with alpha-darken. A preset without the
+        // key is build-up (`KisBrushBasedPaintOpSettings::paintIncremental`).
+        if p.int("PaintOpAction", 1) != 1 {
             bail!("`{}` paints in wash mode; only build-up is supported yet", p.name);
         }
         if let Some(op) = p.string("CompositeOp") {
@@ -198,10 +262,13 @@ impl PixelBrush {
             bail!("`{}` uses a `{}` tip; only PNG tips are supported", p.name, attr("type").unwrap_or("?"));
         }
         let file = attr("filename").unwrap_or_default();
-        let png = resources
+        let embedded = p
+            .resources
             .iter()
-            .find(|(n, _)| *n == file)
-            .map(|(_, d)| *d)
+            .find(|r| r.kind == "brushes" && r.filename == file)
+            .map(|r| Cow::Borrowed(r.data.as_slice()));
+        let png = embedded
+            .or_else(|| resources.tip(file))
             .ok_or_else(|| anyhow!("`{}` needs the tip `{file}`", p.name))?;
         let mut tip_scale = num("scale", 1.0);
         // KisBrush::fromXMLLoadResult: version-1 definitions stored half the
@@ -212,7 +279,7 @@ impl PixelBrush {
         let angle = num("angle", 0.0);
         let spacing = num("spacing", 0.1).max(0.02);
         let auto_spacing = (attr("useAutoSpacing") == Some("1")).then(|| num("autoSpacingCoeff", 1.0));
-        let tip = PngTip::load(png, angle).with_context(|| format!("tip `{file}`"))?;
+        let tip = PngTip::load(&png, angle).with_context(|| format!("tip `{file}`"))?;
 
         let texture = if p.bool("Texture/Pattern/Enabled", false) {
             if p.int("Texture/Pattern/TexturingMode", 0) != 0 {
@@ -247,7 +314,7 @@ impl PixelBrush {
                     brightness: p.double("Texture/Pattern/Brightness", 0.0),
                     contrast: p.double("Texture/Pattern/Contrast", 1.0),
                     neutral_point: p.double("Texture/Pattern/NeutralPoint", 0.5),
-                    invert: false,
+                    invert: p.bool("Texture/Pattern/Invert", false),
                     cutoff_left: p.int("Texture/Pattern/CutoffLeft", 0),
                     cutoff_right: p.int("Texture/Pattern/CutoffRight", 255),
                     cutoff_policy: p.int("Texture/Pattern/CutoffPolicy", 0),
@@ -259,19 +326,28 @@ impl PixelBrush {
             None
         };
 
-        let level = p.int("KisPrecisionOption/precisionLevel", 5).clamp(1, 5);
+        let size = p.curve_option(&options::SIZE)?;
+        let rotation = p.curve_option(&options::ROTATION)?;
+        let opacity = p.curve_option(&options::OPACITY)?;
+        let texture_strength = p.curve_option(&options::TEXTURE_STRENGTH)?;
+        let precision = PrecisionOption {
+            level: p.int("KisPrecisionOption/precisionLevel", 5).clamp(1, 5),
+            auto: p.bool("KisPrecisionOption/AutoPrecisionEnabled", false),
+            // KisBrushOp and KisBrushBasedPaintOp's imprecise options.
+            imprecise: rotation.checked || texture.is_some(),
+        };
         Ok(Self {
             tip,
             tip_scale,
-            size: p.curve_option("Size", true)?,
-            rotation: p.curve_option("Rotation", true)?,
-            opacity: p.curve_option("Opacity", false)?,
-            texture_strength: p.curve_option("Texture/Strength/", true)?,
+            size,
+            rotation,
+            opacity,
+            texture_strength,
             texture,
             spacing,
             auto_spacing,
             isotropic_spacing: p.bool("Spacing/Isotropic", false),
-            precision: PRECISION_LEVELS[(level - 1) as usize],
+            precision,
         })
     }
 
@@ -312,6 +388,8 @@ impl PixelBrush {
             canvas_rotation: rotation_deg,
             canvas_mirrored_h: mirrored.0,
             canvas_mirrored_v: mirrored.1,
+            hovering: true,
+            ..Default::default()
         };
         let shape = DabShape {
             scale: self.size.apply(&info),
@@ -365,7 +443,10 @@ struct DabParams {
     h: i32,
     sub_x: f64,
     sub_y: f64,
+    softness: f64,
     ratio: f64,
+    /// A pipe tip's cell.
+    index: i32,
 }
 
 impl DabParams {
@@ -375,7 +456,9 @@ impl DabParams {
             && (self.h - last.h).abs() <= (prec.size_frac * self.h as f64) as i32
             && (self.sub_x - last.sub_x).abs() <= prec.sub_pixel
             && (self.sub_y - last.sub_y).abs() <= prec.sub_pixel
+            && (self.softness - last.softness).abs() <= prec.softness
             && (self.ratio - last.ratio).abs() <= prec.ratio
+            && self.index == last.index
     }
 }
 
@@ -389,7 +472,7 @@ struct CachedDab {
 
 /// One stroke with a Krita brush.
 pub struct KritaStroke {
-    brush: &'static PixelBrush,
+    brush: Arc<PixelBrush>,
     brush_scale: f64,
     color: [u8; 3],
     /// The preset's opacity option with the app's opacity slider as its
@@ -399,6 +482,10 @@ pub struct KritaStroke {
     canvas_rotation: f64,
     mirrored: (bool, bool),
     distance: Distance,
+    /// The dabs painted so far, for the sensors that read the stroke's
+    /// history. Set by [`start`](Self::start) at pen-down.
+    history: DabHistory,
+    random: Rc<RefCell<RandomSource>>,
     pending: Vec<DabRequest>,
     cache: Option<CachedDab>,
 }
@@ -418,7 +505,7 @@ impl KritaStroke {
     /// `diameter` is the brush size in canvas pixels, `rotation_deg` the
     /// view's rotation, positive clockwise on screen.
     pub fn new(
-        preset: KritaPreset,
+        brush: Arc<PixelBrush>,
         diameter: f64,
         color: [u8; 4],
         opacity: f64,
@@ -426,7 +513,6 @@ impl KritaStroke {
         rotation_deg: f64,
         mirrored: (bool, bool),
     ) -> Self {
-        let brush = preset.brush();
         let brush_scale = brush.brush_scale(diameter);
         let mut opacity_option = brush.opacity.clone();
         opacity_option.strength = opacity.clamp(0.0, 1.0);
@@ -440,19 +526,46 @@ impl KritaStroke {
             mirrored,
             // KisSpacingInformation(): zero spacing until the first dab.
             distance: Distance::new(Spacing::isotropic(0.0)),
+            history: DabHistory::start((0.0, 0.0), 0.0),
+            random: Rc::new(RefCell::new(RandomSource::for_stroke())),
             pending: Vec::new(),
             cache: None,
         }
     }
 
+    /// Pen-down at `s`: the history starts there. Krita's starting angle
+    /// comes from the hover path before the press, which the app does not
+    /// keep; it only shows if the first dab lands exactly on the press.
+    pub fn start(&mut self, s: &PointerSample) {
+        self.history = DabHistory::start((s.x as f64, s.y as f64), 0.0);
+    }
+
+    /// Fix the stroke's random source, so a test sees the same stroke twice.
+    pub fn seed(&mut self, seed: u32) {
+        self.random = Rc::new(RefCell::new(RandomSource::new(seed)));
+    }
+
+    /// The preset this stroke paints with.
+    pub fn brush(&self) -> &Arc<PixelBrush> {
+        &self.brush
+    }
+
     fn info(&self, s: &PointerSample) -> PaintInfo {
+        let pos = (s.x as f64, s.y as f64);
         PaintInfo {
             pressure: s.pressure.clamp(0.0, 1.0) as f64,
             x_tilt: s.tilt_x as f64,
             y_tilt: s.tilt_y as f64,
+            rotation: s.rotation as f64,
+            tangential_pressure: s.tangential as f64,
+            speed: s.speed as f64,
+            drawing_angle: self.history.drawing_angle(pos),
+            dab_seq_no: self.history.dab_seq_no,
             canvas_rotation: self.canvas_rotation,
             canvas_mirrored_h: self.mirrored.0,
             canvas_mirrored_v: self.mirrored.1,
+            hovering: false,
+            random: Some(self.random.clone()),
         }
     }
 
@@ -467,7 +580,14 @@ impl KritaStroke {
     /// `KisBrushOp::paintAt`: decide the dab at `s` and the spacing to the
     /// next one. The dab is painted by the next [`drain`](Self::drain).
     pub fn paint_at(&mut self, s: &PointerSample) {
-        let b = self.brush;
+        self.dab_at(s);
+        // KisPaintInformation::paintAt: every dab is registered, even one
+        // too small to paint.
+        self.history.register_painted_dab((s.x as f64, s.y as f64), s.pressure.clamp(0.0, 1.0) as f64);
+    }
+
+    fn dab_at(&mut self, s: &PointerSample) {
+        let b = self.brush.clone();
         let info = self.info(s);
         let scale = b.size.apply(&info);
         let (w, h) = b.tip.size();
@@ -538,7 +658,7 @@ impl KritaStroke {
     }
 
     fn render(&mut self, req: DabRequest, canvas: &mut Canvas, clip: Option<&Arc<Mask>>, alpha_lock: bool) -> Option<DirtyRect> {
-        let b = self.brush;
+        let b = self.brush.clone();
         // calculateDabRect.
         let (hx, hy) = b.tip.hot_spot(self.brush_scale, req.shape);
         let (x, sub_x) = split(req.x - hx);
@@ -550,12 +670,15 @@ impl KritaStroke {
             h,
             sub_x,
             sub_y,
+            softness: 1.0,
             ratio: req.shape.ratio,
+            index: 0,
         };
+        let precision = b.precision.for_dab(w.min(h));
         let reuse = self
             .cache
             .as_ref()
-            .is_some_and(|c| params.matches(&c.params, &b.precision));
+            .is_some_and(|c| params.matches(&c.params, precision));
         if !reuse {
             let (alpha, mw, mh) = b.tip.mask(self.brush_scale, req.shape, sub_x, sub_y);
             self.cache = Some(CachedDab {
@@ -634,7 +757,7 @@ mod tests {
         assert!((b.tip.angle - 3.14159).abs() < 1e-12);
         assert_eq!(b.auto_spacing, Some(0.3));
         assert!(!b.isotropic_spacing);
-        assert_eq!(b.precision, PRECISION_LEVELS[0]);
+        assert_eq!(*b.precision.for_dab(10), PRECISION_LEVELS[0]);
 
         // Size: tilt elevation through 0,1 → 1,0.246.
         assert!(b.size.checked);
@@ -717,6 +840,44 @@ mod tests {
         v.extend_from_slice(&body);
         v.extend_from_slice(&[0; 4]);
         v
+    }
+
+    /// A Krita 5 preset (`version` 5.0) carries its tip in `<resources>`,
+    /// so it loads with nothing else supplied.
+    #[test]
+    fn a_krita5_preset_brings_its_own_tip() {
+        fn b64(data: &[u8]) -> String {
+            const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::new();
+            for c in data.chunks(3) {
+                let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+                for i in 0..4 {
+                    if i <= c.len() {
+                        out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+                    } else {
+                        out.push('=');
+                    }
+                }
+            }
+            out
+        }
+        let xml = kpp::preset_xml(PENCIL5_KPP).unwrap();
+        let res = format!(
+            r#"<resources><resource type="brushes" md5sum="x" name="gradient" filename="gradient.png"><![CDATA[{}]]></resource></resources></Preset>"#,
+            b64(GRADIENT_PNG)
+        );
+        let xml = xml.replacen("</Preset>", &res, 1);
+        let mut kpp = kpp_with(&xml);
+        assert!(PixelBrush::load(&kpp, &[]).is_err(), "no version chunk: resources ignored");
+        // Splice a `version` text chunk in after the signature.
+        let body = b"version\x005.0";
+        let mut chunk = (body.len() as u32).to_be_bytes().to_vec();
+        chunk.extend_from_slice(b"tEXt");
+        chunk.extend_from_slice(body);
+        chunk.extend_from_slice(&[0; 4]);
+        kpp.splice(8..8, chunk);
+        let b = PixelBrush::load(&kpp, &[]).expect("loads from its own resources");
+        assert!((b.diameter() - 40.0).abs() < 1e-3);
     }
 
     #[test]
