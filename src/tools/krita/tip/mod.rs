@@ -7,6 +7,9 @@
 //! having Qt draw it with the dab's scale, rotation and sub-pixel offset;
 //! the mask is then `255 - gray`, times the drawn alpha.
 
+pub mod auto;
+pub mod simd_math;
+
 use anyhow::{bail, Context, Result};
 
 use super::composite::mul;

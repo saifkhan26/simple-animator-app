@@ -54,6 +54,7 @@ use qt::{qround, Image32};
 use sensors::{CurveOption, PaintInfo};
 use spacing::{effective_spacing, Distance, Spacing};
 use texture::{TextureMask, TextureSettings};
+use tip::auto::{AutoDef, AutoTip};
 use tip::{DabShape, PngTip};
 
 pub(crate) const PENCIL5_KPP: &[u8] = include_bytes!("assets/Pencil-5_Tilted.kpp");
@@ -160,9 +161,18 @@ impl PrecisionOption {
     }
 }
 
+/// A preset's brush tip.
+pub enum Tip {
+    /// A bitmap, scaled to size.
+    Png(PngTip),
+    /// Generated: the size slider resizes the generator itself, so each
+    /// stroke builds its own [`AutoTip`] from this.
+    Auto(AutoDef),
+}
+
 /// A pixel-brush preset, loaded and checked.
 pub struct PixelBrush {
-    pub tip: PngTip,
+    pub tip: Tip,
     /// The preset's own `KisBrush::scale`.
     pub tip_scale: f64,
     pub size: CurveOption,
@@ -258,28 +268,40 @@ impl PixelBrush {
         let b = doc.root_element();
         let attr = |k: &str| b.attribute(k);
         let num = |k: &str, d: f64| attr(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
-        if attr("type") != Some("png_brush") {
-            bail!("`{}` uses a `{}` tip; only PNG tips are supported", p.name, attr("type").unwrap_or("?"));
-        }
-        let file = attr("filename").unwrap_or_default();
-        let embedded = p
-            .resources
-            .iter()
-            .find(|r| r.kind == "brushes" && r.filename == file)
-            .map(|r| Cow::Borrowed(r.data.as_slice()));
-        let png = embedded
-            .or_else(|| resources.tip(file))
-            .ok_or_else(|| anyhow!("`{}` needs the tip `{file}`", p.name))?;
-        let mut tip_scale = num("scale", 1.0);
-        // KisBrush::fromXMLLoadResult: version-1 definitions stored half the
-        // scale.
-        if attr("BrushVersion").unwrap_or("1") == "1" {
-            tip_scale *= 2.0;
-        }
-        let angle = num("angle", 0.0);
-        let spacing = num("spacing", 0.1).max(0.02);
-        let auto_spacing = (attr("useAutoSpacing") == Some("1")).then(|| num("autoSpacingCoeff", 1.0));
-        let tip = PngTip::load(&png, angle).with_context(|| format!("tip `{file}`"))?;
+        let (tip, tip_scale, spacing, auto_spacing) = match attr("type") {
+            Some("png_brush") => {
+                let file = attr("filename").unwrap_or_default();
+                let embedded = p
+                    .resources
+                    .iter()
+                    .find(|r| r.kind == "brushes" && r.filename == file)
+                    .map(|r| Cow::Borrowed(r.data.as_slice()));
+                let png = embedded
+                    .or_else(|| resources.tip(file))
+                    .ok_or_else(|| anyhow!("`{}` needs the tip `{file}`", p.name))?;
+                let mut tip_scale = num("scale", 1.0);
+                // KisBrush::fromXMLLoadResult: version-1 definitions stored
+                // half the scale.
+                if attr("BrushVersion").unwrap_or("1") == "1" {
+                    tip_scale *= 2.0;
+                }
+                let angle = num("angle", 0.0);
+                let spacing = num("spacing", 0.1).max(0.02);
+                let auto_spacing = (attr("useAutoSpacing") == Some("1")).then(|| num("autoSpacingCoeff", 1.0));
+                let tip = PngTip::load(&png, angle).with_context(|| format!("tip `{file}`"))?;
+                (Tip::Png(tip), tip_scale, spacing, auto_spacing)
+            }
+            Some("auto_brush") => {
+                let def = AutoDef::parse(b).with_context(|| format!("`{}`", p.name))?;
+                // KisAutoBrushFactory: spacing defaults to 1, clamped like
+                // any brush's to 0.02.
+                let spacing = num("spacing", 1.0).max(0.02);
+                let auto = attr("useAutoSpacing").and_then(|v| v.trim().parse::<i32>().ok()).unwrap_or(0) != 0;
+                let auto_spacing = auto.then(|| num("autoSpacingCoeff", 1.0));
+                (Tip::Auto(def), 1.0, spacing, auto_spacing)
+            }
+            other => bail!("`{}` uses a `{}` tip, which is not supported yet", p.name, other.unwrap_or("?")),
+        };
 
         let texture = if p.bool("Texture/Pattern/Enabled", false) {
             if p.int("Texture/Pattern/TexturingMode", 0) != 0 {
@@ -353,19 +375,30 @@ impl PixelBrush {
 
     /// The preset's own brush size, in pixels.
     pub fn diameter(&self) -> f64 {
-        let (w, h) = self.tip.size();
-        w.max(h) as f64 * self.tip_scale
+        match &self.tip {
+            Tip::Png(t) => {
+                let (w, h) = t.size();
+                w.max(h) as f64 * self.tip_scale
+            }
+            Tip::Auto(d) => d.diameter,
+        }
     }
 
     /// `KisBrush::scale` for a brush `diameter` pixels across. At the
     /// preset's own size this is the preset's scale, not one recomputed from
-    /// a rounded diameter, so an untouched brush is the preset.
+    /// a rounded diameter, so an untouched brush is the preset. An auto tip
+    /// is resized through its generator instead, so its scale stays 1.
     fn brush_scale(&self, diameter: f64) -> f64 {
-        let (w, h) = self.tip.size();
-        if (diameter - self.diameter()).abs() < 0.01 {
-            self.tip_scale
-        } else {
-            diameter / w.max(h) as f64
+        match &self.tip {
+            Tip::Png(t) => {
+                let (w, h) = t.size();
+                if (diameter - self.diameter()).abs() < 0.01 {
+                    self.tip_scale
+                } else {
+                    diameter / w.max(h) as f64
+                }
+            }
+            Tip::Auto(_) => 1.0,
         }
     }
 
@@ -380,7 +413,7 @@ impl PixelBrush {
         tilt: (f32, f32),
         rotation_deg: f64,
         mirrored: (bool, bool),
-    ) -> [(f64, f64); 4] {
+    ) -> Vec<(f64, f64)> {
         let info = PaintInfo {
             pressure: pressure.clamp(0.0, 1.0) as f64,
             x_tilt: qt_tilt(tilt.0) as f64,
@@ -396,7 +429,10 @@ impl PixelBrush {
             ratio: 1.0,
             rotation: sensors::rotation(&self.rotation, &info),
         };
-        self.tip.outline(self.brush_scale(diameter), shape)
+        match &self.tip {
+            Tip::Png(t) => t.outline(self.brush_scale(diameter), shape).to_vec(),
+            Tip::Auto(d) => AutoTip::new(d, diameter, RandomSource::new(0)).outline(shape),
+        }
     }
 }
 
@@ -486,6 +522,8 @@ pub struct KritaStroke {
     /// history. Set by [`start`](Self::start) at pen-down.
     history: DabHistory,
     random: Rc<RefCell<RandomSource>>,
+    /// An auto tip, built at this stroke's size.
+    auto_tip: Option<AutoTip>,
     pending: Vec<DabRequest>,
     cache: Option<CachedDab>,
 }
@@ -514,6 +552,10 @@ impl KritaStroke {
         mirrored: (bool, bool),
     ) -> Self {
         let brush_scale = brush.brush_scale(diameter);
+        let auto_tip = match &brush.tip {
+            Tip::Auto(d) => Some(AutoTip::new(d, diameter, RandomSource::for_stroke())),
+            Tip::Png(_) => None,
+        };
         let mut opacity_option = brush.opacity.clone();
         opacity_option.strength = opacity.clamp(0.0, 1.0);
         Self {
@@ -528,6 +570,7 @@ impl KritaStroke {
             distance: Distance::new(Spacing::isotropic(0.0)),
             history: DabHistory::start((0.0, 0.0), 0.0),
             random: Rc::new(RefCell::new(RandomSource::for_stroke())),
+            auto_tip,
             pending: Vec::new(),
             cache: None,
         }
@@ -543,6 +586,57 @@ impl KritaStroke {
     /// Fix the stroke's random source, so a test sees the same stroke twice.
     pub fn seed(&mut self, seed: u32) {
         self.random = Rc::new(RefCell::new(RandomSource::new(seed)));
+        if let Some(t) = &mut self.auto_tip {
+            t.seed(seed.wrapping_mul(0x9e37_79b9).wrapping_add(1));
+        }
+    }
+
+    // The tip's geometry, whichever kind it is.
+
+    fn png(&self) -> &PngTip {
+        match &self.brush.tip {
+            Tip::Png(t) => t,
+            Tip::Auto(_) => unreachable!("an auto tip's stroke has its own"),
+        }
+    }
+
+    fn tip_size(&self) -> (i32, i32) {
+        match &self.auto_tip {
+            Some(t) => t.size(),
+            None => self.png().size(),
+        }
+    }
+
+    fn characteristic_size(&self, shape: DabShape) -> (f64, f64) {
+        match &self.auto_tip {
+            Some(t) => t.characteristic_size(shape),
+            None => self.png().characteristic_size(self.brush_scale, shape),
+        }
+    }
+
+    fn hot_spot(&self, shape: DabShape) -> (f64, f64) {
+        match &self.auto_tip {
+            Some(t) => t.hot_spot(shape),
+            None => self.png().hot_spot(self.brush_scale, shape),
+        }
+    }
+
+    fn mask_size(&self, shape: DabShape, sub_x: f64, sub_y: f64) -> (i32, i32) {
+        match &self.auto_tip {
+            Some(t) => t.mask_size(shape, sub_x, sub_y),
+            None => self.png().mask_size(self.brush_scale, shape, sub_x, sub_y),
+        }
+    }
+
+    fn tip_mask(&self, shape: DabShape, sub_x: f64, sub_y: f64, softness: f64) -> (Vec<u8>, usize, usize) {
+        match &self.auto_tip {
+            Some(t) => t.mask(shape, sub_x, sub_y, softness),
+            None => self.png().mask(self.brush_scale, shape, sub_x, sub_y),
+        }
+    }
+
+    fn supports_caching(&self) -> bool {
+        self.auto_tip.as_ref().is_none_or(AutoTip::supports_caching)
     }
 
     /// The preset this stroke paints with.
@@ -590,7 +684,7 @@ impl KritaStroke {
         let b = self.brush.clone();
         let info = self.info(s);
         let scale = b.size.apply(&info);
-        let (w, h) = b.tip.size();
+        let (w, h) = self.tip_size();
         // checkSizeTooSmall.
         let s_px = scale * self.brush_scale;
         if s_px * (w as f64) < 0.01 || s_px * (h as f64) < 0.01 {
@@ -622,14 +716,11 @@ impl KritaStroke {
 
         // effectiveSpacing: the dab's size unrotated; the rotation turns
         // the spacing ellipse.
-        let (cw, ch) = b.tip.characteristic_size(
-            self.brush_scale,
-            DabShape {
-                scale,
-                ratio: 1.0,
-                rotation: 0.0,
-            },
-        );
+        let (cw, ch) = self.characteristic_size(DabShape {
+            scale,
+            ratio: 1.0,
+            rotation: 0.0,
+        });
         // `flipped` is the Mirror option's, which this brush has off; the
         // canvas's own mirroring does not enter.
         let spacing = effective_spacing(
@@ -660,10 +751,10 @@ impl KritaStroke {
     fn render(&mut self, req: DabRequest, canvas: &mut Canvas, clip: Option<&Arc<Mask>>, alpha_lock: bool) -> Option<DirtyRect> {
         let b = self.brush.clone();
         // calculateDabRect.
-        let (hx, hy) = b.tip.hot_spot(self.brush_scale, req.shape);
+        let (hx, hy) = self.hot_spot(req.shape);
         let (x, sub_x) = split(req.x - hx);
         let (y, sub_y) = split(req.y - hy);
-        let (w, h) = b.tip.mask_size(self.brush_scale, req.shape, sub_x, sub_y);
+        let (w, h) = self.mask_size(req.shape, sub_x, sub_y);
         let params = DabParams {
             angle: req.shape.rotation,
             w,
@@ -675,12 +766,13 @@ impl KritaStroke {
             index: 0,
         };
         let precision = b.precision.for_dab(w.min(h));
-        let reuse = self
-            .cache
-            .as_ref()
-            .is_some_and(|c| params.matches(&c.params, precision));
+        let reuse = self.supports_caching()
+            && self
+                .cache
+                .as_ref()
+                .is_some_and(|c| params.matches(&c.params, precision));
         if !reuse {
-            let (alpha, mw, mh) = b.tip.mask(self.brush_scale, req.shape, sub_x, sub_y);
+            let (alpha, mw, mh) = self.tip_mask(req.shape, sub_x, sub_y, 1.0);
             self.cache = Some(CachedDab {
                 params,
                 alpha,
@@ -754,7 +846,8 @@ mod tests {
         let b = KritaPreset::Pencil5Tilted.brush();
         assert!((b.diameter() - 40.0).abs() < 1e-3);
         assert!((b.tip_scale - 0.181818).abs() < 1e-12);
-        assert!((b.tip.angle - 3.14159).abs() < 1e-12);
+        let Tip::Png(tip) = &b.tip else { panic!("a bitmap tip") };
+        assert!((tip.angle - 3.14159).abs() < 1e-12);
         assert_eq!(b.auto_spacing, Some(0.3));
         assert!(!b.isotropic_spacing);
         assert_eq!(*b.precision.for_dab(10), PRECISION_LEVELS[0]);
@@ -805,26 +898,26 @@ mod tests {
     #[test]
     fn outline_is_the_bar_sized_and_turned_like_a_dab() {
         let b = KritaPreset::Pencil5Tilted.brush();
-        let sides = |c: [(f64, f64); 4]| {
+        let sides = |c: &[(f64, f64)]| {
             let d = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).hypot(p.1 - q.1);
             (d(c[0], c[1]), d(c[1], c[2]))
         };
         let upright = b.outline(40.0, 1.0, (0.0, 0.0), 0.0, (false, false));
         let flat = b.outline(40.0, 1.0, (60.0, 0.0), 0.0, (false, false));
-        let (uw, uh) = sides(upright);
-        let (fw, fh) = sides(flat);
+        let (uw, uh) = sides(&upright);
+        let (fw, fh) = sides(&flat);
         assert!(uh > 4.0 * uw, "a thin bar: {uw} x {uh}");
         assert!((fh - 40.0).abs() < 1.0, "full size flat: {fh}");
         assert!((fh / uh - 1.0 / 0.246231).abs() < 0.01, "{uh} -> {fh}");
         assert!((fw / fh - uw / uh).abs() < 1e-9);
 
         // Leaning along x lays the bar along x; along y, along y.
-        let long_axis = |c: [(f64, f64); 4]| {
+        let long_axis = |c: &[(f64, f64)]| {
             let e = (c[2].0 - c[1].0, c[2].1 - c[1].1);
             e.1.atan2(e.0).rem_euclid(std::f64::consts::PI)
         };
-        let ax = long_axis(flat);
-        let ay = long_axis(b.outline(40.0, 1.0, (0.0, 60.0), 0.0, (false, false)));
+        let ax = long_axis(&flat);
+        let ay = long_axis(&b.outline(40.0, 1.0, (0.0, 60.0), 0.0, (false, false)));
         let d = (ax - ay).abs();
         assert!((d - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "{}", d.to_degrees());
     }
