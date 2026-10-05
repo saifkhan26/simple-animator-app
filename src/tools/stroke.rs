@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use crate::tools::krita::{qt_tilt, KritaStroke, PixelBrush};
 use crate::tools::ribbon::{union_rect, CapPlane, SpineNode, StrokeWorkspace};
+use crate::tools::stabilizer::{Stabilizer, StabilizerSettings};
 use crate::tools::{
     ActiveTool, BrushMode, BrushSettings, Smoothing, SmoothingOptions, StrokeCap,
 };
@@ -105,6 +106,10 @@ pub struct StrokeBuilder {
     /// Some segment has been handed to the walker: Krita's
     /// `hasPaintAtLeastOnce`, which decides how a stroke ends.
     painted_once: bool,
+    /// The Stabilizer's timer-driven line, once the pen is down.
+    stabilizer: Option<Stabilizer>,
+    /// The stroke's clock, milliseconds, as `tick` last gave it.
+    clock: f64,
 }
 
 impl StrokeBuilder {
@@ -171,6 +176,8 @@ impl StrokeBuilder {
             smooth_pressure: None,
             krita,
             painted_once: false,
+            stabilizer: None,
+            clock: 0.0,
         }
     }
 
@@ -218,17 +225,29 @@ impl StrokeBuilder {
         // stationary pen still reports pressure changes). Expressed in screen
         // pixels so it means the same thing at every zoom.
         let dup = 0.05 / self.view_scale;
-        if let Some(p) = self.previous {
+        let last_input = match &self.stabilizer {
+            Some(st) => Some(st.last_event()),
+            None => self.previous,
+        };
+        if let Some(p) = last_input {
             if (p.x - s.x).abs() < dup && (p.y - s.y).abs() < dup {
                 return;
             }
         }
 
         let info = self.smooth(s);
+        // The stabilizer paints on its timer, in `tick`; the pen only feeds it.
+        if let Some(st) = &mut self.stabilizer {
+            st.add_event(info);
+            return;
+        }
         self.smooth_pos = Some((info.x, info.y));
         self.smooth_pressure = Some(info.pressure);
 
         let Some(previous) = self.previous else {
+            if self.opts.kind == Smoothing::Stabilizer {
+                self.stabilizer = Some(Stabilizer::start(info, self.stabilizer_settings(), self.clock));
+            }
             if let Some(k) = &mut self.krita {
                 k.start(&info);
             }
@@ -244,7 +263,7 @@ impl StrokeBuilder {
         };
 
         match self.opts.kind {
-            Smoothing::None => self.paint_line(previous, info),
+            Smoothing::None | Smoothing::Stabilizer => self.paint_line(previous, info),
             Smoothing::Basic | Smoothing::Weighted => {
                 if !self.have_tangent {
                     self.have_tangent = true;
@@ -269,6 +288,53 @@ impl StrokeBuilder {
         }
 
         self.previous = Some(info);
+    }
+
+    /// The stabilizer's settings for this stroke, from Krita's options.
+    fn stabilizer_settings(&self) -> StabilizerSettings {
+        let o = &self.opts;
+        // The stabilizer counts samples, not distance, so Krita inverts
+        // "scalable distance" for it: scaled means the count stays put.
+        let n = if o.scalable_distance { o.distance_max } else { o.distance_max / self.view_scale };
+        StabilizerSettings {
+            sample_size: (n.round().max(0.0) as usize).max(3),
+            delay: o.use_delay.then(|| o.delay_distance / self.view_scale),
+            finish: o.finish_stabilized,
+            sensors: o.stabilize_sensors,
+            poll_ms: o.stabilizer_poll_ms.max(1) as f64,
+        }
+    }
+
+    /// Whether this stroke paints on the stabilizer's timer, so wants
+    /// `tick` every frame while the pen is down.
+    pub fn stabilized(&self) -> bool {
+        self.opts.kind == Smoothing::Stabilizer
+    }
+
+    /// The stabilized line's end, where Krita draws the delay circle.
+    pub fn stabilizer_end(&self) -> Option<(f32, f32)> {
+        self.stabilizer.as_ref().map(|st| {
+            let p = st.end_point();
+            (p.x, p.y)
+        })
+    }
+
+    /// Tell the stroke the time, milliseconds on any steady clock. A
+    /// stabilized stroke paints whatever its timer has made due since.
+    pub fn tick(&mut self, now: f64) {
+        self.clock = now;
+        let Some(st) = &mut self.stabilizer else { return };
+        if !st.due(now) {
+            return;
+        }
+        let lines = st.poll(now);
+        let end = st.end_point();
+        for (a, b) in lines {
+            self.paint_line(a, b);
+        }
+        self.previous = Some(end);
+        self.smooth_pos = Some((end.x, end.y));
+        self.smooth_pressure = Some(end.pressure);
     }
 
     /// Rasterize newly committed stroke geometry and composite it into the
@@ -343,6 +409,14 @@ impl StrokeBuilder {
             } else if self.opts.kind == Smoothing::None {
                 self.have_tangent = false;
             }
+        }
+
+        // Krita's `stabilizerEnd`, after the above as in `endPaint`.
+        if let Some(mut st) = self.stabilizer.take() {
+            for (a, b) in st.end(self.clock) {
+                self.paint_line(a, b);
+            }
+            self.previous = Some(st.end_point());
         }
 
         // Krita's `finishStroke`: the segment `older -> previous` has been
@@ -1022,7 +1096,7 @@ fn segments_cross(a1: (f32, f32), a2: (f32, f32), b1: (f32, f32), b2: (f32, f32)
 
 /// Blend two samples. Position is included, so callers that want a different
 /// position (the Bezier midpoint) overwrite it afterwards.
-fn mix(a: PointerSample, b: PointerSample, t: f32) -> PointerSample {
+pub(crate) fn mix(a: PointerSample, b: PointerSample, t: f32) -> PointerSample {
     PointerSample {
         x: lerp(a.x, b.x, t),
         y: lerp(a.y, b.y, t),
@@ -1317,6 +1391,61 @@ mod tests {
             worst < 2.0,
             "curve bulged {worst} px off a path drawn within half a pixel of straight"
         );
+    }
+
+    /// Krita's stabilizer: the line follows on its timer, trailing the pen,
+    /// keeps catching up while the pen is held, and pen-up finishes it on
+    /// the point where the pen lifted.
+    #[test]
+    fn the_stabilizer_trails_then_lands_on_the_pen() {
+        let opts = SmoothingOptions {
+            kind: Smoothing::Stabilizer,
+            use_delay: false,
+            distance_max: 20.0,
+            distance_min: 20.0,
+            stabilizer_poll_ms: 50,
+            ..SmoothingOptions::default()
+        };
+        let mut b = builder(1.0, opts);
+        let mut c = Canvas::new(300, 40);
+        let pre = c.pixels().into_owned();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(300, 40, &b.brush.clone());
+        // 1 px per ms along y = 20.
+        for t in 0..=200 {
+            b.tick(t as f64);
+            b.push(sample(20.0 + t as f32, 20.0));
+            b.flush(&mut c, &mut ws, &pre);
+        }
+        let last = b.spine.last().copied().unwrap();
+        assert!(last.x < 215.0 && last.x > 190.0, "trails the pen at 220: {}", last.x);
+        assert!(b.spine.iter().all(|n| (n.y - 20.0).abs() < 1e-3), "a straight hand stays straight");
+        // Held still for 100 ms, the line reaches the pen.
+        b.tick(300.0);
+        assert!((b.spine.last().unwrap().x - 220.0).abs() < 1.5, "{}", b.spine.last().unwrap().x);
+        b.push(sample(240.0, 20.0));
+        b.tick(310.0);
+        b.finish(&mut c, &mut ws, &pre);
+        assert!((b.spine.last().unwrap().x - 240.0).abs() < 0.01, "lands where the pen lifted");
+        assert!(c.pixels()[((20 * 300 + 239) * 4 + 3) as usize] > 0);
+    }
+
+    /// With the delay, a stroke that never leaves the string is one dot.
+    #[test]
+    fn the_stabilizer_string_holds_a_short_stroke() {
+        let opts = SmoothingOptions {
+            kind: Smoothing::Stabilizer,
+            delay_distance: 50.0,
+            stabilizer_poll_ms: 50,
+            ..SmoothingOptions::default()
+        };
+        let mut b = builder(1.0, opts);
+        for t in 0..=100 {
+            b.tick(t as f64);
+            b.push(sample(20.0 + t as f32 * 0.3, 20.0));
+        }
+        b.tick(150.0);
+        assert_eq!(b.stabilizer_end(), Some((20.0, 20.0)), "the line has not moved");
     }
 
     /// Basic smoothing does not touch positions — that is the point of it,

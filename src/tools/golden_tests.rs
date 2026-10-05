@@ -169,10 +169,14 @@ fn stroke_on(
     }
     let mut b = StrokeBuilder::new(brush.clone(), tool, view_scale, smoothing);
     b.orient(orient.0, orient.1);
-    for &s in input {
+    // A steady 4 ms between samples: only the stabilizer reads the clock.
+    for (i, &s) in input.iter().enumerate() {
+        b.tick(i as f64 * 4.0);
         b.push(s);
+        b.tick(i as f64 * 4.0);
         b.flush(c, ws, &pre);
     }
+    b.tick(input.len() as f64 * 4.0);
     b.finish(c, ws, &pre);
 }
 
@@ -276,11 +280,29 @@ fn cases() -> Vec<Case> {
         kind: Smoothing::None,
         ..SmoothingOptions::default()
     };
+    // The poll interval is pinned: its default differs on Windows.
+    let stabilizer = SmoothingOptions {
+        kind: Smoothing::Stabilizer,
+        stabilizer_poll_ms: 50,
+        ..SmoothingOptions::default()
+    };
+    let loose = SmoothingOptions {
+        use_delay: false,
+        distance_max: 20.0,
+        distance_min: 20.0,
+        ..stabilizer
+    };
     for (label, brush, tool) in brushes() {
         if !matches!(label, "Pencil" | "G-Pen" | "Pencil-5") {
             continue;
         }
-        for (sname, opts, scale) in [("none", none, 1.0), ("weighted", weighted, 1.0), ("weighted-zoom05", weighted, 0.5)] {
+        for (sname, opts, scale) in [
+            ("none", none, 1.0),
+            ("weighted", weighted, 1.0),
+            ("weighted-zoom05", weighted, 0.5),
+            ("stabilizer", stabilizer, 1.0),
+            ("stabilizer-nodelay", loose, 1.0),
+        ] {
             out.push(freehand_case(
                 format!("{label}/{}/s/clear/{sname}", tool_name(tool)),
                 brush.clone(),

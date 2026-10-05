@@ -971,6 +971,8 @@ pub struct AppState {
     pub stroke: Option<StrokeBuilder>,
     /// CellId being painted into during the current stroke.
     pub stroke_target: Option<CellId>,
+    /// When the stroke began: the clock a stabilized stroke paints by.
+    stroke_clock: Option<Instant>,
     /// In-progress Shape-tool drag (preview only until pointer-up).
     pub shape_drag: Option<ShapeDrag>,
     /// In-progress Fill press, adjustable by dragging until pointer-up.
@@ -1372,6 +1374,7 @@ impl AppState {
             history: History::default(),
             stroke_pre_pixels: Vec::new(),
             stroke_pre_live: false,
+            stroke_clock: None,
             stroke_ws: StrokeWorkspace::new(),
             preview_upload_rect: None,
             shortcuts: shortcuts::load(),
@@ -1686,6 +1689,25 @@ impl AppState {
             }
         }
         self.brush.krita.brush()
+    }
+
+    /// Krita's stabilizer paints on a timer, not only when the pen moves:
+    /// give a stabilized stroke the time and paint what it adds. Returns
+    /// whether one is running, so the caller keeps frames coming.
+    pub fn tick_stroke(&mut self) -> bool {
+        let (Some(target), Some(t0)) = (self.stroke_target, self.stroke_clock) else { return false };
+        let Some(builder) = self.stroke.as_mut().filter(|b| b.stabilized()) else { return false };
+        builder.tick(t0.elapsed().as_secs_f64() * 1000.0);
+        if let (Some(pre), Some(c)) = (
+            self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
+            self.project.cell_mut(target),
+        ) {
+            if let Some(r) = builder.flush(c, &mut self.stroke_ws, pre) {
+                self.preview_upload_rect = Some(union_rect(self.preview_upload_rect, r));
+                self.mark_dirty(target);
+            }
+        }
+        true
     }
 
     /// Open the Import Krita brushes window, which starts reading Krita's
@@ -3597,6 +3619,8 @@ impl AppState {
             StrokeBuilder::new_with_krita(brush, self.tool, self.cell_view_scale(), self.smoothing, krita);
         let (rotation, mirrored) = self.cell_screen_orientation();
         builder.orient(rotation, mirrored);
+        self.stroke_clock = Some(Instant::now());
+        builder.tick(0.0);
         builder.push(sample);
         if let (Some(pre), Some(c)) = (
             self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
@@ -3622,6 +3646,9 @@ impl AppState {
             return;
         };
         builder.push(sample);
+        if let Some(t0) = self.stroke_clock {
+            builder.tick(t0.elapsed().as_secs_f64() * 1000.0);
+        }
         if let (Some(pre), Some(c)) = (
             self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
             self.project.cell_mut(target),
@@ -3669,6 +3696,9 @@ impl AppState {
             self.mark_dirty(target);
             paints = true;
         } else if let Some(mut builder) = self.stroke.take() {
+            if let Some(t0) = self.stroke_clock.take() {
+                builder.tick(t0.elapsed().as_secs_f64() * 1000.0);
+            }
             if let (Some(pre), Some(c)) = (
                 self.stroke_pre_live.then_some(&self.stroke_pre_pixels[..]),
                 self.project.cell_mut(target),
@@ -5054,6 +5084,10 @@ impl eframe::App for AppState {
         // Krita presets and thumbnails arrive from the library's loader.
         if self.brush_library.poll() || self.brush_library.loading() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        // A stabilized line keeps catching up while the pen is held still.
+        if self.tick_stroke() {
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
         self.blank_scans_left = Self::BLANK_SCANS_PER_FRAME;
 
@@ -7335,6 +7369,32 @@ mod tests {
         assert_eq!(st.tool, ActiveTool::Pencil);
         assert_eq!(st.brush.radius, 33.0);
         assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
+    }
+
+    /// A stabilized stroke through the app: pen-up finishes the line even
+    /// when no frame came between the pen's events to tick it.
+    #[test]
+    fn a_stabilized_stroke_finishes_at_pen_up() {
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolPencil);
+        st.smoothing = SmoothingOptions {
+            kind: crate::tools::Smoothing::Stabilizer,
+            use_delay: false,
+            ..SmoothingOptions::default()
+        };
+        st.pointer_down(st.make_sample(100.0, 100.0, 0.0));
+        for i in 1..=40 {
+            st.pointer_move(st.make_sample(100.0 + i as f32 * 4.0, 100.0, i as f32 * 0.004));
+        }
+        assert!(st.stroke.as_ref().unwrap().stabilized());
+        st.pointer_up();
+        let cell = st.project.layers[st.project.current_layer]
+            .resolve(st.project.current_frame)
+            .and_then(|id| st.project.cell(id))
+            .expect("the stroke made a drawing");
+        let alpha = |x: u32, y: u32| cell.pixels()[((y * cell.width + x) * 4 + 3) as usize];
+        assert!(alpha(250, 100) > 0, "the line runs on to where the pen lifted");
+        assert_eq!(alpha(275, 100), 0);
     }
 
     #[test]

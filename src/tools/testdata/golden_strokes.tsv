@@ -490,3 +490,11 @@ krita/c)_Pencil-6_Quick_Shade/tap/clear	exact	bc477756f1ef9c4c
 krita/c)_Pencil-6_Quick_Shade/line/stripes	exact	e85d3c7d13362b1c
 krita/c)_Pencil-6_Quick_Shade/s/sel	exact	a6afcc6d7241e116
 krita/c)_Pencil-6_Quick_Shade/s/lock	exact	88c318b3641a4bfc
+Pencil/pencil/s/clear/stabilizer	portable	502d24030ed03919
+Pencil/pencil/s/clear/stabilizer-nodelay	portable	71f4c5afed8cb178
+Pencil-5/pencil/s/clear/stabilizer	rcp-f4cab8f2d8aef205	4a3ceef4e5bd79c4
+Pencil-5/pencil/s/clear/stabilizer-nodelay	rcp-f4cab8f2d8aef205	3ca12150911d333f
+G-Pen/ink/s/clear/stabilizer	portable	f0ccd21af2db1a69
+G-Pen/ink/s/clear/stabilizer-nodelay	portable	4f4e54ce02fac96c
+Pencil-5/pencil/s/clear/stabilizer	exact	4a3ceef4e5bd79c4
+Pencil-5/pencil/s/clear/stabilizer-nodelay	exact	3ca12150911d333f

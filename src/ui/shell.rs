@@ -1651,6 +1651,7 @@ fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
         Smoothing::None => "None",
         Smoothing::Basic => "Basic",
         Smoothing::Weighted => "Weighted",
+        Smoothing::Stabilizer => "Stabilizer",
     };
     egui::ComboBox::from_id_salt("smoothing_kind")
         .selected_text(label)
@@ -1665,7 +1666,16 @@ fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
                 .on_hover_text(
                     "A gaussian average over the recent samples, then the same                      Bezier fit. Steadier, at the cost of the stroke trailing                      the pen.",
                 );
+            ui.selectable_value(&mut state.smoothing.kind, Smoothing::Stabilizer, "Stabilizer")
+                .on_hover_text(
+                    "Krita's stabilizer: the line follows the pen on a timer,                      averaging away the hand's shake, and can trail it on a string.",
+                );
         });
+
+    if state.smoothing.kind == Smoothing::Stabilizer {
+        stabilizer_controls(state, ui);
+        return;
+    }
 
     ui.add_enabled_ui(state.smoothing.kind == Smoothing::Weighted, |ui| {
         // Krita keeps a separate width for fast strokes. Dragging the main
@@ -1695,6 +1705,30 @@ fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
                 "Measure the distance above in screen pixels rather than canvas                  pixels, so smoothing feels the same at every zoom. Off, a                  zoomed-out stroke is barely smoothed at all.",
             );
     });
+}
+
+/// Krita's Stabilizer options.
+fn stabilizer_controls(state: &mut AppState, ui: &mut egui::Ui) {
+    let o = &mut state.smoothing;
+    let linked = (o.distance_min - o.distance_max).abs() < 0.01;
+    let resp = ui
+        .add(egui::Slider::new(&mut o.distance_max, 3.0..=1000.0).logarithmic(true).text("Distance"))
+        .on_hover_text("How much movement each point of the line averages, in milliseconds. Higher is steadier and trails further behind.");
+    if linked && resp.changed() {
+        o.distance_min = o.distance_max;
+    }
+    ui.checkbox(&mut o.use_delay, "Delay")
+        .on_hover_text("Hold the line back on a string: nothing is drawn until the pen is this far from the line's end.");
+    ui.add_enabled(
+        o.use_delay,
+        egui::Slider::new(&mut o.delay_distance, 5.0..=500.0).text("Delay distance").suffix(" px"),
+    );
+    ui.checkbox(&mut o.finish_stabilized, "Finish line")
+        .on_hover_text("At pen-up, draw the line on to where the pen lifted.");
+    ui.checkbox(&mut o.stabilize_sensors, "Stabilize sensors")
+        .on_hover_text("Average pressure and tilt along with position.");
+    ui.checkbox(&mut o.scalable_distance, "Scale distance with zoom")
+        .on_hover_text("On, the distance is the same number of samples at every zoom; off, it shrinks as you zoom in.");
 }
 
 /// The Loop toggle shared by both timeline windows. One flag covers playback,
@@ -4257,6 +4291,13 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
+    // Krita's stabilizer delay circle, around the line's end while drawing.
+    if let Some((x, y)) = state.stroke.as_ref().and_then(|b| b.stabilizer_end()) {
+        if state.smoothing.use_delay {
+            delay_circle(&painter, cell_to_screen(x, y), state.smoothing.delay_distance);
+        }
+    }
+
     // Shape-tool preview: drawn as egui shapes while dragging; the real pixels
     // are rasterised into the cell on pointer-up. Mirrors the freehand preview.
     if let Some(drag) = state.shape_drag {
@@ -5336,6 +5377,13 @@ fn draw_krita_outline(state: &AppState, painter: &egui::Painter, canvas_rect: Re
     painter.circle_stroke(pos, 1.2, Stroke::new(0.6, black));
 }
 
+/// The stabilizer's delay radius (screen pixels), as Krita adds it to the
+/// brush outline: faint, so it reads as a guide rather than the brush.
+fn delay_circle(painter: &egui::Painter, centre: egui::Pos2, radius: f32) {
+    painter.circle_stroke(centre, radius + 0.5, Stroke::new(1.5, theme::premul(0, 0, 0, 90)));
+    painter.circle_stroke(centre, radius, Stroke::new(1.0, theme::white_alpha(110)));
+}
+
 /// Paint the active tool's cursor preview on top of the canvas.
 /// Pencil/Ink/Eraser → outline circle sized by brush radius (in doc px → screen
 /// px via current canvas scale). Eraser shown with a dashed inner ring.
@@ -5353,6 +5401,12 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
 
     let white = theme::white_alpha(220);
     let black = theme::premul(0, 0, 0, 180);
+
+    // The stabilizer's string, around the pen until a stroke takes it over.
+    let draws = matches!(state.tool, ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser);
+    if idle && draws && state.smoothing.kind == Smoothing::Stabilizer && state.smoothing.use_delay {
+        delay_circle(&painter, pos, state.smoothing.delay_distance);
+    }
 
     match state.tool {
         ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser
@@ -8450,6 +8504,35 @@ mod krita_brush_tests {
         state.brush_library.poll();
     }
 
+    /// Drag Brush settings' corner to the screen's bottom, as a user would
+    /// to see what runs below its default height.
+    fn grow_brush_settings(ctx: &egui::Context, state: &mut AppState) {
+        let r = egui::AreaState::load(ctx, egui::Id::new("window_brush_settings")).unwrap().rect();
+        let grip = r.max - egui::vec2(3.0, 3.0);
+        run(ctx, state, vec![egui::Event::PointerMoved(grip), button(grip, true)]);
+        for i in 1..=10 {
+            let p = egui::pos2(grip.x, grip.y + (895.0 - grip.y) * i as f32 / 10.0);
+            run(ctx, state, vec![egui::Event::PointerMoved(p)]);
+        }
+        run(ctx, state, vec![button(egui::pos2(grip.x, 895.0), false)]);
+        run(ctx, state, vec![]);
+    }
+
+    /// Stabilizer brings Krita's own options in place of the Weighted ones.
+    #[test]
+    fn the_stabilizer_offers_krita_s_options() {
+        let (ctx, mut state) = picker_state();
+        state.smoothing.kind = Smoothing::Stabilizer;
+        state.brush_search = "nothing matches this".into();
+        run(&ctx, &mut state, vec![]);
+        grow_brush_settings(&ctx, &mut state);
+        let t = run(&ctx, &mut state, vec![]);
+        for want in ["Stabilizer", "Delay", "Delay distance", "Finish line", "Stabilize sensors"] {
+            assert!(t.iter().any(|s| s == want), "{want} in {t:?}");
+        }
+        assert!(!t.iter().any(|s| s == "Tail aggressiveness"), "{t:?}");
+    }
+
     fn picker_state() -> (egui::Context, AppState) {
         let mut state = AppState::for_test();
         state.show_panels = false;
@@ -8569,17 +8652,8 @@ mod krita_brush_tests {
         state.brush_search = "nothing matches this".into();
         let t = run(&ctx, &mut state, vec![]);
         assert!(t.iter().any(|s| s == "Krita · Pencil-5 Tilted"), "{t:?}");
-        // The editor runs below the window's default height: drag the
-        // window's corner down, as a user would.
-        let r = egui::AreaState::load(&ctx, egui::Id::new("window_brush_settings")).unwrap().rect();
-        let grip = r.max - egui::vec2(3.0, 3.0);
-        run(&ctx, &mut state, vec![egui::Event::PointerMoved(grip), button(grip, true)]);
-        for i in 1..=10 {
-            let p = egui::pos2(grip.x, grip.y + (895.0 - grip.y) * i as f32 / 10.0);
-            run(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
-        }
-        run(&ctx, &mut state, vec![button(egui::pos2(grip.x, 895.0), false)]);
-        run(&ctx, &mut state, vec![]);
+        // The editor runs below the window's default height.
+        grow_brush_settings(&ctx, &mut state);
         assert!(!state.krita_brush().wash);
 
         click_text(&ctx, &mut state, "Wash");
