@@ -35,6 +35,15 @@ pub struct PenPacket {
     /// screen-down. Zero when the device reports no orientation.
     pub tilt_x: f32,
     pub tilt_y: f32,
+    /// The packet's own timestamp, milliseconds on the driver's clock (0
+    /// when it reports none). Only differences between packets mean
+    /// anything.
+    pub time_ms: f64,
+    /// Barrel rotation (twist), degrees, -180..=180, as Krita maps it.
+    pub rotation: f32,
+    /// Tangential pressure, 0..=1: an airbrush's finger wheel. Zero for
+    /// every other pen, as in Krita.
+    pub tangential: f32,
 }
 
 /// Byte offsets of the packet fields this module reads, and the packet's
@@ -61,8 +70,11 @@ pub struct PacketLayout {
     pub x: Option<usize>,
     pub y: Option<usize>,
     pub pressure: Option<usize>,
-    /// Offset of the ORIENTATION triple; azimuth first, then altitude.
+    /// Offset of the ORIENTATION triple: azimuth, altitude, twist.
     pub orientation: Option<usize>,
+    pub time: Option<usize>,
+    pub cursor: Option<usize>,
+    pub tangent: Option<usize>,
 }
 
 /// The packet fields, in `WTPKT` bit order with their sizes. The order is the
@@ -101,6 +113,9 @@ impl PacketLayout {
             }
             match bit {
                 b if b == 1 << 1 => out.status = Some(at),
+                b if b == 1 << 2 => out.time = Some(at),
+                b if b == 1 << 5 => out.cursor = Some(at),
+                b if b == 1 << 11 => out.tangent = Some(at),
                 b if b == 1 << 7 => out.x = Some(at),
                 b if b == 1 << 8 => out.y = Some(at),
                 b if b == 1 << 10 => out.pressure = Some(at),
@@ -549,9 +564,19 @@ mod windows_backend {
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, GetClientRect};
     use super::{read_i32, read_u32, PacketLayout};
     use wintab_lite::{
-        cast_void, WTClose, WTInfo, WTOpen, WTPacketsGet, AXIS, CXO, DVC, HCTX, LOGCONTEXT, WTI,
+        cast_void, WTClose, WTInfo, WTOpen, WTPacketsGet, AXIS, CSR, CXO, DVC, HCTX, LOGCONTEXT, WTI,
         WTPKT,
     };
+
+    /// Wintab's twist (tenths of a degree, clockwise) as Krita reads it:
+    /// `360 - twist / 10`, folded into -180..=180.
+    pub(super) fn map_twist(twist: i32) -> f32 {
+        let mut r = 360.0 - twist as f64 / 10.0;
+        if r > 180.0 {
+            r -= 360.0;
+        }
+        r as f32
+    }
 
     /// Polls after which a context that has never produced a packet is
     /// called out. Roughly a few seconds of drawing.
@@ -605,6 +630,14 @@ mod windows_backend {
         pub map_y: (f32, f32, f32),
         /// Whether the device reports azimuth/altitude.
         tilt_support: bool,
+        /// The tangential-pressure axis's span, 0 without one.
+        tangent_span: f32,
+        /// Each cursor's `CSR_TYPE`, asked once: only an airbrush reports
+        /// tangential pressure.
+        cursor_types: std::collections::HashMap<u32, u32>,
+        /// `WTInfoA` with its category as a plain number, for the
+        /// multiplexed cursor categories.
+        wt_info_raw: libloading::Symbol<'static, unsafe extern "C" fn(u32, u32, *mut std::ffi::c_void) -> u32>,
         /// Refreshed every poll; see `PenInput::client_origin`.
         pub client_origin: Option<(f32, f32)>,
         /// The mapping as the cursor shows it to be. Preferred over
@@ -695,13 +728,25 @@ mod windows_backend {
             // every packet after the first in a batch is found by it. Five
             // documented fields, none of them optional extensions, is a packet
             // this code can size exactly.
+            // Time, cursor and tangential pressure feed Krita's speed sensor
+            // and airbrush wheel; the layout below is built from whatever is
+            // actually granted, so a driver that refuses them costs nothing.
             log_context.lcPktData = WTPKT::STATUS
+                | WTPKT::TIME
+                | WTPKT::CURSOR
                 | WTPKT::X
                 | WTPKT::Y
                 | WTPKT::NORMAL_PRESSURE
+                | WTPKT::TANGENT_PRESSURE
                 | WTPKT::ORIENTATION;
             log_context.lcPktMode = WTPKT::empty();
-            log_context.lcMoveMask = WTPKT::X | WTPKT::Y | WTPKT::NORMAL_PRESSURE;
+            // Twisting the barrel or turning the wheel with the pen held
+            // still is input too.
+            log_context.lcMoveMask = WTPKT::X
+                | WTPKT::Y
+                | WTPKT::NORMAL_PRESSURE
+                | WTPKT::TANGENT_PRESSURE
+                | WTPKT::ORIENTATION;
 
             // The same area, scaled up, so positions arrive on a fraction
             // of a screen pixel instead of on whole ones.
@@ -730,6 +775,14 @@ mod windows_backend {
                 (pressure_axis.axMin as f32, pressure_axis.axMax as f32)
             } else {
                 (0.0, 1023.0)
+            };
+            // The airbrush wheel's range. Krita scales by its span alone.
+            let mut tangent_axis = AXIS::default();
+            let tr = unsafe { wt_info(WTI::DEVICES, DVC::TPRESSURE as u32, cast_void!(tangent_axis)) };
+            let tangent_span = if tr as usize == std::mem::size_of::<AXIS>() {
+                (tangent_axis.axMax as f32 - tangent_axis.axMin as f32).max(0.0)
+            } else {
+                0.0
             };
             let pressure_span = pressure_max - pressure_min;
             if pressure_span < 1.0 {
@@ -852,6 +905,9 @@ mod windows_backend {
                 hwnd,
                 pressure_min,
                 pressure_span,
+                tangent_span,
+                cursor_types: std::collections::HashMap::new(),
+                wt_info_raw: unsafe { lib.get(c"WTInfoA".to_bytes()).context("WTInfoA")? },
                 map_x,
                 map_y,
                 tilt_support,
@@ -878,6 +934,22 @@ mod windows_backend {
                 self.fit.x.map_or(sx + (x as f32 - ox) * kx, |f| f.map(x)),
                 self.fit.y.map_or(sy + (y as f32 - oy) * ky, |f| f.map(y)),
             )
+        }
+
+        /// Whether cursor `index` is an airbrush (`QTabletEvent::Airbrush`:
+        /// `CSR_TYPE & 0x0F06 == 0x0902`).
+        fn is_airbrush(&mut self, index: u32) -> bool {
+            let ty = *self.cursor_types.entry(index).or_insert_with(|| {
+                let mut ty: u32 = 0;
+                // WTI_CURSORS + n is a category of its own, outside the enum.
+                let n = unsafe { (self.wt_info_raw)(WTI::CURSORS as u32 + index, CSR::TYPE as u32, cast_void!(ty)) };
+                if n as usize == std::mem::size_of::<u32>() {
+                    ty
+                } else {
+                    0
+                }
+            });
+            ty & 0x0F06 == 0x0902
         }
 
         /// Azimuth/altitude → x/y tilt in degrees. Straight from Qt's
@@ -1006,6 +1078,13 @@ mod windows_backend {
                     Some(at) => self.map_tilt(read_i32(p, at), read_i32(p, at + 4)),
                     None => (0.0, 0.0),
                 };
+                let rotation = match (layout.orientation, self.tilt_support) {
+                    (Some(at), true) => map_twist(read_i32(p, at + 8)),
+                    _ => 0.0,
+                };
+                let time_ms = layout.time.map_or(0.0, |at| read_u32(p, at) as f64);
+                let cursor = layout.cursor.map(|at| read_u32(p, at));
+                let tangent = layout.tangent.map(|at| read_u32(p, at));
 
                 if !self.seen_packets {
                     self.seen_packets = true;
@@ -1015,6 +1094,10 @@ mod windows_backend {
                 }
                 self.last_raw = Some((rx, ry));
                 self.total_packets = self.total_packets.saturating_add(1);
+                let tangential = match (tangent, cursor) {
+                    (Some(t), Some(c)) if self.tangent_span > 0.0 && self.is_airbrush(c) => t as f32 / self.tangent_span,
+                    _ => 0.0,
+                };
 
                 out.push(PenPacket {
                     x,
@@ -1022,6 +1105,9 @@ mod windows_backend {
                     pressure,
                     tilt_x,
                     tilt_y,
+                    time_ms,
+                    rotation,
+                    tangential,
                 });
             }
         }
@@ -1143,6 +1229,37 @@ mod tests {
         );
     }
 
+    /// The fields asked for now: time, cursor and tangential pressure
+    /// land at their places in the bit order, around the old ones.
+    #[test]
+    fn time_cursor_and_tangent_have_their_offsets() {
+        let mask = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 7) | (1 << 8) | (1 << 10) | (1 << 11) | (1 << 12);
+        let l = PacketLayout::from_mask(mask);
+        assert_eq!(l.status, Some(0));
+        assert_eq!(l.time, Some(4));
+        assert_eq!(l.cursor, Some(8));
+        assert_eq!((l.x, l.y), (Some(12), Some(16)));
+        assert_eq!(l.pressure, Some(20));
+        assert_eq!(l.tangent, Some(24));
+        assert_eq!(l.orientation, Some(28));
+        assert_eq!(l.size, 40);
+        // A driver that refuses the new ones leaves the old offsets where
+        // the old request had them.
+        let old = PacketLayout::from_mask((1 << 1) | (1 << 7) | (1 << 8) | (1 << 10) | (1 << 12));
+        assert_eq!((old.time, old.cursor, old.tangent), (None, None, None));
+        assert_eq!((old.x, old.pressure, old.orientation), (Some(4), Some(12), Some(16)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn twist_reads_like_krita() {
+        use super::windows_backend::map_twist;
+        assert_eq!(map_twist(0), 0.0, "360 folds to 0");
+        assert_eq!(map_twist(900), -90.0);
+        assert_eq!(map_twist(2700), 90.0);
+        assert_eq!(map_twist(1800), 180.0);
+    }
+
     /// The minimum a tablet has to give us to be worth listening to.
     #[test]
     fn position_alone_is_usable_and_nothing_is_not() {
@@ -1190,6 +1307,9 @@ mod tests {
             pressure,
             tilt_x: 0.0,
             tilt_y: 0.0,
+            time_ms: 0.0,
+            rotation: 0.0,
+            tangential: 0.0,
         }
     }
 

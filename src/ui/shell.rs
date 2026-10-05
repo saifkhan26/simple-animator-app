@@ -1542,6 +1542,19 @@ fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
             d.layout.orientation
         ),
     );
+    // What Krita's rotation, tangential and speed sensors read from the pen.
+    if let Some(p) = state.pen.last_packet() {
+        diag_row(
+            ui,
+            "twist / wheel",
+            format!(
+                "{:.1}° / {:.2}{}",
+                p.rotation,
+                p.tangential,
+                if d.layout.time.is_some() { ", packet time" } else { ", frame time" }
+            ),
+        );
+    }
     diag_row(
         ui,
         "rejected",
@@ -7552,6 +7565,9 @@ mod stroke_source_tests {
             pressure: 0.5,
             tilt_x: 0.0,
             tilt_y: 0.0,
+            time_ms: 0.0,
+            rotation: 0.0,
+            tangential: 0.0,
         }
     }
 
