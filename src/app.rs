@@ -1435,9 +1435,11 @@ impl AppState {
         for id in 0..self.project.cells.len() {
             self.cell_dirty.insert(id, Dirty::Full);
         }
+        // Brushes are the artist's, not the project's: keep every tool's,
+        // the active one included, and come back on the pencil.
+        self.tool_brushes[self.tool.idx()] = self.brush.clone();
         self.tool = ActiveTool::Pencil;
-        self.brush = BrushSettings::default_pencil();
-        self.tool_brushes = default_tool_brushes();
+        self.brush = self.tool_brushes[ActiveTool::Pencil.idx()].clone();
         self.grid_drag = None;
         self.snap_lock = None;
         self.stroke = None;
@@ -4190,6 +4192,9 @@ impl AppState {
     /// Commit a sampled colour: apply it to every tool, restore the drawing tool
     /// that was active before picking, and leave pick mode.
     pub fn commit_screen_pick(&mut self, color: [u8; 4]) {
+        // The active brush may have changed since its slot was last written
+        // (a preset, a slider); keep that before reloading from the slots.
+        self.tool_brushes[self.tool.idx()] = self.brush.clone();
         // Apply to the active brush and every tool's stored colour so the sample
         // sticks across tool switches.
         for b in &mut self.tool_brushes {
@@ -4932,6 +4937,10 @@ impl eframe::App for AppState {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Only a tool switch writes the active brush back to its slot, so a
+        // change made since the last switch lives in `brush` alone.
+        let mut tool_brushes = self.tool_brushes.to_vec();
+        tool_brushes[self.tool.idx()] = self.brush.clone();
         eframe::set_value(
             storage,
             UI_PREFS_KEY,
@@ -4951,7 +4960,7 @@ impl eframe::App for AppState {
                 right_drag: self.right_drag,
                 loop_timeline: self.loop_timeline,
                 smoothing: self.smoothing,
-                tool_brushes: Some(self.tool_brushes.to_vec()),
+                tool_brushes: Some(tool_brushes),
                 palette: self.palette.clone(),
                 track_frame_w: self.track_frame_w,
                 perspective: PerspectiveConfig {
@@ -7225,6 +7234,48 @@ mod tests {
         let brushes = restore_tool_brushes(prefs.tool_brushes);
         assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
         assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
+    }
+
+    /// The active tool's brush is saved as it is now, not as it was at the
+    /// last tool switch.
+    #[test]
+    fn the_active_brush_is_saved_with_its_latest_changes() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.brush = BrushSettings::pencil5_krita();
+        st.brush.radius = 33.0;
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let pencil = &restore_tool_brushes(prefs.tool_brushes)[ActiveTool::Pencil.idx()];
+        assert_eq!(pencil.mode, crate::tools::BrushMode::Krita);
+        assert_eq!(pencil.radius, 33.0);
+    }
+
+    /// Picking a colour off the screen changes the colour and nothing else.
+    #[test]
+    fn a_screen_pick_keeps_the_brush() {
+        let mut st = AppState::for_test();
+        st.brush = BrushSettings::pencil5_krita();
+        st.brush.radius = 33.0;
+        st.begin_screen_pick();
+        st.commit_screen_pick([1, 2, 3, 255]);
+        assert_eq!(st.brush.mode, crate::tools::BrushMode::Krita);
+        assert_eq!(st.brush.radius, 33.0);
+        assert_eq!(st.brush.color, [1, 2, 3, 255]);
+    }
+
+    /// A new project keeps every tool's brush and comes back on the pencil.
+    #[test]
+    fn a_new_project_keeps_the_brushes() {
+        let mut st = AppState::for_test();
+        st.brush.radius = 33.0;
+        st.set_tool(ActiveTool::Ink);
+        st.brush.radius = 9.0;
+        st.reset_with(640, 480, 24.0);
+        assert_eq!(st.tool, ActiveTool::Pencil);
+        assert_eq!(st.brush.radius, 33.0);
+        assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
     }
 
     #[test]
