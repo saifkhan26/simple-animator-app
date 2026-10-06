@@ -574,6 +574,7 @@ impl AppState {
                 // Record the lift, which nothing else now will.
                 if std::mem::take(&mut self.float_pre_live) && self.project.cell(sel.cell).is_some() {
                     std::mem::swap(&mut self.stroke_pre_pixels, &mut self.float_pre);
+                    self.pre_replaced(sel.cell);
                     self.stroke_pre_live = true;
                     let rect = self.float_lift_rect;
                     if let Some(c) = self.project.cell_mut(sel.cell) {
@@ -730,6 +731,7 @@ impl AppState {
         if from_lift {
             // The "before" is the cell as it was before the pixels left it.
             std::mem::swap(&mut self.stroke_pre_pixels, &mut self.float_pre);
+            self.pre_replaced(cell);
             self.stroke_pre_live = true;
             let rect = self.float_lift_rect;
             if let Some(c) = self.project.cell_mut(cell) {
@@ -1162,6 +1164,80 @@ mod tests {
         assert_eq!(px(&st, 105, 120), [200, 0, 0, 255]);
         assert_eq!(px(&st, 165, 120)[3], 0);
         assert_eq!(at(&st, 95, 120), 255);
+    }
+
+    /// Once an edit lands, the stroke snapshot either is the cell it names,
+    /// byte for byte, or names none: the next edit trusts it uncopied.
+    fn assert_pre_mirrors(st: &AppState, what: &str) {
+        let Some((id, rev)) = st.pre_mirror else {
+            return;
+        };
+        let c = st.project.cell(id).unwrap();
+        if c.rev() == rev {
+            assert!(st.stroke_pre_pixels == *c.pixels(), "after {what}: the snapshot is cell {id}");
+        }
+    }
+
+    fn stroke_with(st: &mut AppState, tool: ActiveTool, y: f32) {
+        st.set_tool(tool);
+        st.brush.radius = 4.0;
+        st.pointer_down(st.make_sample(20.0, y, 0.0));
+        for i in 1..=30 {
+            st.pointer_move(st.make_sample(20.0 + i as f32 * 8.0, y, i as f32 * 0.01));
+        }
+        st.pointer_up();
+    }
+
+    #[test]
+    fn the_stroke_snapshot_stays_the_cell_through_every_kind_of_edit() {
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        let id = st.project.resolved_current().unwrap();
+        let orig = st.project.cell(id).unwrap().pixels().into_owned();
+        let steps = st.history.undo_len();
+
+        stroke_with(&mut st, ActiveTool::Ink, 50.0);
+        let rev = st.project.cell(id).unwrap().rev();
+        assert_eq!(st.pre_mirror, Some((id, rev)), "a landed stroke leaves it mirrored");
+        assert_pre_mirrors(&st, "a stroke");
+        // The next one starts from the mirror, copying nothing.
+        stroke_with(&mut st, ActiveTool::Ink, 70.0);
+        assert_pre_mirrors(&st, "a stroke from the mirror");
+        stroke_with(&mut st, ActiveTool::Eraser, 50.0);
+        assert_pre_mirrors(&st, "an eraser stroke");
+        st.set_tool(ActiveTool::Fill);
+        st.pointer_down(st.make_sample(600.0, 400.0, 0.0));
+        st.pointer_up();
+        assert_pre_mirrors(&st, "a bucket fill");
+        // An undo writes the cell, so the mirror no longer counts.
+        st.undo();
+        assert_ne!(st.pre_mirror.map(|m| m.1), Some(st.project.cell(id).unwrap().rev()));
+        stroke_with(&mut st, ActiveTool::Ink, 90.0);
+        assert_pre_mirrors(&st, "a stroke after an undo");
+
+        st.set_tool(ActiveTool::Lasso);
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        st.fill_selection();
+        assert_pre_mirrors(&st, "a selection fill");
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_pre_mirrors(&st, "a lasso move");
+        st.clear_selection_state();
+
+        // Another drawing: the old one's ink has to leave the snapshot.
+        let other = st.project.cells.len();
+        st.project.cells.push(crate::doc::canvas::Canvas::new(st.project.width, st.project.height).into());
+        st.project.layers[0].set_key(0, other);
+        stroke_with(&mut st, ActiveTool::Ink, 300.0);
+        assert_pre_mirrors(&st, "a stroke on another drawing");
+        st.project.layers[0].set_key(0, id);
+        stroke_with(&mut st, ActiveTool::Ink, 310.0);
+        assert_pre_mirrors(&st, "a stroke back on the first");
+
+        while st.history.undo_len() > steps {
+            st.undo();
+        }
+        assert!(*st.project.cell(id).unwrap().pixels() == orig[..], "every edit undone exactly");
     }
 
     const RED: [u8; 4] = [200, 0, 0, 255];

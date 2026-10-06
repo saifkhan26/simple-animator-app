@@ -11,6 +11,42 @@
 //! the cells nobody is drawing on.
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Source of [`Canvas::rev`] values: unique across every canvas.
+static NEXT_REV: AtomicU64 = AtomicU64::new(1);
+
+fn next_rev() -> u64 {
+    NEXT_REV.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Bytes below which `par_rows` stays on one thread: under it, starting
+/// threads costs more than they save.
+const PAR_MIN: usize = 2 << 20;
+
+/// Run `f` over `buf` in bands of whole rows of `row` items, one band to a
+/// thread once `buf` is big enough to be worth it. `f` gets the index of
+/// its band's first row. Copying and clearing big buffers is bound by how
+/// fast one core moves memory, which is a fraction of what the memory can
+/// take: an 8K cell clears and fills about 2× faster on several.
+pub fn par_rows<T: Send>(buf: &mut [T], row: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    let rows = buf.len() / row.max(1);
+    let threads = match std::mem::size_of_val(buf) {
+        n if n < PAR_MIN || rows < 2 => 1,
+        _ => std::thread::available_parallelism().map_or(1, |n| n.get().min(8)),
+    };
+    if threads == 1 {
+        f(0, buf);
+        return;
+    }
+    let per = rows.div_ceil(threads);
+    std::thread::scope(|s| {
+        for (k, band) in buf.chunks_mut(per * row).enumerate() {
+            let f = &f;
+            s.spawn(move || f(k * per, band));
+        }
+    });
+}
 
 /// Serialised by hand (see the impls below) with exactly the wire layout the
 /// derive gave it, so `.anim` files are unchanged.
@@ -22,6 +58,15 @@ pub struct Canvas {
     /// Dirty rectangle (inclusive min, exclusive max). `None` = clean.
     /// Transient render bookkeeping — not persisted.
     pub dirty: Option<DirtyRect>,
+    /// Which pixels these are: new for every canvas made and every chance
+    /// to write, unique across canvases, and unchanged by packing. A clone
+    /// holds the same pixels, so it keeps it. Equal revs, equal pixels —
+    /// what lets a copy of a cell be trusted without comparing it.
+    rev: u64,
+    /// The packed pixels a full canvas was unpacked from by
+    /// [`Canvas::unpack`], kept until something writes (`rev` moves on), so
+    /// packing again before that is free.
+    unwritten: Option<(u64, DirtyRect, Vec<u8>)>,
 }
 
 #[derive(Clone)]
@@ -214,6 +259,8 @@ impl Canvas {
                 max_x: width,
                 max_y: height,
             }),
+            rev: next_rev(),
+            unwritten: None,
         }
     }
 
@@ -230,6 +277,8 @@ impl Canvas {
                 max_x: width,
                 max_y: height,
             }),
+            rev: next_rev(),
+            unwritten: None,
         }
     }
 
@@ -285,6 +334,8 @@ impl Canvas {
     /// Every pixel, to write. A packed canvas is unpacked first, and stays
     /// so until it is packed again.
     pub fn pixels_mut(&mut self) -> &mut [u8] {
+        self.rev = next_rev();
+        self.unwritten = None;
         if let Store::Packed { .. } = self.store {
             self.store = Store::Full(self.unpacked());
         }
@@ -306,12 +357,18 @@ impl Canvas {
         match &self.store {
             Store::Full(p) => p.clone(),
             Store::Packed { rect, pixels } => {
+                // Zeroed: the pages come in as the drawing is copied over
+                // them, on as many threads as copy it.
                 let mut full = vec![0u8; self.byte_len()];
-                let (w, rw) = (self.width as usize, (rect.max_x - rect.min_x) as usize * 4);
-                for (y, row) in (rect.min_y as usize..rect.max_y as usize).zip(pixels.chunks_exact(rw.max(1))) {
-                    let at = (y * w + rect.min_x as usize) * 4;
-                    full[at..at + rw].copy_from_slice(row);
-                }
+                let (w, x0, x1) = (self.width as usize * 4, rect.min_x as usize * 4, rect.max_x as usize * 4);
+                par_rows(&mut full, w, |first, band| {
+                    for (y, out) in (first as u32..).zip(band.chunks_exact_mut(w)) {
+                        if (rect.min_y..rect.max_y).contains(&y) {
+                            let at = (y - rect.min_y) as usize * (x1 - x0);
+                            out[x0..x1].copy_from_slice(&pixels[at..at + x1 - x0]);
+                        }
+                    }
+                });
                 full
             }
         }
@@ -321,8 +378,58 @@ impl Canvas {
         matches!(self.store, Store::Packed { .. })
     }
 
+    /// Unpack ahead of a write that's on its way, so the write doesn't pay
+    /// for it, keeping the packed pixels until something does write: packing
+    /// again before then costs nothing. The pixels stay as they were, and so
+    /// does the rev.
+    pub fn unpack(&mut self) {
+        if let Store::Packed { .. } = self.store {
+            let full = Store::Full(self.unpacked());
+            if let Store::Packed { rect, pixels } = std::mem::replace(&mut self.store, full) {
+                self.unwritten = Some((self.rev, rect, pixels));
+            }
+        }
+    }
+
+    /// For a full canvas nothing has written since [`Canvas::unpack`], the
+    /// packed pixels it came from.
+    fn unwritten(&self) -> Option<(DirtyRect, &[u8])> {
+        match (&self.store, &self.unwritten) {
+            (Store::Full(_), Some((rev, rect, pixels))) if *rev == self.rev => Some((*rect, pixels)),
+            _ => None,
+        }
+    }
+
+    /// See the field. Two canvases with the same rev hold the same pixels.
+    pub fn rev(&self) -> u64 {
+        self.rev
+    }
+
+    /// The rect this canvas holds pixels for: every byte outside it is zero.
+    /// The packed rect, the whole canvas when full, `None` when blank.
+    pub fn held_rect(&self) -> Option<DirtyRect> {
+        if let Some((rect, _)) = self.unwritten() {
+            return (!rect.is_empty()).then_some(rect);
+        }
+        match &self.store {
+            Store::Full(_) => Some(DirtyRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: self.width,
+                max_y: self.height,
+            }),
+            Store::Packed { rect, .. } => (!rect.is_empty()).then_some(*rect),
+        }
+    }
+
     /// Keep only what's drawn. Returns whether it was full before.
     pub fn pack(&mut self) -> bool {
+        if self.unwritten().is_some() {
+            if let Some((_, rect, pixels)) = self.unwritten.take() {
+                self.store = Store::Packed { rect, pixels };
+                return true;
+            }
+        }
         let Store::Full(full) = &self.store else {
             return false;
         };
@@ -333,7 +440,8 @@ impl Canvas {
     /// Bytes this canvas holds on the heap.
     #[cfg(test)]
     pub fn heap_bytes(&self) -> usize {
-        match &self.store {
+        let kept = self.unwritten.as_ref().map_or(0, |(_, _, p)| p.capacity());
+        kept + match &self.store {
             Store::Full(p) | Store::Packed { pixels: p, .. } => p.capacity(),
         }
     }
@@ -375,6 +483,7 @@ impl Canvas {
     }
 
     /// `rect`'s pixels row by row; `rect` must lie on the canvas.
+    #[cfg(test)]
     pub fn read_rect(&self, rect: DirtyRect) -> Vec<u8> {
         let (w, h) = ((rect.max_x - rect.min_x) as usize, (rect.max_y - rect.min_y) as usize);
         let mut out = vec![0u8; w * h * 4];
@@ -439,18 +548,18 @@ impl Canvas {
     /// The smallest rect holding every pixel with any alpha, or `None` for a
     /// blank canvas. A packed canvas only scans what it holds.
     pub fn content_bounds(&self) -> Option<DirtyRect> {
-        match &self.store {
-            Store::Full(p) => scan_bounds(p, self.width as usize, ALPHA),
-            Store::Packed { rect, pixels } => {
-                let r = scan_bounds(pixels, (rect.max_x - rect.min_x) as usize, ALPHA)?;
-                Some(DirtyRect {
-                    min_x: r.min_x + rect.min_x,
-                    min_y: r.min_y + rect.min_y,
-                    max_x: r.max_x + rect.min_x,
-                    max_y: r.max_y + rect.min_y,
-                })
-            }
-        }
+        let (rect, pixels) = match (&self.store, self.unwritten()) {
+            (_, Some(held)) => held,
+            (Store::Packed { rect, pixels }, None) => (*rect, &pixels[..]),
+            (Store::Full(p), None) => return scan_bounds(p, self.width as usize, ALPHA),
+        };
+        let r = scan_bounds(pixels, (rect.max_x - rect.min_x) as usize, ALPHA)?;
+        Some(DirtyRect {
+            min_x: r.min_x + rect.min_x,
+            min_y: r.min_y + rect.min_y,
+            max_x: r.max_x + rect.min_x,
+            max_y: r.max_y + rect.min_y,
+        })
     }
 
     /// Nothing drawn: no pixel has any alpha.
@@ -462,6 +571,8 @@ impl Canvas {
 
     /// Clear to transparent — which, packed, is nothing at all.
     pub fn clear(&mut self) {
+        self.rev = next_rev();
+        self.unwritten = None;
         self.store = Store::Packed {
             rect: EMPTY,
             pixels: Vec::new(),
@@ -589,6 +700,32 @@ mod tests {
         assert_eq!(back.px(10, 5), [9, 8, 7, 255]);
     }
 
+    /// Unpacked ahead of a write, a canvas reads the same, keeps its rev,
+    /// and packs back for free; once written, it packs as ever.
+    #[test]
+    fn unpacking_ahead_of_a_write_packs_back_for_free() {
+        let mut c = sparse();
+        c.pack();
+        let (rev, want) = (c.rev(), c.pixels().into_owned());
+        c.unpack();
+        assert!(!c.is_packed());
+        assert_eq!(c.rev(), rev, "the same pixels");
+        assert_eq!(c.held_rect(), Some(DirtyRect { min_x: 10, min_y: 5, max_x: 31, max_y: 21 }));
+        assert_eq!(c.content_bounds(), sparse().content_bounds());
+        assert_eq!(&c.pixels()[..], &want[..]);
+        assert!(c.pack());
+        assert!(c.is_packed());
+        assert_eq!(c.heap_bytes(), 21 * 16 * 4, "just the drawing again");
+        assert_eq!(&c.pixels()[..], &want[..]);
+
+        c.unpack();
+        c.pixels_mut()[0] = 9;
+        assert_eq!(c.held_rect(), Some(DirtyRect { min_x: 0, min_y: 0, max_x: 40, max_y: 30 }), "written: anything");
+        assert!(c.pack());
+        assert_eq!(c.px(0, 0), [9, 0, 0, 0]);
+        assert_eq!(c.px(10, 5), [9, 8, 7, 255]);
+    }
+
     #[test]
     fn a_blank_canvas_holds_nothing() {
         let c = Canvas::new(2160, 2880);
@@ -631,3 +768,4 @@ mod tests {
         assert_eq!(c.content_bounds(), Some(r), "packed: the same, from less");
     }
 }
+
