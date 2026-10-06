@@ -62,9 +62,9 @@ fn main() -> eframe::Result<()> {
             // Size used once un-maximized.
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([640.0, 480.0]),
-        // egui-winit swallows Ctrl+C / X / V; this records them so the
-        // selection shortcuts still see a key press.
-        event_loop_builder: Some(Box::new(input::clipboard_keys::install)),
+        // Raw window messages: the Ctrl+C / X / V presses egui-winit swallows,
+        // and the tablet driver's change notices.
+        event_loop_builder: Some(Box::new(input::msg_hook::install)),
         ..Default::default()
     };
 

@@ -17,43 +17,34 @@
 #[cfg(target_os = "windows")]
 static PRESSED: std::sync::Mutex<Vec<egui::Key>> = std::sync::Mutex::new(Vec::new());
 
-/// Watch key-downs on the event loop. Passed as eframe's `event_loop_builder`.
+/// Watch key-downs on the event loop. Called from the message hook
+/// ([`crate::input::msg_hook`]) for every message it reads.
 #[cfg(target_os = "windows")]
-pub fn install(builder: &mut eframe::EventLoopBuilder<eframe::UserEvent>) {
+pub fn on_msg(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_C, VK_DELETE, VK_INSERT, VK_V, VK_X};
-    use windows::Win32::UI::WindowsAndMessaging::{MSG, WM_KEYDOWN, WM_SYSKEYDOWN};
-    use winit::platform::windows::EventLoopBuilderExtWindows;
+    use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_SYSKEYDOWN};
 
-    builder.with_msg_hook(|msg| {
-        // SAFETY: winit hands the hook a pointer to the `MSG` it just read.
-        let msg = unsafe { &*(msg as *const MSG) };
-        // SYSKEYDOWN too: holding Alt turns Ctrl+Alt+V into one.
-        if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
-            return false;
+    // SYSKEYDOWN too: holding Alt turns Ctrl+Alt+V into one.
+    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+        return;
+    }
+    // Every key egui-winit can turn into a clipboard event: Ctrl+X / C / V
+    // and the Windows-only Shift+Delete, Ctrl+Insert, Shift+Insert.
+    let vk = msg.wParam.0 as u16;
+    let key = match vk {
+        _ if vk == VK_C.0 => egui::Key::C,
+        _ if vk == VK_X.0 => egui::Key::X,
+        _ if vk == VK_V.0 => egui::Key::V,
+        _ if vk == VK_INSERT.0 => egui::Key::Insert,
+        _ if vk == VK_DELETE.0 => egui::Key::Delete,
+        _ => return,
+    };
+    if let Ok(mut pressed) = PRESSED.lock() {
+        if !pressed.contains(&key) {
+            pressed.push(key);
         }
-        // Every key egui-winit can turn into a clipboard event: Ctrl+X / C / V
-        // and the Windows-only Shift+Delete, Ctrl+Insert, Shift+Insert.
-        let vk = msg.wParam.0 as u16;
-        let key = match vk {
-            _ if vk == VK_C.0 => egui::Key::C,
-            _ if vk == VK_X.0 => egui::Key::X,
-            _ if vk == VK_V.0 => egui::Key::V,
-            _ if vk == VK_INSERT.0 => egui::Key::Insert,
-            _ if vk == VK_DELETE.0 => egui::Key::Delete,
-            _ => return false,
-        };
-        if let Ok(mut pressed) = PRESSED.lock() {
-            if !pressed.contains(&key) {
-                pressed.push(key);
-            }
-        }
-        // Never eat the message: winit and egui-winit still see it as usual.
-        false
-    });
+    }
 }
-
-#[cfg(not(target_os = "windows"))]
-pub fn install(_builder: &mut eframe::EventLoopBuilder<eframe::UserEvent>) {}
 
 #[cfg(target_os = "windows")]
 fn take_pressed(_raw: &egui::RawInput) -> Vec<egui::Key> {

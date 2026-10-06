@@ -331,6 +331,216 @@ fn fit_axis(pairs: impl Iterator<Item = (i32, i32)> + Clone) -> Option<AxisFit> 
     (rms <= FIT_MAX_RMS).then_some(AxisFit { origin, scale, rms })
 }
 
+// --- keeping the context in step with the desktop ---
+//
+// The Wintab context and its startup mapping describe the desktop as it was
+// when they were made. Plugging in a monitor, rearranging them, or changing
+// the work area in the tablet driver leaves both describing a desktop that no
+// longer exists, and nothing on the drawing path notices: the cursor fit only
+// relearns after two dozen misses, and only while hovering slowly. So the
+// layout is watched and the context reopened when it changes.
+
+/// A rectangle in virtual-desktop pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ScreenRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl ScreenRect {
+    /// The same rectangle with a non-negative size, whichever way round its
+    /// extent ran (Wintab's can be negative).
+    fn normalized(self) -> Self {
+        let (x, w) = if self.w < 0 { (self.x + self.w, -self.w) } else { (self.x, self.w) };
+        let (y, h) = if self.h < 0 { (self.y + self.h, -self.h) } else { (self.y, self.h) };
+        Self { x, y, w, h }
+    }
+
+    /// Whether the two share any area — touching edges don't count.
+    fn overlaps(self, o: Self) -> bool {
+        let (a, b) = (self.normalized(), o.normalized());
+        a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+    }
+}
+
+/// Where the tablet driver says it puts the pen: the screen area its system
+/// context moves the cursor over (`lcSys*`) and the size of the tablet area
+/// it reads (`lcInExt`), in tablet counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DriverArea {
+    pub screen: ScreenRect,
+    pub tablet: (i32, i32),
+}
+
+/// The desktop a context was opened against.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DisplaySig {
+    /// The virtual desktop's bounding box.
+    pub desktop: ScreenRect,
+    /// Every monitor, `true` for the primary. Sorted, so enumeration order
+    /// can never pass for a change.
+    pub monitors: Vec<(ScreenRect, bool)>,
+    /// `None` when there is no driver to ask.
+    pub driver: Option<DriverArea>,
+}
+
+/// Why the context was last reopened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReopenReason {
+    Monitors,
+    Driver,
+    Requested,
+}
+
+impl ReopenReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReopenReason::Monitors => "monitors changed",
+            ReopenReason::Driver => "driver area changed",
+            ReopenReason::Requested => "reconnect pressed",
+        }
+    }
+}
+
+/// How often the layout is re-read. Time, not frames: the app only redraws
+/// when something happens, and the first frame after a quiet spell is the
+/// one that should notice.
+const DISPLAY_CHECK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Watches the desktop and the driver's area for changes since the context
+/// opened.
+#[derive(Clone, Debug, Default)]
+pub struct DisplayWatch {
+    at_open: Option<DisplaySig>,
+    last_check: Option<std::time::Instant>,
+    /// A change seen mid-stroke, held until the pen lifts: reopening under a
+    /// stroke would remap the rest of it.
+    pending: Option<ReopenReason>,
+}
+
+impl DisplayWatch {
+    /// Note what a freshly opened context was built against.
+    pub fn opened(&mut self, sig: DisplaySig, now: std::time::Instant) {
+        *self = Self {
+            at_open: Some(sig),
+            last_check: Some(now),
+            pending: None,
+        };
+    }
+
+    /// Whether the context should be reopened now. `read` is only called when
+    /// a check is due, or straight away when `nudged` (the driver posted a
+    /// change message).
+    pub fn tick(
+        &mut self,
+        now: std::time::Instant,
+        read: impl FnOnce() -> DisplaySig,
+        pointer_down: bool,
+        nudged: bool,
+    ) -> Option<ReopenReason> {
+        if self.pending.is_none() {
+            let due = nudged
+                || self
+                    .last_check
+                    .map_or(true, |t| now.saturating_duration_since(t) >= DISPLAY_CHECK);
+            if !due {
+                return None;
+            }
+            self.last_check = Some(now);
+            let sig = read();
+            let old = self.at_open.as_ref()?;
+            self.pending = if sig.desktop != old.desktop || sig.monitors != old.monitors {
+                Some(ReopenReason::Monitors)
+            } else if sig.driver.is_some() && sig.driver != old.driver {
+                Some(ReopenReason::Driver)
+            } else {
+                None
+            };
+        }
+        if pointer_down {
+            return None;
+        }
+        self.pending.take()
+    }
+}
+
+/// Why opening the context failed, which decides when to try again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitFail {
+    /// The window isn't up yet. Cheap to retry, so every frame.
+    NoWindow,
+    /// No Wintab32.dll. Nothing will change that until the user installs a
+    /// driver and presses Reconnect.
+    NoDriver,
+    /// The driver is there but refused the context. Backed off, so a tablet
+    /// plugged in later is still picked up without retrying every frame.
+    Context,
+}
+
+/// Backoff for opening the context.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Retry {
+    failures: u32,
+    next_at: Option<std::time::Instant>,
+    /// Waiting for Reconnect rather than for a time.
+    parked: bool,
+}
+
+/// First and longest wait after a refused context.
+const RETRY_FIRST: f32 = 0.5;
+const RETRY_MAX: f32 = 10.0;
+
+impl Retry {
+    pub fn due(&self, now: std::time::Instant) -> bool {
+        !self.parked && self.next_at.map_or(true, |t| now >= t)
+    }
+
+    pub fn failed(&mut self, kind: InitFail, now: std::time::Instant) {
+        match kind {
+            InitFail::NoWindow => self.next_at = None,
+            InitFail::NoDriver => self.parked = true,
+            InitFail::Context => {
+                self.failures += 1;
+                let wait = (RETRY_FIRST * 2f32.powi(self.failures as i32 - 1)).min(RETRY_MAX);
+                self.next_at = Some(now + std::time::Duration::from_secs_f32(wait));
+            }
+        }
+    }
+
+    /// How long until the next attempt; `None` when it is due now or parked.
+    pub fn wait(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.next_at
+            .filter(|_| !self.parked)
+            .map(|t| t.saturating_duration_since(now))
+            .filter(|d| !d.is_zero())
+    }
+
+    pub fn parked(&self) -> bool {
+        self.parked
+    }
+}
+
+/// How many monitors `area` reaches onto. More than one means the tablet is
+/// spread over several screens, so any one of them gets only part of it.
+pub fn monitors_spanned(area: ScreenRect, monitors: &[(ScreenRect, bool)]) -> usize {
+    monitors.iter().filter(|(m, _)| m.overlaps(area)).count()
+}
+
+/// How far the tablet area's shape is from the screen area's it is mapped
+/// onto, as a fraction: 0 when they match, 0.6 for a 16:9 tablet on a 2.9:1
+/// two-monitor desktop. Anything but near zero stretches every stroke.
+pub fn aspect_mismatch(tablet: (i32, i32), area: ScreenRect) -> f32 {
+    let a = area.normalized();
+    if tablet.0 == 0 || tablet.1 == 0 || a.w == 0 || a.h == 0 {
+        return 0.0;
+    }
+    let t = (tablet.0 as f32 / tablet.1 as f32).abs();
+    let s = a.w as f32 / a.h as f32;
+    t.max(s) / t.min(s) - 1.0
+}
+
 /// What the tablet backend is currently seeing.
 ///
 /// This exists because the interesting failures here are invisible: a release
@@ -367,6 +577,16 @@ pub struct PenDiagnostics {
     pub fit_x: Option<AxisFit>,
     pub fit_y: Option<AxisFit>,
     pub fit_pairs: usize,
+    /// The desktop and the driver's area, read when the snapshot is taken.
+    pub display: DisplaySig,
+    /// Times the context was reopened, and the latest reason.
+    pub reopens: u32,
+    pub last_reopen: Option<ReopenReason>,
+    /// Why the last attempt to open the context failed, while there is none.
+    pub init_error: Option<String>,
+    /// Until the next attempt; `None` when due now or waiting for Reconnect.
+    pub retry_in: Option<std::time::Duration>,
+    pub waiting_for_reconnect: bool,
 }
 
 /// Frames without a packet after which the pen is considered gone and pressure
@@ -388,6 +608,15 @@ pub struct PenInput {
     last_packet: Option<PenPacket>,
     last_pressure: f32,
     idle_frames: u32,
+    /// The app window, once known. Looked up by title only until then.
+    hwnd: Option<isize>,
+    retry: Retry,
+    watch: DisplayWatch,
+    /// Reconnect was pressed; honoured on the next poll with the pen up.
+    reconnect: bool,
+    reopens: u32,
+    last_reopen: Option<ReopenReason>,
+    init_error: Option<String>,
 }
 
 impl PenInput {
@@ -401,29 +630,82 @@ impl PenInput {
             last_packet: None,
             last_pressure: 1.0,
             idle_frames: u32::MAX,
+            hwnd: None,
+            retry: Retry::default(),
+            watch: DisplayWatch::default(),
+            reconnect: false,
+            reopens: 0,
+            last_reopen: None,
+            init_error: None,
         }
     }
 
-    /// Called once per frame. Initialises the backend lazily (once the window
-    /// exists) and drains the whole packet queue into `packets`.
+    /// The app window's handle, so the context binds to this window rather
+    /// than to the first one titled "Animator" — which, with two instances
+    /// open, need not be this one.
+    pub fn set_hwnd(&mut self, hwnd: isize) {
+        self.hwnd = Some(hwnd);
+    }
+
+    pub fn has_hwnd(&self) -> bool {
+        self.hwnd.is_some()
+    }
+
+    /// Close and reopen the context on the next poll with the pen up, and try
+    /// again at once if opening had failed.
+    pub fn reconnect(&mut self) {
+        self.reconnect = true;
+    }
+
+    /// Called once per frame. Opens the context lazily (once the window
+    /// exists), reopens it when the desktop or the driver's area has changed,
+    /// and drains the whole packet queue into `packets`.
     ///
     /// `pointer_down` freezes the idle count: a pen held still mid-stroke
     /// produces no packets, and handing the stroke to the mouse there — at
-    /// pressure 1.0 — stamps a full-size blob into the line.
+    /// pressure 1.0 — stamps a full-size blob into the line. It also holds
+    /// off any reopen until the stroke is over.
     pub fn poll(&mut self, pointer_down: bool) {
         self.packets.clear();
         #[cfg(target_os = "windows")]
         {
-            if self.backend.is_none() {
-                match windows_backend::Wintab::try_init() {
+            let now = std::time::Instant::now();
+            let nudged = windows_backend::take_nudge();
+            let reason = if self.reconnect && !pointer_down {
+                Some(ReopenReason::Requested)
+            } else if self.backend.is_some() {
+                let backend = self.backend.as_ref();
+                self.watch
+                    .tick(now, || windows_backend::display_sig(backend), pointer_down, nudged)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                if self.backend.take().is_some() {
+                    log::info!("Wintab context reopened: {}", reason.label());
+                    self.reopens += 1;
+                    self.last_reopen = Some(reason);
+                    // Positions from the old mapping mean nothing now.
+                    self.last_packet = None;
+                }
+                self.reconnect = false;
+                self.retry = Retry::default();
+            }
+            if self.backend.is_none() && self.retry.due(now) {
+                match windows_backend::Wintab::try_init(self.hwnd) {
                     Ok(w) => {
                         log::info!("Wintab pen backend ready");
+                        self.watch.opened(windows_backend::display_sig(Some(&w)), now);
+                        self.retry = Retry::default();
+                        self.init_error = None;
                         self.backend = Some(w);
                     }
-                    Err(e) => {
-                        // Don't spam — only log once per second-ish would be
-                        // nicer, but a single missing-DLL message is fine.
-                        log::debug!("Wintab init pending/failed: {e}");
+                    Err((kind, e)) => {
+                        if kind != InitFail::NoWindow {
+                            log::debug!("Wintab init failed: {e}");
+                        }
+                        self.retry.failed(kind, now);
+                        self.init_error = Some(e);
                     }
                 }
             }
@@ -478,6 +760,15 @@ impl PenInput {
         };
         if let Some(p) = self.packets.last() {
             d.tilt = (p.tilt_x, p.tilt_y);
+        }
+        d.reopens = self.reopens;
+        d.last_reopen = self.last_reopen;
+        d.init_error = self.init_error.clone().filter(|_| !self.is_active());
+        d.retry_in = self.retry.wait(std::time::Instant::now());
+        d.waiting_for_reconnect = self.retry.parked();
+        #[cfg(target_os = "windows")]
+        {
+            d.display = windows_backend::display_sig(self.backend.as_ref());
         }
         #[cfg(target_os = "windows")]
         if let Some(w) = self.backend.as_ref() {
@@ -552,16 +843,23 @@ impl PenInput {
 
 #[cfg(target_os = "windows")]
 mod windows_backend {
-    //! Wintab backend. We find our HWND by window title to avoid plumbing a
-    //! raw window handle through eframe's CreationContext.
+    //! Wintab backend. The app hands over its window handle on the first
+    //! frame; until then the window is found by title.
 
-    use super::PenPacket;
+    use super::{InitFail, PenPacket};
     use anyhow::{anyhow, Context, Result};
     use libloading::{Library, Symbol};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::OnceLock;
     use windows::core::PCSTR;
-    use windows::Win32::Foundation::{HWND, POINT, RECT};
-    use windows::Win32::Graphics::Gdi::ClientToScreen;
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, GetClientRect};
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowA, GetClientRect, GetSystemMetrics, MONITORINFOF_PRIMARY, MSG,
+        SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
     use super::{read_i32, read_u32, PacketLayout};
     use wintab_lite::{
         cast_void, WTClose, WTInfo, WTOpen, WTPacketsGet, AXIS, CSR, CXO, DVC, HCTX, LOGCONTEXT, WTI,
@@ -651,21 +949,125 @@ mod windows_backend {
         seen_packets: bool,
     }
 
-    impl Wintab {
-        pub fn try_init() -> Result<Self> {
-            // Find our window by title. The title must match what we set via
-            // ViewportBuilder::with_title in main.rs.
-            let title = b"Animator\0";
-            let hwnd = unsafe { FindWindowA(None, PCSTR(title.as_ptr())) };
-            if hwnd.0 == 0 {
-                return Err(anyhow!("FindWindowA returned null (window not up yet)"));
+    /// Wintab32.dll, loaded once for the life of the process. Every symbol
+    /// borrows from it, which is what lets `Wintab` hold them as `'static`;
+    /// reopening a context must not load (and leak) another copy.
+    static LIB: OnceLock<Library> = OnceLock::new();
+
+    fn library() -> Result<&'static Library> {
+        if let Some(lib) = LIB.get() {
+            return Ok(lib);
+        }
+        let lib = unsafe { Library::new("Wintab32.dll") }
+            .context("Wintab32.dll not found (no tablet driver?)")?;
+        Ok(LIB.get_or_init(|| lib))
+    }
+
+    /// The message base the open context was given, for spotting the
+    /// driver's change notices in [`on_msg`].
+    static MSG_BASE: AtomicU32 = AtomicU32::new(0x7FF0);
+    /// Set by [`on_msg`], taken by the next poll.
+    static NUDGE: AtomicBool = AtomicBool::new(false);
+
+    /// See every message the event loop reads. `WT_CTXUPDATE` and
+    /// `WT_INFOCHANGE` (base + 3, + 6) say the driver changed something, so
+    /// the next poll checks the layout at once instead of within half a
+    /// second. A hint only: `WM_DISPLAYCHANGE` is sent rather than posted and
+    /// never passes through here, which is why the poll checks regardless.
+    pub fn on_msg(msg: &MSG) {
+        let base = MSG_BASE.load(Ordering::Relaxed);
+        if msg.message == base + 3 || msg.message == base + 6 {
+            NUDGE.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn take_nudge() -> bool {
+        NUDGE.swap(false, Ordering::Relaxed)
+    }
+
+    /// The desktop as it stands, and the driver's area when there is a
+    /// context to ask through.
+    pub fn display_sig(w: Option<&Wintab>) -> super::DisplaySig {
+        use super::ScreenRect;
+        let metric = |i| unsafe { GetSystemMetrics(i) };
+        let desktop = ScreenRect {
+            x: metric(SM_XVIRTUALSCREEN),
+            y: metric(SM_YVIRTUALSCREEN),
+            w: metric(SM_CXVIRTUALSCREEN),
+            h: metric(SM_CYVIRTUALSCREEN),
+        };
+        unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(m, &mut info).as_bool() {
+                let r = info.rcMonitor;
+                let out = &mut *(out.0 as *mut Vec<(super::ScreenRect, bool)>);
+                out.push((
+                    super::ScreenRect {
+                        x: r.left,
+                        y: r.top,
+                        w: r.right - r.left,
+                        h: r.bottom - r.top,
+                    },
+                    info.dwFlags & MONITORINFOF_PRIMARY != 0,
+                ));
             }
+            true.into()
+        }
+        let mut monitors: Vec<(ScreenRect, bool)> = Vec::new();
+        unsafe {
+            let _ = EnumDisplayMonitors(
+                HDC::default(),
+                None,
+                Some(each),
+                LPARAM(&mut monitors as *mut _ as isize),
+            );
+        }
+        monitors.sort();
+        let driver = w.and_then(|w| {
+            let mut lc = LOGCONTEXT::default();
+            let n = unsafe { (w.wt_info_raw)(WTI::DEFSYSCTX as u32, 0, cast_void!(lc)) };
+            (n != 0).then_some(super::DriverArea {
+                screen: ScreenRect {
+                    x: lc.lcSysOrgXY.x,
+                    y: lc.lcSysOrgXY.y,
+                    w: lc.lcSysExtXY.x,
+                    h: lc.lcSysExtXY.y,
+                },
+                tablet: (lc.lcInExtXYZ.x, lc.lcInExtXYZ.y),
+            })
+        });
+        super::DisplaySig {
+            desktop,
+            monitors,
+            driver,
+        }
+    }
 
-            let lib: &'static Library = Box::leak(Box::new(
-                unsafe { Library::new("Wintab32.dll") }
-                    .context("Wintab32.dll not found (no tablet driver?)")?,
-            ));
+    impl Wintab {
+        /// Open a context on `hwnd`, or on the window found by title when the
+        /// app hasn't handed its handle over yet. A failure says which kind it
+        /// was, which decides when to try again.
+        pub fn try_init(hwnd: Option<isize>) -> std::result::Result<Self, (InitFail, String)> {
+            let hwnd = match hwnd {
+                Some(h) => HWND(h),
+                None => {
+                    // The title must match what main.rs sets.
+                    let title = b"Animator\0";
+                    let hwnd = unsafe { FindWindowA(None, PCSTR(title.as_ptr())) };
+                    if hwnd.0 == 0 {
+                        return Err((InitFail::NoWindow, "window not up yet".into()));
+                    }
+                    hwnd
+                }
+            };
+            let lib = library().map_err(|e| (InitFail::NoDriver, format!("{e:#}")))?;
+            Self::open(hwnd, lib).map_err(|e| (InitFail::Context, format!("{e:#}")))
+        }
 
+        fn open(hwnd: HWND, lib: &'static Library) -> Result<Self> {
             let wt_open: WTOpen<'static> =
                 unsafe { lib.get(c"WTOpenA".to_bytes()).context("WTOpenA")? };
             let wt_info: WTInfo<'static> =
@@ -817,6 +1219,7 @@ mod windows_backend {
             if ctx_handle.is_null() {
                 return Err(anyhow!("WTOpen returned null"));
             }
+            MSG_BASE.store(log_context.lcMsgBase, Ordering::Relaxed);
 
             // WTOpen rewrites the struct with the area the driver settled
             // on, which need not be the one asked for.
@@ -1135,6 +1538,9 @@ mod windows_backend {
         }
     }
 }
+
+#[cfg(target_os = "windows")]
+pub use windows_backend::on_msg;
 
 #[cfg(test)]
 mod tests {
@@ -1484,5 +1890,116 @@ mod tests {
         let map = axis_map(-1920, 1920, -1920 * 8, 1920 * 8);
         assert_eq!(apply(map, -1920 * 8), -1920.0);
         assert_eq!(apply(map, 0), 0.0);
+    }
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> ScreenRect {
+        ScreenRect { x, y, w, h }
+    }
+
+    /// The reported setup: a 2560×1440 primary with a 1600×900 display to its
+    /// right, and a Deco Pro M (16:9) mapped over both.
+    fn reported() -> DisplaySig {
+        DisplaySig {
+            desktop: rect(0, 0, 4160, 1440),
+            monitors: vec![(rect(0, 0, 2560, 1440), true), (rect(2560, 0, 1600, 900), false)],
+            driver: Some(DriverArea {
+                screen: rect(0, 0, 4160, 1440),
+                tablet: (50800, 28575),
+            }),
+        }
+    }
+
+    #[test]
+    fn the_watch_reopens_only_on_a_real_change() {
+        let t0 = std::time::Instant::now();
+        let later = |ms| t0 + std::time::Duration::from_millis(ms);
+        let mut w = DisplayWatch::default();
+        // Nothing opened yet: nothing to compare against.
+        assert_eq!(w.tick(t0, reported, false, false), None);
+        w.opened(reported(), t0);
+        assert_eq!(w.tick(later(600), reported, false, false), None);
+        // Not due yet: the layout isn't even read.
+        let unread = || -> DisplaySig { panic!("read before it was due") };
+        assert_eq!(w.tick(later(700), unread, false, false), None);
+        // A monitor moved.
+        let moved = || {
+            let mut s = reported();
+            s.monitors[1].0.y = 200;
+            s
+        };
+        assert_eq!(w.tick(later(1200), moved, false, false), Some(ReopenReason::Monitors));
+        // The work area narrowed to the primary in the driver.
+        w.opened(reported(), later(1200));
+        let narrowed = || {
+            let mut s = reported();
+            s.driver.as_mut().unwrap().screen = rect(0, 0, 2560, 1440);
+            s
+        };
+        assert_eq!(w.tick(later(1300), narrowed, false, true), Some(ReopenReason::Driver));
+        // A driver that can't be asked is no change.
+        w.opened(reported(), later(1300));
+        let silent = || DisplaySig { driver: None, ..reported() };
+        assert_eq!(w.tick(later(2000), silent, false, false), None);
+    }
+
+    #[test]
+    fn a_change_during_a_stroke_waits_for_pen_up() {
+        let t0 = std::time::Instant::now();
+        let mut w = DisplayWatch::default();
+        w.opened(reported(), t0);
+        let unplugged = || DisplaySig {
+            desktop: rect(0, 0, 2560, 1440),
+            monitors: vec![(rect(0, 0, 2560, 1440), true)],
+            ..reported()
+        };
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        assert_eq!(w.tick(t1, unplugged, true, false), None);
+        // Still down: held, and the layout isn't read again.
+        assert_eq!(w.tick(t1, || panic!("re-read while held"), true, false), None);
+        assert_eq!(w.tick(t1, || panic!("re-read while held"), false, false), Some(ReopenReason::Monitors));
+    }
+
+    #[test]
+    fn failed_inits_back_off_and_a_missing_driver_waits_for_reconnect() {
+        let t0 = std::time::Instant::now();
+        let at = |s: f32| t0 + std::time::Duration::from_secs_f32(s);
+        let mut r = Retry::default();
+        assert!(r.due(t0));
+        r.failed(InitFail::NoWindow, t0);
+        assert!(r.due(t0), "no window yet: try again next frame");
+        r.failed(InitFail::Context, t0);
+        assert!(!r.due(at(0.4)));
+        assert!(r.due(at(0.5)));
+        r.failed(InitFail::Context, at(0.5));
+        assert!(!r.due(at(1.4)));
+        assert!(r.due(at(1.5)));
+        for _ in 0..10 {
+            r.failed(InitFail::Context, t0);
+        }
+        assert!(r.due(at(10.0)), "capped at ten seconds");
+        r.failed(InitFail::NoDriver, t0);
+        assert!(r.parked());
+        assert!(!r.due(at(3600.0)));
+        assert_eq!(r.wait(t0), None);
+    }
+
+    #[test]
+    fn your_desktop_spans_two_monitors() {
+        let s = reported();
+        let area = s.driver.unwrap().screen;
+        assert_eq!(monitors_spanned(area, &s.monitors), 2);
+        assert_eq!(monitors_spanned(rect(0, 0, 2560, 1440), &s.monitors), 1);
+        // Touching the second monitor's edge isn't reaching onto it.
+        assert_eq!(monitors_spanned(rect(0, 0, 2560, 900), &s.monitors), 1);
+        // Extents can run negative in Wintab's rectangles.
+        assert_eq!(monitors_spanned(rect(4160, 1440, -4160, -1440), &s.monitors), 2);
+    }
+
+    #[test]
+    fn a_stretched_mapping_is_flagged() {
+        let tablet = reported().driver.unwrap().tablet;
+        assert!(aspect_mismatch(tablet, rect(0, 0, 4160, 1440)) > 0.5);
+        assert!(aspect_mismatch(tablet, rect(0, 0, 2560, 1440)) < 0.01);
+        assert_eq!(aspect_mismatch((0, 0), rect(0, 0, 2560, 1440)), 0.0);
     }
 }
