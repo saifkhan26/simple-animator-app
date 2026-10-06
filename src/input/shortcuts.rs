@@ -564,6 +564,10 @@ fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
 /// What a combo collides with among the keys `AppState::handle_keys` and
 /// [`ShortcutMap::poll_actions`] read directly. Those read the key whatever
 /// the modifiers, except the Redo alias, which wants Ctrl and Shift.
+///
+/// Tab and ` are not here: what gets through a focused widget on them is
+/// whatever the map binds there ([`FOCUS_PASS_KEYS`]), so binding them is no
+/// different from binding any other key.
 fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str> {
     use egui::Key as K;
     match c.key? {
@@ -573,15 +577,16 @@ fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str> {
         K::ArrowUp | K::ArrowDown | K::ArrowLeft | K::ArrowRight => {
             Some("The arrow keys also nudge the selection while there is one")
         }
-        K::Tab if action != Action::TogglePanels => {
-            Some("While a text field has focus, Tab toggles the panels instead")
-        }
-        K::Backtick if action != Action::ToggleCheckerBg => {
-            Some("While a text field has focus, ` toggles the checker backdrop instead")
-        }
         _ => None,
     }
 }
+
+/// Keys that still reach the map while a widget has keyboard focus. Tab
+/// would otherwise only walk focus from field to field, which is how panels
+/// hidden and shown again could leave every shortcut dead; ` is a character
+/// no name or number field needs. Whatever the map binds to them fires,
+/// matched exactly like any other press.
+pub const FOCUS_PASS_KEYS: [egui::Key; 2] = [egui::Key::Tab, egui::Key::Backtick];
 
 // --- the map itself ---
 
@@ -823,6 +828,19 @@ impl ShortcutMap {
             out
         })
     }
+
+    /// [`ShortcutMap::poll_actions`] for a frame where a widget has keyboard
+    /// focus: only what is bound to one of [`FOCUS_PASS_KEYS`].
+    pub fn poll_focused(&self, ctx: &egui::Context) -> Vec<Action> {
+        ctx.input(|i| {
+            self.bindings
+                .iter()
+                .filter(|(_, c)| c.key.is_some_and(|k| FOCUS_PASS_KEYS.contains(&k)))
+                .filter(|(_, c)| c.matches(i))
+                .map(|(&a, _)| a)
+                .collect()
+        })
+    }
 }
 
 /// This app's config folder. Everything the app persists across runs lives
@@ -1059,12 +1077,12 @@ mod tests {
         map.set(Action::OnionToggle, KeyCombo::ctrl_shift(egui::Key::Z));
         map.set(Action::PlayPause, KeyCombo::plain(egui::Key::Tab));
         map.set(Action::Redo, KeyCombo::ctrl_shift(egui::Key::Z));
-        // Tab and ` belong to these two; on them they are no clash.
         map.set(Action::TogglePanels, KeyCombo::ctrl(egui::Key::Tab));
         map.set(Action::ToggleCheckerBg, KeyCombo::plain(egui::Key::Backtick));
         let c = map.clashes();
         assert!(matches!(c[&Action::FramePrev][..], [Clash::Builtin(_)]));
-        assert!(matches!(c[&Action::PlayPause][..], [Clash::Builtin(_)]));
+        // Tab and ` reach whatever is bound on them, focus or not.
+        assert!(!c.contains_key(&Action::PlayPause));
         // Redo's alias: a clash for the other action, and the two share the
         // combo besides.
         assert!(c[&Action::OnionToggle].contains(&Clash::Action(Action::Redo)));
@@ -1072,6 +1090,87 @@ mod tests {
         assert_eq!(c[&Action::Redo], vec![Clash::Action(Action::OnionToggle)]);
         assert!(!c.contains_key(&Action::TogglePanels));
         assert!(!c.contains_key(&Action::ToggleCheckerBg));
+    }
+
+    /// The reported map: the panels on M, the mini timeline on Shift+M and
+    /// the last layer on Tab. Settings flagged Tab, because it was read as
+    /// the panel toggle whenever a field had focus, whatever the map said.
+    #[test]
+    fn tab_and_backtick_are_free_to_bind() {
+        let mut map = ShortcutMap::default();
+        map.set(Action::TogglePanels, KeyCombo::plain(egui::Key::M));
+        map.set(Action::ToggleMiniTimeline, KeyCombo::shift(egui::Key::M));
+        map.set(Action::LayerLast, KeyCombo::plain(egui::Key::Tab));
+        map.set(Action::OnionToggle, KeyCombo::plain(egui::Key::Backtick));
+        map.set(Action::ToggleCheckerBg, KeyCombo::ctrl(egui::Key::Backtick));
+        let c = map.clashes();
+        for a in [
+            Action::TogglePanels,
+            Action::ToggleMiniTimeline,
+            Action::LayerLast,
+            Action::OnionToggle,
+            Action::ToggleCheckerBg,
+        ] {
+            assert!(!c.contains_key(&a), "{a:?}: {:?}", c.get(&a));
+        }
+    }
+
+    /// What `poll` returns for one frame with `key` pressed under `mods`.
+    fn press(
+        key: egui::Key,
+        mods: egui::Modifiers,
+        poll: impl FnOnce(&egui::Context) -> Vec<Action>,
+    ) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let mut fired = Vec::new();
+        let mut poll = Some(poll);
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: mods,
+                }],
+                modifiers: mods,
+                ..Default::default()
+            },
+            |ctx| {
+                if let Some(p) = poll.take() {
+                    fired = p(ctx);
+                }
+            },
+        );
+        fired
+    }
+
+    #[test]
+    fn poll_focused_sees_only_the_pass_keys_exactly() {
+        let mut map = ShortcutMap::default();
+        map.set(Action::TogglePanels, KeyCombo::plain(egui::Key::M));
+        map.set(Action::ToggleMiniTimeline, KeyCombo::shift(egui::Key::M));
+        map.set(Action::LayerLast, KeyCombo::plain(egui::Key::Tab));
+        let none = egui::Modifiers::default();
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            press(egui::Key::Tab, none, |c| map.poll_focused(c)),
+            vec![Action::LayerLast]
+        );
+        assert!(press(egui::Key::Tab, shift, |c| map.poll_focused(c)).is_empty());
+        assert!(press(egui::Key::M, none, |c| map.poll_focused(c)).is_empty());
+        assert_eq!(
+            press(egui::Key::Backtick, none, |c| map.poll_focused(c)),
+            vec![Action::ToggleCheckerBg]
+        );
+        // With nothing focused, M is the panels as usual.
+        assert_eq!(
+            press(egui::Key::M, none, |c| map.poll_actions(c)),
+            vec![Action::TogglePanels]
+        );
     }
 
     #[test]
