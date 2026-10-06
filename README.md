@@ -506,6 +506,14 @@ lists the current binding for each one. A few of the defaults:
 | Ctrl+S / Ctrl+Shift+S     | Save / Save As                |
 | Tab                       | Hide / show panels            |
 
+**Held while dragging.** Pan, zoom and rotate (`Shift` / `Ctrl` / `Alt` by
+default), and brush size and opacity, scrub, flip and the swatch pie (unbound
+by default) can each be held on a key, a combo or bare modifiers — `Space` to
+pan, or `Shift` to size the brush as in Krita. Bind them under **Held while
+dragging** in Settings; tap Shift, Ctrl or Alt there to bind a modifier on
+its own. Letting go of the key ends the gesture, and the rest of that drag
+does nothing. An unbound action (the × beside it) stays unbound.
+
 ## Files
 
 Projects save as a binary `.anim` file (**File → Save**, `Ctrl+S`) — postcard

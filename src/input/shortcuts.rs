@@ -6,10 +6,12 @@
 //! `ShortcutMap` is serialised to TOML in the user's config directory so
 //! rebinds persist across runs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use crate::input::button_drag::ButtonDrag;
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,10 +109,18 @@ pub enum Action {
     SaveProject,
     SaveProjectAs,
     OpenProject,
-    // Canvas navigation gestures (modifier-only binds: no key, held during drag).
+    // Canvas drag gestures: held as a canvas drag starts — a key, bare
+    // modifiers, or both. The names predate the key option and stay, so old
+    // shortcut files keep loading.
     CanvasZoom,
     CanvasPan,
     CanvasRotate,
+    // The button-drag modes, held the same way. Unbound until the user picks
+    // a key.
+    HoldToolAdjust,
+    HoldScrub,
+    HoldFlip,
+    HoldSwatchPie,
     // Layer transform editing.
     LayerTransformToggle,
     TransformKeyAdd,
@@ -206,6 +216,10 @@ impl Action {
         Action::CanvasZoom,
         Action::CanvasPan,
         Action::CanvasRotate,
+        Action::HoldToolAdjust,
+        Action::HoldScrub,
+        Action::HoldFlip,
+        Action::HoldSwatchPie,
         Action::LayerTransformToggle,
         Action::TransformKeyAdd,
         Action::TransformKeyDelete,
@@ -300,6 +314,10 @@ impl Action {
             Action::CanvasZoom => "Canvas: zoom (drag)",
             Action::CanvasPan => "Canvas: pan (drag)",
             Action::CanvasRotate => "Canvas: rotate (drag)",
+            Action::HoldToolAdjust => "Canvas: brush size / opacity (drag)",
+            Action::HoldScrub => "Canvas: scrub frames (drag)",
+            Action::HoldFlip => "Canvas: flip drawings (drag)",
+            Action::HoldSwatchPie => "Canvas: swatch pie (drag)",
             Action::LayerTransformToggle => "Layer transform mode",
             Action::TransformKeyAdd => "Add transform key",
             Action::TransformKeyDelete => "Delete transform key",
@@ -327,31 +345,44 @@ impl Action {
         })
     }
 
-    /// Bound to a bare modifier combo held while a canvas drag starts, rather
-    /// than to a key press: the canvas gestures and the selection modes.
-    pub fn is_drag_modifier(self) -> bool {
-        matches!(
-            self,
-            Action::CanvasZoom
-                | Action::CanvasPan
-                | Action::CanvasRotate
-                | Action::SelModeAdd
-                | Action::SelModeSubtract
-                | Action::SelModeIntersect
-        )
+    /// Held while a canvas drag starts, rather than pressed: the drag
+    /// gestures and the selection modes. Its combo can be a key, bare
+    /// modifiers or both, and it never fires as a press.
+    pub fn is_hold(self) -> bool {
+        self.hold_drag().is_some()
+            || matches!(
+                self,
+                Action::SelModeAdd | Action::SelModeSubtract | Action::SelModeIntersect
+            )
+    }
+
+    /// The drag a hold action starts. `None` for everything else, the
+    /// selection modes included — those change what a Lasso drag does
+    /// instead of replacing it.
+    pub fn hold_drag(self) -> Option<ButtonDrag> {
+        Some(match self {
+            Action::CanvasZoom => ButtonDrag::Zoom,
+            Action::CanvasPan => ButtonDrag::Pan,
+            Action::CanvasRotate => ButtonDrag::Rotate,
+            Action::HoldToolAdjust => ButtonDrag::ToolAdjust,
+            Action::HoldScrub => ButtonDrag::Scrub,
+            Action::HoldFlip => ButtonDrag::Flip,
+            Action::HoldSwatchPie => ButtonDrag::SwatchPie,
+            _ => return None,
+        })
     }
 }
 
-/// Every bare-modifier combo a drag gesture can be bound to, in the order the
-/// settings picker lists them.
-pub const DRAG_MODIFIERS: [(bool, bool, bool); 7] = [
-    (true, false, false),
-    (false, true, false),
-    (false, false, true),
-    (true, true, false),
-    (true, false, true),
-    (false, true, true),
-    (true, true, true),
+/// The drag gestures in the order they win when several are held at once
+/// with equally specific combos.
+pub const HOLD_DRAGS: [Action; 7] = [
+    Action::CanvasZoom,
+    Action::CanvasRotate,
+    Action::CanvasPan,
+    Action::HoldToolAdjust,
+    Action::HoldScrub,
+    Action::HoldFlip,
+    Action::HoldSwatchPie,
 ];
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
@@ -459,7 +490,7 @@ impl KeyCombo {
 
     /// Matches if the given egui input state had this combo pressed this
     /// frame (with matching modifier state, ignoring caps/super). Modifier-only
-    /// combos never match here — they are drag gestures, see `mods_held`.
+    /// combos never match here — they are drag gestures, see `held`.
     pub fn matches(self, i: &egui::InputState) -> bool {
         let Some(key) = self.key else {
             return false;
@@ -471,14 +502,67 @@ impl KeyCombo {
         i.key_pressed(key)
     }
 
-    /// True when exactly this combo's modifiers are currently held (and at least
-    /// one is). Used to pick a canvas navigation gesture at drag start.
-    pub fn mods_held(self, i: &egui::InputState) -> bool {
+    /// True while this combo is held: its key down (if it has one) with
+    /// exactly its modifiers. A combo with no key needs at least one modifier.
+    /// Used to pick a drag gesture as the drag starts.
+    pub fn held(self, i: &egui::InputState) -> bool {
         let m = i.modifiers;
-        (self.ctrl || self.shift || self.alt)
-            && m.ctrl == self.ctrl
-            && m.shift == self.shift
-            && m.alt == self.alt
+        let mods = m.ctrl == self.ctrl && m.shift == self.shift && m.alt == self.alt;
+        match self.key {
+            Some(k) => mods && i.key_down(k),
+            None => mods && (self.ctrl || self.shift || self.alt),
+        }
+    }
+
+    /// True while every part of this combo is still down. Looser than
+    /// [`KeyCombo::held`]: a modifier pressed on top doesn't count as letting
+    /// go, so a gesture started on Space survives Shift going down mid-drag.
+    pub fn still_held(self, i: &egui::InputState) -> bool {
+        let m = i.modifiers;
+        self.key.map_or(true, |k| i.key_down(k))
+            && (!self.ctrl || m.ctrl)
+            && (!self.shift || m.shift)
+            && (!self.alt || m.alt)
+    }
+}
+
+/// Capture for a hold binding in Settings, which — unlike a press binding —
+/// may be bare modifiers. egui reports no key for Shift, Ctrl or Alt on their
+/// own, so a bare-modifier combo is the set of modifiers held at their peak,
+/// taken when the last of them comes back up.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HoldCapture {
+    /// Everything held when capture began has been let go. Until then,
+    /// modifiers still down from whatever started the capture are ignored.
+    armed: bool,
+    peak: (bool, bool, bool),
+}
+
+impl HoldCapture {
+    /// One frame of capture: the modifiers held now, and the key pressed this
+    /// frame if any. Returns the captured combo once there is one.
+    pub fn step(&mut self, mods: egui::Modifiers, pressed: Option<egui::Key>) -> Option<KeyCombo> {
+        if let Some(key) = pressed {
+            *self = Self::default();
+            return Some(KeyCombo {
+                key: Some(key),
+                ctrl: mods.ctrl,
+                shift: mods.shift,
+                alt: mods.alt,
+            });
+        }
+        let now = (mods.ctrl, mods.shift, mods.alt);
+        let any = now.0 || now.1 || now.2;
+        if !self.armed {
+            self.armed = !any;
+            return None;
+        }
+        if any {
+            self.peak = (self.peak.0 || now.0, self.peak.1 || now.1, self.peak.2 || now.2);
+            return None;
+        }
+        let (c, s, a) = std::mem::take(&mut self.peak);
+        (c || s || a).then(|| KeyCombo::modifier_only(c, s, a))
     }
 }
 
@@ -581,6 +665,14 @@ fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str> {
     }
 }
 
+/// Whether this frame has a key-down for `combo`'s key that isn't an
+/// auto-repeat.
+fn fresh_press(i: &egui::InputState, combo: &KeyCombo) -> bool {
+    i.events.iter().any(|e| {
+        matches!(e, egui::Event::Key { key, pressed: true, repeat: false, .. } if Some(*key) == combo.key)
+    })
+}
+
 /// Keys that still reach the map while a widget has keyboard focus. Tab
 /// would otherwise only walk focus from field to field, which is how panels
 /// hidden and shown again could leave every shortcut dead; ` is a character
@@ -588,12 +680,69 @@ fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str> {
 /// matched exactly like any other press.
 pub const FOCUS_PASS_KEYS: [egui::Key; 2] = [egui::Key::Tab, egui::Key::Backtick];
 
+/// Every key Settings will take as a binding.
+pub const CAPTURE_KEYS: [egui::Key; 65] = {
+    use egui::Key::*;
+    [
+        A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, Num0, Num1,
+        Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9, OpenBracket, CloseBracket, Semicolon, Comma,
+        Period, Slash, Backslash, Minus, Equals, Space, Tab, Backspace, Backtick, F1, F2, F3, F4,
+        F5, F6, F7, F8, F9, F10, F11, F12, ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
+    ]
+};
+
 // --- the map itself ---
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Every action's combo, saved as `action = "Combo"` lines.
+///
+/// An action the user unbound is saved as `action = ""` and kept in
+/// `unbound`, so loading doesn't hand it its default back. An action absent
+/// from both maps is unbound too, but takes its default on the next load.
+#[derive(Clone, Debug)]
 pub struct ShortcutMap {
-    #[serde(flatten)]
     pub bindings: BTreeMap<Action, KeyCombo>,
+    pub unbound: BTreeSet<Action>,
+}
+
+impl Serialize for ShortcutMap {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        let mut out: BTreeMap<Action, String> =
+            self.bindings.iter().map(|(&a, c)| (a, c.display())).collect();
+        for &a in &self.unbound {
+            out.insert(a, String::new());
+        }
+        out.serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for ShortcutMap {
+    /// Entry by entry, so one line naming an action that no longer exists, or
+    /// a combo that doesn't parse, costs that line rather than every binding.
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+        let raw: BTreeMap<String, String> = BTreeMap::deserialize(de)?;
+        let mut map = ShortcutMap {
+            bindings: BTreeMap::new(),
+            unbound: BTreeSet::new(),
+        };
+        for (name, combo) in raw {
+            let action: Result<Action, serde::de::value::Error> =
+                Action::deserialize(name.as_str().into_deserializer());
+            let Ok(action) = action else {
+                log::warn!("shortcuts: unknown action {name:?}, skipped");
+                continue;
+            };
+            let combo = combo.trim();
+            if combo.is_empty() || combo.eq_ignore_ascii_case("none") {
+                map.unbound.insert(action);
+            } else if let Some(c) = parse_combo(combo) {
+                map.bindings.insert(action, c);
+            } else {
+                log::warn!("shortcuts: bad combo {combo:?} for {name}, using the default");
+            }
+        }
+        Ok(map)
+    }
 }
 
 impl Default for ShortcutMap {
@@ -761,7 +910,10 @@ impl Default for ShortcutMap {
         b.insert(Action::CameraKeyAdd, KeyCombo::ctrl(K::K));
         b.insert(Action::CameraKeyDelete, KeyCombo::ctrl_shift(K::K));
         b.insert(Action::CameraLookThrough, KeyCombo::shift(K::V));
-        Self { bindings: b }
+        Self {
+            bindings: b,
+            unbound: BTreeSet::new(),
+        }
     }
 }
 
@@ -771,6 +923,41 @@ impl ShortcutMap {
     }
     pub fn set(&mut self, action: Action, combo: KeyCombo) {
         self.bindings.insert(action, combo);
+        self.unbound.remove(&action);
+    }
+
+    /// Unbind `action`, for good: it stays unbound across a save and load
+    /// rather than taking its default back.
+    pub fn clear(&mut self, action: Action) {
+        self.bindings.remove(&action);
+        self.unbound.insert(action);
+    }
+
+    /// The drag gesture held right now, with the combo that holds it. A combo
+    /// with a key beats one of bare modifiers (Ctrl+Space over Ctrl); between
+    /// equals, [`HOLD_DRAGS`] order decides.
+    pub fn held_drag(&self, i: &egui::InputState) -> Option<(Action, KeyCombo)> {
+        let held = HOLD_DRAGS
+            .iter()
+            .filter_map(|&a| Some((a, self.get(a)?)))
+            .filter(|(_, c)| c.held(i));
+        let mut best: Option<(Action, KeyCombo)> = None;
+        for (a, c) in held {
+            if best.map_or(true, |(_, b)| b.key.is_none() && c.key.is_some()) {
+                best = Some((a, c));
+            }
+        }
+        best
+    }
+
+    /// Keys some hold binding uses. A press on one fires only on its first
+    /// key-down, never on the auto-repeat that holding it sends.
+    pub(crate) fn hold_keys(&self) -> Vec<egui::Key> {
+        self.bindings
+            .iter()
+            .filter(|(a, _)| a.is_hold())
+            .filter_map(|(_, c)| c.key)
+            .collect()
     }
 
     /// Every binding that shares its combo with something, keyed by the
@@ -806,16 +993,24 @@ impl ShortcutMap {
     /// treated as an alias for Redo because that's the muscle-memory shortcut
     /// on most apps.
     pub fn poll_actions(&self, ctx: &egui::Context) -> Vec<Action> {
+        let hold_keys = self.hold_keys();
         ctx.input(|i| {
             let mut out: Vec<Action> = Vec::new();
             for (&action, combo) in &self.bindings {
-                // Modifier-only combos (canvas gestures) are not press actions.
-                if combo.key.is_none() {
+                // Held, not pressed: the drag gestures and selection modes.
+                if action.is_hold() {
                     continue;
                 }
-                if combo.matches(i) {
-                    out.push(action);
+                if !combo.matches(i) {
+                    continue;
                 }
+                // With Space held for a pan, pressing Ctrl turns Space's
+                // auto-repeat into Ctrl+Space, which would fire whatever is
+                // there on every repeat. Only a real key-down counts.
+                if combo.key.is_some_and(|k| hold_keys.contains(&k)) && !fresh_press(i, combo) {
+                    continue;
+                }
+                out.push(action);
             }
             // Ctrl+Shift+Z alias for Redo, regardless of user map.
             if i.modifiers.ctrl
@@ -861,9 +1056,16 @@ pub fn load() -> ShortcutMap {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return ShortcutMap::default();
     };
-    match toml::from_str::<ShortcutMap>(&text) {
+    let map = load_from_str(&text);
+    log::info!("Loaded shortcuts from {}", path.display());
+    map
+}
+
+/// A saved shortcuts file, migrated, with defaults for whatever it doesn't
+/// mention.
+pub fn load_from_str(text: &str) -> ShortcutMap {
+    match toml::from_str::<ShortcutMap>(text) {
         Ok(mut map) => {
-            log::info!("Loaded shortcuts from {}", path.display());
             // Migration: the in-canvas eyedropper was folded into the screen
             // picker. Drop the retired binding, and hand its key to the picker
             // that replaced it unless the user had already rebound that one.
@@ -880,10 +1082,14 @@ pub fn load() -> ShortcutMap {
                 map.bindings
                     .insert(Action::PasteImage, KeyCombo::ctrl_shift(egui::Key::V));
             }
-            // Merge in any missing defaults so newly added actions are bound.
+            // Merge in any missing defaults so newly added actions are bound,
+            // except where the user unbound one on purpose.
             let mut full = ShortcutMap::default();
             for (a, c) in map.bindings {
-                full.bindings.insert(a, c);
+                full.set(a, c);
+            }
+            for a in map.unbound {
+                full.clear(a);
             }
             full
         }
@@ -1173,14 +1379,248 @@ mod tests {
         );
     }
 
+    /// Run one frame of `events` with `mods` held on `ctx`, and read the input.
+    fn with_input<R>(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        mods: egui::Modifiers,
+        f: impl FnOnce(&egui::InputState) -> R,
+    ) -> R {
+        let mut f = Some(f);
+        let mut out = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                modifiers: mods,
+                ..Default::default()
+            },
+            |ctx| {
+                if let Some(f) = f.take() {
+                    out = Some(ctx.input(f));
+                }
+            },
+        );
+        out.unwrap()
+    }
+
+    fn key(key: egui::Key, pressed: bool, repeat: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat,
+            modifiers,
+        }
+    }
+
+    const NONE: egui::Modifiers = egui::Modifiers::NONE;
+    const CTRL: egui::Modifiers = egui::Modifiers {
+        alt: false,
+        ctrl: true,
+        shift: false,
+        mac_cmd: false,
+        command: true,
+    };
+    const SHIFT: egui::Modifiers = egui::Modifiers {
+        alt: false,
+        ctrl: false,
+        shift: true,
+        mac_cmd: false,
+        command: false,
+    };
+
     #[test]
-    fn selection_modes_are_drag_modifiers_and_never_fire_as_presses() {
+    fn an_unbound_binding_survives_a_save_over_its_default() {
+        let mut map = ShortcutMap::default();
+        map.clear(Action::ToolInk);
+        let text = toml::to_string_pretty(&map).unwrap();
+        assert!(text.contains("tool_ink = \"\""), "{text}");
+        let back = load_from_str(&text);
+        assert_eq!(back.get(Action::ToolInk), None);
+        assert_eq!(back.get(Action::ToolPencil), Some(KeyCombo::plain(egui::Key::Q)));
+        // Binding it again makes it ordinary.
+        let mut back = back;
+        back.set(Action::ToolInk, KeyCombo::plain(egui::Key::W));
+        let again = load_from_str(&toml::to_string_pretty(&back).unwrap());
+        assert_eq!(again.get(Action::ToolInk), Some(KeyCombo::plain(egui::Key::W)));
+    }
+
+    /// Files written before holds could be keys: the gestures keep their
+    /// bare modifiers, and the new holds come up unbound.
+    #[test]
+    fn old_shortcut_files_still_load() {
+        let map = load_from_str(
+            r#"
+            play_pause = "Ctrl+Space"
+            layer_last = "Tab"
+            toggle_panels = "M"
+            canvas_zoom = "Ctrl"
+            canvas_pan = "Shift"
+            canvas_rotate = "Alt"
+            sel_mode_intersect = "Shift+Alt"
+            "#,
+        );
+        assert_eq!(map.get(Action::CanvasZoom), Some(KeyCombo::modifier_only(true, false, false)));
+        assert_eq!(map.get(Action::CanvasPan), Some(KeyCombo::modifier_only(false, true, false)));
+        assert_eq!(map.get(Action::PlayPause), Some(KeyCombo::ctrl(egui::Key::Space)));
+        for a in [Action::HoldToolAdjust, Action::HoldScrub, Action::HoldFlip, Action::HoldSwatchPie] {
+            assert_eq!(map.get(a), None, "{a:?} starts unbound");
+        }
+    }
+
+    #[test]
+    fn a_bad_entry_drops_only_itself() {
+        let map = load_from_str(
+            r#"
+            tool_pencil = "P"
+            tool_ink = "Ctrl+NotAKey"
+            an_action_from_the_future = "Q"
+            "#,
+        );
+        assert_eq!(map.get(Action::ToolPencil), Some(KeyCombo::plain(egui::Key::P)));
+        assert_eq!(map.get(Action::ToolInk), Some(KeyCombo::plain(egui::Key::W)), "default kept");
+    }
+
+    #[test]
+    fn a_key_hold_matches_only_while_down_with_exact_modifiers() {
+        let ctx = egui::Context::default();
+        let space = KeyCombo::plain(egui::Key::Space);
+        let ctrl_space = KeyCombo::ctrl(egui::Key::Space);
+        let read = |i: &egui::InputState| {
+            (space.held(i), ctrl_space.held(i), space.still_held(i))
+        };
+        assert_eq!(with_input(&ctx, vec![], NONE, read), (false, false, false));
+        let down = vec![key(egui::Key::Space, true, false, NONE)];
+        assert_eq!(with_input(&ctx, down, NONE, read), (true, false, true));
+        // Still down a frame later, with no new event.
+        assert_eq!(with_input(&ctx, vec![], NONE, read), (true, false, true));
+        // Ctrl on top: exactly Ctrl+Space now, and Space is still held.
+        assert_eq!(with_input(&ctx, vec![], CTRL, read), (false, true, true));
+        let up = vec![key(egui::Key::Space, false, false, NONE)];
+        assert_eq!(with_input(&ctx, up, NONE, read), (false, false, false));
+        // A bare-modifier hold needs exactly its modifiers.
+        let shift = KeyCombo::modifier_only(false, true, false);
+        assert!(with_input(&ctx, vec![], SHIFT, |i| shift.held(i)));
+        assert!(!with_input(&ctx, vec![], NONE, |i| shift.held(i)));
+    }
+
+    #[test]
+    fn hold_actions_never_fire_as_presses() {
+        let mut map = ShortcutMap::default();
+        map.bindings.clear();
+        map.set(Action::HoldScrub, KeyCombo::plain(egui::Key::J));
+        map.set(Action::CanvasPan, KeyCombo::plain(egui::Key::H));
+        assert!(press(egui::Key::J, NONE, |c| map.poll_actions(c)).is_empty());
+        assert!(press(egui::Key::H, NONE, |c| map.poll_actions(c)).is_empty());
+    }
+
+    /// Space held to pan, then Ctrl pressed: Space's auto-repeat now arrives
+    /// as Ctrl+Space, which must not play and pause on every repeat.
+    #[test]
+    fn holding_a_hold_key_does_not_repeat_presses_on_it() {
+        let mut map = ShortcutMap::default();
+        map.set(Action::CanvasPan, KeyCombo::plain(egui::Key::Space));
+        map.set(Action::PlayPause, KeyCombo::ctrl(egui::Key::Space));
+        let ctx = egui::Context::default();
+        // egui marks a repeat itself, from whether the key was already down.
+        let poll = |ctx: &egui::Context, events, mods| {
+            let mut fired = Vec::new();
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    modifiers: mods,
+                    ..Default::default()
+                },
+                |ctx| fired = map.poll_actions(ctx),
+            );
+            fired
+        };
+        let space = |pressed, mods| key(egui::Key::Space, pressed, false, mods);
+        assert!(poll(&ctx, vec![space(true, NONE)], NONE).is_empty(), "Space down: a hold");
+        assert!(poll(&ctx, vec![space(true, CTRL)], CTRL).is_empty(), "its repeat under Ctrl");
+        assert!(poll(&ctx, vec![space(false, CTRL)], CTRL).is_empty());
+        assert_eq!(poll(&ctx, vec![space(true, CTRL)], CTRL), vec![Action::PlayPause]);
+        // A key no hold uses still repeats as it always has.
+        map.set(Action::FrameNext, KeyCombo::plain(egui::Key::S));
+        let mut fired = Vec::new();
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![key(egui::Key::S, true, true, NONE)],
+                ..Default::default()
+            },
+            |ctx| fired = map.poll_actions(ctx),
+        );
+        assert_eq!(fired, vec![Action::FrameNext]);
+    }
+
+    #[test]
+    fn the_more_specific_hold_wins() {
+        let mut map = ShortcutMap::default();
+        map.set(Action::CanvasZoom, KeyCombo::modifier_only(true, false, false));
+        map.set(Action::HoldScrub, KeyCombo::ctrl(egui::Key::Space));
+        let ctx = egui::Context::default();
+        let held = |ctx: &egui::Context, events, mods| {
+            with_input(ctx, events, mods, |i| map.held_drag(i).map(|(a, _)| a))
+        };
+        assert_eq!(held(&ctx, vec![], CTRL), Some(Action::CanvasZoom));
+        let down = vec![key(egui::Key::Space, true, false, CTRL)];
+        assert_eq!(held(&ctx, down, CTRL), Some(Action::HoldScrub));
+        assert_eq!(held(&ctx, vec![], NONE), None, "Space alone is bound to nothing");
+    }
+
+    #[test]
+    fn hold_and_press_on_one_combo_clash() {
+        let mut map = ShortcutMap::default();
+        map.set(Action::CanvasPan, KeyCombo::plain(egui::Key::Space));
+        map.set(Action::PlayPause, KeyCombo::plain(egui::Key::Space));
+        let c = map.clashes();
+        assert!(c[&Action::CanvasPan].contains(&Clash::Action(Action::PlayPause)));
+        assert!(c[&Action::PlayPause].contains(&Clash::Action(Action::CanvasPan)));
+        // Different modifiers: the repeat rule keeps them apart.
+        map.set(Action::PlayPause, KeyCombo::ctrl(egui::Key::Space));
+        let c = map.clashes();
+        assert!(!c.contains_key(&Action::CanvasPan) && !c.contains_key(&Action::PlayPause));
+    }
+
+    #[test]
+    fn capturing_shift_alone_binds_it_on_release() {
+        let alt = egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        let shift_alt = egui::Modifiers {
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        let mut c = HoldCapture::default();
+        assert_eq!(c.step(NONE, None), None, "arms");
+        assert_eq!(c.step(SHIFT, None), None);
+        assert_eq!(c.step(NONE, None), Some(KeyCombo::modifier_only(false, true, false)));
+        // Two at once, let go one at a time: the peak is what was held.
+        let mut c = HoldCapture::default();
+        c.step(NONE, None);
+        assert_eq!(c.step(SHIFT, None), None);
+        assert_eq!(c.step(shift_alt, None), None);
+        assert_eq!(c.step(alt, None), None);
+        assert_eq!(c.step(NONE, None), Some(KeyCombo::modifier_only(false, true, true)));
+        // Ctrl already down when capture began isn't taken for the binding.
+        let mut c = HoldCapture::default();
+        assert_eq!(c.step(CTRL, None), None);
+        assert_eq!(c.step(NONE, None), None);
+        assert_eq!(c.step(NONE, None), None);
+        // A key goes in with whatever is held.
+        assert_eq!(c.step(CTRL, Some(egui::Key::Space)), Some(KeyCombo::ctrl(egui::Key::Space)));
+    }
+
+    #[test]
+    fn selection_modes_are_holds_and_never_fire_as_presses() {
         let map = ShortcutMap::default();
         for a in [Action::SelModeAdd, Action::SelModeSubtract, Action::SelModeIntersect] {
-            assert!(a.is_drag_modifier());
+            assert!(a.is_hold());
             assert!(map.get(a).is_some_and(|c| c.key.is_none()));
         }
-        assert!(!Action::SelectAll.is_drag_modifier());
+        assert!(!Action::SelectAll.is_hold());
     }
 
     /// Shift+Backspace fills; it must not also clear the drawing it just

@@ -38,6 +38,9 @@ pub struct ButtonDragState {
     start_frame: usize,
     /// Whether the scrub steps key drawings rather than frames.
     keys_only: bool,
+    /// Started by holding a combo with Shift in it, so Shift is the gesture's
+    /// own key here and can't also mean "keys only".
+    shift_locked: bool,
     // The tool values at the press, which tool adjust moves away from.
     radius: f32,
     opacity: f32,
@@ -52,6 +55,12 @@ impl AppState {
     /// [`ButtonDrag::None`] starts one too, which swallows the drag so it
     /// never reaches the active tool.
     pub fn begin_button_drag(&mut self, kind: ButtonDrag, at: egui::Pos2) {
+        self.begin_held_drag(kind, at, false);
+    }
+
+    /// [`AppState::begin_button_drag`] for a drag started by a held combo
+    /// rather than a button. `shift_locked` when that combo has Shift in it.
+    pub fn begin_held_drag(&mut self, kind: ButtonDrag, at: egui::Pos2, shift_locked: bool) {
         if matches!(kind, ButtonDrag::Scrub | ButtonDrag::Flip) {
             // Playback rewrites the frame every tick; a scrub over it would be
             // invisible.
@@ -64,7 +73,9 @@ impl AppState {
             from: at,
             from_frame: frame,
             start_frame: frame,
-            keys_only: kind == ButtonDrag::Flip || (kind == ButtonDrag::Scrub && self.shift_held),
+            keys_only: kind == ButtonDrag::Flip
+                || (kind == ButtonDrag::Scrub && self.shift_held && !shift_locked),
+            shift_locked,
             radius: self.brush.radius,
             opacity: self.brush.opacity,
             gap: self.brush.fill_gap,
@@ -80,7 +91,7 @@ impl AppState {
         };
         match d.kind {
             ButtonDrag::Scrub | ButtonDrag::Flip => {
-                let keys_only = d.kind == ButtonDrag::Flip || self.shift_held;
+                let keys_only = d.kind == ButtonDrag::Flip || (self.shift_held && !d.shift_locked);
                 if keys_only != d.keys_only {
                     d.keys_only = keys_only;
                     d.from = at;
@@ -299,6 +310,23 @@ mod tests {
         assert_eq!(st.project.current_frame, 9);
         st.button_drag_to(AT + vec2(-40.0, 0.0));
         assert_eq!(st.project.current_frame, 0, "back two drawings from 6, then clamped");
+    }
+
+    /// A scrub held on Shift: Shift is the gesture's own key there, so it
+    /// keeps scrubbing frames rather than jumping key to key.
+    #[test]
+    fn a_scrub_started_by_a_shift_hold_ignores_shift() {
+        let mut st = timeline();
+        st.shift_held = true;
+        st.begin_held_drag(ButtonDrag::Scrub, AT, true);
+        st.button_drag_to(AT + vec2(25.0, 0.0));
+        assert_eq!(st.project.current_frame, 2, "frames, not keys");
+        st.end_button_drag();
+        // Held on a key without Shift, Shift still means keys.
+        st.project.goto(0);
+        st.begin_held_drag(ButtonDrag::Scrub, AT, false);
+        st.button_drag_to(AT + vec2(25.0, 0.0));
+        assert_eq!(st.project.current_frame, 3, "the next key");
     }
 
     #[test]

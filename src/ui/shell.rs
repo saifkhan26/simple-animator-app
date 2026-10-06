@@ -10,7 +10,7 @@ use crate::doc::camera::Ease;
 use crate::doc::canvas::DirtyRect;
 use crate::doc::layer::CellId;
 use crate::input::button_drag::{self, ButtonDrag};
-use crate::input::shortcuts::{Action, Clash, KeyCombo};
+use crate::input::shortcuts::{Action, Clash};
 use crate::input::tablet::PenPacket;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, PIN_TINTS};
@@ -117,15 +117,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             if !state.screen_pick {
             let canvas_to_doc = canvas_to_doc_mapping(state, canvas_rect);
 
-            // Canvas navigation gesture binds (modifier-only, configurable in
-            // Settings). Held during a drag, they reinterpret it as
-            // zoom/pan/rotate instead of drawing.
-            let zoom_bind = state.shortcuts.get(Action::CanvasZoom);
-            let pan_bind = state.shortcuts.get(Action::CanvasPan);
-            let rotate_bind = state.shortcuts.get(Action::CanvasRotate);
             // A selection mode held as the drag starts. Only the Lasso reads
-            // them, and while it is active they win over a nav gesture bound
-            // to the same keys.
+            // them, and while it is active they win over a drag gesture held
+            // on the same keys.
             let held_op = if state.tool == ActiveTool::Lasso {
                 ui.input(|i| held_sel_op(state, i))
             } else {
@@ -134,17 +128,16 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             // What the middle or right button does, when one of those — not
             // the left, which always uses the tool — is what went down.
             let (middle, right) = (state.middle_drag, state.right_drag);
-            let (nav_gesture, button) = ui.input(|i| {
+            let (held, button) = ui.input(|i| {
+                // A held key or modifiers (configurable in Settings) turn a
+                // drag into a gesture instead of a stroke.
                 let g = if held_op.is_some() {
                     None
-                } else if zoom_bind.is_some_and(|c| c.mods_held(i)) {
-                    Some(NavKind::Zoom)
-                } else if rotate_bind.is_some_and(|c| c.mods_held(i)) {
-                    Some(NavKind::Rotate)
-                } else if pan_bind.is_some_and(|c| c.mods_held(i)) {
-                    Some(NavKind::Pan)
                 } else {
-                    None
+                    state
+                        .shortcuts
+                        .held_drag(i)
+                        .and_then(|(a, c)| Some((a.hold_drag()?, c)))
                 };
                 let b = if i.pointer.primary_down() {
                     None
@@ -162,21 +155,32 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 // Pressing on the canvas hands the keyboard back to it: Delete
                 // stops meaning "delete the drawings selected in the tracks".
                 state.track_sel.clear();
+                state.drag_inert = false;
                 // Decide once, on press, what this drag does. A middle or
                 // right button does what Settings binds it to, the view
                 // gestures among those through the navigation drag. Otherwise
-                // configurable modifiers pick zoom/rotate/pan, or the tool
-                // draws. When layer-transform mode is on, the modifier
-                // gestures retarget the active layer instead of the view.
+                // a held key or modifiers pick a gesture, or the tool draws.
+                // When layer-transform mode is on, the view gestures retarget
+                // the active layer instead of the view.
+                let nav_of = |b| match b {
+                    ButtonDrag::Pan => Some(NavKind::Pan),
+                    ButtonDrag::Zoom => Some(NavKind::Zoom),
+                    ButtonDrag::Rotate => Some(NavKind::Rotate),
+                    _ => None,
+                };
                 let (button_nav, button_drag) = match button {
-                    Some(ButtonDrag::Pan) => (Some(NavKind::Pan), None),
-                    Some(ButtonDrag::Zoom) => (Some(NavKind::Zoom), None),
-                    Some(ButtonDrag::Rotate) => (Some(NavKind::Rotate), None),
+                    Some(b) if nav_of(b).is_some() => (nav_of(b), None),
                     other => (None, other),
                 };
-                // Modifiers only reinterpret a left-button drag: Shift with a
+                // Holds only reinterpret a left-button drag: Shift with a
                 // scrub means keys, not pan.
-                let nav_gesture = if button.is_some() { None } else { nav_gesture };
+                let held = if button.is_some() { None } else { held };
+                state.hold_latch = held.map(|(_, c)| c);
+                let (nav_gesture, held_drag) = match held {
+                    Some((b, c)) if nav_of(b).is_none() => (None, Some((b, c))),
+                    Some((b, _)) => (nav_of(b), None),
+                    None => (None, None),
+                };
                 state.nav_drag = nav_gesture.or(button_nav);
                 state.nav_to_layer = state.layer_xform && nav_gesture.is_some();
                 state.nav_to_camera =
@@ -188,6 +192,10 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 } else if let Some(b) = button_drag {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         state.begin_button_drag(b, pos);
+                    }
+                } else if let Some((b, c)) = held_drag {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        state.begin_held_drag(b, pos, c.shift);
                     }
                 } else if state.nav_drag.is_none() {
                     // One complaint per stroke, not one per frame.
@@ -231,7 +239,21 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     }
                 }
             }
-            if resp.dragged() {
+            // Letting go of the held combo ends its gesture where it is, the
+            // way letting go of Space ends a pan in Krita, and the rest of this
+            // pen-down does nothing: carrying on as a stroke would draw from
+            // wherever the pen happened to be.
+            if resp.dragged() && !resp.drag_started() {
+                if let Some(c) = state.hold_latch.take() {
+                    if ui.input(|i| c.still_held(i)) {
+                        state.hold_latch = Some(c);
+                    } else {
+                        finish_canvas_drag(state);
+                        state.drag_inert = true;
+                    }
+                }
+            }
+            if resp.dragged() && !state.drag_inert {
                 if state.nav_to_layer {
                     // Apply the gesture to the active layer's transform.
                     match state.nav_drag {
@@ -368,21 +390,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 }
             }
             if resp.drag_stopped() {
-                if state.nav_to_layer {
-                    state.commit_layer_xform();
-                } else if state.nav_to_camera {
-                    state.commit_camera_drag();
-                } else if state.button_drag.is_some() {
-                    state.end_button_drag();
-                } else if state.nav_drag.is_none() {
-                    // Both are no-ops when idle, so a tool change mid-drag
-                    // cannot strand either.
-                    state.select_up();
-                    state.pointer_up();
+                if !state.drag_inert {
+                    finish_canvas_drag(state);
                 }
-                state.nav_drag = None;
-                state.nav_to_layer = false;
-                state.nav_to_camera = false;
+                state.hold_latch = None;
+                state.drag_inert = false;
             }
             // A double-click closes a polygon selection. Its second press has
             // already placed a corner on top of the first; `polygon_finish`
@@ -3313,103 +3325,93 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    egui::Grid::new("shortcuts_grid")
-                        .num_columns(4)
-                        .striped(true)
-                        .min_col_width(100.0)
-                        .show(ui, |ui| {
-                            for &action in Action::ALL {
-                                let flags = clashes.get(&action);
-                                let bad = flags.is_some_and(|v| v.iter().any(|c| c.is_conflict()));
-                                if only_clashes && !bad {
-                                    continue;
-                                }
-                                let tint = |t: String| {
-                                    let t = egui::RichText::new(t);
-                                    if bad {
-                                        t.color(DIAG_BAD)
-                                    } else {
-                                        t
+                    // Pressed, then held: a hold binding is read while a
+                    // canvas drag starts, and can be bare modifiers.
+                    let sections: [(&str, bool); 2] = [("shortcuts_grid", false), ("holds_grid", true)];
+                    for (id, holds) in sections {
+                        if holds {
+                            ui.add_space(8.0);
+                            theme::section_header(ui, ic::HAND_GRABBING, "Held while dragging");
+                            ui.label(
+                                egui::RichText::new(
+                                    "Hold these while a drag on the canvas starts. A key, a \
+                                     combo, or bare Shift / Ctrl / Alt; letting go ends the \
+                                     gesture.",
+                                )
+                                .color(theme::TEXT_MUTED)
+                                .size(11.0),
+                            );
+                        }
+                        egui::Grid::new(id)
+                            .num_columns(4)
+                            .striped(true)
+                            .min_col_width(100.0)
+                            .show(ui, |ui| {
+                                for &action in Action::ALL.iter().filter(|a| a.is_hold() == holds) {
+                                    let flags = clashes.get(&action);
+                                    let bad =
+                                        flags.is_some_and(|v| v.iter().any(|c| c.is_conflict()));
+                                    if only_clashes && !bad {
+                                        continue;
                                     }
-                                };
-                                // Canvas nav gestures are modifier-only; show a
-                                // modifier picker instead of press-to-bind (egui
-                                // has no Key for a bare Ctrl/Shift/Alt).
-                                if action.is_drag_modifier() {
-                                    ui.label(action.label());
-                                    let cur = state.shortcuts.get(action);
-                                    let cur_label = cur
-                                        .map(|c| c.display())
-                                        .unwrap_or_else(|| "(none)".to_string());
-                                    egui::ComboBox::from_id_salt(("navmod", action))
-                                        .selected_text(tint(cur_label.clone()))
-                                        .width(140.0)
-                                        .show_ui(ui, |ui| {
-                                            let choices = crate::input::shortcuts::DRAG_MODIFIERS
-                                                .iter()
-                                                .map(|&(c, s, a)| Some(KeyCombo::modifier_only(c, s, a)))
-                                                .chain(std::iter::once(None));
-                                            for combo in choices {
-                                                let lbl = combo
-                                                    .map(|c| c.display())
-                                                    .unwrap_or_else(|| "(none)".to_string());
-                                                if ui
-                                                    .selectable_label(cur_label == lbl, lbl.as_str())
-                                                    .clicked()
-                                                {
-                                                    match combo {
-                                                        Some(c) => {
-                                                            state.shortcuts.set(action, c)
-                                                        }
-                                                        None => {
-                                                            state
-                                                                .shortcuts
-                                                                .bindings
-                                                                .remove(&action);
-                                                        }
-                                                    }
-                                                    crate::input::shortcuts::save(
-                                                        &state.shortcuts,
-                                                    );
-                                                }
-                                            }
-                                        });
-                                    ui.label("");
-                                    clash_cell(ui, action, flags);
-                                    ui.end_row();
-                                    continue;
+                                    shortcut_row(state, ui, action, flags, bad);
                                 }
-                                ui.label(action.label());
-                                let combo_text = state
-                                    .shortcuts
-                                    .get(action)
-                                    .map(|c| c.display())
-                                    .unwrap_or_else(|| "—".to_string());
-                                let is_active = state.rebinding == Some(action);
-                                let btn = egui::Button::new(if is_active {
-                                    egui::RichText::new("Press key…")
-                                } else {
-                                    tint(combo_text)
-                                })
-                                .min_size(egui::vec2(140.0, 22.0));
-                                if ui.add(btn).clicked() {
-                                    state.rebinding = if is_active { None } else { Some(action) };
-                                }
-                                if ui
-                                    .small_button(theme::icon_text(ic::X, ""))
-                                    .on_hover_text("Unbind")
-                                    .clicked()
-                                {
-                                    state.shortcuts.bindings.remove(&action);
-                                    crate::input::shortcuts::save(&state.shortcuts);
-                                }
-                                clash_cell(ui, action, flags);
-                                ui.end_row();
-                            }
-                        });
+                            });
+                    }
                 });
         });
     state.show_settings = open;
+}
+
+/// One binding in Settings: its name, the combo as a press-to-rebind button,
+/// an unbind button, and the clash flag.
+fn shortcut_row(
+    state: &mut AppState,
+    ui: &mut egui::Ui,
+    action: Action,
+    flags: Option<&Vec<Clash>>,
+    bad: bool,
+) {
+    let tint = |t: String| {
+        let t = egui::RichText::new(t);
+        if bad {
+            t.color(DIAG_BAD)
+        } else {
+            t
+        }
+    };
+    ui.label(action.label());
+    let combo_text = state
+        .shortcuts
+        .get(action)
+        .map(|c| c.display())
+        .unwrap_or_else(|| "—".to_string());
+    let is_active = state.rebinding == Some(action);
+    let prompt = if action.is_hold() {
+        "Press a key, or tap Shift / Ctrl / Alt…"
+    } else {
+        "Press key…"
+    };
+    let btn = egui::Button::new(if is_active {
+        egui::RichText::new(prompt)
+    } else {
+        tint(combo_text)
+    })
+    .min_size(egui::vec2(140.0, 22.0));
+    if ui.add(btn).clicked() {
+        state.rebinding = if is_active { None } else { Some(action) };
+        state.hold_capture = Default::default();
+    }
+    if ui
+        .small_button(theme::icon_text(ic::X, ""))
+        .on_hover_text("Unbind")
+        .clicked()
+    {
+        state.shortcuts.clear(action);
+        crate::input::shortcuts::save(&state.shortcuts);
+    }
+    clash_cell(ui, action, flags);
+    ui.end_row();
 }
 
 /// The last cell of a shortcut row: ⚠ when the binding clashes, a muted ⓘ
@@ -3422,7 +3424,7 @@ fn clash_cell(ui: &mut egui::Ui, action: Action, flags: Option<&Vec<Clash>>) {
     let lines: Vec<String> = flags
         .iter()
         .map(|c| match *c {
-            Clash::Action(b) if action.is_drag_modifier() => {
+            Clash::Action(b) if action.is_hold() => {
                 format!("Also held for: {} — only one of them can start a drag", b.label())
             }
             Clash::Action(b) => format!("Also bound to: {} — both fire", b.label()),
@@ -5261,7 +5263,7 @@ fn gesture_path(painter: &egui::Painter, pts: &[egui::Pos2], closing: bool) {
     }
 }
 
-/// The selection mode a held modifier asks for, if any.
+/// The selection mode a held combo asks for, if any.
 pub(crate) fn held_sel_op(state: &AppState, i: &egui::InputState) -> Option<SelOp> {
     [
         (Action::SelModeAdd, SelOp::Add),
@@ -5269,8 +5271,28 @@ pub(crate) fn held_sel_op(state: &AppState, i: &egui::InputState) -> Option<SelO
         (Action::SelModeIntersect, SelOp::Intersect),
     ]
     .into_iter()
-    .find(|(a, _)| state.shortcuts.get(*a).is_some_and(|c| c.mods_held(i)))
+    .find(|(a, _)| state.shortcuts.get(*a).is_some_and(|c| c.held(i)))
     .map(|(_, op)| op)
+}
+
+/// End whatever the canvas drag was doing: the pen came up, or the combo
+/// holding its gesture was let go.
+fn finish_canvas_drag(state: &mut AppState) {
+    if state.nav_to_layer {
+        state.commit_layer_xform();
+    } else if state.nav_to_camera {
+        state.commit_camera_drag();
+    } else if state.button_drag.is_some() {
+        state.end_button_drag();
+    } else if state.nav_drag.is_none() {
+        // Both are no-ops when idle, so a tool change mid-drag
+        // cannot strand either.
+        state.select_up();
+        state.pointer_up();
+    }
+    state.nav_drag = None;
+    state.nav_to_layer = false;
+    state.nav_to_camera = false;
 }
 
 /// Screen-space corners (TL, TR, BR, BL) of a cell of size `cw`×`ch` placed by
@@ -8269,6 +8291,7 @@ mod fill_tests {
 #[cfg(test)]
 mod button_drag_tests {
     use super::*;
+    use crate::input::shortcuts::KeyCombo;
     use egui::{pos2, vec2, Pos2};
 
     const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
@@ -8362,6 +8385,155 @@ mod button_drag_tests {
         frame(&ctx, &mut state, vec![]);
         frame(&ctx, &mut state, vec![]);
     }
+
+    fn frame_mods(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            modifiers,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| draw(state, ctx));
+    }
+
+    /// A left (pen) drag of `by` from `from` in four moves, with `key` and
+    /// `mods` held from before the press. With `let_go_after: Some(n)`, both
+    /// are released after the `n`th move.
+    fn hold_drag(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        key: Option<egui::Key>,
+        mods: egui::Modifiers,
+        from: Pos2,
+        by: Vec2,
+        let_go_after: Option<usize>,
+    ) {
+        let key_event = |k, pressed, modifiers| egui::Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        let press = |pos, pressed, modifiers| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        let mut m = mods;
+        let mut first = vec![egui::Event::PointerMoved(from)];
+        first.extend(key.map(|k| key_event(k, true, m)));
+        frame_mods(ctx, state, first, m);
+        frame_mods(ctx, state, vec![press(from, true, m)], m);
+        for i in 1..=4 {
+            let mut events = Vec::new();
+            if let_go_after.is_some_and(|n| i == n + 1) {
+                events.extend(key.map(|k| key_event(k, false, egui::Modifiers::NONE)));
+                m = egui::Modifiers::NONE;
+            }
+            events.push(egui::Event::PointerMoved(from + by * (i as f32 / 4.0)));
+            frame_mods(ctx, state, events, m);
+        }
+        frame_mods(ctx, state, vec![press(from + by, false, m)], m);
+        if let_go_after.is_none() {
+            frame_mods(ctx, state, key.map(|k| key_event(k, false, m)).into_iter().collect(), m);
+        }
+        frame(ctx, state, vec![]);
+    }
+
+    fn space_pans(state: &mut AppState) {
+        state.shortcuts = crate::input::shortcuts::ShortcutMap::default();
+        state.shortcuts.set(Action::CanvasPan, KeyCombo::plain(egui::Key::Space));
+        state.shortcuts.set(Action::PlayPause, KeyCombo::ctrl(egui::Key::Space));
+    }
+
+    #[test]
+    fn holding_space_pans_a_pen_drag_and_draws_nothing() {
+        let mut state = state();
+        space_pans(&mut state);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let pan = state.view.pan;
+        let space = Some(egui::Key::Space);
+        hold_drag(&ctx, &mut state, space, egui::Modifiers::NONE, pos2(600.0, 400.0), vec2(40.0, 20.0), None);
+        assert!((state.view.pan - pan - vec2(40.0, 20.0)).length() < 1.0, "{:?}", state.view.pan);
+        assert_eq!(state.history.undo_len(), 0, "drew a stroke");
+        assert!(state.hold_latch.is_none() && !state.drag_inert);
+    }
+
+    /// Krita's Space-pan: letting go of Space mid-drag ends the pan right
+    /// there, and the rest of that pen-down draws nothing.
+    #[test]
+    fn releasing_space_mid_drag_stops_the_pan_and_draws_nothing_after() {
+        let mut state = state();
+        space_pans(&mut state);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let pan = state.view.pan;
+        let space = Some(egui::Key::Space);
+        hold_drag(&ctx, &mut state, space, egui::Modifiers::NONE, pos2(600.0, 400.0), vec2(40.0, 0.0), Some(2));
+        let moved = state.view.pan - pan;
+        assert!((moved.x - 20.0).abs() < 1.0, "panned {moved:?}");
+        assert_eq!(state.history.undo_len(), 0, "drew after Space came up");
+        assert!(state.stroke.is_none());
+        // And the next drag is an ordinary stroke again.
+        drag(&ctx, &mut state, egui::PointerButton::Primary, pos2(500.0, 300.0), vec2(40.0, 0.0));
+        assert_eq!(state.history.undo_len(), 1);
+    }
+
+    #[test]
+    fn holding_shift_adjusts_the_brush() {
+        let mut state = state();
+        space_pans(&mut state);
+        state
+            .shortcuts
+            .set(Action::HoldToolAdjust, KeyCombo::modifier_only(false, true, false));
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let (radius, pan) = (state.brush.radius, state.view.pan);
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        hold_drag(&ctx, &mut state, None, shift, pos2(600.0, 400.0), vec2(200.0, 0.0), None);
+        assert!(state.brush.radius > radius * 1.5, "{radius} -> {}", state.brush.radius);
+        assert_eq!(state.view.pan, pan);
+        assert_eq!(state.history.undo_len(), 0);
+    }
+
+    #[test]
+    fn a_hold_pan_in_transform_mode_moves_the_layer() {
+        let mut state = state();
+        space_pans(&mut state);
+        state.layer_xform = true;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let (pan, tx) = (state.view.pan, state.project.layers[0].transform.tx);
+        let space = Some(egui::Key::Space);
+        hold_drag(&ctx, &mut state, space, egui::Modifiers::NONE, pos2(600.0, 400.0), vec2(40.0, 0.0), None);
+        assert_eq!(state.view.pan, pan);
+        assert!(state.project.layers[0].transform.tx != tx, "the layer stayed put");
+    }
+
+    #[test]
+    fn the_lasso_mode_hold_still_wins_on_the_lasso() {
+        let mut state = state();
+        space_pans(&mut state);
+        state.shortcuts.set(Action::SelModeAdd, KeyCombo::plain(egui::Key::Space));
+        state.tool = ActiveTool::Lasso;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let pan = state.view.pan;
+        let space = Some(egui::Key::Space);
+        hold_drag(&ctx, &mut state, space, egui::Modifiers::NONE, pos2(600.0, 400.0), vec2(40.0, 40.0), None);
+        assert_eq!(state.view.pan, pan, "panned on the Lasso");
+    }
 }
 
 /// The Krita brush through the real UI: the preset is offered, its summary
@@ -8372,7 +8544,7 @@ mod button_drag_tests {
 #[cfg(test)]
 mod shortcut_clash_tests {
     use super::*;
-    use crate::input::shortcuts::ShortcutMap;
+    use crate::input::shortcuts::{KeyCombo, ShortcutMap};
     use egui::{pos2, Pos2};
 
     /// One frame's painted shapes, flattened.
