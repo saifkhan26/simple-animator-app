@@ -1481,6 +1481,68 @@ fn diag_row(ui: &mut egui::Ui, key: &str, value: String) {
 /// theme has no warning colour and one readout does not justify adding to it.
 pub(crate) const DIAG_BAD: Color32 = Color32::from_rgb(232, 138, 96);
 
+/// A tablet work area this far off the screen area's shape stretches strokes
+/// visibly; below it, rounding in the driver's own numbers.
+const ASPECT_TOLERANCE: f32 = 0.03;
+
+/// The screens, and where the tablet driver puts the pen on them. The usual
+/// cause of a pen that covers only part of the window is a driver work area
+/// spread over every monitor; this says so in as many words.
+fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnostics) {
+    use crate::input::tablet::{aspect_mismatch, monitors_spanned, ScreenRect};
+    let rect = |r: ScreenRect| format!("{}×{} @{},{}", r.w, r.h, r.x, r.y);
+    let monitors: Vec<String> = d
+        .display
+        .monitors
+        .iter()
+        .map(|&(m, primary)| format!("{}{}", rect(m), if primary { " (primary)" } else { "" }))
+        .collect();
+    diag_row(ui, "monitors", monitors.join(" · "));
+    diag_row(ui, "desktop", rect(d.display.desktop));
+    if let Some(area) = d.display.driver {
+        diag_row(ui, "driver area", rect(area.screen));
+        let spans = monitors_spanned(area.screen, &d.display.monitors);
+        if spans > 1 {
+            ui.label(
+                egui::RichText::new(format!(
+                    "the pen spans {spans} monitors — set the driver's work area to one \
+                     monitor so this window gets the whole tablet"
+                ))
+                .color(DIAG_BAD)
+                .size(11.0),
+            );
+        }
+        let off = aspect_mismatch(area.tablet, area.screen);
+        let ratio = |w: i32, h: i32| if h == 0 { 0.0 } else { (w as f32 / h as f32).abs() };
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("aspect").color(theme::TEXT_MUTED).size(11.0));
+            ui.label(
+                egui::RichText::new(format!(
+                    "tablet {:.2}:1, area {:.2}:1",
+                    ratio(area.tablet.0, area.tablet.1),
+                    ratio(area.screen.w, area.screen.h)
+                ))
+                .monospace()
+                .size(11.0)
+                .color(if off > ASPECT_TOLERANCE { DIAG_BAD } else { theme::TEXT }),
+            )
+            .on_hover_text(
+                "When these differ, strokes come out stretched: circles drawn on the \
+                 tablet land as ovals. Map the tablet to one monitor, or turn on the \
+                 driver's keep-proportions option.",
+            );
+        });
+    }
+    diag_row(ui, "ui scale", format!("{:.2} px/pt", ui.ctx().pixels_per_point()));
+    if let Some((x, y)) = crate::input::screen_pixel::cursor_pos() {
+        diag_row(ui, "cursor", format!("{x}, {y} desktop px"));
+    }
+    if d.reopens > 0 {
+        let why = d.last_reopen.map_or("", |r| r.label());
+        diag_row(ui, "reopened", format!("{}× (last: {why})", d.reopens));
+    }
+}
+
 /// What the tablet driver is actually reporting.
 ///
 /// A release build has no console, so nothing this module logs is reachable
@@ -1489,17 +1551,33 @@ pub(crate) const DIAG_BAD: Color32 = Color32::from_rgb(232, 138, 96);
 /// last line: the gap between where the pen says it is and where the cursor
 /// is. If that grows the further you get from the middle of the screen, an
 /// axis is inverted.
-fn tablet_diagnostics(state: &AppState, ui: &mut egui::Ui) {
+fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
     let d = state.pen.diagnostics();
     let cursor = ui.input(|i| i.pointer.latest_pos());
 
+    if ui
+        .small_button("Reconnect tablet")
+        .on_hover_text(
+            "Close and reopen the connection to the tablet driver. It also \
+             reopens by itself when monitors or the driver's work area change.",
+        )
+        .clicked()
+    {
+        state.pen.reconnect();
+    }
+    display_diagnostics(ui, &d);
 
     if !d.backend {
-        ui.label(
-            egui::RichText::new("No Wintab driver loaded.")
-                .color(theme::TEXT_MUTED)
-                .size(11.0),
-        );
+        let mut text = match &d.init_error {
+            Some(e) => format!("No tablet connection: {e}"),
+            None => "No tablet connection yet.".to_owned(),
+        };
+        if d.waiting_for_reconnect {
+            text.push_str(" Install or start the tablet driver, then press Reconnect.");
+        } else if let Some(wait) = d.retry_in {
+            text.push_str(&format!(" Trying again in {:.0} s.", wait.as_secs_f32().ceil()));
+        }
+        ui.label(egui::RichText::new(text).color(theme::TEXT_MUTED).size(11.0));
         return;
     }
 

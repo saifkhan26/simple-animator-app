@@ -5419,6 +5419,17 @@ impl eframe::App for AppState {
         }
         #[cfg(not(target_os = "windows"))]
         let _ = (&frame, self.window_styled);
+        // The pen binds to this window's handle rather than to whichever
+        // window is titled "Animator".
+        #[cfg(target_os = "windows")]
+        if !self.pen.has_hwnd() {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(h) = frame.window_handle() {
+                if let RawWindowHandle::Win32(w) = h.as_raw() {
+                    self.pen.set_hwnd(w.hwnd.get());
+                }
+            }
+        }
 
         self.pen.poll(ctx.input(|i| i.pointer.any_down()));
         // Sampled here rather than in the pointer handlers: those run off
