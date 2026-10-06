@@ -1084,6 +1084,12 @@ pub struct AppState {
     pub lock_brush_to_view: bool,
     /// Active non-drawing canvas gesture for the current drag, if any.
     pub nav_drag: Option<NavKind>,
+    /// The held combo that started this drag's gesture, while it lasts.
+    /// Letting go of it ends the gesture there, as Space-pan does in Krita.
+    pub hold_latch: Option<shortcuts::KeyCombo>,
+    /// The rest of this pen-down does nothing: its held gesture was let go,
+    /// and drawing from wherever the pen happens to be would be a surprise.
+    pub drag_inert: bool,
 
     pub playback: Playback,
     pub onion: OnionConfig,
@@ -1188,6 +1194,9 @@ pub struct AppState {
     /// While `Some(action)`, the next key press from the user becomes the
     /// new binding for that action.
     pub rebinding: Option<Action>,
+    /// Capture state while `rebinding` is a hold binding: bare modifiers are
+    /// only known once they come back up.
+    pub hold_capture: shortcuts::HoldCapture,
     /// Settings lists only the bindings that clash. Session-only.
     pub shortcut_clashes_only: bool,
     /// In-progress inline layer rename in the layers panel.
@@ -1436,6 +1445,8 @@ impl AppState {
             view_scale: 1.0,
             lock_brush_to_view: prefs.lock_brush_to_view,
             nav_drag: None,
+            hold_latch: None,
+            drag_inert: false,
             playback: Playback::default(),
             onion: prefs.onion,
             fade_others: false,
@@ -1474,6 +1485,7 @@ impl AppState {
             preview_upload_rect: None,
             shortcuts: shortcuts::load(),
             rebinding: None,
+            hold_capture: Default::default(),
             shortcut_clashes_only: false,
             layer_rename: None,
             show_settings: false,
@@ -4896,11 +4908,15 @@ impl AppState {
                 Ok(None) => {}
                 Err(e) => log::error!("Open project failed: {e:#}"),
             },
-            // Canvas nav gestures are modifier-only drag binds, handled directly
-            // in the canvas input code — never dispatched as press actions.
+            // Held, not pressed: read by the canvas input code as a drag
+            // starts, never dispatched.
             Action::CanvasZoom
             | Action::CanvasPan
             | Action::CanvasRotate
+            | Action::HoldToolAdjust
+            | Action::HoldScrub
+            | Action::HoldFlip
+            | Action::HoldSwatchPie
             | Action::SelModeAdd
             | Action::SelModeSubtract
             | Action::SelModeIntersect => {}
@@ -5101,91 +5117,40 @@ impl AppState {
         let tab_focus = ctx.input(|i| i.key_pressed(egui::Key::Tab))
             && ctx.memory(|m| m.focused()).is_none();
 
+        // A focused button takes Space as a click, auto-repeat included. With
+        // Space held for a gesture that would press whatever button last had
+        // focus, so a hold key lets go of it first. Text fields keep it.
+        if let Some(id) = ctx.memory(|m| m.focused()) {
+            let hold_keys = self.shortcuts.hold_keys();
+            if ctx.input(|i| hold_keys.iter().any(|&k| i.key_pressed(k)))
+                && egui::text_edit::TextEditState::load(ctx, id).is_none()
+            {
+                ctx.memory_mut(|m| m.surrender_focus(id));
+            }
+        }
+
         // Shortcut rebind capture: when an Action is "rebinding", the next
-        // key press becomes its new combo and rebind mode ends.
+        // key press becomes its new combo and rebind mode ends. A hold
+        // binding may also be bare modifiers, taken when they come back up.
         if let Some(action) = self.rebinding {
-            let captured = ctx.input(|i| {
-                use egui::Key;
-                let mods = i.modifiers;
-                // Ignore modifier-only key presses (Shift on its own etc.).
-                for &key in &[
-                    Key::A,
-                    Key::B,
-                    Key::C,
-                    Key::D,
-                    Key::E,
-                    Key::F,
-                    Key::G,
-                    Key::H,
-                    Key::I,
-                    Key::J,
-                    Key::K,
-                    Key::L,
-                    Key::M,
-                    Key::N,
-                    Key::O,
-                    Key::P,
-                    Key::Q,
-                    Key::R,
-                    Key::S,
-                    Key::T,
-                    Key::U,
-                    Key::V,
-                    Key::W,
-                    Key::X,
-                    Key::Y,
-                    Key::Z,
-                    Key::Num0,
-                    Key::Num1,
-                    Key::Num2,
-                    Key::Num3,
-                    Key::Num4,
-                    Key::Num5,
-                    Key::Num6,
-                    Key::Num7,
-                    Key::Num8,
-                    Key::Num9,
-                    Key::OpenBracket,
-                    Key::CloseBracket,
-                    Key::Semicolon,
-                    Key::Comma,
-                    Key::Period,
-                    Key::Slash,
-                    Key::Backslash,
-                    Key::Minus,
-                    Key::Equals,
-                    Key::Space,
-                    Key::Tab,
-                    Key::Backspace,
-                    Key::Backtick,
-                    Key::F1,
-                    Key::F2,
-                    Key::F3,
-                    Key::F4,
-                    Key::F5,
-                    Key::F6,
-                    Key::F7,
-                    Key::F8,
-                    Key::F9,
-                    Key::F10,
-                    Key::F11,
-                    Key::F12,
-                    Key::ArrowUp,
-                    Key::ArrowDown,
-                    Key::ArrowLeft,
-                    Key::ArrowRight,
-                ] {
-                    if i.key_pressed(key) {
-                        return Some(crate::input::shortcuts::KeyCombo {
-                            key: Some(key),
-                            ctrl: mods.ctrl,
-                            shift: mods.shift,
-                            alt: mods.alt,
-                        });
-                    }
-                }
-                None
+            let (mods, pressed) = ctx.input(|i| {
+                let key = shortcuts::CAPTURE_KEYS
+                    .iter()
+                    .copied()
+                    .find(|&k| i.key_pressed(k));
+                (i.modifiers, key)
             });
+            let captured = if action.is_hold() {
+                self.hold_capture.step(mods, pressed)
+            } else {
+                // A modifier on its own is no press binding.
+                pressed.map(|key| shortcuts::KeyCombo {
+                    key: Some(key),
+                    ctrl: mods.ctrl,
+                    shift: mods.shift,
+                    alt: mods.alt,
+                })
+            };
             if let Some(combo) = captured {
                 self.shortcuts.set(action, combo);
                 self.rebinding = None;
@@ -6572,6 +6537,107 @@ mod tests {
         assert_eq!(ctx.memory(|m| m.focused()), None, "Tab left a panel widget focused");
         frame(&mut st, Some(egui::Key::Q));
         assert_eq!(st.tool, ActiveTool::Pencil);
+    }
+
+    /// Settings takes a bare Shift for a hold binding once it comes back up,
+    /// and a key with whatever is held for a press binding as before.
+    #[test]
+    fn capturing_a_bare_modifier_in_settings() {
+        use crate::input::shortcuts::KeyCombo;
+        let mut st = AppState::for_test();
+        st.shortcuts = ShortcutMap::default();
+        let ctx = egui::Context::default();
+        let frame = |st: &mut AppState, mods: egui::Modifiers, key: Option<egui::Key>| {
+            let events = key
+                .map(|key| egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: mods,
+                })
+                .into_iter()
+                .collect();
+            let raw = egui::RawInput {
+                events,
+                modifiers: mods,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                st.handle_keys(ctx);
+            });
+        };
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        st.rebinding = Some(Action::HoldToolAdjust);
+        frame(&mut st, egui::Modifiers::NONE, None);
+        frame(&mut st, shift, None);
+        assert_eq!(st.rebinding, Some(Action::HoldToolAdjust), "still listening while held");
+        frame(&mut st, egui::Modifiers::NONE, None);
+        assert_eq!(st.rebinding, None);
+        assert_eq!(
+            st.shortcuts.get(Action::HoldToolAdjust),
+            Some(KeyCombo::modifier_only(false, true, false))
+        );
+        // A press binding ignores the bare modifier and waits for a key.
+        st.rebinding = Some(Action::ToolInk);
+        frame(&mut st, shift, None);
+        frame(&mut st, egui::Modifiers::NONE, None);
+        assert_eq!(st.rebinding, Some(Action::ToolInk));
+        frame(&mut st, shift, Some(egui::Key::I));
+        assert_eq!(st.shortcuts.get(Action::ToolInk), Some(KeyCombo::shift(egui::Key::I)));
+    }
+
+    /// A focused button takes Space as a click. Held for a pan, Space must
+    /// let go of the button rather than press it.
+    #[test]
+    fn space_held_for_pan_does_not_click_a_focused_button() {
+        use crate::input::shortcuts::KeyCombo;
+        for (pan_on_space, clicks) in [(true, false), (false, true)] {
+            let mut st = AppState::for_test();
+            st.shortcuts = ShortcutMap::default();
+            st.shortcuts.bindings.clear();
+            if pan_on_space {
+                st.shortcuts.set(Action::CanvasPan, KeyCombo::plain(egui::Key::Space));
+            }
+            let ctx = egui::Context::default();
+            let button = egui::Id::new("test button");
+            let mut clicked = false;
+            let mut frame = |st: &mut AppState, space: bool, focus: bool| {
+                let events = if space {
+                    vec![egui::Event::Key {
+                        key: egui::Key::Space,
+                        physical_key: Some(egui::Key::Space),
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }]
+                } else {
+                    vec![]
+                };
+                let raw = egui::RawInput {
+                    events,
+                    ..Default::default()
+                };
+                let _ = ctx.run(raw, |ctx| {
+                    st.handle_keys(ctx);
+                    egui::Area::new(egui::Id::new("test area")).show(ctx, |ui| {
+                        let r = ui.add(egui::Button::new("b").sense(egui::Sense::click()));
+                        let r = ui.interact(r.rect, button, egui::Sense::click());
+                        if focus {
+                            r.request_focus();
+                        }
+                        clicked |= r.clicked();
+                    });
+                });
+            };
+            frame(&mut st, false, true);
+            assert_eq!(ctx.memory(|m| m.focused()), Some(button));
+            frame(&mut st, true, false);
+            assert_eq!(clicked, clicks, "Space with pan on it: {pan_on_space}");
+        }
     }
 
     /// With the panels moved to M and "last layer" put on Tab, Tab inside a
