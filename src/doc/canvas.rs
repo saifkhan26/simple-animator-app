@@ -30,7 +30,12 @@ const PAR_MIN: usize = 2 << 20;
 /// fast one core moves memory, which is a fraction of what the memory can
 /// take: an 8K cell clears and fills about 2× faster on several.
 pub fn par_rows<T: Send>(buf: &mut [T], row: usize, f: impl Fn(usize, &mut [T]) + Sync) {
-    let rows = buf.len() / row.max(1);
+    // No rows, or rows of nothing — a freed 0×0 canvas: nothing to do, and
+    // `f` can't split a band into 0-wide rows.
+    if row == 0 || buf.is_empty() {
+        return;
+    }
+    let rows = buf.len() / row;
     let threads = match std::mem::size_of_val(buf) {
         n if n < PAR_MIN || rows < 2 => 1,
         _ => std::thread::available_parallelism().map_or(1, |n| n.get().min(8)),

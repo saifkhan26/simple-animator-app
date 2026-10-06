@@ -352,6 +352,24 @@ mod tests {
         assert_eq!(p.camera, cam);
     }
 
+    /// A freed cell is 0×0 and holds nothing; saving one must still work.
+    /// Saves panicked here once, which on a background save took the whole
+    /// app down: reading a 0-wide canvas row by row asked for 0-byte rows.
+    #[test]
+    fn saves_a_project_with_freed_cells() {
+        let mut p = Project::new(40, 30, 12.0);
+        p.cells.push(std::sync::Arc::new(crate::doc::canvas::Canvas::tombstone()));
+        let mut c = crate::doc::canvas::Canvas::new(40, 30);
+        c.pixels_mut()[(5 * 40 + 6) * 4 + 3] = 255;
+        c.pack();
+        p.cells.push(c.into());
+        let (bytes, _) = encode(&p).unwrap();
+        let back = decode(&bytes).unwrap();
+        assert_eq!(back.cells.len(), 3);
+        assert!(back.cells[1].is_tombstone());
+        assert_eq!(back.cells[2].px(6, 5)[3], 255);
+    }
+
     /// Current-version round trip through encode/decode.
     #[test]
     fn round_trips_current_project() {
