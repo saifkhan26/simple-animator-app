@@ -5093,10 +5093,10 @@ impl AppState {
 
     /// Rebind capture and shortcut dispatch for this frame's key presses.
     ///
-    /// Returns whether a Tab press found nothing focused. Tab is our panel
-    /// toggle, but egui also reads it as "focus the next widget" and hands
-    /// focus to the first one drawn after it; `drop_stray_focus` takes that
-    /// back once the frame is drawn.
+    /// Returns whether a Tab press found nothing focused. Tab is a shortcut
+    /// like any other (the panel toggle by default), but egui also reads it
+    /// as "focus the next widget" and hands focus to the first one drawn after
+    /// it; `drop_stray_focus` takes that back once the frame is drawn.
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) -> bool {
         let tab_focus = ctx.input(|i| i.key_pressed(egui::Key::Tab))
             && ctx.memory(|m| m.focused()).is_none();
@@ -5197,8 +5197,9 @@ impl AppState {
             // Normal shortcut dispatch — skip when a text widget has keyboard
             // focus so the user can type into fields (e.g. DragValue in the
             // new-project dialog) without triggering shortcuts.
-            // Tab (TogglePanels) and Backtick (ToggleCheckerBg) are always
-            // allowed through so the user can recover panels if focus is stuck.
+            // Whatever is bound to Tab or ` is always let through
+            // (`FOCUS_PASS_KEYS`), so the panels — on Tab by default — can be
+            // got back if focus is stuck.
             if ctx.memory(|m| m.focused()).is_none() {
                 let actions = self.shortcuts.poll_actions(ctx);
                 // Delete is both the selection's erase and the tracks'
@@ -5270,11 +5271,8 @@ impl AppState {
                     self.nudge_selection(dx, dy);
                 }
             } else {
-                if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
-                    self.dispatch(Action::TogglePanels);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::Backtick)) {
-                    self.dispatch(Action::ToggleCheckerBg);
+                for a in self.shortcuts.poll_focused(ctx) {
+                    self.dispatch(a);
                 }
             }
         }
@@ -5283,9 +5281,9 @@ impl AppState {
 
     /// Clear keyboard focus nothing should be holding: any at all while the
     /// panels are hidden, and whatever a Tab press handed out (see
-    /// `handle_keys`). A focused widget gates off every shortcut but Tab and
-    /// `, so Tabbing the panels back would otherwise leave the first panel
-    /// button focused and the shortcuts dead until the next click.
+    /// `handle_keys`). A focused widget gates off every shortcut but those on
+    /// Tab and `, so Tabbing the panels back would otherwise leave the first
+    /// panel button focused and the shortcuts dead until the next click.
     pub(crate) fn drop_stray_focus(&self, ctx: &egui::Context, tab_focus: bool) {
         if !self.show_panels || tab_focus {
             ctx.memory_mut(|m| {
@@ -6563,6 +6561,67 @@ mod tests {
         assert_eq!(ctx.memory(|m| m.focused()), None, "Tab left a panel widget focused");
         frame(&mut st, Some(egui::Key::Q));
         assert_eq!(st.tool, ActiveTool::Pencil);
+    }
+
+    /// With the panels moved to M and "last layer" put on Tab, Tab inside a
+    /// text field must go to the last layer: what gets through focus is the
+    /// map's binding on Tab, not a key wired to the panels.
+    #[test]
+    fn tab_reaches_its_own_binding_from_a_focused_field() {
+        use crate::input::shortcuts::KeyCombo;
+        let mut st = AppState::for_test();
+        st.shortcuts = ShortcutMap::default();
+        st.shortcuts.set(Action::TogglePanels, KeyCombo::plain(egui::Key::M));
+        st.shortcuts.set(Action::ToggleMiniTimeline, KeyCombo::shift(egui::Key::M));
+        st.shortcuts.set(Action::LayerLast, KeyCombo::plain(egui::Key::Tab));
+        st.project.add_layer();
+        let panels = st.show_panels;
+        let ctx = egui::Context::default();
+        let field = egui::Id::new("test field");
+        let mut text = String::new();
+        // One frame: keys, then a text field (focused on request), then the
+        // focus clean-up, the order `update` runs them in.
+        let mut frame = |st: &mut AppState, key: Option<(egui::Key, egui::Modifiers)>, focus: bool| {
+            let events = key
+                .map(|(key, modifiers)| egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                })
+                .into_iter()
+                .collect();
+            let raw = egui::RawInput {
+                events,
+                modifiers: key.map_or(egui::Modifiers::NONE, |k| k.1),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                let tab_focus = st.handle_keys(ctx);
+                egui::Area::new(egui::Id::new("test area")).show(ctx, |ui| {
+                    let r = ui.add(egui::TextEdit::singleline(&mut text).id(field));
+                    if focus {
+                        r.request_focus();
+                    }
+                });
+                st.drop_stray_focus(ctx, tab_focus);
+            });
+        };
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        for (mods, jumps) in [(egui::Modifiers::NONE, true), (shift, false)] {
+            st.project.current_layer = 1;
+            st.prev_layer = Some(0);
+            frame(&mut st, None, true);
+            assert_eq!(ctx.memory(|m| m.focused()), Some(field));
+            frame(&mut st, Some((egui::Key::Tab, mods)), false);
+            let want = if jumps { 0 } else { 1 };
+            assert_eq!(st.project.current_layer, want, "Tab with {mods:?}");
+            assert_eq!(st.show_panels, panels, "Tab is no longer the panels");
+        }
     }
 
     /// The Krita link end to end on a real file, minus Krita: send, a "Krita
