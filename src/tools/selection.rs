@@ -169,12 +169,12 @@ impl Pose {
     }
 
     /// The pose this one becomes when `grab` is dragged from `start` to `now`,
-    /// both in cell space. `uniform` is the Shift constraint: it locks a corner
-    /// scale to one ratio, and snaps a rotation to 15°.
+    /// both in cell space, with `mods` held — see [`DragMods`].
     ///
     /// Always solved against `self`, which callers hold fixed at the pose
     /// recorded when the handle was pressed. A drag therefore depends only on
-    /// where the pointer is now, not on the path it took to get there.
+    /// where the pointer is now, not on the path it took to get there — and
+    /// pressing or letting go of Shift or Alt mid-drag never drifts.
     ///
     /// [`Grab::Move`] is not handled here — the pointer path owns it, so that a
     /// move keeps accumulating in whole pixels and stays lossless.
@@ -184,27 +184,29 @@ impl Pose {
         grab: Grab,
         start: (f32, f32),
         now: (f32, f32),
-        uniform: bool,
+        mods: DragMods,
     ) -> Pose {
         let (w, h) = (m.w as f32, m.h as f32);
         match grab {
             Grab::Move => *self,
             Grab::Rotate => {
                 // The centre is a fixed point of a rotation about itself, so
-                // the offset needs no correction.
+                // the offset needs no correction — and Alt, which would put
+                // the pivot there, has nothing to change.
                 let c = self.buf_to_cell(m, w * 0.5, h * 0.5);
                 let a0 = (start.1 - c.1).atan2(start.0 - c.0);
                 let a1 = (now.1 - c.1).atan2(now.0 - c.0);
                 let mut rot = self.rot + (a1 - a0);
-                if uniform {
+                if mods.proportional {
                     let step = std::f32::consts::FRAC_PI_2 / 6.0;
                     rot = (rot / step).round() * step;
                 }
                 Pose { rot, ..*self }
             }
             Grab::Scale(id) => {
-                let (anchor, (drives_x, drives_y)) =
+                let (opposite, (drives_x, drives_y)) =
                     grab.anchor(w, h).expect("Scale always has an anchor");
+                let anchor = if mods.centred { (w * 0.5, h * 0.5) } else { opposite };
                 let handle = Grab::handle_pos(id, w, h);
                 // Solve in the frame where the anchor is the origin and the
                 // rotation is undone: the pointer delta then reads straight off
@@ -215,35 +217,41 @@ impl Pose {
                 let qx = dx * c + dy * s;
                 let qy = -dx * s + dy * c;
                 let (hx, hy) = (handle.0 - anchor.0, handle.1 - anchor.1);
+                let s0 = self.scale;
 
-                let mut sx = if drives_x && hx.abs() > 1e-6 {
-                    qx / hx
+                let scale = if mods.proportional {
+                    // One factor on the scale the box had at the press, so a
+                    // stretched box keeps its stretch.
+                    let k = if drives_x && drives_y {
+                        // The handle's proportional path is the line through
+                        // the anchor and where it started; take the point on
+                        // it nearest the pointer. Continuous, and it shrinks
+                        // as readily as it grows.
+                        let (ex, ey) = (hx * s0.0, hy * s0.1);
+                        (qx * ex + qy * ey) / (ex * ex + ey * ey).max(1e-12)
+                    } else if drives_x {
+                        qx / (hx * s0.0)
+                    } else {
+                        qy / (hy * s0.1)
+                    };
+                    // Clamped as one, so the limits don't bend the aspect.
+                    let lo = (MIN_SCALE / s0.0).max(MIN_SCALE / s0.1);
+                    let hi = (MAX_SCALE / s0.0).min(MAX_SCALE / s0.1);
+                    let k = k.clamp(lo, hi.max(lo));
+                    (s0.0 * k, s0.1 * k)
                 } else {
-                    self.scale.0
+                    let sx = if drives_x && hx.abs() > 1e-6 { qx / hx } else { s0.0 };
+                    let sy = if drives_y && hy.abs() > 1e-6 { qy / hy } else { s0.1 };
+                    // Clamped rather than let through zero: a negative scale
+                    // would mirror the art, which is not what dragging a
+                    // handle past the far edge is asking for (Flip is), and
+                    // zero has no inverse.
+                    (sx.clamp(MIN_SCALE, MAX_SCALE), sy.clamp(MIN_SCALE, MAX_SCALE))
                 };
-                let mut sy = if drives_y && hy.abs() > 1e-6 {
-                    qy / hy
-                } else {
-                    self.scale.1
-                };
-                if uniform && drives_x && drives_y {
-                    let u = sx.abs().max(sy.abs());
-                    sx = u;
-                    sy = u;
-                }
-                // Clamped rather than let through zero: a negative scale would
-                // mirror the art, which is not what dragging a handle past the
-                // far edge is asking for, and zero has no inverse.
-                let mut p = Pose {
-                    scale: (
-                        sx.clamp(MIN_SCALE, MAX_SCALE),
-                        sy.clamp(MIN_SCALE, MAX_SCALE),
-                    ),
-                    ..*self
-                };
+                let mut p = Pose { scale, ..*self };
                 // Scaling happens about the centre, so the anchor drifted. Put
                 // it back — this is the one thing that makes `offset`
-                // fractional.
+                // fractional. About the centre itself (Alt), nothing moved.
                 let moved = p.buf_to_cell(m, anchor.0, anchor.1);
                 p.offset.0 += pa.0 - moved.0;
                 p.offset.1 += pa.1 - moved.1;
@@ -251,6 +259,17 @@ impl Pose {
             }
         }
     }
+}
+
+/// What the modifiers held during a transform-box drag ask for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DragMods {
+    /// Shift: any handle keeps the box's proportions as they were when it was
+    /// grabbed, and a rotation snaps to 15°.
+    pub proportional: bool,
+    /// Alt: scale about the box's centre rather than the opposite handle, so
+    /// both sides move.
+    pub centred: bool,
 }
 
 /// Where a cell sat in the document when a float was cut from it: the layer
@@ -1234,7 +1253,7 @@ mod tests {
         };
         let p = Pose::default();
         // Grab BR (handle 2) at (25, 15) and pull it to (45, 35).
-        let after = p.dragged(&m, Grab::Scale(2), (25.0, 15.0), (45.0, 35.0), false);
+        let after = p.dragged(&m, Grab::Scale(2), (25.0, 15.0), (45.0, 35.0), PLAIN);
         let tl = after.buf_to_cell(&m, 0.0, 0.0);
         let br = after.buf_to_cell(&m, 20.0, 10.0);
         assert!(
@@ -1249,20 +1268,131 @@ mod tests {
         assert!((after.scale.1 - 3.0).abs() < 1e-3);
     }
 
-    /// Shift on a corner locks the two axes to one ratio.
-    #[test]
-    fn shift_makes_a_corner_drag_uniform() {
-        let m = Mask {
+    const PLAIN: DragMods = DragMods {
+        proportional: false,
+        centred: false,
+    };
+    const SHIFT: DragMods = DragMods {
+        proportional: true,
+        centred: false,
+    };
+    const ALT: DragMods = DragMods {
+        proportional: false,
+        centred: true,
+    };
+    const SHIFT_ALT: DragMods = DragMods {
+        proportional: true,
+        centred: true,
+    };
+
+    fn box10() -> Mask {
+        Mask {
             x: 0,
             y: 0,
             w: 10,
             h: 10,
             cov: vec![255; 100],
-        };
-        let after = Pose::default().dragged(&m, Grab::Scale(2), (10.0, 10.0), (40.0, 20.0), true);
+        }
+    }
+
+    fn near(a: (f32, f32), b: (f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+    }
+
+    /// Shift on a corner keeps one ratio, at the point on the box's diagonal
+    /// nearest the pointer: pulled to (40, 20) from (10, 10), that is 3×.
+    #[test]
+    fn shift_on_a_corner_projects_onto_the_diagonal() {
+        let after = Pose::default().dragged(&box10(), Grab::Scale(2), (10.0, 10.0), (40.0, 20.0), SHIFT);
         assert!((after.scale.0 - after.scale.1).abs() < 1e-4);
-        // The bigger of the two ratios wins (4x across, 2x down).
-        assert!((after.scale.0 - 4.0).abs() < 1e-3, "got {}", after.scale.0);
+        assert!((after.scale.0 - 3.0).abs() < 1e-3, "got {}", after.scale.0);
+        // Pulled inwards, it shrinks just as readily.
+        let after = Pose::default().dragged(&box10(), Grab::Scale(2), (10.0, 10.0), (5.0, 6.0), SHIFT);
+        assert!((after.scale.0 - 0.55).abs() < 1e-3, "got {}", after.scale.0);
+    }
+
+    /// Shift on a box already stretched 2:1 keeps it 2:1, not square.
+    #[test]
+    fn shift_on_a_corner_keeps_a_stretched_aspect() {
+        let p = Pose {
+            scale: (2.0, 1.0),
+            ..Pose::default()
+        };
+        let m = box10();
+        let br = p.buf_to_cell(&m, 10.0, 10.0);
+        let after = p.dragged(&m, Grab::Scale(2), br, (br.0 + 20.0, br.1 + 10.0), SHIFT);
+        assert!((after.scale.0 / after.scale.1 - 2.0).abs() < 1e-4, "{:?}", after.scale);
+        assert!(after.scale.0 > 2.0);
+    }
+
+    /// Shift on an edge handle scales both axes, the far one about the box's
+    /// centre line, and keeps the aspect the box had.
+    #[test]
+    fn shift_on_an_edge_keeps_the_aspect() {
+        let p = Pose {
+            scale: (2.0, 1.0),
+            ..Pose::default()
+        };
+        let m = box10();
+        let left_mid = p.buf_to_cell(&m, 0.0, 5.0);
+        let right = p.buf_to_cell(&m, 10.0, 5.0);
+        // Handle 5, the right edge, pulled to double the width.
+        let to = (right.0 + (right.0 - left_mid.0), right.1);
+        let after = p.dragged(&m, Grab::Scale(5), right, to, SHIFT);
+        assert!(near(after.scale, (4.0, 2.0)), "{:?}", after.scale);
+        assert!(near(after.buf_to_cell(&m, 0.0, 5.0), left_mid), "the left edge stays");
+        // Without Shift it is one axis, as ever.
+        let after = p.dragged(&m, Grab::Scale(5), right, to, PLAIN);
+        assert!(near(after.scale, (4.0, 1.0)), "{:?}", after.scale);
+    }
+
+    /// Alt pins the centre instead of the opposite handle, so the box grows
+    /// on both sides: twice the pointer's travel in all.
+    #[test]
+    fn alt_scales_about_the_centre() {
+        let m = box10();
+        let p = Pose::default();
+        let centre = p.buf_to_cell(&m, 5.0, 5.0);
+        // The right edge moved 5 to the right: 5 + 5 = 10 from the centre,
+        // so the box is twice as wide.
+        let after = p.dragged(&m, Grab::Scale(5), (10.0, 5.0), (15.0, 5.0), ALT);
+        assert!(near(after.scale, (2.0, 1.0)), "{:?}", after.scale);
+        assert!(near(after.buf_to_cell(&m, 5.0, 5.0), centre), "the centre stays");
+        assert!(near(after.buf_to_cell(&m, 0.0, 5.0), (-5.0, 5.0)), "the left edge moved too");
+    }
+
+    #[test]
+    fn shift_alt_keeps_aspect_about_the_centre() {
+        let p = Pose {
+            scale: (1.0, 2.0),
+            rot: 0.4,
+            ..Pose::default()
+        };
+        let m = box10();
+        let centre = p.buf_to_cell(&m, 5.0, 5.0);
+        let br = p.buf_to_cell(&m, 10.0, 10.0);
+        let to = (centre.0 + (br.0 - centre.0) * 1.5, centre.1 + (br.1 - centre.1) * 1.5);
+        let after = p.dragged(&m, Grab::Scale(2), br, to, SHIFT_ALT);
+        assert!(near(after.scale, (1.5, 3.0)), "{:?}", after.scale);
+        assert!(near(after.buf_to_cell(&m, 5.0, 5.0), centre));
+        assert!(near(after.buf_to_cell(&m, 10.0, 10.0), to), "the corner under the pointer");
+    }
+
+    /// At the scale limits the factor stops as one, so the aspect holds.
+    #[test]
+    fn proportional_clamps_keep_the_aspect() {
+        let p = Pose {
+            scale: (4.0, 1.0),
+            ..Pose::default()
+        };
+        let m = box10();
+        let br = p.buf_to_cell(&m, 10.0, 10.0);
+        let after = p.dragged(&m, Grab::Scale(2), br, (1e6, 1e6), SHIFT);
+        assert!((after.scale.0 - MAX_SCALE).abs() < 1e-3, "{:?}", after.scale);
+        assert!((after.scale.0 / after.scale.1 - 4.0).abs() < 1e-3, "{:?}", after.scale);
+        let after = p.dragged(&m, Grab::Scale(2), br, (-1e6, -1e6), SHIFT);
+        assert!((after.scale.1 - MIN_SCALE).abs() < 1e-6, "{:?}", after.scale);
+        assert!((after.scale.0 / after.scale.1 - 4.0).abs() < 1e-3, "{:?}", after.scale);
     }
 
     /// An edge handle drives one axis and leaves the other alone.
@@ -1276,7 +1406,7 @@ mod tests {
             cov: vec![255; 100],
         };
         // Handle 5 is the right edge.
-        let after = Pose::default().dragged(&m, Grab::Scale(5), (10.0, 5.0), (30.0, 5.0), false);
+        let after = Pose::default().dragged(&m, Grab::Scale(5), (10.0, 5.0), (30.0, 5.0), PLAIN);
         assert!((after.scale.0 - 3.0).abs() < 1e-3, "got {}", after.scale.0);
         assert!((after.scale.1 - 1.0).abs() < 1e-6, "y must not move");
     }
@@ -1291,7 +1421,7 @@ mod tests {
             h: 10,
             cov: vec![255; 100],
         };
-        let after = Pose::default().dragged(&m, Grab::Scale(2), (10.0, 10.0), (-30.0, -30.0), false);
+        let after = Pose::default().dragged(&m, Grab::Scale(2), (10.0, 10.0), (-30.0, -30.0), PLAIN);
         assert_eq!(after.scale.0, MIN_SCALE);
         assert_eq!(after.scale.1, MIN_SCALE);
     }
@@ -1309,7 +1439,7 @@ mod tests {
         let p = Pose::default();
         let before = p.buf_to_cell(&m, 10.0, 10.0);
         // From due east of the centre to due south: a quarter turn.
-        let after = p.dragged(&m, Grab::Rotate, (40.0, 20.0), (20.0, 40.0), false);
+        let after = p.dragged(&m, Grab::Rotate, (40.0, 20.0), (20.0, 40.0), PLAIN);
         let moved = after.buf_to_cell(&m, 10.0, 10.0);
         assert!((moved.0 - before.0).abs() < 1e-3 && (moved.1 - before.1).abs() < 1e-3);
         assert!(
@@ -1330,7 +1460,7 @@ mod tests {
             cov: vec![255; 400],
         };
         let step = std::f32::consts::FRAC_PI_2 / 6.0;
-        let after = Pose::default().dragged(&m, Grab::Rotate, (30.0, 10.0), (29.0, 13.0), true);
+        let after = Pose::default().dragged(&m, Grab::Rotate, (30.0, 10.0), (29.0, 13.0), SHIFT);
         let k = (after.rot / step).round();
         assert!((after.rot - k * step).abs() < 1e-4, "got {}", after.rot);
     }

@@ -156,6 +156,18 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 // stops meaning "delete the drawings selected in the tracks".
                 state.track_sel.clear();
                 state.drag_inert = false;
+                // A press on the transform box takes it, whatever bare
+                // modifiers are held: there Shift keeps proportions and Alt
+                // scales from the centre, not pan and rotate, and a selection
+                // mode mustn't start a new shape over a handle. A held key
+                // (Space) still wins — it only ever means the view.
+                let on_box = state.tool == ActiveTool::Lasso
+                    && button.is_none()
+                    && !held.is_some_and(|(_, c)| c.key.is_some())
+                    && resp
+                        .interact_pointer_pos()
+                        .is_some_and(|p| state.transform_grab_at(canvas_to_doc(p)).is_some());
+                let (held, held_op) = if on_box { (None, None) } else { (held, held_op) };
                 // Decide once, on press, what this drag does. A middle or
                 // right button does what Settings binds it to, the view
                 // gestures among those through the navigation drag. Otherwise
@@ -4109,7 +4121,11 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
     let paste = combo_text(state, Action::SelectionPaste);
     ui.label(
         egui::RichText::new(format!(
-            "Every stroke and fill stays inside the selection. Drag inside it to              move the pixels, or nudge with the arrow keys; Enter puts them down.              {del} erases inside it - {cut} / {copy} / {paste} move it between              frames and layers.",
+            "Every stroke and fill stays inside the selection. Drag inside it to \
+             move the pixels, or nudge with the arrow keys; Enter puts them down. \
+             On a handle, Shift keeps proportions and Alt scales from the centre. \
+             {del} erases inside it - {cut} / {copy} / {paste} move it between \
+             frames and layers.",
         ))
         .color(theme::TEXT_MUTED)
         .size(11.0),
@@ -8596,6 +8612,93 @@ mod button_drag_tests {
         hold_drag(&ctx, &mut state, space, egui::Modifiers::NONE, pos2(600.0, 400.0), vec2(40.0, 0.0), None);
         assert_eq!(state.view.pan, pan);
         assert!(state.project.layers[0].transform.tx != tx, "the layer stayed put");
+    }
+
+    /// A red square at 200..300 selected with the rectangle lasso, not yet
+    /// lifted; the bindings as reported (pan Shift, rotate Alt, intersect
+    /// Shift+Alt). Returns the screen points of its bottom-right handle and
+    /// its middle.
+    fn boxed(ctx: &egui::Context, state: &mut AppState) -> (Pos2, Pos2) {
+        state.shortcuts = crate::input::shortcuts::ShortcutMap::default();
+        let cell = state.project.ensure_active_cell();
+        let c = state.project.cell_mut(cell).unwrap();
+        for y in 200..300u32 {
+            for x in 200..300u32 {
+                let i = ((y * c.width + x) * 4) as usize;
+                c.pixels_mut()[i..i + 4].copy_from_slice(&[200, 0, 0, 255]);
+            }
+        }
+        state.set_tool(ActiveTool::Lasso);
+        state.sel_shape = SelShape::Rect;
+        state.select_down((190.0, 190.0), None);
+        state.select_move((310.0, 310.0));
+        state.select_up();
+        frame(ctx, state, vec![]);
+        let m = state.active_cell_mask().expect("a selection");
+        let xf = Xform::new(state, SCREEN);
+        let br = xf.doc_to_screen((m.x + m.w) as f32, (m.y + m.h) as f32);
+        (br, xf.doc_to_screen(250.0, 250.0))
+    }
+
+    fn mods(ctrl: bool, shift: bool, alt: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            ctrl,
+            shift,
+            alt,
+            command: ctrl,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn alt_on_a_handle_scales_instead_of_rotating_the_canvas() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let (br, _) = boxed(&ctx, &mut state);
+        let rotation = state.view.rotation;
+        hold_drag(&ctx, &mut state, None, mods(false, false, true), br, vec2(40.0, 40.0), None);
+        assert_eq!(state.view.rotation, rotation, "the canvas turned");
+        let sel = state.selection.as_ref().expect("the handle took the press");
+        assert!(sel.pose.scale.0 > 1.1, "{:?}", sel.pose.scale);
+    }
+
+    #[test]
+    fn shift_alt_on_a_handle_beats_intersect() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let (br, _) = boxed(&ctx, &mut state);
+        hold_drag(&ctx, &mut state, None, mods(false, true, true), br, vec2(40.0, 40.0), None);
+        let sel = state.selection.as_ref().expect("the handle took the press");
+        assert!(sel.pose.scale.0 > 1.1, "{:?}", sel.pose.scale);
+        assert_eq!(state.sel_mask.as_ref().unwrap().at(250, 250), 255, "not intersected away");
+    }
+
+    #[test]
+    fn space_over_a_handle_still_pans() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let (br, _) = boxed(&ctx, &mut state);
+        state.shortcuts.set(Action::CanvasPan, KeyCombo::plain(egui::Key::Space));
+        let pan = state.view.pan;
+        let space = Some(egui::Key::Space);
+        hold_drag(&ctx, &mut state, space, egui::Modifiers::NONE, br, vec2(40.0, 0.0), None);
+        assert!((state.view.pan - pan - vec2(40.0, 0.0)).length() < 1.0, "{:?}", state.view.pan);
+        assert!(state.selection.is_none(), "the box was left alone");
+    }
+
+    /// Inside a selection that isn't lifted, a held mode still starts a new
+    /// shape: that is how you add to a selection from within it.
+    #[test]
+    fn a_held_mode_inside_an_unlifted_selection_still_starts_a_shape() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let (_, mid) = boxed(&ctx, &mut state);
+        let to = Xform::new(&state, SCREEN).doc_to_screen(380.0, 380.0);
+        hold_drag(&ctx, &mut state, None, mods(true, true, false), mid, to - mid, None);
+        assert!(state.selection.is_none(), "nothing lifted");
+        let m = state.sel_mask.as_ref().unwrap();
+        assert_eq!(m.at(250, 250), 255, "kept");
+        assert_eq!(m.at(350, 350), 255, "added");
     }
 
     #[test]

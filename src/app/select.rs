@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::{AppState, SelDrag, SelTint};
 use crate::tools::lasso::{self, Mask};
 use crate::tools::select_mask::{self, SelOp, SelShape, SelectionMask};
-use crate::tools::selection::{self, Placement, Pose, Selection, HANDLE_PX};
+use crate::tools::selection::{self, Grab, Placement, Pose, Selection, HANDLE_PX};
 use crate::tools::ActiveTool;
 use crate::undo;
 
@@ -425,6 +425,26 @@ impl AppState {
     /// A press on the float's transform box, or on the selection itself when
     /// there is no float yet, which lifts one. `true` when the press was
     /// taken.
+    /// What a plain press at `doc` would take hold of on the transform box,
+    /// without taking it: on a float, any part of it; on a selection not yet
+    /// lifted, only its handles and ring — inside it, a held selection mode
+    /// still starts a new shape, which is how you add to it from within.
+    pub fn transform_grab_at(&mut self, doc: (f32, f32)) -> Option<Grab> {
+        if self.polygon_active() || self.sel_op != SelOp::Replace {
+            return None;
+        }
+        let (cx, cy) = self.doc_to_active_cell(doc);
+        let tol = HANDLE_PX / self.cell_view_scale();
+        if let Some(sel) = &self.selection {
+            return sel.grab_at(cx, cy, tol);
+        }
+        if !self.mask_is_grabbable() {
+            return None;
+        }
+        let clip = self.active_cell_mask()?;
+        selection::grab_at(&clip, &Pose::default(), cx, cy, tol).filter(|g| *g != Grab::Move)
+    }
+
     fn try_grab(&mut self, doc: (f32, f32)) -> bool {
         let (cx, cy) = self.doc_to_active_cell(doc);
         let tol = HANDLE_PX / self.cell_view_scale();
@@ -912,7 +932,7 @@ impl AppState {
     /// re-solved from the pose recorded at the press, so it depends only on
     /// where the pointer is now.
     pub(super) fn drag_selection(&mut self, drag: SelDrag, x: f32, y: f32) {
-        if let selection::Grab::Move = drag.grab {
+        if let Grab::Move = drag.grab {
             let (dx, dy) = (
                 (x - drag.start.0).round() as i32,
                 (y - drag.start.1).round() as i32,
@@ -926,13 +946,16 @@ impl AppState {
             self.nudge_selection(dx, dy);
             return;
         }
-        let uniform = self.shift_held;
+        let mods = selection::DragMods {
+            proportional: self.shift_held,
+            centred: self.alt_held,
+        };
         let Some(sel) = self.selection.as_mut() else {
             return;
         };
         let pose = drag
             .pose
-            .dragged(&sel.mask, drag.grab, drag.start, (x, y), uniform);
+            .dragged(&sel.mask, drag.grab, drag.start, (x, y), mods);
         if pose == sel.pose {
             return;
         }
@@ -1347,6 +1370,37 @@ mod tests {
         st.undo();
         assert_eq!(px(&st, 105, 120), RED);
         assert_eq!(px(&st, 135, 120), BLUE);
+    }
+
+    /// Alt pressed and let go mid-drag switches the pivot back and forth, and
+    /// every frame is solved from the press, so nothing creeps.
+    #[test]
+    fn alt_toggled_mid_drag_switches_pivot_without_drift() {
+        let mut st = lasso();
+        two_stripes(&mut st);
+        drag(&mut st, (95.0, 95.0), (145.0, 145.0), None);
+        let m = st.active_cell_mask().unwrap();
+        let br = ((m.x + m.w) as f32, (m.y + m.h) as f32);
+        let centre = ((m.x as f32 + br.0) * 0.5, (m.y as f32 + br.1) * 0.5);
+        let to = (br.0 + 10.0, br.1 + 10.0);
+        st.select_down(br, None);
+        let mid = |st: &AppState| {
+            let s = st.selection.as_ref().unwrap();
+            s.buf_to_cell(s.mask.w as f32 * 0.5, s.mask.h as f32 * 0.5)
+        };
+        st.alt_held = true;
+        st.select_move(to);
+        let centred = st.selection.as_ref().unwrap().pose;
+        let c = mid(&st);
+        assert!((c.0 - centre.0).abs() < 1e-3 && (c.1 - centre.1).abs() < 1e-3, "{c:?}");
+        st.alt_held = false;
+        st.select_move(to);
+        let c = mid(&st);
+        assert!(c.0 > centre.0 + 1.0, "pinned at the far corner, the middle moves: {c:?}");
+        st.alt_held = true;
+        st.select_move(to);
+        assert_eq!(st.selection.as_ref().unwrap().pose, centred, "no drift");
+        st.select_up();
     }
 
     #[test]
