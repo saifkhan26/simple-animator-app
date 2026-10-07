@@ -22,6 +22,8 @@ const MIN_RADIUS: f32 = 0.5;
 const MAX_RADIUS: f32 = 256.0;
 /// A size drag never takes a brush all the way to invisible.
 const MIN_OPACITY: f32 = 0.01;
+/// The biggest warp brush a size drag reaches, matching the Liquify slider.
+const MAX_LIQUIFY_RADIUS: f32 = 1000.0;
 
 /// A middle- or right-button drag under way on the canvas.
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +46,7 @@ pub struct ButtonDragState {
     // The tool values at the press, which tool adjust moves away from.
     radius: f32,
     opacity: f32,
+    strength: f32,
     gap: u8,
     expand: u8,
     /// Swatch under the pen, for the pie.
@@ -78,6 +81,7 @@ impl AppState {
             shift_locked,
             radius: self.brush.radius,
             opacity: self.brush.opacity,
+            strength: self.brush.liquify_strength,
             gap: self.brush.fill_gap,
             expand: self.brush.fill_expand,
             pie_hover: None,
@@ -147,6 +151,7 @@ impl AppState {
             ButtonDrag::ToolAdjust => {
                 self.brush.radius = d.radius;
                 self.brush.opacity = d.opacity;
+                self.brush.liquify_strength = d.strength;
                 self.brush.fill_gap = d.gap;
                 self.brush.fill_expand = d.expand;
             }
@@ -182,6 +187,11 @@ impl AppState {
                     self.brush.radius,
                     self.brush.opacity * 100.0
                 )),
+                ActiveTool::Liquify => Some(format!(
+                    "Size {:.0} · Strength {:.0}%",
+                    self.brush.radius,
+                    self.brush.liquify_strength * 100.0
+                )),
                 _ => None,
             },
             _ => None,
@@ -203,6 +213,15 @@ impl AppState {
                 self.brush.radius = (d.radius * grow).clamp(MIN_RADIUS, MAX_RADIUS);
                 self.brush.opacity =
                     (d.opacity + past_dead_zone(up) / OPACITY_PX).clamp(MIN_OPACITY, 1.0);
+            }
+            // The warp brush the same way, strength in place of opacity, and
+            // sized for moving limbs rather than drawing lines.
+            ActiveTool::Liquify => {
+                let grow = (past_dead_zone(dx) / SIZE_PX_PER_DOUBLING).exp2();
+                self.brush.radius =
+                    (d.radius * grow).clamp(crate::tools::liquify::MIN_RADIUS, MAX_LIQUIFY_RADIUS);
+                self.brush.liquify_strength =
+                    (d.strength + past_dead_zone(up) / OPACITY_PX).clamp(MIN_OPACITY, 1.0);
             }
             _ => {}
         }

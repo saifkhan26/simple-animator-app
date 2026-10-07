@@ -2,6 +2,7 @@
 
 mod button_drag;
 mod grids;
+mod liquify;
 mod orient;
 mod select;
 
@@ -401,7 +402,7 @@ impl Default for FadeOthers {
 }
 
 /// Number of tools, and so of slots in the per-tool brush array.
-const TOOL_COUNT: usize = 8;
+const TOOL_COUNT: usize = 9;
 
 /// The built-in per-tool brushes.
 fn default_tool_brushes() -> [BrushSettings; TOOL_COUNT] {
@@ -416,20 +417,23 @@ fn default_tool_brushes() -> [BrushSettings; TOOL_COUNT] {
         BrushSettings::default_shape(),
         BrushSettings::default_shape(),
         BrushSettings::default_shape(),
+        BrushSettings::default_liquify(),
     ]
 }
 
 /// Saved brushes, or the defaults. A blob from a build with a different
 /// number of tools is discarded rather than padded: the array is indexed by
 /// `ActiveTool::idx`, so a short one would silently reassign brushes to the
-/// wrong tools. The one exception is a blob from just before the Perspective
-/// tool: it was appended last, so the older slots still line up and only its
-/// own is missing.
+/// wrong tools. The exception is a blob from before the tools that were
+/// appended last (Perspective, then Liquify): the older slots still line up,
+/// and only the new tools' own are missing.
 fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; TOOL_COUNT] {
     match saved {
         Some(mut v) => {
-            if v.len() == ActiveTool::Perspective.idx() {
-                v.push(default_tool_brushes()[ActiveTool::Perspective.idx()].clone());
+            if v.len() >= ActiveTool::Perspective.idx() {
+                while v.len() < TOOL_COUNT {
+                    v.push(default_tool_brushes()[v.len()].clone());
+                }
             }
             <[BrushSettings; TOOL_COUNT]>::try_from(v).unwrap_or_else(|_| default_tool_brushes())
         }
@@ -1021,6 +1025,8 @@ pub struct AppState {
     /// Floating pixels lifted through the selection, if any. Bound to one
     /// cell: changing frame or layer lands them first.
     pub selection: Option<Selection>,
+    /// A Liquify warp under way, until it lands or is cancelled.
+    pub liquify: Option<liquify::LiquifySession>,
     /// The float's cell as it was before the lift, so landing records lift
     /// and stamp as one step and an undo while floating can put it back.
     float_pre: Vec<u8>,
@@ -1421,6 +1427,7 @@ impl AppState {
             tint_outside: prefs.tint_outside,
             sel_tint: None,
             selection: None,
+            liquify: None,
             float_pre: Vec::new(),
             float_pre_live: false,
             float_lift_rect: None,
@@ -3634,6 +3641,11 @@ impl AppState {
     }
 
     pub fn pointer_down(&mut self, sample: PointerSample) {
+        // Before anything lands: landing would end the warp in hand.
+        if self.tool == ActiveTool::Liquify {
+            self.liquify_down(sample);
+            return;
+        }
         self.playback.stop();
         // Put floating pixels down first: a stroke is held to the selection
         // where it now is, and must not paint under pixels about to land.
@@ -3765,6 +3777,10 @@ impl AppState {
     }
 
     pub fn pointer_move(&mut self, sample: PointerSample) {
+        if self.tool == ActiveTool::Liquify {
+            self.liquify_move(sample);
+            return;
+        }
         let Some(target) = self.stroke_target else {
             return;
         };
@@ -3785,6 +3801,12 @@ impl AppState {
     pub fn pointer_up(&mut self) {
         self.finish_grid_drag();
         self.snap_lock = None;
+        // A warp has no stroke to finish, and its snapshot must outlive the
+        // pen-up: the session goes on until it lands.
+        if self.liquify.is_some() {
+            self.liquify_up();
+            return;
+        }
         if self.finish_fill() {
             return;
         }
@@ -4757,6 +4779,7 @@ impl AppState {
             Action::ToolTracker => self.set_tool(ActiveTool::Tracker),
             Action::ToolLasso => self.set_tool(ActiveTool::Lasso),
             Action::ToolPerspective => self.set_tool(ActiveTool::Perspective),
+            Action::ToolLiquify => self.set_tool(ActiveTool::Liquify),
             Action::TogglePerspectiveGrid => {
                 self.perspective.show = !self.perspective.show;
             }
@@ -5091,9 +5114,10 @@ impl AppState {
     pub fn undo(&mut self) {
         self.track_sel.clear();
         // Back out of whatever is in hand before touching the history: a
-        // polygon loses its newest corner, and floating pixels go back where
-        // they were picked up — nothing about them is recorded yet.
-        if self.polygon_back() {
+        // polygon loses its newest corner, a warp its last stroke, and
+        // floating pixels go back where they were picked up — nothing about
+        // any of them is recorded yet.
+        if self.polygon_back() || self.liquify_step_back() {
             return;
         }
         self.cancel_gesture();
@@ -5107,9 +5131,9 @@ impl AppState {
     pub fn redo(&mut self) {
         self.track_sel.clear();
         self.cancel_gesture();
-        // Landing a float is a new edit, and like any other it ends the redo
-        // chain; there is nothing left to redo after it.
-        if self.selection.is_some() {
+        // Landing a float or a warp is a new edit, and like any other it ends
+        // the redo chain; there is nothing left to redo after it.
+        if self.selection.is_some() || self.liquify.is_some() {
             self.land_float();
             return;
         }
@@ -5217,7 +5241,8 @@ impl AppState {
                 // progress, a drag in the tracks, the drawings selected
                 // there, and last the canvas selection.
                 if escape && !self.screen_pick {
-                    if self.cancel_fill()
+                    if self.cancel_liquify()
+                        || self.cancel_fill()
                         || self.cancel_button_drag()
                         || self.cancel_gesture()
                         || self.track_drag.take().is_some()
@@ -5429,6 +5454,7 @@ impl eframe::App for AppState {
         // Keep the active layer's transform edit buffer synced while scrubbing.
         self.sync_active_transform_buffer();
         self.sync_selection();
+        self.sync_liquify();
         self.sync_camera_buffer();
         // After the camera and layer buffers, which grids may follow.
         self.sync_grid_buffers();

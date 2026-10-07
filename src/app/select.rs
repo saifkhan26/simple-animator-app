@@ -713,6 +713,9 @@ impl AppState {
         if clip.w == 0 || clip.h == 0 {
             return false;
         }
+        // Lifting from a drawing mid-warp would lift the preview and leave
+        // the warp's snapshot behind; the warp lands first.
+        self.commit_liquify();
         let Some(cell) = self.project.resolved_current() else {
             return false;
         };
@@ -744,11 +747,19 @@ impl AppState {
         true
     }
 
+    /// Settle what's in hand before an edit: a Liquify warp lands, then any
+    /// floating pixels. Everything that must not edit around either calls
+    /// this. Safe with nothing in hand.
+    pub fn land_float(&mut self) {
+        self.commit_liquify();
+        self.land_float_only();
+    }
+
     /// Put a float down: stamp its pixels into its cell and move the selection
     /// to where they landed. One undo step for all of it — the lift, the stamp
     /// and the selection — so one Ctrl+Z puts everything back where it was
     /// picked up. Safe to call with nothing floating.
-    pub fn land_float(&mut self) {
+    pub(super) fn land_float_only(&mut self) {
         let Some(sel) = self.selection.take() else {
             return;
         };

@@ -889,6 +889,8 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 tool_toggle(ui, state, ActiveTool::Tracker, ic::CROSSHAIR, &tr);
                 let pg = tip(state, Action::ToolPerspective, "Perspective grid");
                 tool_toggle(ui, state, ActiveTool::Perspective, ic::PERSPECTIVE, &pg);
+                let lq = tip(state, Action::ToolLiquify, "Liquify");
+                tool_toggle(ui, state, ActiveTool::Liquify, ic::DROP, &lq);
                 ui.add_space(6.0);
                 // The one colour picker — a momentary mode, not a persistent
                 // tool. Samples any pixel on screen, canvas included, leaving
@@ -1021,6 +1023,8 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 perspective_options(state, ui);
             } else if state.tool == ActiveTool::Lasso {
                 selection_options(state, ui);
+            } else if state.tool == ActiveTool::Liquify {
+                liquify_options(state, ui);
             } else {
                 brush_size_lock(state, ui);
                 let label = if state.lock_brush_to_view {
@@ -1959,6 +1963,7 @@ fn tool_icon(tool: ActiveTool) -> &'static str {
         ActiveTool::Tracker => ic::CROSSHAIR,
         ActiveTool::Lasso => ic::LASSO,
         ActiveTool::Perspective => ic::PERSPECTIVE,
+        ActiveTool::Liquify => ic::DROP,
     }
 }
 
@@ -1972,6 +1977,7 @@ fn tool_name(tool: ActiveTool) -> &'static str {
         ActiveTool::Tracker => "Tracker",
         ActiveTool::Lasso => "Lasso select",
         ActiveTool::Perspective => "Perspective grid",
+        ActiveTool::Liquify => "Liquify",
     }
 }
 
@@ -4003,6 +4009,70 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// Liquify's options: push or smooth, the brush, how soft the selection's
+/// edge is, and applying or throwing away the warp in hand.
+fn liquify_options(state: &mut AppState, ui: &mut egui::Ui) {
+    use crate::tools::liquify::{LiquifyMode, MIN_RADIUS};
+    ui.horizontal(|ui| {
+        for (mode, icon, text) in [
+            (LiquifyMode::Push, ic::HAND_POINTING, "Push: drag the pixels along with the pen"),
+            (LiquifyMode::Smooth, ic::WAVE_SINE, "Smooth: ease kinks out of the warp"),
+        ] {
+            if theme::icon_toggle(ui, icon, text, state.brush.liquify_mode == mode).clicked() {
+                state.brush.liquify_mode = mode;
+            }
+        }
+    });
+    brush_size_lock(state, ui);
+    ui.add(
+        egui::Slider::new(&mut state.brush.radius, MIN_RADIUS..=1000.0)
+            .logarithmic(true)
+            .text("Size"),
+    );
+    let mut pct = state.brush.liquify_strength * 100.0;
+    if ui
+        .add(egui::Slider::new(&mut pct, 1.0..=100.0).suffix("%").text("Strength"))
+        .on_hover_text("How far the pixels follow the pen at full pressure")
+        .changed()
+    {
+        state.brush.liquify_strength = pct / 100.0;
+    }
+    let bounded = state.sel_mask.as_ref().is_some_and(|m| !m.is_all());
+    ui.add_enabled(
+        bounded,
+        egui::Slider::new(&mut state.brush.liquify_edge, 0.0..=200.0)
+            .suffix(" px")
+            .text("Edge falloff"),
+    )
+    .on_hover_text(
+        "How far in from the selection's edge the warp eases out, so it never \
+         tears at the edge. Needs a selection; without one the whole drawing warps.",
+    );
+    ui.checkbox(&mut state.brush.liquify_mesh, "Show mesh");
+    ui.checkbox(&mut state.sel_all_frames, "All frames").on_hover_text(
+        "When the warp is applied, apply the same warp to every drawing on this layer.",
+    );
+    ui.horizontal(|ui| {
+        let live = state.liquify.is_some();
+        if ui.add_enabled(live, egui::Button::new("Apply (Enter)")).clicked() {
+            state.land_float();
+        }
+        if ui.add_enabled(live, egui::Button::new("Cancel (Esc)")).clicked() {
+            state.cancel_liquify();
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "Drag on the drawing to push its pixels, inside the selection if there \
+             is one. Every pass reads the drawing as it was, so lines stay sharp. \
+             Ctrl+Z takes back a stroke; the warp lands when you press Enter or \
+             change tool, frame or layer.",
+        )
+        .color(theme::TEXT_MUTED)
+        .size(11.0),
+    );
+}
+
 /// The Lasso's options: what a drag draws, how it combines with the
 /// selection already there, and the commands that act on the selection.
 fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
@@ -4419,6 +4489,36 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     };
     // On-screen pixel size scales with both the view zoom and the layer scale.
     let layer_scale = preview_xf.scale.abs();
+
+    // Liquify's mesh: the warp's grid, bent the way the drawing is. A point
+    // of the drawing at `s` now shows at about `s − D(s)`. Lines at least 12
+    // screen points apart, and never more than 200 of them each way.
+    if let Some(f) = state
+        .liquify
+        .as_ref()
+        .filter(|_| state.tool == ActiveTool::Liquify && state.brush.liquify_mesh)
+        .map(|l| &l.field)
+    {
+        let step = crate::tools::liquify::STEP as f32;
+        let span = (cell_to_screen(step, 0.0) - cell_to_screen(0.0, 0.0)).length().max(1e-3);
+        let every = ((12.0 / span).ceil() as usize)
+            .max(f.nw.max(f.nh).div_ceil(200))
+            .max(1);
+        let at = |i: usize, j: usize| {
+            let (x, y) = f.point(i, j);
+            let d = f.at(x, y);
+            cell_to_screen(x - d[0], y - d[1])
+        };
+        let stroke = Stroke::new(1.0, theme::premul(90, 200, 255, 150));
+        for j in (0..f.nh).step_by(every) {
+            let line: Vec<egui::Pos2> = (0..f.nw).step_by(every).map(|i| at(i, j)).collect();
+            painter.add(egui::Shape::line(line, stroke));
+        }
+        for i in (0..f.nw).step_by(every) {
+            let line: Vec<egui::Pos2> = (0..f.nh).step_by(every).map(|j| at(i, j)).collect();
+            painter.add(egui::Shape::line(line, stroke));
+        }
+    }
 
     // Live-tail overlay: the committed stroke is already streamed into the
     // cell texture via partial uploads, so only the short uncommitted span
@@ -5617,6 +5717,27 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
             }
 
             // 1-px centre dot to mark exact hot-spot.
+            painter.circle_filled(pos, 1.2, white);
+            painter.circle_stroke(pos, 1.2, Stroke::new(0.6, black));
+        }
+        ActiveTool::Liquify => {
+            // The brush's reach, and a dashed ring where it is half strength:
+            // the falloff is steep, and the inner ring is what moves most.
+            let layer_scale = state
+                .display_transform(state.project.current_layer, state.project.current_frame)
+                .scale
+                .abs();
+            let r = (state.effective_radius() * scale * layer_scale).max(4.0);
+            painter.circle_stroke(pos, r + 0.6, Stroke::new(1.5, black));
+            painter.circle_stroke(pos, r, Stroke::new(1.0, white));
+            let inner = r * (1.0 - std::f32::consts::FRAC_1_SQRT_2).sqrt();
+            let n = 24;
+            for k in (0..n).step_by(2) {
+                let a0 = k as f32 / n as f32 * std::f32::consts::TAU;
+                let a1 = (k + 1) as f32 / n as f32 * std::f32::consts::TAU;
+                let p = |a: f32| pos + egui::vec2(a.cos(), a.sin()) * inner;
+                painter.line_segment([p(a0), p(a1)], Stroke::new(1.0, white));
+            }
             painter.circle_filled(pos, 1.2, white);
             painter.circle_stroke(pos, 1.2, Stroke::new(0.6, black));
         }
@@ -7327,7 +7448,14 @@ mod perspective_tests {
         assert_eq!(gears.len(), 2, "one gear a row");
 
         // The test screen is small enough for the Timeline panel's default
-        // spot to cover the right half of the gear; press its left end.
+        // spot to overlap the Tools panel; bring Tools to the front, as a
+        // click on it would (egui reorders at the end of the next frame),
+        // and press the gear's left end.
+        ctx.move_to_top(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new(panel_key(PanelId::Tools)),
+        ));
+        run(&mut state, vec![]);
         let at = gears[1].left_center() - vec2(3.0, 0.0);
         let button = |pressed| egui::Event::PointerButton {
             pos: at,
@@ -8699,6 +8827,52 @@ mod button_drag_tests {
         let m = state.sel_mask.as_ref().unwrap();
         assert_eq!(m.at(250, 250), 255, "kept");
         assert_eq!(m.at(350, 350), 255, "added");
+    }
+
+    /// Liquify end to end: a drag on the canvas pushes the drawing along,
+    /// and its panel and mesh draw.
+    #[test]
+    fn a_liquify_drag_moves_the_pixels() {
+        let mut state = state();
+        let cell = state.project.ensure_active_cell();
+        let c = state.project.cell_mut(cell).unwrap();
+        for y in 300..310u32 {
+            for x in 300..310u32 {
+                let i = ((y * c.width + x) * 4) as usize;
+                c.pixels_mut()[i..i + 4].copy_from_slice(&[200, 0, 0, 255]);
+            }
+        }
+        state.set_tool(ActiveTool::Liquify);
+        state.brush.radius = 40.0;
+        state.brush.liquify_strength = 1.0;
+        state.brush.liquify_mesh = true;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        let xf = Xform::new(&state, SCREEN);
+        let from = xf.doc_to_screen(305.0, 305.0);
+        let to = xf.doc_to_screen(365.0, 305.0);
+        // Alpha-weighted x of the drawing.
+        let mid_x = |state: &AppState| {
+            let c = state.project.cell(cell).unwrap();
+            let (mut s, mut n) = (0.0, 0.0);
+            for y in 280..330 {
+                for x in 280..420 {
+                    let a = c.px(x, y)[3] as f32;
+                    s += x as f32 * a;
+                    n += a;
+                }
+            }
+            s / n
+        };
+        let before = mid_x(&state);
+        drag(&ctx, &mut state, egui::PointerButton::Primary, from, to - from);
+        assert!(state.liquify.is_some(), "a warp under way");
+        let moved = mid_x(&state) - before;
+        assert!(moved > 5.0, "pushed right by {moved}");
+        assert_eq!(state.history.undo_len(), 0, "not landed yet");
+        state.show_panels = true;
+        frame(&ctx, &mut state, vec![]);
+        frame(&ctx, &mut state, vec![]);
     }
 
     #[test]
