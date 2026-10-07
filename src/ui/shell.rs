@@ -1532,7 +1532,15 @@ fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnosti
     diag_row(ui, "monitors", monitors.join(" · "));
     diag_row(ui, "desktop", rect(d.display.desktop));
     if let Some(a) = d.context_area {
-        diag_row(ui, "pen area", rect(a));
+        diag_row(ui, "context area", rect(a));
+    }
+    if let Some(h) = d.hwnd {
+        let by_title = match d.hwnd_by_title {
+            Some(t) if t == h => "same as by title".to_owned(),
+            Some(t) => format!("by title {t:#x}"),
+            None => "none by title".to_owned(),
+        };
+        diag_row(ui, "window", format!("{h:#x}, {by_title}"));
     }
     if let Some(area) = d.display.driver {
         diag_row(ui, "driver says", rect(area.screen));
@@ -1595,23 +1603,6 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
         .clicked()
     {
         state.pen.reconnect();
-    }
-    {
-        use crate::input::tablet::PenArea;
-        let mut area = state.pen.area();
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("pen area while active").color(theme::TEXT_MUTED).size(11.0));
-            egui::ComboBox::from_id_salt("pen_area")
-                .selected_text(area.label())
-                .show_ui(ui, |ui| {
-                    for a in PenArea::ALL {
-                        ui.selectable_value(&mut area, a, a.label()).on_hover_text(a.hint());
-                    }
-                })
-                .response
-                .on_hover_text(area.hint());
-        });
-        state.pen.set_area(area);
     }
     ui.horizontal(|ui| {
         if state.pen_record.is_some() {

@@ -26,12 +26,16 @@ impl PenRecord {
     pub fn start(pen: &PenInput) -> Self {
         let d = pen.diagnostics();
         let mut text = String::new();
-        let _ = writeln!(text, "# area {:?}, context area {:?}", d.area, d.context_area);
+        let _ = writeln!(
+            text,
+            "# context area {:?}, hwnd {:?}, by title {:?}",
+            d.context_area, d.hwnd, d.hwnd_by_title
+        );
         let _ = writeln!(text, "# monitors {:?}", d.display.monitors);
         let _ = writeln!(
             text,
-            "# desktop {:?}, driver {:?}, window monitor {:?}",
-            d.display.desktop, d.display.driver, d.display.window_monitor
+            "# desktop {:?}, driver {:?}",
+            d.display.desktop, d.display.driver
         );
         let _ = writeln!(text, "# map x {:?}, map y {:?}", d.map_x, d.map_y);
         let _ = writeln!(text, "# fit x {:?}, fit y {:?}, {} pairs", d.fit_x, d.fit_y, d.fit_pairs);
