@@ -4361,7 +4361,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     };
 
     for (li, layer) in state.project.layers.iter().enumerate() {
-        if !layer.visible || !layer.reference {
+        if !state.project.shows(li) || !layer.reference {
             continue;
         }
         if let Some(id) = layer.resolve(cur_frame) {
@@ -4380,7 +4380,34 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     }
 
     for (li, layer) in state.project.layers.iter().enumerate() {
-        if !layer.visible || layer.reference {
+        if !state.project.shows(li) || layer.reference {
+            continue;
+        }
+        if layer.is_group() {
+            // Below full opacity a group draws as one merged image, centred
+            // on the document — group space — at its own opacity. Its active
+            // layer's ghosts go just under it.
+            if state.group_drawn_whole(li) {
+                if state.project.group_of(cur_layer) == Some(li) {
+                    draw_onion();
+                }
+                if let Some((tex, (gw, gh))) = state.group_texture(li) {
+                    let (pw, ph) = (state.project.width as f32, state.project.height as f32);
+                    let (x0, y0) = ((pw - gw as f32) / 2.0, (ph - gh as f32) / 2.0);
+                    let (x1, y1) = (x0 + gw as f32, y0 + gh as f32);
+                    let q = [
+                        xf.doc_to_screen(x0, y0),
+                        xf.doc_to_screen(x1, y0),
+                        xf.doc_to_screen(x1, y1),
+                        xf.doc_to_screen(x0, y1),
+                    ];
+                    let op = layer.opacity * state.layer_view_alpha(li);
+                    image_quad(&painter, tex.id(), q, theme::white_alpha((op.clamp(0.0, 1.0) * 255.0) as u8));
+                }
+            }
+            continue;
+        }
+        if state.in_group_image(li) {
             continue;
         }
         // Onion ghosts render at the active layer's depth, just behind its
@@ -4388,10 +4415,17 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         if li == cur_layer {
             draw_onion();
         }
+        // A layer of a group below full opacity that isn't drawn merged —
+        // "fade other layers" is fading around it — carries the group's
+        // opacity itself.
+        let group_op = state
+            .project
+            .group_of(li)
+            .map_or(1.0, |g| state.project.layers[g].opacity);
         // A clipped layer draws its drawing cut to its base.
         if let Some((id, tex, rect)) = state.layer_texture(li) {
             if let Some(lc) = tex_corners(li, id, rect) {
-                let op = layer.opacity * state.layer_view_alpha(li);
+                let op = layer.opacity * group_op * state.layer_view_alpha(li);
                 let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
                 image_quad(
                     &painter,

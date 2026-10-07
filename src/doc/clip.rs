@@ -229,38 +229,128 @@ pub fn shown(p: &Project, li: usize, frame: usize) -> Option<std::borrow::Cow<'_
 /// unless a layer reaches further, when it grows to hold it. `None` when
 /// nothing in the group shows on the frame.
 pub fn group_mask(p: &Project, g: usize, frame: usize) -> Option<Canvas> {
+    let xf = |li: usize| p.layers[li].resolve_transform(frame);
+    let (w, h) = group_space(p, g, frame, &xf);
+    let mut out = Canvas::new(w, h);
+    let all = DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: w,
+        max_y: h,
+    };
+    render_group(p, g, frame, false, &xf, &mut out, all).then_some(out)
+}
+
+/// The layers of group `g` that draw on `frame`: showing, not references,
+/// with a drawing there.
+fn group_kids(p: &Project, g: usize, frame: usize) -> impl Iterator<Item = usize> + '_ {
+    p.children(g)
+        .filter(move |&c| p.shows(c) && !p.layers[c].reference && p.layers[c].resolve(frame).is_some())
+}
+
+/// The size of group `g`'s group-space canvas on `frame`, with its layers
+/// placed by `xf`: the frame, grown by whole pixels each side as far as any
+/// of them reaches, so its centre stays the document's.
+pub fn group_space(p: &Project, g: usize, frame: usize, xf: &dyn Fn(usize) -> Transform) -> (u32, u32) {
     let (pw, ph) = (p.width as f32, p.height as f32);
-    // How far out from the document's centre anything reaches.
     let mut reach = (pw / 2.0, ph / 2.0);
-    let mut shown_kids = Vec::new();
-    for c in p.children(g) {
-        if !p.shows(c) || p.layers[c].reference {
-            continue;
-        }
-        let Some(src) = shown(p, c, frame) else {
+    for c in group_kids(p, g, frame) {
+        let Some(cell) = p.layers[c].resolve(frame).and_then(|id| p.cell(id)) else {
             continue;
         };
-        let xf = p.layers[c].resolve_transform(frame);
-        let (cw, ch) = (src.width as f32, src.height as f32);
+        let (cw, ch) = (cell.width as f32, cell.height as f32);
+        let t = xf(c);
         for (x, y) in [(0.0, 0.0), (cw, 0.0), (0.0, ch), (cw, ch)] {
-            let (dx, dy) = xf.cell_to_doc(x, y, cw, ch, pw, ph);
+            let (dx, dy) = t.cell_to_doc(x, y, cw, ch, pw, ph);
             reach.0 = reach.0.max((dx - pw / 2.0).abs());
             reach.1 = reach.1.max((dy - ph / 2.0).abs());
         }
-        shown_kids.push((src, xf));
     }
-    if shown_kids.is_empty() {
-        return None;
-    }
-    // Grown by whole pixels each side, so its centre stays the document's.
     let grow = |half: f32, side: u32| side + 2 * ((half - side as f32 / 2.0).max(0.0).ceil() as u32);
-    let (w, h) = (grow(reach.0, p.width), grow(reach.1, p.height));
-    let mut out = Canvas::new(w, h);
-    for (src, xf) in shown_kids {
-        crate::io::composite::composite_layer(&mut out, &src, &xf, 1.0, w, h);
+    (grow(reach.0, p.width), grow(reach.1, p.height))
+}
+
+/// Draw group `g`'s layers on `frame`, merged, into `rect` of `out` — a
+/// group-space canvas — clearing that rect first. With `opacity` each layer
+/// goes down at its own opacity, as the group shows; without, at full, as
+/// the mask a layer clipped to the group is cut by. Layers are placed by
+/// `xf`. Whether any layer drew at all.
+pub fn render_group(
+    p: &Project,
+    g: usize,
+    frame: usize,
+    opacity: bool,
+    xf: &dyn Fn(usize) -> Transform,
+    out: &mut Canvas,
+    rect: DirtyRect,
+) -> bool {
+    let (w, h) = (out.width, out.height);
+    let (x0, y0, x1, y1) = (rect.min_x.min(w), rect.min_y.min(h), rect.max_x.min(w), rect.max_y.min(h));
+    if x0 < x1 && y0 < y1 {
+        let px = out.pixels_mut();
+        for y in y0..y1 {
+            let at = (y * w) as usize * 4;
+            px[at + x0 as usize * 4..at + x1 as usize * 4].fill(0);
+        }
+    }
+    let mut any = false;
+    for c in group_kids(p, g, frame) {
+        let Some(src) = shown(p, c, frame) else {
+            continue;
+        };
+        any = true;
+        let op = if opacity { p.layers[c].opacity } else { 1.0 };
+        crate::io::composite::composite_layer_in(out, &src, &xf(c), op, w, h, rect);
     }
     out.dirty = None;
-    Some(out)
+    any
+}
+
+/// What an image of group `g` on `frame` is made from, as a hash: the
+/// canvas size, and each layer's drawing, placement, visibility, opacity
+/// (when it counts) and clip base. Equal hashes mean the same image, give or
+/// take pixel edits, which are tracked by cell instead.
+pub fn group_sig(p: &Project, g: usize, frame: usize, opacity: bool, xf: &dyn Fn(usize) -> Transform) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut s = std::collections::hash_map::DefaultHasher::new();
+    group_space(p, g, frame, xf).hash(&mut s);
+    for c in p.children(g) {
+        let l = &p.layers[c];
+        (c, p.shows(c), l.reference, l.resolve(frame)).hash(&mut s);
+        let t = xf(c);
+        [t.tx, t.ty, t.scale, t.rot].map(f32::to_bits).hash(&mut s);
+        if opacity {
+            l.opacity.to_bits().hash(&mut s);
+        }
+        if let Some(b) = p.clip_base(c) {
+            (b, p.layers[b].resolve(frame), p.shows(b)).hash(&mut s);
+            let t = xf(b);
+            [t.tx, t.ty, t.scale, t.rot].map(f32::to_bits).hash(&mut s);
+        }
+    }
+    s.finish()
+}
+
+/// The cells group `g`'s image on `frame` is drawn from, each with whether
+/// it lies pixel for pixel on the group-space canvas — so a change to one
+/// redoes the same rect there rather than all of it.
+pub fn group_cells(p: &Project, g: usize, frame: usize, xf: &dyn Fn(usize) -> Transform) -> Vec<(CellId, bool)> {
+    let space = group_space(p, g, frame, xf);
+    let mut out = Vec::new();
+    for c in group_kids(p, g, frame) {
+        let Some(id) = p.layers[c].resolve(frame) else {
+            continue;
+        };
+        let aligned = p
+            .cell(id)
+            .is_some_and(|cell| (cell.width, cell.height) == space && xf(c).is_identity() && p.clip_base(c).is_none());
+        out.push((id, aligned));
+        // A clipped layer redraws whenever its base does.
+        if let Some(bid) = p.clip_base(c).and_then(|b| p.layers[b].resolve(frame)) {
+            out.push((bid, false));
+        }
+    }
+    out
 }
 
 impl Placement {

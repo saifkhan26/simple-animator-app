@@ -2,6 +2,7 @@
 
 mod button_drag;
 mod grids;
+mod groups;
 mod liquify;
 mod orient;
 mod select;
@@ -540,15 +541,19 @@ struct TexEntry {
 enum TexKind {
     Cell,
     Ghost,
-    /// A clipped drawing; `id` is the clipped cell, this its base's.
-    Clip(CellId),
+    /// A clipped drawing; `id` is the clipped cell, this what it is cut by.
+    Clip(groups::BaseKey),
+    /// A group drawn as one image, or a group's mask; `id` is unused.
+    Group(groups::GroupKey),
 }
 
 /// A clipped layer as it shows on the current frame: see
 /// [`AppState::clip_pair`].
 struct ClipPair {
     cell: CellId,
-    base: CellId,
+    base: groups::BaseKey,
+    /// The base's layer: a drawing layer, or a group's header.
+    base_layer: usize,
     at: crate::doc::clip::Placement,
 }
 
@@ -923,8 +928,11 @@ pub struct AppState {
     /// Clipped layers' drawings as the canvas shows them, keyed by (clipped
     /// cell, base cell), drawn in place of the plain cell texture. See
     /// `sync_clip_textures`.
-    clip_textures: HashMap<(CellId, CellId), ClipTex>,
-    clip_tex_used: HashMap<(CellId, CellId), u64>,
+    clip_textures: HashMap<(CellId, groups::BaseKey), ClipTex>,
+    clip_tex_used: HashMap<(CellId, groups::BaseKey), u64>,
+    /// Groups drawn as one image, and group masks. See `app::groups`.
+    group_images: HashMap<groups::GroupKey, groups::GroupImage>,
+    group_used: HashMap<groups::GroupKey, u64>,
     ghost_tex_used: HashMap<CellId, u64>,
     /// Frame the playhead sat on at the last sync, and since when (egui time).
     /// A ghost not built yet waits for the playhead to rest, so a scrub
@@ -1390,6 +1398,8 @@ impl AppState {
             cell_tex_used: HashMap::new(),
             clip_textures: HashMap::new(),
             clip_tex_used: HashMap::new(),
+            group_images: HashMap::new(),
+            group_used: HashMap::new(),
             ghost_tex_used: HashMap::new(),
             playhead_rest: (usize::MAX, 0.0),
             tool: ActiveTool::Pencil,
@@ -1876,7 +1886,7 @@ impl AppState {
         for (&(c, base), t) in self.clip_textures.iter_mut() {
             if c == id {
                 t.pending = t.pending.with(region);
-            } else if base == id {
+            } else if base == groups::BaseKey::Cell(id) {
                 let inside = match region {
                     Dirty::Clean => None,
                     Dirty::Rect(r) if t.aligned => rect_meet(r, t.rect),
@@ -1886,6 +1896,7 @@ impl AppState {
                 t.pending = t.pending.with(inside.map_or(Dirty::Clean, Dirty::Rect));
             }
         }
+        self.mark_group_region(id, region);
         self.blank_cache.remove(&id);
         // The ghost is baked from these pixels, so it needs rebuilding — but
         // re-uploaded in place, never freed. See `ghost_stale`.
@@ -1939,7 +1950,13 @@ impl AppState {
             self.cell_dirty.remove(&id);
             self.retire_ghost(id);
             self.ghost_tex_used.remove(&id);
-            let gone: Vec<_> = self.clip_textures.keys().copied().filter(|&(c, b)| c == id || b == id).collect();
+            self.retire_group_images(Some(id));
+            let gone: Vec<_> = self
+                .clip_textures
+                .keys()
+                .copied()
+                .filter(|&(c, b)| c == id || b == groups::BaseKey::Cell(id))
+                .collect();
             for key in gone {
                 if let Some(t) = self.clip_textures.remove(&key) {
                     self.retired_textures.push(t.tex);
@@ -1994,6 +2011,9 @@ impl AppState {
         self.retired_textures
             .extend(self.clip_textures.drain().map(|(_, t)| t.tex));
         self.clip_tex_used.clear();
+        self.retired_textures
+            .extend(self.group_images.drain().filter_map(|(_, g)| g.tex));
+        self.group_used.clear();
     }
 
     /// Park every ghost for release on the next sync. See `retired_textures`.
@@ -3195,7 +3215,8 @@ impl AppState {
             // which redoes just the changed rect of it.
             let cur = self.project.current_layer;
             let clipping = self.project.clip_base(cur).is_some()
-                || (0..self.project.layers.len()).any(|i| self.project.clip_base(i) == Some(cur));
+                || (0..self.project.layers.len()).any(|i| self.project.clip_base(i) == Some(cur))
+                || self.feeds_group_image(cur);
             if !clipping && self.cell_textures.contains_key(&target) {
                 self.cell_tex_used.insert(target, now);
                 // What the stroke flushed, and anything left over from
@@ -3220,9 +3241,24 @@ impl AppState {
         // textures, so a ghosted cell's plain texture isn't needed at all.
         let mut needed: Vec<CellId> = Vec::new();
         let mut clipped: Vec<ClipPair> = Vec::new();
+        let mut merged: Vec<usize> = Vec::new();
         let cur = self.project.current_frame;
+        if !self.group_images.is_empty() {
+            self.retire_group_images(None);
+        }
         for (li, layer) in self.project.layers.iter().enumerate() {
-            if !layer.visible {
+            if !self.project.shows(li) {
+                continue;
+            }
+            // A group has no drawing of its own; one drawn merged is one
+            // image, its layers inside it.
+            if layer.is_group() {
+                if self.group_drawn_whole(li) {
+                    merged.push(li);
+                }
+                continue;
+            }
+            if self.in_group_image(li) {
                 continue;
             }
             // A clipped layer shows as its clipped texture instead — or not
@@ -3241,6 +3277,7 @@ impl AppState {
                 }
             }
         }
+        self.sync_group_images(ctx, now, &merged, &clipped);
         self.sync_clip_textures(ctx, now, &clipped);
 
         for id in needed {
@@ -3294,14 +3331,37 @@ impl AppState {
         let p = &self.project;
         let f = p.current_frame;
         let base = p.layers.get(b)?;
-        if !base.visible || base.reference {
+        if !p.shows(b) || base.reference {
             return None;
         }
+        let cell = p.layers[li].resolve(f)?;
+        let xf = self.display_transform(li, f);
+        if base.is_group() {
+            // Cut by the group's mask, which sits in group space.
+            let shows_any = p
+                .children(b)
+                .any(|c| p.shows(c) && !p.layers[c].reference && p.layers[c].resolve(f).is_some());
+            if !shows_any {
+                return None;
+            }
+            return Some(ClipPair {
+                cell,
+                base: groups::BaseKey::Group(self.group_key(b, false)),
+                base_layer: b,
+                at: crate::doc::clip::Placement {
+                    xf,
+                    base_xf: crate::doc::transform::Transform::default(),
+                    pw: p.width,
+                    ph: p.height,
+                },
+            });
+        }
         Some(ClipPair {
-            cell: p.layers[li].resolve(f)?,
-            base: base.resolve(f)?,
+            cell,
+            base: groups::BaseKey::Cell(base.resolve(f)?),
+            base_layer: b,
             at: crate::doc::clip::Placement {
-                xf: self.display_transform(li, f),
+                xf,
                 base_xf: self.display_transform(b, f),
                 pw: p.width,
                 ph: p.height,
@@ -3337,7 +3397,11 @@ impl AppState {
         for pair in pairs {
             let key = (pair.cell, pair.base);
             self.clip_tex_used.insert(key, now);
-            let (Some(clip), Some(base)) = (self.project.cell(pair.cell), self.project.cell(pair.base)) else {
+            let base = match pair.base {
+                groups::BaseKey::Cell(id) => self.project.cell(id),
+                groups::BaseKey::Group(k) => self.group_images.get(&k).map(|g| &g.canvas),
+            };
+            let (Some(clip), Some(base)) = (self.project.cell(pair.cell), base) else {
                 continue;
             };
             let cell = [clip.width, clip.height];
@@ -3358,7 +3422,7 @@ impl AppState {
                 }
                 TexPlan::Rebuild(rect) => {
                     let image = crop_image(rect, || mask_rect(clip, Some(base), &pair.at, rect));
-                    let name = format!("clip_{}_{}", pair.cell, pair.base);
+                    let name = format!("clip_{}_{}", pair.cell, pair.base_layer);
                     let tex = ctx.load_texture(name, image, TextureOptions::LINEAR);
                     let fresh = ClipTex {
                         tex,
@@ -3518,8 +3582,17 @@ impl AppState {
                 bytes: bytes(&t.tex),
             });
         }
+        for (&key, img) in &self.group_images {
+            entries.push(TexEntry {
+                kind: TexKind::Group(key),
+                id: 0,
+                used: self.group_used.get(&key).copied().unwrap_or(0),
+                bytes: img.bytes(),
+            });
+        }
         for e in evictions(&entries, TEXTURE_BUDGET, self.sync_frame, self.playback.playing) {
             match e.kind {
+                TexKind::Group(key) => self.drop_group_image(key),
                 TexKind::Ghost => {
                     self.retire_ghost(e.id);
                     self.ghost_tex_used.remove(&e.id);

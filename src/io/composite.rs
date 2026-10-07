@@ -1,7 +1,7 @@
 //! CPU composite — used for PNG / GIF export where we need flat pixels for a
 //! given frame. Onion skins and reference layers are excluded from export.
 
-use crate::doc::canvas::Canvas;
+use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::project::Project;
 use crate::doc::transform::Transform;
 
@@ -70,8 +70,34 @@ fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
 /// size; otherwise inverse-maps each destination pixel and bilinearly samples
 /// the source.
 pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacity: f32, pw: u32, ph: u32) {
+    let all = DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: pw,
+        max_y: ph,
+    };
+    composite_layer_in(dst, src, xform, opacity, pw, ph, all);
+}
+
+/// [`composite_layer`], writing only `rect` of `dst` — what redoing part of
+/// a group's merged image takes.
+pub fn composite_layer_in(
+    dst: &mut Canvas,
+    src: &Canvas,
+    xform: &Transform,
+    opacity: f32,
+    pw: u32,
+    ph: u32,
+    rect: DirtyRect,
+) {
+    let rect = DirtyRect {
+        min_x: rect.min_x.min(pw),
+        min_y: rect.min_y.min(ph),
+        max_x: rect.max_x.min(pw),
+        max_y: rect.max_y.min(ph),
+    };
     if xform.is_identity() && src.width == pw && src.height == ph {
-        composite_over(dst, src, opacity);
+        composite_over_in(dst, src, opacity, rect);
         return;
     }
 
@@ -82,8 +108,8 @@ pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacit
     let (cw, ch) = (src.width as f32, src.height as f32);
     let (pwf, phf) = (pw as f32, ph as f32);
 
-    for y in 0..ph {
-        for x in 0..pw {
+    for y in rect.min_y..rect.max_y {
+        for x in rect.min_x..rect.max_x {
             let (u, v) = xform.doc_to_cell(x as f32 + 0.5, y as f32 + 0.5, cw, ch, pwf, phf);
             // Sample on a half-pixel grid.
             let su = u - 0.5;
@@ -378,7 +404,18 @@ pub(crate) fn sample_bilinear(src: &Canvas, x: f32, y: f32) -> [u8; 4] {
 }
 
 /// In-place src-over composite, scaled by `opacity` (1:1, same-size path).
-fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32) {
+pub(crate) fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32) {
+    let all = DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: dst.width,
+        max_y: dst.height,
+    };
+    composite_over_in(dst, src, opacity, all);
+}
+
+/// [`composite_over`] over only `rect`.
+fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, rect: DirtyRect) {
     debug_assert_eq!(dst.width, src.width);
     debug_assert_eq!(dst.height, src.height);
     let op = opacity.clamp(0.0, 1.0);
@@ -386,9 +423,15 @@ fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32) {
     let out = dst.pixels_mut();
     // Row by row over what the source holds: a packed one skips its blank
     // margins outright.
-    for y in 0..src.height {
+    for y in rect.min_y..rect.max_y.min(src.height) {
         let (x0, span) = src.row_span(y);
-        let at = (y as usize * w + x0 as usize) * 4;
+        let x1 = x0 + (span.len() / 4) as u32;
+        let (a, b) = (x0.max(rect.min_x), x1.min(rect.max_x));
+        if a >= b {
+            continue;
+        }
+        let span = &span[(a - x0) as usize * 4..(b - x0) as usize * 4];
+        let at = (y as usize * w + a as usize) * 4;
         for (s, d) in span.chunks_exact(4).zip(out[at..at + span.len()].chunks_exact_mut(4)) {
             let sa = (s[3] as f32 / 255.0) * op;
             if sa <= 0.0 {
