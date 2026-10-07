@@ -73,6 +73,17 @@ pub fn stays_here(l: &Layer) -> bool {
     l.reference || stays_put(&l.name)
 }
 
+/// [`stays_here`] for layer `li` of `p`, which also stays when its group is
+/// named to stay.
+pub fn stays_here_at(p: &Project, li: usize) -> bool {
+    stays_here(&p.layers[li]) || p.group_of(li).is_some_and(|g| stays_put(&p.layers[g].name))
+}
+
+/// Which layers of `p` a send takes to Krita.
+pub fn sendable(p: &Project) -> Vec<bool> {
+    (0..p.layers.len()).map(|li| !stays_here_at(p, li)).collect()
+}
+
 /// Whether a Krita layer comes back here: not named to [`stays_put`], and not
 /// inside a group that is. The filter for [`kra::read_filtered`].
 pub fn comes_back(name: &str, groups: &[String]) -> bool {
@@ -119,6 +130,9 @@ pub struct LayerBase {
     pub by_hash: HashMap<u64, CellId>,
     /// Size for a drawing Krita adds with no neighbouring key to copy.
     pub cell_size: (u32, u32),
+    /// One of a group's layers; a folded group.
+    pub in_group: bool,
+    pub collapsed: bool,
 }
 
 /// What Krita holds, as of the last sync: the send, or the last pull.
@@ -162,6 +176,8 @@ impl Baseline {
                     sizes: Vec::new(),
                     by_hash: HashMap::new(),
                     cell_size: l.cell_size(pw, ph),
+                    in_group: l.in_group,
+                    collapsed: l.collapsed,
                 };
                 for (f, e) in l.exposures.iter().enumerate().take(project.frame_count) {
                     let Some(id) = *e else { continue };
@@ -206,6 +222,9 @@ pub struct PulledLayer {
     pub drawings: Vec<PulledDrawing>,
     /// `(time, drawing)`, leading blank keys dropped.
     pub keys: Vec<(usize, usize)>,
+    pub group: bool,
+    pub in_group: bool,
+    pub collapsed: bool,
 }
 
 impl PulledLayer {
@@ -314,6 +333,9 @@ pub fn prepare(doc: KraDoc, base: &Baseline, present: &HashSet<String>) -> Pulle
                 locked: kl.locked,
                 keys: kl.keys[lead..].to_vec(),
                 drawings,
+                group: kl.group,
+                in_group: kl.in_group,
+                collapsed: kl.collapsed,
             }
         })
         .collect();
@@ -341,6 +363,10 @@ struct LayerEdit {
     visible: Option<bool>,
     locked: Option<bool>,
     keys: Option<Vec<(usize, CellRef)>>,
+    /// Only for a layer Krita added: whether it's a group.
+    group: Option<bool>,
+    in_group: Option<bool>,
+    collapsed: Option<bool>,
 }
 
 impl LayerEdit {
@@ -350,11 +376,23 @@ impl LayerEdit {
             && self.visible.is_none()
             && self.locked.is_none()
             && self.keys.is_none()
+            && self.group.is_none()
+            && self.in_group.is_none()
+            && self.collapsed.is_none()
     }
 
     fn apply(self, l: &mut Layer, fc: usize, resolve: impl Fn(CellRef) -> CellId) {
         if let Some(n) = self.name {
             l.name = n;
+        }
+        if self.group == Some(true) {
+            l.kind = crate::doc::layer::LayerKind::Group;
+        }
+        if let Some(g) = self.in_group {
+            l.in_group = g;
+        }
+        if let Some(c) = self.collapsed {
+            l.collapsed = c;
         }
         if let Some(o) = self.opacity {
             l.opacity = o as f32 / 255.0;
@@ -489,6 +527,9 @@ impl PullPlan {
         let cur = moved.get(project.current_layer).copied().flatten();
         project.layers = layers;
         project.current_layer = cur.unwrap_or(0).min(project.layers.len().saturating_sub(1));
+        // Krita and this side may each have moved layers in or out of
+        // groups; whatever the merge of the two left, put it back in shape.
+        project.normalize_groups();
         linked
     }
 }
@@ -510,10 +551,10 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
     let mut ignored = base.ignored.clone();
     let mut unlink: Vec<u64> = Vec::new();
     let mut warnings = pulled.warnings;
-    for l in &project.layers {
+    for (li, l) in project.layers.iter().enumerate() {
         let Some(u) = uuid_of(l) else { continue };
         let linked = base_uuids.contains(u.as_str());
-        if stays_here(l) {
+        if stays_here_at(project, li) {
             ignore.insert(u.clone());
             ignored.insert(u.clone());
             unlink.push(l.uid);
@@ -558,6 +599,17 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
     }
     let mut decided: Vec<(String, Slot)> = Vec::new();
     let mut next_layers: Vec<LayerBase> = Vec::new();
+    // Each Krita layer's group, by uuid: the group over the run it's in.
+    let krita_group: HashMap<String, String> = {
+        let ls = &pulled.layers;
+        (0..ls.len())
+            .filter(|&i| ls[i].in_group)
+            .filter_map(|i| {
+                let g = (i + 1..ls.len()).find(|&j| !ls[j].in_group).filter(|&j| ls[j].group)?;
+                Some((ls[i].uuid.clone(), ls[g].uuid.clone()))
+            })
+            .collect()
+    };
     for mut pl in pulled.layers {
         if ignore.contains(&pl.uuid) {
             continue;
@@ -578,6 +630,12 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
         }
         if b.map_or(true, |b| b.locked != pl.locked) {
             edit.locked = Some(pl.locked);
+        }
+        if b.map_or(true, |b| b.in_group != pl.in_group) {
+            edit.in_group = Some(pl.in_group);
+        }
+        if b.map_or(true, |b| b.collapsed != pl.collapsed) {
+            edit.collapsed = Some(pl.collapsed);
         }
         let attrs_changed = !edit.is_empty();
 
@@ -645,6 +703,8 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
                 opacity: pl.opacity,
                 visible: pl.visible,
                 locked: pl.locked,
+                in_group: pl.in_group,
+                collapsed: pl.collapsed,
                 ..b.clone()
             },
             (b, _) => {
@@ -672,6 +732,8 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
                         Some(i) => project.layers[i].cell_size(pw, ph),
                         None => (pw, ph),
                     },
+                    in_group: pl.in_group,
+                    collapsed: pl.collapsed,
                 }
             }
         };
@@ -691,12 +753,39 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
                 edit.opacity = Some(pl.opacity);
                 edit.visible = Some(pl.visible);
                 edit.locked = Some(pl.locked);
+                edit.group = Some(pl.group);
+                edit.in_group = Some(pl.in_group);
+                edit.collapsed = Some(pl.collapsed);
                 report.added += 1;
                 Slot::Add(edit)
             }
             _ => Slot::Skip,
         };
         decided.push((pl.uuid, slot));
+    }
+
+    // A layer in a Krita group that isn't coming here — one that stays here
+    // now, say — comes in top-level: next to that group's header here it
+    // would join it.
+    let headers: HashSet<&str> = decided
+        .iter()
+        .filter(|(_, s)| matches!(s, Slot::Keep(..) | Slot::Add(_)))
+        .map(|(u, _)| u.as_str())
+        .collect();
+    let orphans: HashSet<String> = krita_group
+        .iter()
+        .filter(|(_, g)| !headers.contains(g.as_str()))
+        .map(|(u, _)| u.clone())
+        .collect();
+    for (u, slot) in &mut decided {
+        if !orphans.contains(u) {
+            continue;
+        }
+        match slot {
+            Slot::Keep(i, edit) => edit.in_group = project.layers[*i].in_group.then_some(false),
+            Slot::Add(edit) => edit.in_group = Some(false),
+            Slot::Skip => {}
+        }
     }
 
     // Linked layers Krita deleted. (`local_of` already leaves out the ones
@@ -782,16 +871,26 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
         }
     };
     push_local(&mut stack, anchored.get(&None));
+    // What Krita added just above a layer stays just above it — a group
+    // Krita made around that layer must sit right on top of it — and what
+    // was added here above that layer goes on top of those.
+    let mut pending: Option<String> = None;
     for u in linked {
         match slots.remove(&u) {
             Some(Slot::Keep(index, edit)) => {
+                if pending.is_some() {
+                    push_local(&mut stack, anchored.get(&pending.take()));
+                }
                 changed |= !edit.is_empty();
                 stack.push(Entry::Local { index, edit: (!edit.is_empty()).then_some(edit) });
+                pending = Some(u);
             }
             Some(Slot::Add(edit)) => stack.push(Entry::New { uuid: u.clone(), edit }),
             _ => {}
         }
-        push_local(&mut stack, anchored.get(&Some(u)));
+    }
+    if pending.is_some() {
+        push_local(&mut stack, anchored.get(&pending));
     }
     if stack.is_empty() {
         // Krita deleted every layer here and brings none back. A project
@@ -1072,6 +1171,8 @@ pub fn send(
         i += 1;
         keep.get(i - 1).copied().unwrap_or(false)
     });
+    // A group whose header stayed here sends its layers as plain ones.
+    project.normalize_groups();
     let project = &project;
     let carried = match std::fs::read(path) {
         Ok(bytes) => kra::carry(bytes, &comes_back).unwrap_or_else(|e| {
@@ -1466,7 +1567,7 @@ mod tests {
     }
 
     fn send_linked(p: &Project) -> (Links, Baseline, Vec<u8>) {
-        let keep: Vec<bool> = p.layers.iter().map(|l| !stays_here(l)).collect();
+        let keep: Vec<bool> = sendable(p);
         let mut links = Links::new();
         let mut uuids = Vec::new();
         for (l, &k) in p.layers.iter().zip(&keep) {
@@ -1482,6 +1583,157 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         (links, base, bytes)
+    }
+
+    /// `project()` plus a "Top" layer, with Ink and Color grouped under it.
+    fn grouped() -> (Project, usize) {
+        let mut p = project();
+        let mut top = Layer::new("Top", 6);
+        let id = p.cells.len();
+        p.cells.push(cell(40, 30, 7).into());
+        top.exposures[0] = Some(id);
+        p.layers.push(top);
+        let g = p.group_layers(&[0, 1]).unwrap();
+        p.layers[g].name = "Char".into();
+        (p, g)
+    }
+
+    fn rows(p: &Project) -> Vec<String> {
+        p.layers
+            .iter()
+            .map(|l| match (l.is_group(), l.in_group) {
+                (true, _) => format!("[{}]", l.name),
+                (false, true) => format!(" {}", l.name),
+                (false, false) => l.name.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_untouched_round_trip_with_groups_is_a_noop() {
+        let (p, _) = grouped();
+        let (mut links, base) = link(&p);
+        let first = pull_from(&p, &base, &mut links, &p.clone());
+        assert!(first.is_noop(), "{:?}", first.report);
+        // And through a real send, file and all.
+        let (links, base, bytes) = send_linked(&p);
+        let pulled = prepare(kra::read_filtered(bytes, &comes_back).unwrap(), &base, &present(&p, &links));
+        let again = plan(&p, &base, &links, pulled).unwrap();
+        assert!(again.is_noop(), "{:?}", again.report);
+    }
+
+    #[test]
+    fn a_group_made_in_krita_comes_back() {
+        let mut p = project();
+        let (mut links, base) = link(&p);
+        let mut k = p.clone();
+        let g = k.group_layers(&[0, 1]).unwrap();
+        k.layers[g].name = "Made in Krita".into();
+        k.layers[g].opacity = 0.5;
+        let plan = pull_from(&p, &base, &mut links, &k);
+        assert_eq!(plan.report.added, 1);
+        links.extend(plan.apply(&mut p));
+        assert_eq!(rows(&p), [" Ink", " Color", "[Made in Krita]"]);
+        assert!((p.layers[2].opacity - 0.5).abs() < 0.01);
+        assert!(links.contains_key(&p.layers[2].uid), "the new group is linked");
+        // A second pull of the same file changes nothing.
+        let base = base_of(&p, &links);
+        let plan = pull_from(&p, &base, &mut links, &k);
+        assert!(plan.is_noop(), "{:?}", plan.report);
+    }
+
+    #[test]
+    fn a_layer_moved_into_a_group_in_krita_moves_here() {
+        let (mut p, g) = grouped();
+        let (mut links, base) = link(&p);
+        // In Krita, Top goes into the group, and the group is renamed.
+        let mut k = p.clone();
+        let top = k.layers.len() - 1;
+        assert!(k.drop_item(top, 1, true));
+        let kg = k.layers.iter().position(|l| l.is_group()).unwrap();
+        k.layers[kg].name = "Renamed".into();
+        let plan = pull_from(&p, &base, &mut links, &k);
+        plan.apply(&mut p);
+        assert_eq!(rows(&p), [" Ink", " Color", " Top", "[Renamed]"]);
+        assert!(p.groups_ok());
+        let _ = g;
+    }
+
+    /// Krita puts Top in a new group while a layer is added above Top here:
+    /// the new group lands right on Top, the layer here on top of the group.
+    #[test]
+    fn a_group_made_in_krita_takes_only_its_own_layers() {
+        let (mut p, _) = grouped();
+        let (mut links, base) = link(&p);
+        let mut k = p.clone();
+        let top = k.layers.len() - 1;
+        let kg = k.group_layers(&[top]).unwrap();
+        k.layers[kg].name = "New".into();
+        let frames = p.frame_count;
+        p.layers.push(Layer::new("Here", frames));
+        let plan = pull_from(&p, &base, &mut links, &k);
+        plan.apply(&mut p);
+        assert_eq!(rows(&p), [" Ink", " Color", "[Char]", " Top", "[New]", "Here"]);
+        assert!(p.groups_ok());
+    }
+
+    /// The group stays here now (`-x`), and Krita moves Top, just under it,
+    /// into its copy of it: Top stays synced and out of the group here, and
+    /// the next pull is quiet.
+    #[test]
+    fn a_layer_moved_into_a_group_that_stays_here_stays_out() {
+        let (mut p, _) = grouped();
+        p.layers.rotate_right(1);
+        let g = p.layers.len() - 1;
+        assert!(p.groups_ok() && p.is_group(g));
+        let (mut links, base) = link(&p);
+        let mut k = p.clone();
+        k.layers[0].in_group = true;
+        let ku: Vec<String> = k.layers.iter().map(|l| links[&l.uid].clone()).collect();
+        let bytes = kra::write(&k, &kra::WriteOpts { layer_uuids: &ku, selected_layer: 0, carried: &[] }).unwrap();
+        let pull = |p: &Project, base: &Baseline, links: &Links| {
+            let pulled = prepare(kra::read_filtered(bytes.clone(), &comes_back).unwrap(), base, &present(p, links));
+            plan(p, base, links, pulled).unwrap()
+        };
+        p.layers[g].name = "Char-x".into();
+        let first = pull(&p, &base, &links);
+        let unlink = first.unlink.clone();
+        let next = first.next.clone();
+        first.apply(&mut p);
+        links.retain(|uid, _| !unlink.contains(uid));
+        assert_eq!(rows(&p), ["Top", " Ink", " Color", "[Char-x]"]);
+        let again = pull(&p, &next, &links);
+        assert!(again.is_noop() && again.unlink.is_empty(), "{:?} {:?}", again.report, again.unlink);
+    }
+
+    #[test]
+    fn a_dash_x_group_stays_here_with_its_layers() {
+        let (mut p, g) = grouped();
+        p.layers[g].name = "Rough-x".into();
+        let (_, base, bytes) = send_linked(&p);
+        let doc = kra::read(bytes).unwrap();
+        let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Top"]);
+        assert_eq!(base.layers.len(), 1);
+    }
+
+    /// Top clipped to the group goes to Krita cut to it, and the untouched
+    /// round trip still changes nothing.
+    #[test]
+    fn a_layer_clipped_to_a_group_goes_cut() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].clip = true;
+        assert_eq!(p.clip_base(top), Some(g));
+        let (links, base, bytes) = send_linked(&p);
+        let doc = kra::read(bytes.clone()).unwrap();
+        let sent = doc.layers.iter().find(|l| l.name == "Top").unwrap();
+        let want = crate::doc::clip::shown(&p, top, 0).unwrap();
+        let got = crate::io::kra::tests::read_cell(&sent.drawings[sent.keys[0].1], 40, 30, 40, 30);
+        assert!(got.pixels() == want.pixels(), "sent cut to the group");
+        let pulled = prepare(kra::read_filtered(bytes, &comes_back).unwrap(), &base, &present(&p, &links));
+        let plan = plan(&p, &base, &links, pulled).unwrap();
+        assert!(plan.is_noop(), "{:?}", plan.report);
     }
 
     #[test]

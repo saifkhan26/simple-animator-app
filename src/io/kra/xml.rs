@@ -9,12 +9,17 @@ use std::fmt::Write;
 pub enum Item<'a> {
     /// A paint layer of ours.
     Layer(LayerXml<'a>),
+    /// A group of ours: its own `<layer>` attributes, whether it's folded,
+    /// and what's in it, top first.
+    Group(LayerXml<'a>, bool, Vec<Item<'a>>),
     /// A `<layer>` element copied verbatim from a Krita file (see
     /// `super::Carried`).
     Raw(&'a str),
 }
 
-/// One `<layer>` element of ours. Only paint layers are ever written.
+/// One `<layer>` element of ours: a paint layer, or a group's own
+/// attributes.
+#[derive(Clone, Copy)]
 pub struct LayerXml<'a> {
     pub filename: &'a str,
     pub name: &'a str,
@@ -73,29 +78,57 @@ pub fn maindoc(image: &str, width: u32, height: u32, layers: &[Item]) -> String 
     );
     s.push_str("  <layers>\n");
     for item in layers {
-        let l = match item {
-            Item::Layer(l) => l,
-            Item::Raw(xml) => {
-                let _ = writeln!(s, "   {xml}");
-                continue;
-            }
-        };
-        let _ = writeln!(
-            s,
-            "   <layer nodetype=\"paintlayer\" filename=\"{}\" name=\"{}\" uuid=\"{}\" opacity=\"{}\" visible=\"{}\" locked=\"{}\" x=\"0\" y=\"0\" compositeop=\"normal\" colorspacename=\"RGBA\" channelflags=\"\" channellockflags=\"\" collapsed=\"0\" colorlabel=\"0\" onionskin=\"0\" intimeline=\"1\" keyframes=\"{}.keyframes.xml\"{}/>",
-            attr(l.filename),
-            attr(l.name),
-            attr(l.uuid),
-            l.opacity,
-            l.visible as u8,
-            l.locked as u8,
-            attr(l.filename),
-            if l.selected { " selected=\"true\"" } else { "" },
-        );
+        write_item(&mut s, item, 3);
     }
     s.push_str("  </layers>\n");
     s.push_str(" </IMAGE>\n</DOC>\n");
     s
+}
+
+/// One stack entry, indented `depth` spaces; a group recurses into its own
+/// `<layers>`.
+fn write_item(s: &mut String, item: &Item, depth: usize) {
+    let pad = " ".repeat(depth);
+    let selected = |l: &LayerXml| if l.selected { " selected=\"true\"" } else { "" };
+    match item {
+        Item::Raw(xml) => {
+            let _ = writeln!(s, "{pad}{xml}");
+        }
+        Item::Layer(l) => {
+            let _ = writeln!(
+                s,
+                "{pad}<layer nodetype=\"paintlayer\" filename=\"{}\" name=\"{}\" uuid=\"{}\" opacity=\"{}\" visible=\"{}\" locked=\"{}\" x=\"0\" y=\"0\" compositeop=\"normal\" colorspacename=\"RGBA\" channelflags=\"\" channellockflags=\"\" collapsed=\"0\" colorlabel=\"0\" onionskin=\"0\" intimeline=\"1\" keyframes=\"{}.keyframes.xml\"{}/>",
+                attr(l.filename),
+                attr(l.name),
+                attr(l.uuid),
+                l.opacity,
+                l.visible as u8,
+                l.locked as u8,
+                attr(l.filename),
+                selected(l),
+            );
+        }
+        Item::Group(l, folded, children) => {
+            let _ = writeln!(
+                s,
+                "{pad}<layer nodetype=\"grouplayer\" filename=\"{}\" name=\"{}\" uuid=\"{}\" opacity=\"{}\" visible=\"{}\" locked=\"{}\" x=\"0\" y=\"0\" compositeop=\"normal\" collapsed=\"{}\" colorlabel=\"0\" passthrough=\"0\" intimeline=\"1\"{}>",
+                attr(l.filename),
+                attr(l.name),
+                attr(l.uuid),
+                l.opacity,
+                l.visible as u8,
+                l.locked as u8,
+                *folded as u8,
+                selected(l),
+            );
+            let _ = writeln!(s, "{pad} <layers>");
+            for c in children {
+                write_item(s, c, depth + 2);
+            }
+            let _ = writeln!(s, "{pad} </layers>");
+            let _ = writeln!(s, "{pad}</layer>");
+        }
+    }
 }
 
 /// A raster layer's content channel. `keys` is `(time, frame file name)`; a

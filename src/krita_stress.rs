@@ -114,10 +114,12 @@ impl Krita {
         let mut uuids = Vec::new();
         let (x, y) = kra::cell_origin(pw, ph, pw, ph);
         for k in &doc.layers {
-            let mut l = Layer::new(k.name.clone(), frames);
+            let mut l = if k.group { Layer::group(k.name.clone(), frames) } else { Layer::new(k.name.clone(), frames) };
             l.opacity = k.opacity as f32 / 255.0;
             l.visible = k.visible;
             l.locked = k.locked;
+            l.in_group = k.in_group;
+            l.collapsed = k.collapsed;
             let base = p.cells.len();
             for d in &k.drawings {
                 p.cells.push(d.place(x, y, pw, ph).0.into());
@@ -139,6 +141,36 @@ impl Krita {
     fn index_of(&self, uuid: &str) -> Option<usize> {
         self.uuids.iter().position(|u| u == uuid)
     }
+
+    /// Run a reorder of the stack, keeping each layer's uuid with it; a
+    /// layer the edit makes gets a fresh one, as Krita would give it.
+    /// Whether layer `i` stays in Krita: `-x` itself, or in a `-x` group.
+    fn stays(&self, i: usize) -> bool {
+        let p = &self.p;
+        stays_put(&p.layers[i].name) || p.group_of(i).is_some_and(|g| stays_put(&p.layers[g].name))
+    }
+
+    /// The stack, bottom first, for a failure message: `[` opens a group's
+    /// children, `]` is its header.
+    fn stack(&self) -> String {
+        let p = &self.p;
+        let mut s = String::new();
+        for (i, l) in p.layers.iter().enumerate() {
+            if l.in_group && (i == 0 || !p.layers[i - 1].in_group) {
+                s.push_str("[ ");
+            }
+            s.push_str(&l.name);
+            s.push_str(if l.is_group() { " ] " } else { " " });
+        }
+        s
+    }
+
+    fn restack(&mut self, edit: impl FnOnce(&mut Project)) {
+        let by_uid: HashMap<u64, String> =
+            self.p.layers.iter().map(|l| l.uid).zip(self.uuids.iter().cloned()).collect();
+        edit(&mut self.p);
+        self.uuids = self.p.layers.iter().map(|l| by_uid.get(&l.uid).cloned().unwrap_or_else(kl::new_uuid)).collect();
+    }
 }
 
 /// The app side: the project and the link state the app keeps.
@@ -152,7 +184,7 @@ struct App {
 impl App {
     /// `start_send`, minus the worker thread.
     fn send(&mut self) -> kl::Sent {
-        let keep: Vec<bool> = self.p.layers.iter().map(|l| !kl::stays_here(l)).collect();
+        let keep: Vec<bool> = kl::sendable(&self.p);
         let mut uuids = Vec::new();
         for (l, &k) in self.p.layers.iter().zip(&keep) {
             if k {
@@ -277,7 +309,9 @@ impl Session {
         let fc = p.frame_count;
         let li = rng.below(p.layers.len());
         let uid = p.layers[li].uid;
-        let op = rng.below(12);
+        let op = rng.below(15);
+        // A group's header has no drawings or reference flag to change.
+        let op = if p.is_group(li) && matches!(op, 0..=4 | 8) { 12 } else { op };
         self.log.push(format!("r{} here  op{op} on {} ({:?})", self.round, p.layers[li].name, p.layers[li].exposures));
         match op {
             0..=2 => {
@@ -323,12 +357,33 @@ impl Session {
             10 if p.layers.len() > 2 => {
                 p.layers.remove(li);
             }
-            11 if li + 1 < p.layers.len() => {
+            11 if li + 1 < p.layers.len() && !p.is_group(li) && !p.is_group(li + 1) && p.layers[li].in_group == p.layers[li + 1].in_group => {
                 p.layers.swap(li, li + 1);
                 self.d.local_order = true;
             }
+            // Groups: wrap a layer in one, dissolve one, step a layer into,
+            // through or out of one.
+            12 if !p.is_group(li) && p.group_of(li).is_none() => {
+                p.group_layers(&[li]);
+                self.d.local_order = true;
+            }
+            13 => {
+                if let Some(g) = if p.is_group(li) { Some(li) } else { p.group_of(li) } {
+                    p.ungroup(g);
+                    self.d.local_order = true;
+                }
+            }
+            14 => {
+                if p.move_item(li, rng.chance(50)) {
+                    self.d.local_order = true;
+                }
+            }
             _ => {}
         }
+        // The raw edits above (a layer inserted anywhere, one removed) can
+        // split a group the way no edit in the app can; settle it as a load
+        // would.
+        p.normalize_groups();
     }
 
     fn krita_edit(&mut self) {
@@ -341,7 +396,9 @@ impl Session {
         let li = rng.below(k.p.layers.len());
         let u = k.uuids[li].clone();
         self.d.krita_unsaved = true;
-        let op = rng.below(12);
+        let op = rng.below(15);
+        // Krita has no drawings on a group either.
+        let op = if k.p.is_group(li) && matches!(op, 0..=4) { 12 } else { op };
         self.log.push(format!("r{} krita op{op} on {} ({:?})", self.round, k.p.layers[li].name, k.p.layers[li].exposures));
         match op {
             0..=2 => {
@@ -385,9 +442,29 @@ impl Session {
                 k.p.layers[li].name.push_str("-x");
                 self.d.krita_attr.insert(u);
             }
-            9 if li + 1 < k.p.layers.len() => {
+            9 if li + 1 < k.p.layers.len()
+                && !k.p.is_group(li)
+                && !k.p.is_group(li + 1)
+                && k.p.layers[li].in_group == k.p.layers[li + 1].in_group =>
+            {
                 k.p.layers.swap(li, li + 1);
                 k.uuids.swap(li, li + 1);
+            }
+            12 if !k.p.is_group(li) && k.p.group_of(li).is_none() => {
+                k.restack(|p| {
+                    p.group_layers(&[li]);
+                });
+            }
+            13 => {
+                if let Some(g) = if k.p.is_group(li) { Some(li) } else { k.p.group_of(li) } {
+                    k.restack(|p| p.ungroup(g));
+                }
+            }
+            14 => {
+                let up = rng.chance(50);
+                k.restack(|p| {
+                    p.move_item(li, up);
+                });
             }
             10 => {
                 k.p.layers[li].opacity = rng.below(256) as f32 / 255.0;
@@ -402,6 +479,9 @@ impl Session {
             }
             _ => {}
         }
+        // A layer inserted or removed anywhere can split a group; a real
+        // Krita file can't hold that, so settle it the way a load would.
+        k.restack(|p| p.normalize_groups());
     }
 
     // --- pull ----------------------------------------------------------------
@@ -426,18 +506,14 @@ impl Session {
                 let text = e.to_string();
                 check!(self, text.starts_with(kl::EVERYTHING_DELETED), "pull failed: {text}");
                 let app = &self.app;
-                let comes_back: Vec<&String> = self
-                    .krita
-                    .p
-                    .layers
-                    .iter()
-                    .zip(&self.krita.uuids)
-                    .filter(|(l, _)| kl::comes_back(&l.name, &[]))
-                    .map(|(_, u)| u)
+                let k = &self.krita;
+                let comes_back: Vec<&String> = (0..k.uuids.len())
+                    .filter(|&i| !k.stays(i))
+                    .map(|i| &k.uuids[i])
                     .filter(|u| !app.base.ignored.contains(*u))
                     .collect();
-                let all_gone = app.p.layers.iter().all(|l| {
-                    !kl::stays_here(l) && app.links.get(&l.uid).is_some_and(|u| !comes_back.contains(&u))
+                let all_gone = app.p.layers.iter().enumerate().all(|(i, l)| {
+                    !kl::stays_here_at(&app.p, i) && app.links.get(&l.uid).is_some_and(|u| !comes_back.contains(&u))
                 });
                 check!(self, all_gone, "refused a pull that leaves layers: {text}");
                 let same = |a: &Project, b: &Project| {
@@ -462,13 +538,15 @@ impl Session {
         let (app, k) = (&self.app, &self.krita);
         let fc = app.p.frame_count;
 
+        // Groups are in shape: a pull never leaves anything to repair.
+        check!(self, app.p.groups_ok(), "a pull left the groups broken");
         // The timeline is whole.
         for l in &app.p.layers {
             check!(self, l.exposures.len() == fc, "layer {} has {} of {fc} frames", l.name, l.exposures.len());
             check!(self, l.exposures.iter().flatten().all(|&id| id < app.p.cells.len()), "dangling cell in {}", l.name);
         }
-        for (kl_, u) in k.p.layers.iter().zip(&k.uuids) {
-            if let (Some(last), true) = (kl_.exposures.iter().rposition(Option::is_some), kl::comes_back(&kl_.name, &[])) {
+        for (ki, (kl_, u)) in k.p.layers.iter().zip(&k.uuids).enumerate() {
+            if let (Some(last), true) = (kl_.exposures.iter().rposition(Option::is_some), !k.stays(ki)) {
                 if app.linked(u).is_some() {
                     check!(self, last < fc, "Krita key at {last} past the end ({fc})");
                 }
@@ -481,7 +559,7 @@ impl Session {
         }
 
         // Layers that stay here are untouched and still here.
-        for l in before.layers.iter().filter(|l| kl::stays_here(l)) {
+        for l in (0..before.layers.len()).filter(|&i| kl::stays_here_at(&before, i)).map(|i| &before.layers[i]) {
             let now = app.p.layers.iter().find(|x| x.uid == l.uid);
             check!(self, now.is_some(), "stay-here layer {} vanished", l.name);
             let now = now.unwrap();
@@ -497,7 +575,7 @@ impl Session {
 
         for (ki, u) in k.uuids.iter().enumerate() {
             let kl_ = &k.p.layers[ki];
-            if !kl::comes_back(&kl_.name, &[]) {
+            if k.stays(ki) {
                 check!(self, app.linked(u).is_none(), "{} is -x in Krita but still linked", kl_.name);
                 continue;
             }
@@ -543,9 +621,9 @@ impl Session {
         }
 
         // Linked layers Krita deleted are gone here.
-        for b in &before.layers {
+        for (bi, b) in before.layers.iter().enumerate() {
             if let Some(u) = links_before.get(&b.uid) {
-                if base_before.contains(u) && !kl::stays_here(b) && k.index_of(u).is_none() {
+                if base_before.contains(u) && !kl::stays_here_at(&before, bi) && k.index_of(u).is_none() {
                     check!(self, !app.p.layers.iter().any(|l| l.uid == b.uid), "{} deleted in Krita but kept", b.name);
                 }
             }
@@ -560,7 +638,17 @@ impl Session {
 
         // The same file again changes nothing.
         let again = app.plan();
-        check!(self, again.is_noop() && again.unlink.is_empty(), "second pull not quiet: {:?}", again.report);
+        check!(
+            self,
+            again.is_noop() && again.unlink.is_empty(),
+            "second pull not quiet: {:?}, unlink {:?}
+ here {}
+ krita {}",
+            again.report,
+            again.unlink,
+            Krita { p: app.p.clone(), uuids: Vec::new() }.stack(),
+            k.stack()
+        );
 
         // Agreed again, except where edits here survived.
         self.d.krita_content.clear();
@@ -599,17 +687,22 @@ impl Session {
                 self.d.krita_attr.clear();
             }
         }
-        // What Krita had on disk: its `-x` layers, and the kept layer under each.
+        // What Krita had on disk: its `-x` layers (and what's in its `-x`
+        // groups), and the kept layer under each.
         let on_disk = Krita::open(&self.app.path);
-        let held: Vec<(String, String, Vec<u64>, Option<String>)> = on_disk
+        // In a group, it's the group first that says where it is.
+        #[allow(clippy::type_complexity)]
+        let held: Vec<(String, String, Vec<u64>, Option<String>, Option<String>)> = on_disk
             .p
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| stays_put(&l.name))
+            .filter(|&(i, _)| on_disk.stays(i))
             .map(|(i, l)| {
-                let under = (0..i).rev().find(|&j| !stays_put(&on_disk.p.layers[j].name)).map(|j| on_disk.uuids[j].clone());
-                (on_disk.uuids[i].clone(), l.name.clone(), shows(&on_disk.p, l, on_disk.p.frame_count), under)
+                let dp = &on_disk.p;
+                let under = (0..i).rev().find(|&j| !on_disk.stays(j)).map(|j| on_disk.uuids[j].clone());
+                let group = dp.group_of(i).map(|g| on_disk.uuids[g].clone());
+                (on_disk.uuids[i].clone(), l.name.clone(), shows(dp, l, dp.frame_count), under, group)
             })
             .collect();
 
@@ -622,9 +715,28 @@ impl Session {
         let fc = app.p.frame_count;
 
         // Krita holds exactly what's here, layer for layer…
-        let sendable: Vec<&Layer> = app.p.layers.iter().filter(|l| !kl::stays_here(l)).collect();
-        let theirs: Vec<usize> = (0..k2.p.layers.len()).filter(|&i| !stays_put(&k2.p.layers[i].name)).collect();
-        check!(self, sendable.len() == theirs.len(), "sent {} layers, Krita has {}", sendable.len(), theirs.len());
+        let sendable: Vec<&Layer> = app
+            .p
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !kl::stays_here_at(&app.p, *i))
+            .map(|(_, l)| l)
+            .collect();
+        let theirs: Vec<usize> = (0..k2.p.layers.len()).filter(|&i| !k2.stays(i)).collect();
+        check!(
+            self,
+            sendable.len() == theirs.len(),
+            "sent {} layers, Krita has {}
+ was {}
+ here {}
+ now {}",
+            sendable.len(),
+            theirs.len(),
+            on_disk.stack(),
+            Krita { p: app.p.clone(), uuids: Vec::new() }.stack(),
+            k2.stack()
+        );
         for (l, &i) in sendable.iter().zip(&theirs) {
             check!(self, app.links.get(&l.uid) == Some(&k2.uuids[i]), "{} sent out of order", l.name);
             check!(self, attrs(l) == attrs(&k2.p.layers[i]), "{} attrs lost in the send", l.name);
@@ -633,10 +745,15 @@ impl Session {
         // …plus its own `-x` layers, untouched and in place.
         let mut kept_names: Vec<&str> = sent.kept.iter().map(String::as_str).collect();
         kept_names.sort_unstable();
-        let mut held_names: Vec<&str> = held.iter().map(|h| h.1.as_str()).collect();
+        // A `-x` group goes back as one piece, what's in it along.
+        let dp = &on_disk.p;
+        let mut held_names: Vec<&str> = (0..dp.layers.len())
+            .filter(|&i| stays_put(&dp.layers[i].name) && !dp.group_of(i).is_some_and(|g| stays_put(&dp.layers[g].name)))
+            .map(|i| dp.layers[i].name.as_str())
+            .collect();
         held_names.sort_unstable();
         check!(self, kept_names == held_names, "kept {kept_names:?}, Krita had {held_names:?}");
-        for (u, name, frames, under) in &held {
+        for (u, name, frames, under, group) in &held {
             let i = k2.index_of(u);
             check!(self, i.is_some(), "Krita-only {name} dropped by the send");
             let i = i.unwrap();
@@ -644,9 +761,25 @@ impl Session {
             let mut want = frames.clone();
             want.resize(fc2, *frames.last().unwrap_or(&0));
             check!(self, shows(&k2.p, &k2.p.layers[i], fc2) == want, "Krita-only {name} changed by the send");
-            if let Some(under) = under.as_ref().filter(|u| k2.index_of(u).is_some()) {
-                let now = (0..i).rev().find(|&j| !stays_put(&k2.p.layers[j].name)).map(|j| &k2.uuids[j]);
-                check!(self, now == Some(under), "Krita-only {name} moved");
+            let now = (0..i).rev().find(|&j| !k2.stays(j));
+            let moved = || format!("Krita-only {name} moved
+ was {}
+ now {}", on_disk.stack(), k2.stack());
+            let under = under.as_ref().and_then(|u| k2.index_of(u));
+            if let Some(g) = group.as_ref().and_then(|u| k2.index_of(u)).filter(|&g| k2.p.is_group(g)) {
+                // Still in its group; on the same layer, if that's still in
+                // the group too.
+                let same = k2.p.group_of(i) == Some(g)
+                    && match under.filter(|&j| k2.p.group_of(j) == Some(g)) {
+                        Some(j) => now == Some(j),
+                        None => true,
+                    };
+                check!(self, same, "{}", moved());
+            } else if let Some(under) = under {
+                // Still on the layer it was on — or on the group that layer
+                // has gone into here since.
+                let same = now == Some(under) || now.is_some() && now == k2.p.group_of(under);
+                check!(self, same, "{}", moved());
             }
         }
 

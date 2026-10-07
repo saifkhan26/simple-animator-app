@@ -6018,7 +6018,7 @@ impl AppState {
         link.baseline = None;
         // Reference and `-x` layers stay here: not sent, and unlinked if they
         // were linked before.
-        let keep: Vec<bool> = self.project.layers.iter().map(|l| !krita_link::stays_here(l)).collect();
+        let keep: Vec<bool> = krita_link::sendable(&self.project);
         let mut uuids = Vec::new();
         let mut kept_out = Vec::new();
         for (l, &k) in self.project.layers.iter().zip(&keep) {
@@ -6336,6 +6336,9 @@ impl AppState {
             locked: bool,
             cells: Vec<Canvas>,
             keys: Vec<(usize, usize)>,
+            group: bool,
+            in_group: bool,
+            collapsed: bool,
         }
         let mut layers: Vec<Imported> = Vec::new();
         for kl in &doc.layers {
@@ -6370,7 +6373,23 @@ impl AppState {
                 locked: kl.locked,
                 cells,
                 keys,
+                group: kl.group,
+                in_group: kl.in_group,
+                collapsed: kl.collapsed,
             });
+        }
+        // A group of nothing — every layer in it held back — isn't worth
+        // bringing in.
+        let mut i = 0;
+        while i < layers.len() {
+            if layers[i].group && (i == 0 || !layers[i - 1].in_group) {
+                layers.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        if layers.iter().all(|l| l.group) {
+            layers.clear();
         }
         if layers.is_empty() {
             let why = if doc.held.is_empty() {
@@ -6381,28 +6400,46 @@ impl AppState {
             self.krita_notice(why, true);
             return;
         }
-        let n = layers.len();
+        let n = layers.iter().filter(|l| !l.group).count();
+        let has_groups = layers.iter().any(|l| l.group);
         self.structural_edit(false, move |p| {
             p.ensure_frame_count(need);
             // Bottom first: each lands on top of the one before, all under
-            // the active layer.
+            // the active layer — and in its group, unless what comes in has
+            // groups of its own, which can't go inside one: then under the
+            // whole group.
+            let cur = p.current_layer;
+            let at0 = if has_groups { p.block(p.group_of(cur).unwrap_or(cur)).start } else { cur };
+            let inherit = !has_groups && p.layers.get(cur).is_some_and(|l| l.in_group || l.is_group());
+            let mut at = at0.min(p.layers.len());
             for im in layers {
-                let idx = p.add_layer_below_active(im.name);
-                let base = p.cells.len();
-                let size = im.cells.first().map(|c| (c.width, c.height));
-                p.cells.extend(im.cells.into_iter().map(std::sync::Arc::new));
-                let l = &mut p.layers[idx];
+                let mut l = if im.group {
+                    crate::doc::layer::Layer::group(im.name, p.frame_count)
+                } else {
+                    crate::doc::layer::Layer::new(im.name, p.frame_count)
+                };
                 l.opacity = im.opacity as f32 / 255.0;
                 l.visible = im.visible;
                 l.locked = im.locked;
-                if let Some((cw, ch)) = size.filter(|&s| s != (pw, ph)) {
+                l.in_group = im.in_group || (inherit && !im.group);
+                l.collapsed = im.collapsed;
+                let base = p.cells.len();
+                if let Some((cw, ch)) = im.cells.first().map(|c| (c.width, c.height)).filter(|&s| s != (pw, ph)) {
                     l.cell_w = cw;
                     l.cell_h = ch;
                 }
+                p.cells.extend(im.cells.into_iter().map(std::sync::Arc::new));
                 for (t, ci) in im.keys {
                     l.set_key(t, base + ci);
                 }
+                p.layers.insert(at, l);
+                p.relink_after_insert(at);
+                at += 1;
             }
+            if cur >= at0 {
+                p.current_layer = cur + (at - at0);
+            }
+            p.normalize_groups();
         });
         let mut warnings = doc.warnings;
         if let Some(fps) = doc.fps.filter(|f| (f - self.project.fps).abs() > 0.01) {
@@ -7137,7 +7174,7 @@ mod tests {
         let mut link = KritaLink::new(path.clone());
         link.poll_every = Duration::ZERO;
         link.settle = Duration::ZERO;
-        let keep: Vec<bool> = st.project.layers.iter().map(|l| !krita_link::stays_here(l)).collect();
+        let keep: Vec<bool> = krita_link::sendable(&st.project);
         assert_eq!(keep, [false, true]);
         let ink_uuid = krita_link::new_uuid();
         link.uuids.insert(st.project.layers[ink].uid, ink_uuid.clone());

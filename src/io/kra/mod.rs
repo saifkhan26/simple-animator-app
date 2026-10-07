@@ -66,9 +66,13 @@ pub struct Carried {
     xml: String,
     /// `(path under layers/, bytes)`.
     files: Vec<(String, Vec<u8>)>,
-    /// Uuids of the paint layers under it in Krita's stack, nearest first:
-    /// it goes back in just above the first of them the rewrite still has.
+    /// Uuids of the layers and groups under it in Krita's stack, nearest
+    /// first (a group before what's in it): it goes back in just above the
+    /// first of them the rewrite still has beside it.
     below: Vec<String>,
+    /// The uuid of the group it sat in — the outermost one, as groups fold
+    /// on reading — so it goes back inside it while the rewrite has it.
+    group: Option<String>,
 }
 
 /// The layers of a Krita file that `keep(name, groups)` rejects — the same
@@ -86,35 +90,42 @@ pub fn carry(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> Result<V
     let dir = format!("{}/layers/", image.attribute("name").unwrap_or(""));
 
     // The stack top first, as the XML lists it: each rejected subtree once,
-    // and the paint layers that stay, in order.
+    // and the paint layers and groups that stay, in order (a group before
+    // what's in it).
     enum Seen {
         Carried(usize),
-        Paint(String),
+        Kept(String),
     }
     struct Walk<'a> {
         keep: &'a dyn Fn(&str, &[String]) -> bool,
         src: &'a str,
         groups: Vec<String>,
+        /// The uuid of each group in `groups`.
+        group_uuids: Vec<String>,
         seen: Vec<Seen>,
-        out: Vec<(String, String, Vec<String>)>,
+        out: Vec<(String, String, Vec<String>, Option<String>)>,
     }
     fn walk(layers: roxmltree::Node, w: &mut Walk) {
         for n in layers.children().filter(|n| n.has_tag_name("layer")) {
             let name = n.attribute("name").unwrap_or("").to_string();
+            let uuid = n.attribute("uuid").unwrap_or("").to_string();
             if !(w.keep)(&name, &w.groups) {
                 let files =
                     n.descendants().filter_map(|d| d.attribute("filename")).map(str::to_string).collect();
-                w.out.push((name, w.src[n.range()].to_string(), files));
+                w.out.push((name, w.src[n.range()].to_string(), files, w.group_uuids.first().cloned()));
                 w.seen.push(Seen::Carried(w.out.len() - 1));
                 continue;
             }
             match n.attribute("nodetype").unwrap_or("") {
-                "paintlayer" => w.seen.push(Seen::Paint(n.attribute("uuid").unwrap_or("").to_string())),
+                "paintlayer" => w.seen.push(Seen::Kept(uuid)),
                 "grouplayer" => {
+                    w.seen.push(Seen::Kept(uuid.clone()));
                     if let Some(inner) = n.children().find(|c| c.has_tag_name("layers")) {
                         w.groups.push(name);
+                        w.group_uuids.push(uuid);
                         walk(inner, w);
                         w.groups.pop();
+                        w.group_uuids.pop();
                     }
                 }
                 _ => {}
@@ -125,18 +136,19 @@ pub fn carry(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> Result<V
         .children()
         .find(|n| n.has_tag_name("layers"))
         .context("maindoc.xml has no layers")?;
-    let mut w = Walk { keep, src: &maindoc, groups: Vec::new(), seen: Vec::new(), out: Vec::new() };
+    let mut w =
+        Walk { keep, src: &maindoc, groups: Vec::new(), group_uuids: Vec::new(), seen: Vec::new(), out: Vec::new() };
     walk(top, &mut w);
     let Walk { seen, out, .. } = w;
 
     let entries: Vec<String> = r.zip.file_names().map(str::to_string).collect();
     let mut carried = Vec::with_capacity(out.len());
-    for (i, (name, xml, filenames)) in out.into_iter().enumerate() {
+    for (i, (name, xml, filenames, group)) in out.into_iter().enumerate() {
         let at = seen.iter().position(|s| matches!(s, Seen::Carried(j) if *j == i)).unwrap_or(0);
         let below = seen[at + 1..]
             .iter()
             .filter_map(|s| match s {
-                Seen::Paint(u) => Some(u.clone()),
+                Seen::Kept(u) => Some(u.clone()),
                 Seen::Carried(_) => None,
             })
             .collect();
@@ -153,7 +165,7 @@ pub fn carry(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> Result<V
                 files.push((rel.to_string(), r.bytes(e)?));
             }
         }
-        carried.push(Carried { name, xml, files, below });
+        carried.push(Carried { name, xml, files, below, group });
     }
     Ok(carried)
 }
@@ -202,13 +214,25 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
             names.push(name);
         }
     }
-    // Carried layers go back above the nearest layer under them that is
-    // still here; with none left, at the bottom.
-    let anchor = |c: &Carried| c.below.iter().find_map(|u| opts.layer_uuids.iter().position(|x| x == u));
-    let mut stack: Vec<xml::Item> = Vec::new();
-    for (i, l) in project.layers.iter().enumerate().rev() {
-        stack.extend(opts.carried.iter().filter(|c| anchor(c) == Some(i)).map(|c| xml::Item::Raw(&c.xml)));
-        stack.push(xml::Item::Layer(xml::LayerXml {
+    // Carried layers go back where they were: inside their group while it's
+    // still a group here, else among the top-level items; there, above the
+    // nearest item under them that's still beside them — or above the group
+    // that item has since gone into — else at the bottom.
+    let index_of = |u: &String| opts.layer_uuids.iter().position(|x| x == u);
+    let home = |c: &Carried| c.group.as_ref().and_then(index_of).filter(|&g| project.is_group(g));
+    let anchor = |c: &Carried| {
+        let beside = |i: usize| match home(c) {
+            Some(g) => (project.group_of(i) == Some(g)).then_some(i),
+            None => Some(project.group_of(i).unwrap_or(i)),
+        };
+        c.below.iter().filter_map(index_of).find_map(beside)
+    };
+    let above = |i: usize| opts.carried.iter().filter(move |k| anchor(k) == Some(i)).map(|k| xml::Item::Raw(&k.xml));
+    let own: Vec<xml::LayerXml> = project
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(i, l)| xml::LayerXml {
             filename: &names[i],
             name: &l.name,
             uuid: &opts.layer_uuids[i],
@@ -216,9 +240,34 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
             visible: l.visible,
             locked: l.locked,
             selected: i == opts.selected_layer,
-        }));
+        })
+        .collect();
+    // Each layer is preceded by whatever carried layers sat just above it —
+    // in the same group as it, if it's in one.
+    let mut stack: Vec<xml::Item> = Vec::new();
+    let mut i = project.layers.len();
+    while i > 0 {
+        i -= 1;
+        stack.extend(above(i));
+        if project.is_group(i) {
+            let kids = project.children(i);
+            let mut inner = Vec::new();
+            for c in kids.clone().rev() {
+                inner.extend(above(c));
+                inner.push(xml::Item::Layer(own[c]));
+            }
+            inner.extend(
+                opts.carried.iter().filter(|k| home(k) == Some(i) && anchor(k).is_none()).map(|k| xml::Item::Raw(&k.xml)),
+            );
+            stack.push(xml::Item::Group(own[i], project.layers[i].collapsed, inner));
+            i = kids.start;
+            continue;
+        }
+        stack.push(xml::Item::Layer(own[i]));
     }
-    stack.extend(opts.carried.iter().filter(|c| anchor(c).is_none()).map(|c| xml::Item::Raw(&c.xml)));
+    stack.extend(
+        opts.carried.iter().filter(|c| home(c).is_none() && anchor(c).is_none()).map(|c| xml::Item::Raw(&c.xml)),
+    );
     zip.start_file("maindoc.xml", deflated)?;
     zip.write_all(xml::maindoc(IMAGE, pw, ph, &stack).as_bytes())?;
     zip.start_file("documentinfo.xml", deflated)?;
@@ -226,6 +275,10 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
 
     let empty = tiles::encode(&[], 0, 0, 0, 0);
     for (i, layer) in project.layers.iter().enumerate() {
+        // A group has no pixels of its own to write.
+        if layer.is_group() {
+            continue;
+        }
         let base = &names[i];
         // Each distinct cell becomes one frame file; a repeat reuses it.
         // `None` is the blank drawing.
@@ -376,6 +429,14 @@ pub struct KraLayer {
     pub drawings: Vec<Drawing>,
     /// `(time, index into drawings)`, sorted by time.
     pub keys: Vec<(usize, usize)>,
+    /// A group's header — no drawings — with its layers listed just below
+    /// it in [`KraDoc::layers`].
+    pub group: bool,
+    /// One of a group's layers. Groups inside groups are folded into the
+    /// outermost one.
+    pub in_group: bool,
+    /// A group shown folded in Krita.
+    pub collapsed: bool,
 }
 
 pub struct KraDoc {
@@ -384,7 +445,8 @@ pub struct KraDoc {
     pub fps: Option<f32>,
     /// Last frame of Krita's playback range.
     pub range_end: Option<usize>,
-    /// Paint layers, bottom first. Groups are flattened into the stack.
+    /// Layers, bottom first: paint layers, and a group's header just above
+    /// its layers.
     pub layers: Vec<KraLayer>,
     /// Things read but not carried over — unsupported layer types, blend
     /// modes, masks — worded for a toast.
@@ -474,7 +536,9 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
     let name = image.attribute("name").unwrap_or("").to_string();
     let dir = format!("{name}/layers");
 
-    // Paint layers in XML order (top first), groups flattened.
+    // Layers in XML order (top first). A group at the top of the stack comes
+    // through as a header entry above its layers; a group inside a group
+    // folds into the outermost one, since ours hold layers, never groups.
     struct Found {
         uuid: String,
         name: String,
@@ -485,6 +549,9 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
         x: i32,
         y: i32,
         keyframes: Option<String>,
+        group: bool,
+        in_group: bool,
+        collapsed: bool,
     }
     struct Walk<'a> {
         keep: &'a dyn Fn(&str, &[String]) -> bool,
@@ -493,15 +560,27 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
         warnings: Vec<String>,
         held: Vec<(String, String)>,
     }
-    fn walk(layers: roxmltree::Node, visible: bool, holding: bool, dx: i32, dy: i32, w: &mut Walk) -> Result<()> {
+    /// `visible` and `opacity` are what folded-in groups pass down: a layer
+    /// directly in a top-level group keeps its own.
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        layers: roxmltree::Node,
+        visible: bool,
+        opacity: f32,
+        holding: bool,
+        dx: i32,
+        dy: i32,
+        w: &mut Walk,
+    ) -> Result<()> {
         for n in layers.children().filter(|n| n.has_tag_name("layer")) {
             let name = n.attribute("name").unwrap_or("").to_string();
-            let vis = visible && n.attribute("visible") != Some("0");
+            let own_vis = n.attribute("visible") != Some("0");
             let (x, y) = (dx + attr_i32(n, "x"), dy + attr_i32(n, "y"));
             let hold = holding || !(w.keep)(&name, &w.groups);
             if !hold && n.children().any(|c| c.has_tag_name("masks")) {
                 w.warnings.push(format!("masks on \"{name}\" ignored"));
             }
+            let own_opacity = attr_i32(n, "opacity").clamp(0, 255) as f32 / 255.0;
             match n.attribute("nodetype").unwrap_or("") {
                 "paintlayer" if hold => {
                     w.held.push((n.attribute("uuid").unwrap_or("").to_string(), name));
@@ -521,24 +600,50 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
                     w.found.push(Found {
                         uuid: n.attribute("uuid").unwrap_or("").to_string(),
                         filename: n.attribute("filename").context("layer without filename")?.to_string(),
-                        opacity: attr_i32(n, "opacity").clamp(0, 255) as u8,
-                        visible: vis,
+                        opacity: (own_opacity * opacity * 255.0).round().clamp(0.0, 255.0) as u8,
+                        visible: visible && own_vis,
                         locked: n.attribute("locked") == Some("1"),
                         x,
                         y,
                         keyframes: n.attribute("keyframes").map(str::to_string),
                         name,
+                        group: false,
+                        in_group: !w.groups.is_empty(),
+                        collapsed: false,
                     });
                 }
                 "grouplayer" => {
-                    if !hold && attr_i32(n, "opacity") != 255 {
-                        w.warnings.push(format!("group \"{name}\" opacity ignored"));
+                    let Some(inner) = n.children().find(|c| c.has_tag_name("layers")) else {
+                        continue;
+                    };
+                    let top_level = w.groups.is_empty();
+                    if top_level && !hold {
+                        // Ours: a header, its layers keeping their own state.
+                        w.found.push(Found {
+                            uuid: n.attribute("uuid").unwrap_or("").to_string(),
+                            filename: String::new(),
+                            opacity: (own_opacity * 255.0).round() as u8,
+                            visible: own_vis,
+                            locked: n.attribute("locked") == Some("1"),
+                            x,
+                            y,
+                            keyframes: None,
+                            name: name.clone(),
+                            group: true,
+                            in_group: false,
+                            collapsed: n.attribute("collapsed") == Some("1"),
+                        });
+                    } else if !hold && own_opacity < 1.0 {
+                        w.warnings.push(format!(
+                            "group \"{name}\" is inside another group: its opacity went into its layers"
+                        ));
                     }
-                    if let Some(inner) = n.children().find(|c| c.has_tag_name("layers")) {
-                        w.groups.push(name);
-                        walk(inner, vis, hold, x, y, w)?;
-                        w.groups.pop();
-                    }
+                    // A top-level group's own state stays on its header; a
+                    // nested one's passes down into its layers.
+                    let (vis, op) = if top_level { (visible, opacity) } else { (visible && own_vis, opacity * own_opacity) };
+                    w.groups.push(name);
+                    walk(inner, vis, op, hold, x, y, w)?;
+                    w.groups.pop();
                 }
                 _ if hold => {}
                 other => w.warnings.push(format!("\"{name}\" ({other}) skipped")),
@@ -551,11 +656,26 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
         .find(|n| n.has_tag_name("layers"))
         .context("maindoc.xml has no layers")?;
     let mut w = Walk { keep, groups: Vec::new(), found: Vec::new(), warnings: Vec::new(), held: Vec::new() };
-    walk(top, true, false, 0, 0, &mut w)?;
+    walk(top, true, 1.0, false, 0, 0, &mut w)?;
     let Walk { found, mut warnings, held, .. } = w;
 
     let mut layers = Vec::with_capacity(found.len());
     for f in found.into_iter().rev() {
+        if f.group {
+            layers.push(KraLayer {
+                uuid: f.uuid,
+                name: f.name,
+                opacity: f.opacity,
+                visible: f.visible,
+                locked: f.locked,
+                drawings: Vec::new(),
+                keys: Vec::new(),
+                group: true,
+                in_group: false,
+                collapsed: f.collapsed,
+            });
+            continue;
+        }
         let layer_default = r.default_pixel(&format!("{dir}/{}.defaultpixel", f.filename))?;
         let mut drawings: Vec<Drawing> = Vec::new();
         let mut keys: Vec<(usize, usize)> = Vec::new();
@@ -606,6 +726,9 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
             locked: f.locked,
             drawings,
             keys,
+            group: false,
+            in_group: f.in_group,
+            collapsed: false,
         });
     }
 
@@ -678,7 +801,7 @@ pub(crate) mod tests {
     }
 
     /// The frame-space placement read back into a cell of the original size.
-    fn read_cell(d: &Drawing, pw: u32, ph: u32, w: u32, h: u32) -> Canvas {
+    pub(crate) fn read_cell(d: &Drawing, pw: u32, ph: u32, w: u32, h: u32) -> Canvas {
         let (x, y) = cell_origin(pw, ph, w, h);
         let (c, clipped) = d.place(x, y, w, h);
         assert!(!clipped);
@@ -885,6 +1008,195 @@ pub(crate) mod tests {
         let (p, u) = with_sketch();
         let bytes = write(&p, &WriteOpts { layer_uuids: &u, selected_layer: 0, carried: &[] }).unwrap();
         std::fs::write(dir.join("carry_src.kra"), bytes).unwrap();
+    }
+
+    /// `sample_project` with its two layers in a half-opaque, folded group
+    /// under a third layer.
+    pub(crate) fn grouped_project() -> Project {
+        let mut p = sample_project();
+        p.add_layer();
+        let top = p.layers.len() - 1;
+        p.layers[top].name = "Over".into();
+        let id = p.cells.len();
+        p.cells.push(cell(100, 60, 9).into());
+        p.layers[top].set_key(0, id);
+        let g = p.group_layers(&[0, 1]).unwrap();
+        p.layers[g].name = "Character".into();
+        p.layers[g].opacity = 0.5;
+        p.layers[g].collapsed = true;
+        p
+    }
+
+    #[test]
+    fn a_group_round_trips_through_kra() {
+        let p = grouped_project();
+        let u = uuids(p.layers.len());
+        let bytes = write(&p, &WriteOpts { layer_uuids: &u, selected_layer: 0, carried: &[] }).unwrap();
+        let doc = read(bytes).unwrap();
+        let rows: Vec<(String, bool, bool, bool, u8)> = doc
+            .layers
+            .iter()
+            .map(|l| (l.name.clone(), l.group, l.in_group, l.collapsed, l.opacity))
+            .collect();
+        let row = |i: usize| (p.layers[i].name.clone(), false, true, false, opacity_u8(p.layers[i].opacity));
+        assert_eq!(
+            rows,
+            vec![
+                row(0),
+                row(1),
+                ("Character".to_string(), true, false, true, 128),
+                ("Over".to_string(), false, false, false, 255),
+            ]
+        );
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        // Same uuids both ways, the group's included.
+        assert_eq!(doc.layers.iter().map(|l| l.uuid.clone()).collect::<Vec<_>>(), u);
+    }
+
+    /// Krita-only layers beside a group go back on the same side of its
+    /// edge: one just above the group stays out of it, one at the bottom of
+    /// it stays in.
+    #[test]
+    fn carried_layers_keep_their_side_of_a_group() {
+        let mut krita = grouped_project();
+        let mut inside = Layer::new("bottom-x", krita.frame_count);
+        inside.in_group = true;
+        krita.layers.insert(0, inside);
+        krita.layers.insert(4, Layer::new("above-x", krita.frame_count));
+        assert!(krita.groups_ok());
+        let u = uuids(krita.layers.len());
+        let bytes = write(&krita, &WriteOpts { layer_uuids: &u, selected_layer: 0, carried: &[] }).unwrap();
+        let carried = carry(bytes, &|name: &str, _: &[String]| !name.ends_with("-x")).unwrap();
+        assert_eq!(carried.len(), 2);
+
+        let p = grouped_project();
+        let pu = [u[1].clone(), u[2].clone(), u[3].clone(), u[5].clone()];
+        let out = write(&p, &WriteOpts { layer_uuids: &pu, selected_layer: 0, carried: &carried }).unwrap();
+        let rows: Vec<(String, bool)> = read(out).unwrap().layers.iter().map(|l| (l.name.clone(), l.in_group)).collect();
+        let want: Vec<(String, bool)> =
+            krita.layers.iter().map(|l| (l.name.clone(), l.in_group)).collect();
+        assert_eq!(rows, want);
+    }
+
+    /// Rewrite `bytes`' `maindoc.xml` with `f`, every other file as it was.
+    fn with_maindoc(bytes: Vec<u8>, f: impl Fn(&str) -> String) -> Vec<u8> {
+        let mut src = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut out = ZipWriter::new(Cursor::new(Vec::new()));
+        for i in 0..src.len() {
+            let mut e = src.by_index(i).unwrap();
+            let name = e.name().to_string();
+            let mut data = Vec::new();
+            e.read_to_end(&mut data).unwrap();
+            if name == "maindoc.xml" {
+                data = f(std::str::from_utf8(&data).unwrap()).into_bytes();
+            }
+            out.start_file(name, SimpleFileOptions::default()).unwrap();
+            out.write_all(&data).unwrap();
+        }
+        out.finish().unwrap().into_inner()
+    }
+
+    /// Krita groups can nest; ours can't. A group inside a group folds into
+    /// the outer one, its own visibility and opacity going into its layers.
+    #[test]
+    fn a_nested_krita_group_folds_into_the_outer() {
+        let p = grouped_project();
+        let u = uuids(p.layers.len());
+        let bytes = write(&p, &WriteOpts { layer_uuids: &u, selected_layer: 0, carried: &[] }).unwrap();
+        // Wrap our group in an outer one, and make the inner one half opaque
+        // and hidden.
+        let nested = with_maindoc(bytes, |xml| {
+            let start = xml.find("<layer nodetype=\"grouplayer\"").unwrap();
+            let end = xml[start..].find("</layers>\n   </layer>").unwrap() + start + "</layers>\n   </layer>".len();
+            // The group's own tag comes first: hide just it.
+            let inner = xml[start..end].replacen("visible=\"1\"", "visible=\"0\"", 1);
+            let outer = format!(
+                "<layer nodetype=\"grouplayer\" filename=\"outer\" name=\"Outer\" uuid=\"{{11111111-0000-4000-8000-000000000000}}\" opacity=\"255\" visible=\"1\" locked=\"0\" x=\"0\" y=\"0\" compositeop=\"normal\" collapsed=\"0\" passthrough=\"0\" intimeline=\"1\"><layers>{inner}</layers></layer>"
+            );
+            format!("{}{}{}", &xml[..start], outer, &xml[end..])
+        });
+        let doc = read(nested).unwrap();
+        let rows: Vec<(String, bool, bool, bool, u8)> =
+            doc.layers.iter().map(|l| (l.name.clone(), l.group, l.in_group, l.visible, l.opacity)).collect();
+        // Outer header; its layers — the inner group's — folded in: hidden
+        // with it, at its half opacity.
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[2].0, "Outer");
+        assert!(rows[2].1 && !rows[2].2);
+        for (i, r) in rows[..2].iter().enumerate() {
+            assert!(!r.1 && r.2 && !r.3, "{r:?}");
+            assert_eq!(r.4, opacity_u8(p.layers[i].opacity * 128.0 / 255.0), "{r:?}");
+        }
+        assert!(doc.warnings.iter().any(|w| w.contains("inside another group")), "{:?}", doc.warnings);
+    }
+
+    /// Not a unit test: writes `group_src.kra` (see [`grouped_project`])
+    /// into `$KRA_FIXTURE_DIR`, for checking against Krita:
+    /// `krita --export-sequence --export-filename seq.png group_src.kra`
+    /// should match our own flatten, and `krita --export --export-filename
+    /// group_krita.kra group_src.kra` should read back with its group.
+    #[test]
+    #[ignore]
+    fn kra_group_src() {
+        let dir = std::path::PathBuf::from(std::env::var("KRA_FIXTURE_DIR").unwrap());
+        let p = grouped_project();
+        let u = uuids(p.layers.len());
+        let bytes = write(&p, &WriteOpts { layer_uuids: &u, selected_layer: 0, carried: &[] }).unwrap();
+        std::fs::write(dir.join("group_src.kra"), bytes).unwrap();
+        // The same layers with no group, to tell group effects from anything
+        // Krita's export does to every file.
+        let mut plain = p.clone();
+        plain.ungroup(plain.layers.iter().position(|l| l.is_group()).unwrap());
+        let u = uuids(plain.layers.len());
+        let bytes = write(&plain, &WriteOpts { layer_uuids: &u, selected_layer: 0, carried: &[] }).unwrap();
+        std::fs::write(dir.join("plain_src.kra"), bytes).unwrap();
+        for f in 0..p.frame_count {
+            for (proj, name) in [(&p, "ours"), (&plain, "oursplain")] {
+                let flat = crate::io::composite::flatten_frame(proj, f);
+                let img = image::RgbaImage::from_raw(flat.width, flat.height, flat.into_pixels()).unwrap();
+                img.save(dir.join(format!("{name}{f:04}.png"))).unwrap();
+            }
+        }
+    }
+
+    /// Not a unit test: reads Krita's re-save of `group_src.kra` and checks
+    /// the group came through.
+    #[test]
+    #[ignore]
+    fn kra_group_back() {
+        let dir = std::path::PathBuf::from(std::env::var("KRA_FIXTURE_DIR").unwrap());
+        let doc = read(std::fs::read(dir.join("group_krita.kra")).unwrap()).unwrap();
+        let rows: Vec<(String, bool, bool, bool, u8)> =
+            doc.layers.iter().map(|l| (l.name.clone(), l.group, l.in_group, l.collapsed, l.opacity)).collect();
+        println!("{rows:?}\n{:?}", doc.warnings);
+        assert!(rows.iter().any(|r| r.0 == "Character" && r.1 && r.4 == 128));
+        assert_eq!(rows.iter().filter(|r| r.2).count(), 2);
+        // Krita's own render of the group (`seq*.png`) against ours. Krita's
+        // PNG export converts colour (it does the same to `plain*.png`, the
+        // file without a group), so colour is checked against that render,
+        // and coverage — what the group's opacity decides — against ours,
+        // wherever our render and Krita's already agree without the group
+        // (an odd-sized cell lands half a pixel apart in the two, groups or
+        // not).
+        for f in 0..6 {
+            let open = |name: String| image::open(dir.join(name)).unwrap().to_rgba8();
+            let ours = open(format!("ours{f:04}.png"));
+            let ours_plain = open(format!("oursplain{f:04}.png"));
+            let theirs = open(format!("seq{f:04}.png"));
+            let plain = open(format!("plain{f:04}.png"));
+            let (mut alpha, mut colour, mut compared) = (0, 0, 0);
+            for (((a, b), c), d) in ours.pixels().zip(theirs.pixels()).zip(plain.pixels()).zip(ours_plain.pixels()) {
+                if d[3] == c[3] {
+                    compared += 1;
+                    alpha = alpha.max((a[3] as i32 - b[3] as i32).abs());
+                }
+                if b[3] > 0 && c[3] > 0 {
+                    colour = colour.max((0..3).map(|k| (b[k] as i32 - c[k] as i32).abs()).max().unwrap());
+                }
+            }
+            println!("frame {f}: alpha off by {alpha} over {compared} pixels, colour off by {colour}");
+            assert!(alpha <= 1 && colour <= 2, "frame {f}");
+        }
     }
 
     /// Not a unit test: step 2 — carries `sketch-x` out of Krita's
