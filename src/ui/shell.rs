@@ -3041,6 +3041,20 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
 
     let cf = state.project.current_frame;
     let li = state.project.current_layer;
+    // A group has no pose of its own: the gestures move its layers.
+    if state.project.is_group(li) {
+        let n = state.project.children(li).len();
+        let what = if n == 1 { "layer" } else { "layers" };
+        ui.label(
+            egui::RichText::new(format!(
+                "Moves, turns and scales its {n} {what} together, about their middle. \
+                 Keyed layers move on every frame — or, with auto-key, get a key here."
+            ))
+            .color(theme::TEXT_MUTED)
+            .size(11.0),
+        );
+        return;
+    }
     // Set once an edit *settles*, never on every `changed()`: keying
     // mid-drag would push one undo entry per mouse-move.
     let mut xform_settled = false;

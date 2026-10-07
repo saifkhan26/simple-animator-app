@@ -234,6 +234,7 @@ fn full(c: &Canvas) -> DirtyRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::transform::Transform;
     use std::sync::Arc;
 
     /// Run one texture sync and hand back what egui was asked to upload.
@@ -442,6 +443,81 @@ mod tests {
         assert_eq!(st.project.current_layer, g - 1, "unfolded, into it");
         st.dispatch(crate::input::shortcuts::Action::LayerPick1);
         assert_eq!(st.project.current_layer, top);
+    }
+
+    /// A pan of the group as transform mode drives it: begin, move, commit.
+    fn pan_group(st: &mut AppState, g: usize, dx: f32, dy: f32) {
+        st.project.current_layer = g;
+        st.begin_layer_xform();
+        st.apply_layer_pan(dx, dy);
+        st.commit_layer_xform();
+    }
+
+    #[test]
+    fn dragging_a_group_moves_every_layer_in_one_undo() {
+        let (mut st, g) = grouped();
+        let steps = st.history.undo_len();
+        pan_group(&mut st, g, 10.0, 5.0);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        for c in st.project.children(g) {
+            let t = st.project.layers[c].resolve_transform(0);
+            assert_eq!((t.tx, t.ty), (10.0, 5.0));
+        }
+        let top = st.project.layers.len() - 1;
+        assert_eq!(st.project.layers[top].transform.tx, 0.0, "outside the group, untouched");
+        st.undo();
+        for c in st.project.children(g) {
+            assert_eq!(st.project.layers[c].transform.tx, 0.0);
+        }
+    }
+
+    #[test]
+    fn with_auto_key_each_layer_gets_a_key_here() {
+        let (mut st, g) = grouped();
+        st.auto_key_transform = true;
+        pan_group(&mut st, g, 10.0, 0.0);
+        for c in st.project.children(g) {
+            assert!(st.project.layers[c].has_transform_key(0));
+        }
+    }
+
+    #[test]
+    fn a_keyed_layer_has_every_key_moved() {
+        let (mut st, g) = grouped();
+        st.project.ensure_frame_count(6);
+        let first = st.project.children(g).start;
+        let t = |tx: f32| Transform { tx, ..Transform::default() };
+        st.project.layers[first].set_transform_key(0, t(0.0));
+        st.project.layers[first].set_transform_key(5, t(20.0));
+        pan_group(&mut st, g, 10.0, 0.0);
+        assert_eq!(st.project.layers[first].resolve_transform(0).tx, 10.0);
+        assert_eq!(st.project.layers[first].resolve_transform(5).tx, 30.0);
+    }
+
+    #[test]
+    fn rotating_a_group_turns_its_layers_about_their_middle() {
+        let (mut st, g) = grouped();
+        let kids: Vec<usize> = st.project.children(g).collect();
+        st.project.layers[kids[0]].transform.tx = -50.0;
+        st.project.layers[kids[1]].transform.tx = 50.0;
+        st.project.current_layer = g;
+        st.begin_layer_xform();
+        st.apply_layer_rotate(std::f32::consts::PI);
+        st.commit_layer_xform();
+        let a = st.project.layers[kids[0]].transform;
+        let b = st.project.layers[kids[1]].transform;
+        assert!((a.tx - 50.0).abs() < 1e-3 && (b.tx + 50.0).abs() < 1e-3, "{} {}", a.tx, b.tx);
+        assert!((a.rot - std::f32::consts::PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_locked_group_stays_put() {
+        let (mut st, g) = grouped();
+        st.project.layers[g].locked = true;
+        pan_group(&mut st, g, 10.0, 0.0);
+        for c in st.project.children(g) {
+            assert_eq!(st.project.layers[c].transform.tx, 0.0);
+        }
     }
 
     #[test]

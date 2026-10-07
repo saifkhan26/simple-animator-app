@@ -1256,6 +1256,9 @@ pub struct AppState {
     /// Timeline snapshot captured at the start of a layer-transform drag, used
     /// to push a single undo entry when the drag ends.
     layer_xform_before: Option<undo::TimelineState>,
+    /// What a group being transformed turns and scales about, in document
+    /// space: the middle of its layers when the drag started.
+    group_pivot: Option<(f32, f32)>,
     /// Last (layer, frame) the transform edit buffer was synced for, so the
     /// buffer is only reloaded from keys when the cursor actually moves.
     xform_sync_last: Option<(usize, usize)>,
@@ -1528,6 +1531,7 @@ impl AppState {
             layer_xform: false,
             nav_to_layer: false,
             layer_xform_before: None,
+            group_pivot: None,
             xform_sync_last: None,
             camera_edit: false,
             nav_to_camera: false,
@@ -2656,6 +2660,67 @@ impl AppState {
     /// Snapshot timeline state at the start of a layer-transform drag.
     pub fn begin_layer_xform(&mut self) {
         self.layer_xform_before = Some(undo::TimelineState::capture(&self.project));
+        // A group turns and scales about the middle of its layers, as they
+        // stand when the drag starts.
+        let p = &self.project;
+        let g = p.current_layer;
+        self.group_pivot = p.is_group(g).then(|| {
+            let f = p.current_frame;
+            let kids: Vec<Transform> = p.children(g).map(|c| p.layers[c].resolve_transform(f)).collect();
+            let n = kids.len().max(1) as f32;
+            let (sx, sy) = kids.iter().fold((0.0, 0.0), |(x, y), t| (x + t.tx, y + t.ty));
+            (p.width as f32 / 2.0 + sx / n, p.height as f32 / 2.0 + sy / n)
+        });
+    }
+
+    /// Move, turn or scale every layer of the active group by `f`, a change
+    /// to a layer's pose. A layer whose transform is keyed has every key
+    /// changed the same way, so it moves along on every frame — or, with
+    /// auto-key on, gets a key here instead, as a single layer would. Layers
+    /// locked on their own stay put.
+    fn transform_group(&mut self, f: impl Fn(Transform) -> Transform) {
+        let p = &mut self.project;
+        let g = p.current_layer;
+        if !p.is_group(g) || p.locked_eff(g) {
+            return;
+        }
+        let frame = p.current_frame;
+        let auto = self.auto_key_transform;
+        for c in p.children(g) {
+            if p.layers[c].locked {
+                continue;
+            }
+            let l = &mut p.layers[c];
+            if auto {
+                let pose = f(l.resolve_transform(frame));
+                l.set_transform_key(frame, pose);
+                l.transform = pose;
+            } else {
+                for k in &mut l.transform_keys {
+                    k.transform = f(k.transform);
+                }
+                l.transform = f(l.transform);
+            }
+        }
+    }
+
+    /// What scaling the whole group by `k` and turning it by `rot` about its
+    /// pivot does to one layer's pose. Owns its inputs, so it can be handed
+    /// to [`AppState::transform_group`].
+    fn about_group_pivot(&self, k: f32, rot: f32) -> impl Fn(Transform) -> Transform {
+        let (hw, hh) = (self.project.width as f32 / 2.0, self.project.height as f32 / 2.0);
+        let (px, py) = self.group_pivot.unwrap_or((hw, hh));
+        let (s, c) = rot.sin_cos();
+        move |t: Transform| {
+            let (cx, cy) = (hw + t.tx - px, hh + t.ty - py);
+            let (x, y) = (k * (cx * c - cy * s), k * (cx * s + cy * c));
+            Transform {
+                tx: px + x - hw,
+                ty: py + y - hh,
+                scale: (t.scale * k).clamp(0.01, 100.0),
+                rot: t.rot + rot,
+            }
+        }
     }
 
     /// Push a single undo entry for a completed layer-transform drag.
@@ -2689,6 +2754,14 @@ impl AppState {
 
     /// Translate the active layer by a document-space delta.
     pub fn apply_layer_pan(&mut self, dx: f32, dy: f32) {
+        if self.project.is_group(self.project.current_layer) {
+            self.transform_group(|t| Transform {
+                tx: t.tx + dx,
+                ty: t.ty + dy,
+                ..t
+            });
+            return;
+        }
         if self.active_layer_locked() {
             return;
         }
@@ -2700,6 +2773,11 @@ impl AppState {
 
     /// Scale the active layer by `factor` (multiplicative).
     pub fn apply_layer_scale(&mut self, factor: f32) {
+        if self.project.is_group(self.project.current_layer) {
+            let f = self.about_group_pivot(factor, 0.0);
+            self.transform_group(f);
+            return;
+        }
         if self.active_layer_locked() {
             return;
         }
@@ -2710,6 +2788,11 @@ impl AppState {
 
     /// Rotate the active layer by `d` radians.
     pub fn apply_layer_rotate(&mut self, d: f32) {
+        if self.project.is_group(self.project.current_layer) {
+            let f = self.about_group_pivot(1.0, d);
+            self.transform_group(f);
+            return;
+        }
         if self.active_layer_locked() {
             return;
         }
