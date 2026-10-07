@@ -1175,9 +1175,6 @@ pub struct AppState {
     /// went — or why it couldn't be written.
     pub pen_record: Option<crate::input::pen_record::PenRecord>,
     pub pen_record_saved: Option<Result<std::path::PathBuf, String>>,
-    /// Whether the window had focus last frame: coming back to it is when
-    /// edits made to shortcuts.toml in an editor are picked up.
-    window_focused: bool,
     /// What the last open of, or reload from, shortcuts.toml came to, for
     /// the Settings window: the file opened, edits loaded, or why not.
     pub shortcuts_file_note: Option<Result<String, String>>,
@@ -1391,6 +1388,7 @@ impl AppState {
     /// `brush_root`: where imported Krita presets live (none in tests).
     fn with_prefs(prefs: UiPrefs, max_tex: u32, brush_root: Option<PathBuf>) -> Self {
         let project = Project::new(1280, 720, 24.0);
+        let (shortcuts, shortcuts_err) = shortcuts::load();
         let mut cell_dirty = HashMap::new();
         for id in 0..project.cells.len() {
             cell_dirty.insert(id, Dirty::Full);
@@ -1511,8 +1509,8 @@ impl AppState {
             pen: PenInput::new(),
             pen_record: None,
             pen_record_saved: None,
-            window_focused: true,
-            shortcuts_file_note: None,
+            shortcuts_file_note: shortcuts_err
+                .map(|e| Err(format!("shortcuts.toml didn't load, defaults in use: {e}"))),
             history: History::default(),
             stroke_pre_pixels: Vec::new(),
             stroke_pre_live: false,
@@ -1525,7 +1523,7 @@ impl AppState {
             stroke_clock: None,
             stroke_ws: StrokeWorkspace::new(),
             preview_upload_rect: None,
-            shortcuts: shortcuts::load(),
+            shortcuts,
             rebinding: None,
             hold_capture: Default::default(),
             shortcut_clashes_only: false,
@@ -5506,22 +5504,21 @@ impl AppState {
         self.apply_touched(touched);
     }
 
-    /// Pick up edits made to shortcuts.toml outside the app. A file that
-    /// doesn't read is left alone — loading it would mean defaults, which the
-    /// next rebind here would then write over the user's file.
+    /// Load edits made to shortcuts.toml outside the app (Settings' Reload
+    /// button). A file that doesn't read is left alone, and so are the
+    /// bindings in use — loading it would mean defaults, which the next
+    /// rebind here would then write over the user's file.
     pub(crate) fn reload_shortcuts_file(&mut self) {
-        match shortcuts::read_file() {
+        self.shortcuts_file_note = Some(match shortcuts::read_file() {
             Some(Ok(map)) if map != self.shortcuts => {
                 self.shortcuts = map;
                 self.rebinding = None;
-                self.shortcuts_file_note = Some(Ok("loaded your edits to shortcuts.toml".into()));
+                Ok("loaded your edits to shortcuts.toml".into())
             }
-            Some(Err(e)) => {
-                self.shortcuts_file_note =
-                    Some(Err(format!("shortcuts.toml didn't load, nothing changed: {e}")));
-            }
-            _ => {}
-        }
+            Some(Ok(_)) => Ok("shortcuts.toml matches what's in use: nothing to load".into()),
+            Some(Err(e)) => Err(format!("shortcuts.toml didn't load, nothing changed: {e}")),
+            None => Err("there's no shortcuts.toml yet: Open shortcuts file writes one".into()),
+        });
     }
 
     /// Rebind capture and shortcut dispatch for this frame's key presses.
@@ -5815,11 +5812,6 @@ impl eframe::App for AppState {
         }
 
         self.pen.poll(ctx.input(|i| i.pointer.any_down()));
-        let focused = ctx.input(|i| i.focused);
-        if focused && !self.window_focused {
-            self.reload_shortcuts_file();
-        }
-        self.window_focused = focused;
         if let Some(rec) = &mut self.pen_record {
             if rec.frame(ctx, &self.pen) {
                 let rec = self.pen_record.take().expect("recording");

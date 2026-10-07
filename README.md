@@ -548,9 +548,12 @@ app closed — the temp file stays on disk.
 
 Every action is bound and rebindable in **Settings → Shortcuts**, which also
 lists the current binding for each one. **Open shortcuts file** there opens
-`shortcuts.toml` (in `%APPDATA%nimator-app`) in your editor, writing it out
-first on a fresh install; saved edits load when you switch back to the app, and
-a file with a mistake in it is reported and left unloaded. A few of the defaults:
+`shortcuts.toml` (in `%APPDATA%\animator-app`) in your editor, writing it out
+first on a fresh install; **Reload** loads your saved edits without a restart. A
+file with a mistake in it is reported and left unloaded, key names read in any
+case (`ctrl+space`), and a line that doesn't read is listed there and kept in the
+file. Changes made in Settings go into the file in place, so your comments and
+lines stay as you wrote them. A few of the defaults:
 
 | Shortcut                  | Action                        |
 |---------------------------|-------------------------------|

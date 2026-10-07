@@ -619,8 +619,22 @@ fn parse_combo(s: &str) -> Option<KeyCombo> {
             _ => key_name = Some(part),
         }
     }
+    // `Ctrl++` splits into an empty last part: the key is `+` itself.
+    if key_name == Some("") && s.trim_end().ends_with("++") {
+        key_name = Some("+");
+    }
     let key = match key_name {
-        Some(name) => Some(egui::Key::from_name(name)?),
+        // Any case: `space`, `delete` and `esc` are how people write them.
+        Some(name) => Some(
+            egui::Key::from_name(name)
+                // egui's short forms (`Esc`, `Del`) are capitalised.
+                .or_else(|| {
+                    let mut c = name.chars();
+                    let first = c.next()?.to_ascii_uppercase();
+                    egui::Key::from_name(&format!("{first}{}", c.as_str().to_ascii_lowercase()))
+                })
+                .or_else(|| egui::Key::ALL.iter().copied().find(|k| k.name().eq_ignore_ascii_case(name)))?,
+        ),
         None => {
             // Modifier-only combo is valid only if at least one modifier is set.
             if !(ctrl || shift || alt) {
@@ -727,6 +741,12 @@ pub const CAPTURE_KEYS: [egui::Key; 65] = {
 pub struct ShortcutMap {
     pub bindings: BTreeMap<Action, KeyCombo>,
     pub unbound: BTreeSet<Action>,
+    /// Lines of the file that didn't read, as `(name, value)`: an action this
+    /// build doesn't know, or a combo that doesn't parse. Its action keeps
+    /// its default meanwhile, and saving leaves the line as written until the
+    /// action is bound here — a typo in a hand edit is the user's to fix, not
+    /// the app's to overwrite.
+    pub unread: Vec<(String, String)>,
 }
 
 impl Serialize for ShortcutMap {
@@ -744,26 +764,39 @@ impl<'de> Deserialize<'de> for ShortcutMap {
     /// Entry by entry, so one line naming an action that no longer exists, or
     /// a combo that doesn't parse, costs that line rather than every binding.
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        use serde::de::IntoDeserializer;
-        let raw: BTreeMap<String, String> = BTreeMap::deserialize(de)?;
+        /// A value as written: text, or anything else TOML allows, which
+        /// costs only its own line.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Text(String),
+            Other(serde::de::IgnoredAny),
+        }
+        let raw: BTreeMap<String, Raw> = BTreeMap::deserialize(de)?;
         let mut map = ShortcutMap {
             bindings: BTreeMap::new(),
             unbound: BTreeSet::new(),
+            unread: Vec::new(),
         };
-        for (name, combo) in raw {
-            let action: Result<Action, serde::de::value::Error> =
-                Action::deserialize(name.as_str().into_deserializer());
-            let Ok(action) = action else {
-                log::warn!("shortcuts: unknown action {name:?}, skipped");
+        for (name, value) in raw {
+            let Raw::Text(combo) = value else {
+                log::warn!("shortcuts: {name} isn't text, skipped");
+                map.unread.push((name, "(not text)".into()));
                 continue;
             };
-            let combo = combo.trim();
-            if combo.is_empty() || combo.eq_ignore_ascii_case("none") {
+            let Some(action) = action_named(&name) else {
+                log::warn!("shortcuts: unknown action {name:?}, skipped");
+                map.unread.push((name, combo));
+                continue;
+            };
+            let c = combo.trim();
+            if c.is_empty() || c.eq_ignore_ascii_case("none") {
                 map.unbound.insert(action);
-            } else if let Some(c) = parse_combo(combo) {
+            } else if let Some(c) = parse_combo(c) {
                 map.bindings.insert(action, c);
             } else {
                 log::warn!("shortcuts: bad combo {combo:?} for {name}, using the default");
+                map.unread.push((name, combo));
             }
         }
         Ok(map)
@@ -940,7 +973,23 @@ impl Default for ShortcutMap {
         Self {
             bindings: b,
             unbound: BTreeSet::new(),
+            unread: Vec::new(),
         }
+    }
+}
+
+/// The action a file line names, if any.
+fn action_named(name: &str) -> Option<Action> {
+    use serde::de::IntoDeserializer;
+    let a: Result<Action, serde::de::value::Error> = Action::deserialize(name.into_deserializer());
+    a.ok()
+}
+
+/// The name an action's line goes by in the file.
+fn key_of(action: Action) -> String {
+    match toml::Value::try_from(action) {
+        Ok(toml::Value::String(s)) => s,
+        _ => format!("{action:?}"),
     }
 }
 
@@ -951,6 +1000,13 @@ impl ShortcutMap {
     pub fn set(&mut self, action: Action, combo: KeyCombo) {
         self.bindings.insert(action, combo);
         self.unbound.remove(&action);
+        self.forget_unread(action);
+    }
+
+    /// Bound here now: the file's unreadable line for it can go.
+    fn forget_unread(&mut self, action: Action) {
+        let key = key_of(action);
+        self.unread.retain(|(name, _)| *name != key);
     }
 
     /// Unbind `action`, for good: it stays unbound across a save and load
@@ -958,6 +1014,7 @@ impl ShortcutMap {
     pub fn clear(&mut self, action: Action) {
         self.bindings.remove(&action);
         self.unbound.insert(action);
+        self.forget_unread(action);
     }
 
     /// The drag gesture held right now, with the combo that holds it. A combo
@@ -1076,20 +1133,22 @@ fn config_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("shortcuts.toml"))
 }
 
-pub fn load() -> ShortcutMap {
-    let Some(path) = config_path() else {
-        return ShortcutMap::default();
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return ShortcutMap::default();
-    };
-    let map = load_from_str(&text);
-    log::info!("Loaded shortcuts from {}", path.display());
-    map
+/// The saved shortcuts, and why the file didn't load if it didn't — the
+/// defaults stand in then, and nothing is saved over the file until it reads.
+pub fn load() -> (ShortcutMap, Option<String>) {
+    match read_file() {
+        Some(Ok(map)) => (map, None),
+        Some(Err(e)) => {
+            log::warn!("shortcuts.toml parse failed ({e}); using defaults");
+            (ShortcutMap::default(), Some(e))
+        }
+        None => (ShortcutMap::default(), None),
+    }
 }
 
 /// A saved shortcuts file, migrated, with defaults for whatever it doesn't
 /// mention. Defaults throughout when it can't be read.
+#[cfg(test)]
 pub fn load_from_str(text: &str) -> ShortcutMap {
     parse(text).unwrap_or_else(|e| {
         log::warn!("shortcuts.toml parse failed ({e}); using defaults");
@@ -1111,9 +1170,15 @@ pub fn parse(text: &str) -> Result<ShortcutMap, String> {
                 }
             }
             // Migration: Ctrl+V now pastes a pixel selection. Move an existing
-            // PasteImage binding off it so the two don't both fire, unless the
-            // user had already rebound PasteImage themselves.
-            if map.bindings.get(&Action::PasteImage) == Some(&KeyCombo::ctrl(egui::Key::V)) {
+            // PasteImage binding off it so the two don't both fire — in a file
+            // from before selections, that is: one that names selection_paste
+            // was saved since, and Ctrl+V there is the user's choice.
+            let selections_known = map.bindings.contains_key(&Action::SelectionPaste)
+                || map.unbound.contains(&Action::SelectionPaste)
+                || map.unread.iter().any(|(n, _)| *n == key_of(Action::SelectionPaste));
+            if !selections_known
+                && map.bindings.get(&Action::PasteImage) == Some(&KeyCombo::ctrl(egui::Key::V))
+            {
                 map.bindings
                     .insert(Action::PasteImage, KeyCombo::ctrl_shift(egui::Key::V));
             }
@@ -1135,6 +1200,7 @@ pub fn parse(text: &str) -> Result<ShortcutMap, String> {
             for a in map.unbound {
                 full.clear(a);
             }
+            full.unread = map.unread;
             Ok(full)
         }
         Err(e) => Err(e.message().to_string()),
@@ -1188,19 +1254,68 @@ pub fn save(map: &ShortcutMap) {
         log::warn!("no config dir; shortcuts not saved");
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    match save_at(&path, map) {
+        Ok(()) => log::info!("Saved shortcuts → {}", path.display()),
+        Err(e) => log::warn!("shortcut save failed: {e}"),
     }
-    match toml::to_string_pretty(map) {
-        Ok(s) => {
-            if let Err(e) = std::fs::write(&path, s) {
-                log::warn!("shortcut save failed: {e}");
-            } else {
-                log::info!("Saved shortcuts → {}", path.display());
-            }
+}
+
+/// Write `map` to the file at `path`, editing it in place when there is one
+/// (see [`save_text`]). A file that isn't TOML at all is left alone: it is a
+/// hand edit half done, and the user's to finish.
+fn save_at(path: &std::path::Path, map: &ShortcutMap) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let text = match std::fs::read_to_string(path) {
+        Ok(old) => save_text(&old, map).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidData, "shortcuts.toml doesn't read; not written over")
+        })?,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            toml::to_string_pretty(map).map_err(|e| Error::new(ErrorKind::InvalidData, e))?
         }
-        Err(e) => log::warn!("shortcut serialize failed: {e}"),
+        Err(e) => return Err(e),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    std::fs::write(path, text)
+}
+
+/// `old`, the file as it stands, with `map` written into it: only the lines
+/// whose binding differs change, so comments, order, spelling (`ctrl+z`) and
+/// lines this build can't read all stay as the user wrote them. `None` when
+/// `old` isn't TOML.
+fn save_text(old: &str, map: &ShortcutMap) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = old.parse().ok()?;
+    let mut want: BTreeMap<String, String> =
+        map.bindings.iter().map(|(&a, c)| (key_of(a), c.display())).collect();
+    for &a in &map.unbound {
+        want.insert(key_of(a), String::new());
+    }
+    let keep: BTreeSet<&str> = map.unread.iter().map(|(n, _)| n.as_str()).collect();
+    // Actions the map no longer mentions (a reset dropped them). A name that
+    // isn't an action is not ours to remove.
+    let stale: Vec<String> = doc
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .filter(|k| !want.contains_key(k) && !keep.contains(k.as_str()) && action_named(k).is_some())
+        .collect();
+    for k in stale {
+        doc.remove(&k);
+    }
+    let same = |written: &str, want: &str| {
+        let unbound = |s: &str| s.trim().is_empty() || s.trim().eq_ignore_ascii_case("none");
+        (unbound(written) && unbound(want))
+            || (!unbound(want) && parse_combo(written.trim()).is_some_and(|c| Some(c) == parse_combo(want)))
+    };
+    for (k, v) in &want {
+        if keep.contains(k.as_str()) {
+            continue;
+        }
+        if !doc.get(k).and_then(|i| i.as_str()).is_some_and(|w| same(w, v)) {
+            doc[k.as_str()] = toml_edit::value(v.as_str());
+        }
+    }
+    Some(doc.to_string())
 }
 
 #[cfg(test)]
@@ -1234,6 +1349,71 @@ mod tests {
         assert!(parse("undo = [").is_err());
         assert_eq!(parse("").unwrap(), ShortcutMap::default());
         assert_eq!(load_from_str("undo = ["), ShortcutMap::default());
+        // And it isn't saved over: the half-done edit is the user's to finish.
+        let dir = std::env::temp_dir().join(format!("animator-keymap-broken-{}", std::process::id()));
+        let path = dir.join("shortcuts.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "undo = [").unwrap();
+        assert!(save_at(&path, &ShortcutMap::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "undo = [");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hand-edited file keeps everything the user wrote through a save made
+    /// here: comments, their spelling of a combo, a line naming an action
+    /// this build doesn't have, and a line that doesn't parse. Only the
+    /// binding changed here is rewritten.
+    #[test]
+    fn a_save_edits_the_file_in_place() {
+        let old = "# my keys\n\
+                   undo = \"ctrl+z\"  # lower case is fine\n\
+                   future_tool = \"Q\"\n\
+                   redo = \"Ctrl+Nope\"\n\
+                   tool_pencil = \"Q\"\n";
+        let mut map = parse(old).unwrap();
+        assert_eq!(map.get(Action::Undo), Some(KeyCombo::ctrl(egui::Key::Z)));
+        assert_eq!(
+            map.unread,
+            [("future_tool".to_string(), "Q".to_string()), ("redo".to_string(), "Ctrl+Nope".to_string())]
+        );
+        // The bad line's action keeps its default meanwhile.
+        assert_eq!(map.get(Action::Redo), ShortcutMap::default().get(Action::Redo));
+        map.set(Action::ToolPencil, KeyCombo::plain(egui::Key::P));
+        let new = save_text(old, &map).unwrap();
+        assert!(new.starts_with("# my keys\nundo = \"ctrl+z\"  # lower case is fine\n"), "{new}");
+        assert!(new.contains("future_tool = \"Q\"") && new.contains("redo = \"Ctrl+Nope\""), "{new}");
+        assert!(new.contains("tool_pencil = \"P\""), "{new}");
+        assert_eq!(parse(&new).unwrap(), map);
+        // Binding the bad line's action here replaces the line.
+        map.set(Action::Redo, KeyCombo::ctrl(egui::Key::Y));
+        let fixed = save_text(&new, &map).unwrap();
+        assert!(fixed.contains("redo = \"Ctrl+Y\"") && !fixed.contains("Nope"), "{fixed}");
+        // A reset drops what has no default, and keeps names that aren't ours.
+        let mut bound = map.clone();
+        bound.set(Action::HoldScrub, KeyCombo::plain(egui::Key::N));
+        let with = save_text(&fixed, &bound).unwrap();
+        assert!(with.contains("hold_scrub"));
+        let reset = save_text(&with, &ShortcutMap::default()).unwrap();
+        assert!(!reset.contains("hold_scrub") && reset.contains("future_tool"), "{reset}");
+    }
+
+    #[test]
+    fn key_names_read_in_any_case() {
+        assert_eq!(parse_combo("ctrl+space"), Some(KeyCombo::ctrl(egui::Key::Space)));
+        assert_eq!(parse_combo("delete"), Some(KeyCombo::plain(egui::Key::Delete)));
+        assert_eq!(parse_combo("Shift+esc"), Some(KeyCombo::shift(egui::Key::Escape)));
+        assert_eq!(parse_combo("Ctrl++"), Some(KeyCombo::ctrl(egui::Key::Plus)));
+        assert_eq!(parse_combo("ctrl+nope"), None);
+    }
+
+    /// Ctrl+V for paste_image in a file saved since selections came in is the
+    /// user's choice: the old migration only moves it in older files.
+    #[test]
+    fn paste_on_ctrl_v_is_kept_in_a_current_file() {
+        let old = load_from_str("paste_image = \"Ctrl+V\"\n");
+        assert_eq!(old.get(Action::PasteImage), Some(KeyCombo::ctrl_shift(egui::Key::V)));
+        let current = load_from_str("paste_image = \"Ctrl+V\"\nselection_paste = \"Ctrl+Shift+P\"\n");
+        assert_eq!(current.get(Action::PasteImage), Some(KeyCombo::ctrl(egui::Key::V)));
     }
 
     /// The selection's bindings must not collide with anything else's — a
