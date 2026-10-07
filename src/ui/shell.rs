@@ -1509,16 +1509,20 @@ fn diag_row(ui: &mut egui::Ui, key: &str, value: String) {
 /// theme has no warning colour and one readout does not justify adding to it.
 pub(crate) const DIAG_BAD: Color32 = Color32::from_rgb(232, 138, 96);
 
-/// A tablet work area this far off the screen area's shape stretches strokes
-/// visibly; below it, rounding in the driver's own numbers.
-const ASPECT_TOLERANCE: f32 = 0.03;
-
 /// The screens, and where the tablet driver puts the pen on them. The usual
 /// cause of a pen that covers only part of the window is a driver work area
-/// spread over every monitor; this says so in as many words.
+/// spread over every monitor; this says so in as many words — going by what
+/// the cursor shows, since drivers misreport their own area.
 fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnostics) {
-    use crate::input::tablet::{aspect_mismatch, monitors_spanned, ScreenRect};
+    use crate::input::tablet::{monitors_spanned, reach_fits_one_monitor, ScreenRect};
     let rect = |r: ScreenRect| format!("{}×{} @{},{}", r.w, r.h, r.x, r.y);
+    let note = |ui: &mut egui::Ui, text: &str, bad: bool| {
+        ui.label(
+            egui::RichText::new(text)
+                .color(if bad { DIAG_BAD } else { theme::TEXT_MUTED })
+                .size(11.0),
+        );
+    };
     let monitors: Vec<String> = d
         .display
         .monitors
@@ -1528,38 +1532,34 @@ fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnosti
     diag_row(ui, "monitors", monitors.join(" · "));
     diag_row(ui, "desktop", rect(d.display.desktop));
     if let Some(area) = d.display.driver {
-        diag_row(ui, "driver area", rect(area.screen));
-        let spans = monitors_spanned(area.screen, &d.display.monitors);
-        if spans > 1 {
-            ui.label(
-                egui::RichText::new(format!(
-                    "the pen spans {spans} monitors — set the driver's work area to one \
-                     monitor so this window gets the whole tablet"
-                ))
-                .color(DIAG_BAD)
-                .size(11.0),
-            );
+        diag_row(ui, "driver says", rect(area.screen));
+        let driver_spans = monitors_spanned(area.screen, &d.display.monitors);
+        match d.reach {
+            Some((w, h)) => {
+                diag_row(ui, "pen reaches", format!("{w:.0}×{h:.0}, measured from the cursor"));
+                if !reach_fits_one_monitor((w, h), &d.display.monitors) {
+                    note(
+                        ui,
+                        "the pen covers more than one monitor — set the driver's work area                          to one monitor so this window gets the whole tablet",
+                        true,
+                    );
+                } else if driver_spans > 1 {
+                    note(
+                        ui,
+                        "the driver names the whole desktop, but the cursor keeps to one                          monitor: the work area is set, and the pen is mapped from the cursor",
+                        false,
+                    );
+                }
+            }
+            None if driver_spans > 1 => note(
+                ui,
+                &format!(
+                    "the driver says the pen spans {driver_spans} monitors (some drivers                      always say so) — hover the pen over this window to measure"
+                ),
+                false,
+            ),
+            None => {}
         }
-        let off = aspect_mismatch(area.tablet, area.screen);
-        let ratio = |w: i32, h: i32| if h == 0 { 0.0 } else { (w as f32 / h as f32).abs() };
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("aspect").color(theme::TEXT_MUTED).size(11.0));
-            ui.label(
-                egui::RichText::new(format!(
-                    "tablet {:.2}:1, area {:.2}:1",
-                    ratio(area.tablet.0, area.tablet.1),
-                    ratio(area.screen.w, area.screen.h)
-                ))
-                .monospace()
-                .size(11.0)
-                .color(if off > ASPECT_TOLERANCE { DIAG_BAD } else { theme::TEXT }),
-            )
-            .on_hover_text(
-                "When these differ, strokes come out stretched: circles drawn on the \
-                 tablet land as ovals. Map the tablet to one monitor, or turn on the \
-                 driver's keep-proportions option.",
-            );
-        });
     }
     diag_row(ui, "ui scale", format!("{:.2} px/pt", ui.ctx().pixels_per_point()));
     if let Some((x, y)) = crate::input::screen_pixel::cursor_pos() {
