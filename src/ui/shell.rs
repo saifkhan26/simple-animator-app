@@ -3272,8 +3272,11 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
             ui.add_space(4.0);
             ui.separator();
 
-            let layer_count = state.project.layers.len();
             let frame_count = state.project.frame_count;
+            // A column per row the Layers panel shows, bottom first: a
+            // group's own column carries its name and no cells, its layers'
+            // columns follow it marked, and a folded group's are left out.
+            let cols: Vec<usize> = state.project.panel_rows().into_iter().rev().collect();
 
             egui::ScrollArea::both()
                 .auto_shrink([false, true])
@@ -3284,12 +3287,16 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                         .min_col_width(28.0)
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new("Fr").color(theme::TEXT_MUTED).strong());
-                            for li in 0..layer_count {
-                                ui.label(
-                                    egui::RichText::new(&state.project.layers[li].name)
-                                        .color(theme::TEXT_MUTED)
-                                        .strong(),
-                                );
+                            for &li in &cols {
+                                let l = &state.project.layers[li];
+                                let name = if l.is_group() {
+                                    format!("{} {}", ic::FOLDER_SIMPLE, l.name)
+                                } else if l.in_group {
+                                    format!("› {}", l.name)
+                                } else {
+                                    l.name.clone()
+                                };
+                                ui.label(egui::RichText::new(name).color(theme::TEXT_MUTED).strong());
                             }
                             ui.end_row();
 
@@ -3317,7 +3324,11 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         ui.data_mut(|d| d.insert_temp(mem_id, f));
                                     }
                                 }
-                                for li in 0..layer_count {
+                                for &li in &cols {
+                                    if state.project.is_group(li) {
+                                        ui.label("");
+                                        continue;
+                                    }
                                     let cell = state.project.layers[li].exposures[f];
                                     let active_l = li == state.project.current_layer;
                                     let label = match cell {
