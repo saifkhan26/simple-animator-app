@@ -29,6 +29,7 @@ pub enum Action {
     ToolTracker,
     ToolLasso,
     ToolPerspective,
+    ToolLiquify,
     TogglePerspectiveGrid,
     TogglePerspectiveSnap,
     /// Make the next visible perspective grid the active one — the one
@@ -149,6 +150,7 @@ impl Action {
         Action::ToolTracker,
         Action::ToolLasso,
         Action::ToolPerspective,
+        Action::ToolLiquify,
         Action::TogglePerspectiveGrid,
         Action::TogglePerspectiveSnap,
         Action::PerspectiveNextGrid,
@@ -252,6 +254,7 @@ impl Action {
             Action::ToolTracker => "Tool: Tracker",
             Action::ToolLasso => "Tool: Lasso select",
             Action::ToolPerspective => "Tool: Perspective grid",
+            Action::ToolLiquify => "Tool: Liquify",
             Action::TogglePerspectiveGrid => "Show perspective grids",
             Action::TogglePerspectiveSnap => "Snap strokes to perspective grid",
             Action::PerspectiveNextGrid => "Next perspective grid",

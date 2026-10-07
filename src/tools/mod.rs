@@ -6,6 +6,7 @@ pub mod fill;
 mod golden_tests;
 pub mod krita;
 pub mod lasso;
+pub mod liquify;
 pub mod perspective;
 pub mod paper;
 pub mod ribbon;
@@ -29,6 +30,8 @@ pub enum ActiveTool {
     Lasso,
     /// Perspective grids — edits the viewport guides, draws nothing.
     Perspective,
+    /// Push the current drawing's pixels around inside the selection.
+    Liquify,
 }
 
 impl ActiveTool {
@@ -42,6 +45,7 @@ impl ActiveTool {
             ActiveTool::Tracker => 5,
             ActiveTool::Lasso => 6,
             ActiveTool::Perspective => 7,
+            ActiveTool::Liquify => 8,
         }
     }
 }
@@ -256,6 +260,16 @@ pub struct BrushSettings {
     pub fill_all_visible: bool,
     /// Outline shape to draw. Only used by the Shape tool.
     pub shape_kind: ShapeKind,
+    /// How far the pixels follow the pen, 0..=1, at full pressure. Only used
+    /// by Liquify.
+    pub liquify_strength: f32,
+    /// Push or smooth. Only used by Liquify.
+    pub liquify_mode: liquify::LiquifyMode,
+    /// How many pixels in from a selection's edge the warp eases out over.
+    /// Only used by Liquify.
+    pub liquify_edge: f32,
+    /// Draw the warp as a deformed grid. Only used by Liquify.
+    pub liquify_mesh: bool,
 }
 
 impl Default for BrushSettings {
@@ -287,6 +301,10 @@ impl Default for BrushSettings {
             fill_gap: 0,
             fill_all_visible: false,
             shape_kind: ShapeKind::Line,
+            liquify_strength: 0.6,
+            liquify_mode: liquify::LiquifyMode::Push,
+            liquify_edge: 16.0,
+            liquify_mesh: false,
         }
     }
 }
@@ -428,6 +446,14 @@ impl BrushSettings {
             // into the user's own strokes. It is opt-in for the line-art-on-
             // another-layer workflow, where the grown ring hides under the ink.
             fill_expand: 0,
+            ..Self::default()
+        }
+    }
+
+    /// A warp brush big enough to move a limb at once.
+    pub fn default_liquify() -> Self {
+        Self {
+            radius: 60.0,
             ..Self::default()
         }
     }

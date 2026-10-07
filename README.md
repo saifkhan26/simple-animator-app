@@ -114,6 +114,19 @@ new cell and keys it there automatically.
 | Ink    | Harder, denser stamps for clean-up lines.                        |
 | Eraser | Punches alpha to 0 (no white).                                   |
 | Fill   | Scanline flood within tolerance bound. Click once to fill.       |
+| Liquify | Push the drawing's pixels with the pen, inside the selection.   |
+
+**Liquify.** Drag on a drawing to push its pixels along (Push), or to even
+out a warp's kinks (Smooth). With a selection, only what's inside moves, and
+the warp eases out over the **Edge falloff** so it never tears at the edge;
+without one the whole drawing warps. Pen pressure sets how far the pixels
+follow, up to **Strength**, and the Tool-adjust drag (or its hold key) sizes
+the brush sideways and sets the strength upward. Every pass is resampled from
+the drawing as the session found it, so going back and forth doesn't soften
+the lines. `Ctrl+Z` takes back a stroke; `Enter`, or changing tool, frame or
+layer, applies the warp as one undo step; `Esc` throws it away. With **All
+frames** on, the same warp lands on every drawing of the layer — fixing a
+proportion through a whole cycle. **Show mesh** draws the warp as a grid.
 
 ### Brush parameters
 
