@@ -528,17 +528,33 @@ pub fn monitors_spanned(area: ScreenRect, monitors: &[(ScreenRect, bool)]) -> us
     monitors.iter().filter(|(m, _)| m.overlaps(area)).count()
 }
 
-/// How far the tablet area's shape is from the screen area's it is mapped
-/// onto, as a fraction: 0 when they match, 0.6 for a 16:9 tablet on a 2.9:1
-/// two-monitor desktop. Anything but near zero stretches every stroke.
-pub fn aspect_mismatch(tablet: (i32, i32), area: ScreenRect) -> f32 {
-    let a = area.normalized();
-    if tablet.0 == 0 || tablet.1 == 0 || a.w == 0 || a.h == 0 {
-        return 0.0;
-    }
-    let t = (tablet.0 as f32 / tablet.1 as f32).abs();
-    let s = a.w as f32 / a.h as f32;
-    t.max(s) / t.min(s) - 1.0
+/// How much screen, in desktop pixels, the whole tablet covers: the packet
+/// range the context reports over, times the scale the cursor fit measured.
+/// `None` until both axes of the fit are trusted.
+///
+/// The driver's own word for this (`lcSys*` of its default context) can't be
+/// taken: XP-Pen's always names the whole desktop, whatever work area is set,
+/// while the cursor it moves keeps to the one monitor it was told to. Only the
+/// size is measured, not where it sits — the same drivers misreport where the
+/// packet range starts, too (the fit's origin absorbs that).
+pub fn pen_reach(span: (i32, i32), fit_x: Option<AxisFit>, fit_y: Option<AxisFit>) -> Option<(f32, f32)> {
+    let (fx, fy) = (fit_x?, fit_y?);
+    Some(((fx.scale * span.0 as f64).abs() as f32, (fy.scale * span.1 as f64).abs() as f32))
+}
+
+/// Pixels a measured reach may run past a monitor before it counts as
+/// reaching off it: the fit is good to a fraction of a pixel, but the packet
+/// range and the screen can disagree by one at each edge.
+const REACH_SLACK: f32 = 8.0;
+
+/// Whether a tablet covering `reach` pixels fits on one of `monitors`. When
+/// it doesn't, the work area is spread over several, and the window gets only
+/// part of the tablet.
+pub fn reach_fits_one_monitor(reach: (f32, f32), monitors: &[(ScreenRect, bool)]) -> bool {
+    monitors.iter().any(|(m, _)| {
+        let m = m.normalized();
+        reach.0 <= m.w as f32 + REACH_SLACK && reach.1 <= m.h as f32 + REACH_SLACK
+    })
 }
 
 /// What the tablet backend is currently seeing.
@@ -577,6 +593,9 @@ pub struct PenDiagnostics {
     pub fit_x: Option<AxisFit>,
     pub fit_y: Option<AxisFit>,
     pub fit_pairs: usize,
+    /// Desktop pixels the whole tablet covers, as the cursor shows it — see
+    /// [`pen_reach`].
+    pub reach: Option<(f32, f32)>,
     /// The desktop and the driver's area, read when the snapshot is taken.
     pub display: DisplaySig,
     /// Times the context was reopened, and the latest reason.
@@ -784,6 +803,7 @@ impl PenInput {
             d.fit_x = w.fit.x;
             d.fit_y = w.fit.y;
             d.fit_pairs = w.fit.pairs();
+            d.reach = pen_reach(w.out_span, w.fit.x, w.fit.y);
             // Mapped from the retained raw value rather than from this frame's
             // packets, which are empty whenever the pen holds still — the
             // readout would otherwise blink out exactly while being read.
@@ -926,6 +946,9 @@ mod windows_backend {
         /// origin, the packet-space origin, and desktop units per packet unit.
         pub map_x: (f32, f32, f32),
         pub map_y: (f32, f32, f32),
+        /// The size of the packet range the whole tablet reports over, per
+        /// axis — the granted output extent, made positive.
+        pub out_span: (i32, i32),
         /// Whether the device reports azimuth/altitude.
         tilt_support: bool,
         /// The tangential-pressure axis's span, 0 without one.
@@ -1313,6 +1336,7 @@ mod windows_backend {
                 wt_info_raw: unsafe { lib.get(c"WTInfoA".to_bytes()).context("WTInfoA")? },
                 map_x,
                 map_y,
+                out_span: (out_ext.x.abs(), out_ext.y.abs()),
                 tilt_support,
                 last_raw: None,
                 total_packets: 0,
@@ -1995,11 +2019,22 @@ mod tests {
         assert_eq!(monitors_spanned(rect(4160, 1440, -4160, -1440), &s.monitors), 2);
     }
 
+    /// The user's readout after mapping the tablet to the main monitor: the
+    /// driver still says 4159×1439, but the cursor puts the tablet's width on
+    /// 2558 pixels — one monitor.
     #[test]
-    fn a_stretched_mapping_is_flagged() {
-        let tablet = reported().driver.unwrap().tablet;
-        assert!(aspect_mismatch(tablet, rect(0, 0, 4160, 1440)) > 0.5);
-        assert!(aspect_mismatch(tablet, rect(0, 0, 2560, 1440)) < 0.01);
-        assert_eq!(aspect_mismatch((0, 0), rect(0, 0, 2560, 1440)), 0.0);
+    fn the_cursor_measures_what_the_pen_reaches() {
+        let s = reported();
+        let fit = |scale: f64, origin: f64| Some(AxisFit { origin, scale, rms: 0.3 });
+        let span = (4159 * 32, 1439 * 32);
+        let reach = pen_reach(span, fit(0.01922, 0.0), fit(0.03126, -1439.5)).unwrap();
+        assert!((reach.0 - 2558.0).abs() < 1.0 && (reach.1 - 1439.5).abs() < 1.0, "{reach:?}");
+        assert!(reach_fits_one_monitor(reach, &s.monitors));
+        // Mapped over both monitors, the cursor shows it too.
+        let both = pen_reach(span, fit(1.0 / 32.0, 0.0), fit(-1.0 / 32.0, 1439.0)).unwrap();
+        assert!(!reach_fits_one_monitor(both, &s.monitors));
+        // The small monitor alone fits; nothing is measured without a fit.
+        assert!(reach_fits_one_monitor((1600.0, 900.0), &s.monitors));
+        assert_eq!(pen_reach(span, fit(0.02, 0.0), None), None);
     }
 }
