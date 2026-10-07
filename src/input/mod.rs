@@ -6,6 +6,7 @@
 pub mod button_drag;
 pub mod clipboard_keys;
 pub mod msg_hook;
+pub mod pen_record;
 pub mod pointer;
 pub mod screen_pixel;
 pub mod shortcuts;
