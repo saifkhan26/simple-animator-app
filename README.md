@@ -179,10 +179,14 @@ canvas centre, or on every drawing of the layer with **All frames** on; a
 layer's right-click menu does the whole layer. Pixels only move, never
 resample, so flipping back gives the drawing back exactly. A quarter turn of a
 non-square drawing swaps its width and height rather than cropping it.
-
 **Moving pixels.** Drag inside the selection to move what's under it, or
 nudge with the arrow keys. Drag a handle on the box around it to scale:
-corners take both axes, edges take one, and `Shift` keeps it uniform. Drag
+corners take both axes, edges take one. `Shift` on any handle keeps the box's
+proportions — the ones it had, so a stretched box stays stretched — and `Alt`
+scales from the centre, so both sides move; either can be pressed or let go
+mid-drag. Over the box, Shift and Alt mean this rather than pan and rotate,
+even when held before the press. Drag just outside a corner to rotate, with
+`Shift` snapping to 15°.
 just outside a corner to rotate, with `Shift` snapping to 15°.
 
 - Moves are pixel-snapped, so a move alone never resamples. A scaled or

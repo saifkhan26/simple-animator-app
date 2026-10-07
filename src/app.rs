@@ -1050,8 +1050,10 @@ pub struct AppState {
     pub fill_drag: Option<FillDrag>,
     /// Shift state, sampled once a frame. Pointer handlers run off tablet
     /// packets rather than egui events, so they have no `InputState` of their
-    /// own to ask; a selection scale reads this for its uniform constraint.
+    /// own to ask; a selection scale reads this to keep its proportions.
     shift_held: bool,
+    /// Alt, likewise: a selection scale about the box centre.
+    alt_held: bool,
     /// Perspective grids and their display/snap switches.
     pub perspective: PerspectiveConfig,
     /// In-flight drag on a perspective grid, or `None`.
@@ -1432,6 +1434,7 @@ impl AppState {
             shape_drag: None,
             fill_drag: None,
             shift_held: false,
+            alt_held: false,
             perspective: {
                 let mut cfg = prefs.perspective.clone();
                 cfg.ensure_ids();
@@ -5406,7 +5409,7 @@ impl eframe::App for AppState {
         self.pen.poll(ctx.input(|i| i.pointer.any_down()));
         // Sampled here rather than in the pointer handlers: those run off
         // tablet packets and never see an `InputState`.
-        self.shift_held = ctx.input(|i| i.modifiers.shift);
+        (self.shift_held, self.alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
 
         let tab_focus = self.handle_keys(ctx);
 
