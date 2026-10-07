@@ -1551,13 +1551,15 @@ fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnosti
                 if !reach_fits_one_monitor((w, h), &d.display.monitors) {
                     note(
                         ui,
-                        "the pen covers more than one monitor — set the driver's work area                          to one monitor so this window gets the whole tablet",
+                        "the pen covers more than one monitor — set the driver's work area \
+                         to one monitor so this window gets the whole tablet",
                         true,
                     );
                 } else if driver_spans > 1 {
                     note(
                         ui,
-                        "the driver names the whole desktop, but the cursor keeps to one                          monitor: the work area is set, and the pen is mapped from the cursor",
+                        "the driver names the whole desktop, but the cursor keeps to one \
+                         monitor: the work area is set, and the pen is mapped from the cursor",
                         false,
                     );
                 }
@@ -1565,7 +1567,8 @@ fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnosti
             None if driver_spans > 1 => note(
                 ui,
                 &format!(
-                    "the driver says the pen spans {driver_spans} monitors (some drivers                      always say so) — hover the pen over this window to measure"
+                    "the driver says the pen spans {driver_spans} monitors (some drivers \
+                     always say so) — hover the pen over this window to measure"
                 ),
                 false,
             ),
@@ -1614,7 +1617,9 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
         } else if ui
             .small_button("Record pen (6 s)")
             .on_hover_text(
-                "Writes where the pen, the cursor and this app's pointer are, frame by                  frame, while this window is active — what a screenshot of this readout                  can't show, since the screenshot tool takes over.",
+                "Writes where the pen, the cursor and this app's pointer are, frame by \
+                 frame, while this window is active — what a screenshot of this readout \
+                 can't show, since the screenshot tool takes over.",
             )
             .clicked()
         {
@@ -1804,15 +1809,19 @@ fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
                 .on_hover_text("Straight lines between raw samples.");
             ui.selectable_value(&mut state.smoothing.kind, Smoothing::Basic, "Basic")
                 .on_hover_text(
-                    "Krita's default. No averaging — samples are joined by a cubic                      Bezier fitted to the local tangents.",
+                    "Krita's default. No averaging — samples are joined by a cubic \
+                     Bezier fitted to the local tangents.",
                 );
             ui.selectable_value(&mut state.smoothing.kind, Smoothing::Weighted, "Weighted")
                 .on_hover_text(
-                    "A gaussian average over the recent samples, then the same                      Bezier fit. Steadier, at the cost of the stroke trailing                      the pen.",
+                    "A gaussian average over the recent samples, then the same \
+                     Bezier fit. Steadier, at the cost of the stroke trailing \
+                     the pen.",
                 );
             ui.selectable_value(&mut state.smoothing.kind, Smoothing::Stabilizer, "Stabilizer")
                 .on_hover_text(
-                    "Krita's stabilizer: the line follows the pen on a timer,                      averaging away the hand's shake, and can trail it on a string.",
+                    "Krita's stabilizer: the line follows the pen on a timer, \
+                     averaging away the hand's shake, and can trail it on a string.",
                 );
         });
 
@@ -1846,7 +1855,9 @@ fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
             .on_hover_text("Run pressure through the same filter as position.");
         ui.checkbox(&mut state.smoothing.scalable_distance, "Scale distance with zoom")
             .on_hover_text(
-                "Measure the distance above in screen pixels rather than canvas                  pixels, so smoothing feels the same at every zoom. Off, a                  zoomed-out stroke is barely smoothed at all.",
+                "Measure the distance above in screen pixels rather than canvas \
+                 pixels, so smoothing feels the same at every zoom. Off, a \
+                 zoomed-out stroke is barely smoothed at all.",
             );
     });
 }
@@ -3548,7 +3559,9 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                 if ui
                     .button(theme::icon_text(ic::FILE_TEXT, "Open shortcuts file"))
                     .on_hover_text(
-                        "Opens shortcuts.toml in your editor, writing it out first if it                          isn't there yet. Saved edits load when you come back to this window.",
+                        "Opens shortcuts.toml in your editor, writing it out first if it \
+                         isn't there yet. Save your edits there, then Reload. Changes made \
+                         here go into the file in place, your comments and lines kept.",
                     )
                     .clicked()
                 {
@@ -3560,6 +3573,16 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                             .map_err(|e| format!("couldn't open shortcuts.toml: {e}")),
                     );
                 }
+                if ui
+                    .button(theme::icon_text(ic::ARROWS_CLOCKWISE, "Reload"))
+                    .on_hover_text(
+                        "Load shortcuts.toml as it is saved now, without restarting. A file \
+                         with a mistake in it is reported and nothing changes.",
+                    )
+                    .clicked()
+                {
+                    state.reload_shortcuts_file();
+                }
             });
             match &state.shortcuts_file_note {
                 Some(Ok(note)) => {
@@ -3569,6 +3592,19 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                     ui.label(egui::RichText::new(e).color(DIAG_BAD).size(11.0));
                 }
                 None => {}
+            }
+            if !state.shortcuts.unread.is_empty() {
+                let lines: Vec<String> =
+                    state.shortcuts.unread.iter().map(|(k, v)| format!("{k} = {v:?}")).collect();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "shortcuts.toml lines that don't read, left in the file as you wrote \
+                         them (defaults stand in): {}",
+                        lines.join(", ")
+                    ))
+                    .color(DIAG_BAD)
+                    .size(11.0),
+                );
             }
             // Bindings that share their combo with something. Recomputed each
             // frame: a few thousand comparisons, and only while this is open.

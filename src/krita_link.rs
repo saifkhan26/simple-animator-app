@@ -897,7 +897,8 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
         // needs a layer, and wiping the whole thing from one save is the
         // wrong default — refuse, and say how to go on.
         bail!(
-            "{EVERYTHING_DELETED}: nothing was changed here. Send to Krita again to put them              back there, or delete them here yourself."
+            "{EVERYTHING_DELETED}: nothing was changed here. Send to Krita again to put them \
+             back there, or delete them here yourself."
         );
     }
 
