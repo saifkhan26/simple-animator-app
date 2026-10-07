@@ -1179,6 +1179,12 @@ pub struct AppState {
     /// went — or why it couldn't be written.
     pub pen_record: Option<crate::input::pen_record::PenRecord>,
     pub pen_record_saved: Option<Result<std::path::PathBuf, String>>,
+    /// Whether the window had focus last frame: coming back to it is when
+    /// edits made to shortcuts.toml in an editor are picked up.
+    window_focused: bool,
+    /// What the last open of, or reload from, shortcuts.toml came to, for
+    /// the Settings window: the file opened, edits loaded, or why not.
+    pub shortcuts_file_note: Option<Result<String, String>>,
 
     pub history: History,
     /// Full-pixel snapshot of the cell before the in-flight stroke started.
@@ -1513,6 +1519,8 @@ impl AppState {
             },
             pen_record: None,
             pen_record_saved: None,
+            window_focused: true,
+            shortcuts_file_note: None,
             history: History::default(),
             stroke_pre_pixels: Vec::new(),
             stroke_pre_live: false,
@@ -5506,6 +5514,24 @@ impl AppState {
         self.apply_touched(touched);
     }
 
+    /// Pick up edits made to shortcuts.toml outside the app. A file that
+    /// doesn't read is left alone — loading it would mean defaults, which the
+    /// next rebind here would then write over the user's file.
+    pub(crate) fn reload_shortcuts_file(&mut self) {
+        match shortcuts::read_file() {
+            Some(Ok(map)) if map != self.shortcuts => {
+                self.shortcuts = map;
+                self.rebinding = None;
+                self.shortcuts_file_note = Some(Ok("loaded your edits to shortcuts.toml".into()));
+            }
+            Some(Err(e)) => {
+                self.shortcuts_file_note =
+                    Some(Err(format!("shortcuts.toml didn't load, nothing changed: {e}")));
+            }
+            _ => {}
+        }
+    }
+
     /// Rebind capture and shortcut dispatch for this frame's key presses.
     ///
     /// Returns whether a Tab press found nothing focused. Tab is a shortcut
@@ -5798,6 +5824,11 @@ impl eframe::App for AppState {
         }
 
         self.pen.poll(ctx.input(|i| i.pointer.any_down()));
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.window_focused {
+            self.reload_shortcuts_file();
+        }
+        self.window_focused = focused;
         if let Some(rec) = &mut self.pen_record {
             if rec.frame(ctx, &self.pen) {
                 let rec = self.pen_record.take().expect("recording");
