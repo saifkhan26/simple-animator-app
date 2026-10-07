@@ -36,7 +36,7 @@ impl AppState {
         let Some(layer) = self.project.layers.get(li) else {
             return;
         };
-        if layer.locked || layer.reference || o.is_identity() {
+        if !self.project.paintable(li) || o.is_identity() {
             return;
         }
         let cells: Vec<_> = if every {

@@ -399,11 +399,24 @@ impl Project {
     /// The base layer `li` is clipped to: the nearest layer below it that is
     /// not clipped itself. `None` when `li` isn't clipped, or nothing under it
     /// can be a base — a clipped bottom layer shows as if it weren't.
+    ///
+    /// Groups keep their own: a layer in a group clips to one below it in
+    /// the same group (the bottom one of a group clips to nothing), and a
+    /// layer outside groups looks past a group's layers to its header — a
+    /// whole group can be a base.
     pub fn clip_base(&self, li: usize) -> Option<usize> {
-        if !self.layers.get(li)?.clip {
+        let layer = self.layers.get(li)?;
+        if !layer.clip || layer.is_group() {
             return None;
         }
-        (0..li).rev().find(|&j| !self.layers[j].clip)
+        if layer.in_group {
+            let start = self.group_of(li).map_or(li, |g| self.children(g).start);
+            return (start..li).rev().find(|&j| !self.layers[j].clip);
+        }
+        (0..li)
+            .rev()
+            .filter(|&j| !self.layers[j].in_group)
+            .find(|&j| !self.layers[j].clip)
     }
 
     /// Frame of the nearest drawing key on the active layer strictly *before*
@@ -456,7 +469,7 @@ impl Project {
 
     /// Keep `lines_from` links valid after the layers were reordered, with
     /// `to_new(old)` giving each layer's new index.
-    fn relink(&mut self, to_new: impl Fn(usize) -> usize) {
+    pub(crate) fn relink(&mut self, to_new: impl Fn(usize) -> usize) {
         for layer in &mut self.layers {
             if let Some(src) = layer.lines_from {
                 layer.lines_from = Some(to_new(src));
@@ -786,7 +799,7 @@ impl Project {
     /// Whether a drag from `src` to `dst` may land. Nothing ever edits a
     /// locked or reference layer, and only a move edits its source.
     pub fn drop_allowed(&self, src: usize, dst: usize, copy: bool) -> bool {
-        let editable = |i: usize| self.layers.get(i).is_some_and(|l| !l.locked && !l.reference);
+        let editable = |i: usize| self.paintable(i);
         editable(dst) && (copy || editable(src))
     }
 

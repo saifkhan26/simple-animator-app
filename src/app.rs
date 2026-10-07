@@ -2141,11 +2141,10 @@ impl AppState {
         if li == 0 {
             return false;
         }
-        let (Some(top), Some(below)) = (self.project.layers.get(li), self.project.layers.get(li - 1))
-        else {
-            return false;
-        };
-        !top.locked && !below.locked && !top.reference && !below.reference
+        // Both editable drawing layers, in the same group or both in none.
+        self.project.paintable(li)
+            && self.project.paintable(li - 1)
+            && self.project.group_of(li) == self.project.group_of(li - 1)
     }
 
     /// Merge the active layer onto the layer below and remove it.
@@ -2558,12 +2557,11 @@ impl AppState {
         }
     }
 
+    /// Locked itself or by its group — or a group header, which has nothing
+    /// to edit.
     fn active_layer_locked(&self) -> bool {
-        self.project
-            .layers
-            .get(self.project.current_layer)
-            .map(|l| l.locked)
-            .unwrap_or(true)
+        let li = self.project.current_layer;
+        self.project.locked_eff(li) || self.project.is_group(li)
     }
 
     /// Translate the active layer by a document-space delta.
@@ -2819,12 +2817,12 @@ impl AppState {
         let li = self.project.current_layer;
         let f = self.project.current_frame;
         let n = self.project.frame_count;
+        if self.project.locked_eff(li) || self.project.is_group(li) {
+            return;
+        }
         let Some(l) = self.project.layers.get_mut(li) else {
             return;
         };
-        if l.locked {
-            return;
-        }
         if l.track_points.len() < n {
             l.track_points.resize(n, TrackSample::default());
         }
@@ -3613,10 +3611,8 @@ impl AppState {
     /// The cell a paint edit on the active slot should write to, allocating
     /// it if the slot is empty. `None` on a locked or reference layer.
     fn begin_edit_cell(&mut self) -> Option<CellId> {
-        if let Some(layer) = self.project.layers.get(self.project.current_layer) {
-            if layer.locked || layer.reference {
-                return None;
-            }
+        if !self.project.paintable(self.project.current_layer) {
+            return None;
         }
         // Auto-key: break the hold first, so the stroke starts a drawing of
         // this frame's own instead of editing the cell every frame in the hold
@@ -4025,7 +4021,7 @@ impl AppState {
     fn pen_cell(&self) -> Option<Option<CellId>> {
         let p = &self.project;
         let l = p.layers.get(p.current_layer)?;
-        if l.locked || l.reference {
+        if !p.paintable(p.current_layer) {
             return None;
         }
         match self.held_for_auto_key() {
@@ -4041,7 +4037,7 @@ impl AppState {
         let p = &self.project;
         let l = p.layers.get(p.current_layer)?;
         let f = p.current_frame;
-        if !self.auto_key_draw || l.locked || l.reference || l.is_key(f) {
+        if !self.auto_key_draw || !p.paintable(p.current_layer) || l.is_key(f) {
             return None;
         }
         l.resolve(f)
@@ -4334,12 +4330,7 @@ impl AppState {
 
     /// Whether every one of `layers` may be edited.
     fn layers_editable(&self, layers: impl IntoIterator<Item = usize>) -> bool {
-        layers.into_iter().all(|i| {
-            self.project
-                .layers
-                .get(i)
-                .is_some_and(|l| !l.locked && !l.reference)
-        })
+        layers.into_iter().all(|i| self.project.paintable(i))
     }
 
     /// Run a track edit as one undo step, then select what it hands back.
@@ -4759,6 +4750,26 @@ impl AppState {
     }
 
     pub fn dispatch(&mut self, action: Action) {
+        // A group's header has no drawings and no pixels: what edits the
+        // active slot leaves it alone.
+        let slot_edit = matches!(
+            action,
+            Action::KeyBlank
+                | Action::KeyCopy
+                | Action::Hold
+                | Action::ClearCell
+                | Action::CellCut
+                | Action::CellPaste
+                | Action::SelectionPaste
+                | Action::SelectionCut
+                | Action::SelectionDelete
+                | Action::SelectionFill
+                | Action::LayerClipToggle
+                | Action::LayerAlphaLockToggle
+        );
+        if slot_edit && self.project.is_group(self.project.current_layer) {
+            return;
+        }
         match action {
             Action::ToolPencil => self.set_tool(ActiveTool::Pencil),
             Action::ToolInk => self.set_tool(ActiveTool::Ink),

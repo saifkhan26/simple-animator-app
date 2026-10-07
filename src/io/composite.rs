@@ -30,16 +30,37 @@ fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
     let mut out = Canvas::new(project.width, project.height);
     let (pw, ph) = (project.width, project.height);
     let cam = project.resolve_camera(frame);
-    for (li, layer) in project.layers.iter().enumerate() {
-        if !layer.visible || layer.reference {
-            continue;
+    let draw = |dst: &mut Canvas, li: usize| {
+        let layer = &project.layers[li];
+        if !project.shows(li) || layer.reference || layer.is_group() {
+            return;
         }
         let Some(src) = crate::doc::clip::shown(project, li, frame) else {
-            continue;
+            return;
         };
         let xform = layer.resolve_transform(frame);
         let xform = if through_camera { cam.apply(&xform) } else { xform };
-        composite_layer(&mut out, &src, &xform, layer.opacity, pw, ph);
+        composite_layer(dst, &src, &xform, layer.opacity, pw, ph);
+    };
+    for (li, layer) in project.layers.iter().enumerate() {
+        // A group's layers are drawn at its header, which sits directly
+        // above them, so the stacking order is the same.
+        if layer.in_group && project.group_of(li).is_some() {
+            continue;
+        }
+        if !layer.is_group() {
+            draw(&mut out, li);
+        } else if layer.visible && layer.opacity >= 1.0 {
+            // Over is associative: at full opacity a group composited on its
+            // own and then laid down is exactly its layers laid down directly.
+            project.children(li).for_each(|c| draw(&mut out, c));
+        } else if layer.visible && layer.opacity > 0.0 {
+            // Otherwise its layers merge first and the group's opacity applies
+            // once, so they don't show through one another.
+            let mut group = Canvas::new(pw, ph);
+            project.children(li).for_each(|c| draw(&mut group, c));
+            composite_over(&mut out, &group, layer.opacity);
+        }
     }
     out
 }
@@ -127,6 +148,98 @@ mod tests {
         // Unclipped, it covers the frame.
         p.layers[1].clip = false;
         assert_eq!(&flatten_frame(&p, 0).pixels()[24..28], &[255, 0, 0, 255]);
+    }
+    /// Three frame-sized layers on an 8×4 project, bottom first: blue on the
+    /// left half, red on the left half too, green over everything. Each
+    /// opaque. Layers 0 and 1 then go into a group.
+    fn grouped() -> (Project, usize) {
+        let mut p = Project::new(8, 4, 12.0);
+        p.add_layer();
+        p.add_layer();
+        let paint = |x0: u32, x1: u32, rgba: [u8; 4]| {
+            let mut c = Canvas::new(8, 4);
+            for y in 0..4u32 {
+                for x in x0..x1 {
+                    let i = ((y * 8 + x) * 4) as usize;
+                    c.pixels_mut()[i..i + 4].copy_from_slice(&rgba);
+                }
+            }
+            c
+        };
+        let cells = [paint(0, 4, [0, 0, 255, 255]), paint(0, 4, [255, 0, 0, 255]), paint(0, 8, [0, 255, 0, 255])];
+        for (li, c) in cells.into_iter().enumerate() {
+            let id = p.cells.len();
+            p.cells.push(c.into());
+            p.layers[li].set_key(0, id);
+        }
+        let g = p.group_layers(&[0, 1]).unwrap();
+        (p, g)
+    }
+
+    fn px(c: &Canvas, x: u32) -> [u8; 4] {
+        c.px(x, 1)
+    }
+
+    /// At half opacity the group's layers merge first: blue under red never
+    /// shows through, only the merged red at half strength.
+    #[test]
+    fn a_half_opaque_group_composites_first() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].visible = false;
+        p.layers[g].opacity = 0.5;
+        let out = flatten_frame(&p, 0);
+        let c = px(&out, 1);
+        assert_eq!(c[2], 0, "no blue through the red: {c:?}");
+        assert!((c[3] as i32 - 128).abs() <= 1, "{c:?}");
+        // Without the group, each at half, blue would show through.
+        p.layers[g].opacity = 1.0;
+        p.layers[0].opacity = 0.5;
+        p.layers[1].opacity = 0.5;
+        assert!(px(&flatten_frame(&p, 0), 1)[2] > 0);
+    }
+
+    #[test]
+    fn an_opaque_group_matches_direct_drawing() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].opacity = 0.4;
+        let grouped = flatten_frame(&p, 0);
+        p.ungroup(g);
+        let plain = flatten_frame(&p, 0);
+        assert!(grouped.pixels() == plain.pixels());
+    }
+
+    #[test]
+    fn a_hidden_group_exports_nothing() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].visible = false;
+        p.layers[g].visible = false;
+        assert!(flatten_frame(&p, 0).pixels().iter().all(|&b| b == 0));
+    }
+
+    /// Green clipped to the group shows only over what the group covers —
+    /// the left half — and the mask ignores the layers' opacity.
+    #[test]
+    fn a_layer_clipped_to_a_group_shows_over_all_of_it() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].clip = true;
+        p.layers[0].opacity = 0.3;
+        assert_eq!(p.clip_base(top), Some(g));
+        let out = flatten_frame(&p, 0);
+        assert_eq!(px(&out, 1), [0, 255, 0, 255], "over the group");
+        assert_eq!(px(&out, 6)[3], 0, "past it");
+        // Hiding the group hides what is clipped to it.
+        p.layers[g].visible = false;
+        assert_eq!(px(&flatten_frame(&p, 0), 1)[3], 0);
+        p.layers[g].visible = true;
+        // Baking for Krita cuts it the same way.
+        let mut baked = p.clone();
+        crate::doc::clip::bake_clipping(&mut baked);
+        assert!(!baked.layers[top].clip);
+        assert!(flatten_frame(&baked, 0).pixels() == out.pixels());
     }
     use crate::doc::camera::Camera;
 
