@@ -2511,6 +2511,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut krita_edit: Option<usize> = None;
             let mut toggle_clip: Option<usize> = None;
             let mut toggle_alpha_lock: Option<usize> = None;
+            let mut orient_layer: Option<(usize, crate::doc::orient::Orient)> = None;
             let mut drop: Option<(usize, usize)> = None;
             let krita_label = krita_menu_label(state);
             let clip_key = combo_text(state, Action::LayerClipToggle);
@@ -2699,6 +2700,22 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                                 ui.close_menu();
                                             }
                                             ui.separator();
+                                            ui.add_enabled_ui(!layer.locked && !layer.reference, |ui| {
+                                                for (o, _, icon, _, text) in ORIENT_ART {
+                                                    if ui
+                                                        .button(theme::icon_text(icon, text))
+                                                        .on_hover_text(
+                                                            "Every drawing on this layer, about the \
+                                                             canvas centre",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        orient_layer = Some((i, o));
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            });
+                                            ui.separator();
                                             if ui
                                                 .button(theme::icon_text(ic::PAINT_BRUSH, krita_label))
                                                 .on_hover_text("Opens the project in Krita with this layer selected")
@@ -2808,6 +2825,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             }
             if let Some(l) = toggle_alpha_lock.and_then(|i| state.project.layers.get_mut(i)) {
                 l.alpha_lock = !l.alpha_lock;
+            }
+            if let Some((i, o)) = orient_layer {
+                state.orient_drawings(i, o, true);
             }
 
             // --- Layer transform ---
@@ -4072,6 +4092,16 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
             state.feather_selection();
         }
     });
+    // Flip and turn the pixels — the view flip leaves them alone.
+    ui.horizontal(|ui| {
+        let scope = orient_scope(state);
+        for (o, action, icon, name, _) in ORIENT_ART {
+            let text = tip(state, action, &format!("{name}: {scope}"));
+            if theme::icon_button(ui, icon, &text).clicked() {
+                state.orient_art(o);
+            }
+        }
+    });
     ui.checkbox(&mut state.tint_outside, "Tint outside selection");
     let del = combo_text(state, Action::SelectionDelete);
     let cut = combo_text(state, Action::SelectionCut);
@@ -4084,6 +4114,38 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
         .color(theme::TEXT_MUTED)
         .size(11.0),
     );
+}
+
+/// The art flips and turns, as the Lasso panel, the Edit menu and a layer's
+/// menu list them: what it does, its shortcut, its icon, and its name on the
+/// selection-or-drawing commands and on the whole-layer ones.
+const ORIENT_ART: [(crate::doc::orient::Orient, Action, &str, &str, &str); 5] = {
+    use crate::doc::orient::Orient;
+    [
+        (Orient::FLIP_H, Action::ArtFlipH, ic::FLIP_HORIZONTAL, "Flip horizontally", "Flip layer horizontally"),
+        (Orient::FLIP_V, Action::ArtFlipV, ic::FLIP_VERTICAL, "Flip vertically", "Flip layer vertically"),
+        (Orient::CW, Action::ArtRotateCw, ic::ARROW_CLOCKWISE, "Rotate 90° clockwise", "Rotate layer 90° clockwise"),
+        (
+            Orient::CCW,
+            Action::ArtRotateCcw,
+            ic::ARROW_COUNTER_CLOCKWISE,
+            "Rotate 90° anticlockwise",
+            "Rotate layer 90° anticlockwise",
+        ),
+        (Orient::HALF, Action::ArtRotate180, ic::ARROWS_CLOCKWISE, "Rotate 180°", "Rotate layer 180°"),
+    ]
+};
+
+/// What the art flips and turns act on right now, for their tooltips.
+fn orient_scope(state: &AppState) -> &'static str {
+    let bounded = state.sel_mask.as_ref().is_some_and(|m| m.outside == 0 && !m.is_all());
+    if state.selection.is_some() || bounded {
+        "the selection, about its centre"
+    } else if state.sel_all_frames {
+        "every drawing on this layer, about the canvas centre"
+    } else {
+        "this drawing, about the canvas centre"
+    }
 }
 
 fn tool_toggle(
@@ -5981,6 +6043,21 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             state.redo();
             ui.close_menu();
         }
+        ui.separator();
+        ui.menu_button(theme::icon_text(ic::FLIP_HORIZONTAL, "Flip / rotate"), |ui| {
+            let scope = orient_scope(state);
+            for (o, action, icon, name, _) in ORIENT_ART {
+                let key = state.shortcuts.get(action).map(|c| format!("  ({})", c.display()));
+                if ui
+                    .button(theme::icon_text(icon, &format!("{name}{}", key.unwrap_or_default())))
+                    .on_hover_text(format!("Acts on {scope}"))
+                    .clicked()
+                {
+                    state.orient_art(o);
+                    ui.close_menu();
+                }
+            }
+        });
         ui.separator();
         let shortcuts = if n_conflicts > 0 {
             ui.button(

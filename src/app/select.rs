@@ -706,6 +706,24 @@ impl AppState {
         true
     }
 
+    /// Mirror or turn the selected pixels where they are, lifting them into a
+    /// float first if they aren't one yet. The float stays up, so it can still
+    /// be moved, and the whole thing lands — or Ctrl+Z puts it all back — as
+    /// one step. `false` when there was nothing to turn.
+    pub(super) fn orient_selection(&mut self, o: crate::doc::orient::Orient) -> bool {
+        if !self.make_float() {
+            return false;
+        }
+        self.touch_selection();
+        let Some(sel) = self.selection.as_mut().filter(|s| s.lifted) else {
+            return false;
+        };
+        sel.orient(o);
+        self.sel_drag = None;
+        self.sel_tex_stale = true;
+        true
+    }
+
     /// Put a float down: stamp its pixels into its cell and move the selection
     /// to where they landed. One undo step for all of it — the lift, the stamp
     /// and the selection — so one Ctrl+Z puts everything back where it was
@@ -826,11 +844,15 @@ impl AppState {
                 continue;
             }
             let mut other = Selection::new(cell, canvas, mask, pk);
-            other.pose = pose_for(sel, &pk, &other.mask);
             self.snapshot_pre(cell);
             if let Some(c) = self.project.cell_mut(cell) {
                 c.dirty = None;
+                // Erased through the mask as cut, then turned the way the
+                // float was — before its pose, which `pose_for` reads off the
+                // turned box.
                 other.lift_source(c);
+                other.orient(sel.orient);
+                other.pose = pose_for(sel, &pk, &other.mask);
                 other.stamp(c);
             }
             self.mark_dirty(cell);
@@ -1051,6 +1073,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::orient::Orient;
     use crate::input::shortcuts::{Action, ShortcutMap};
 
     /// A fresh state with the Lasso up, drawing rectangles.
@@ -1296,6 +1319,77 @@ mod tests {
         st.redo();
         for f in 0..4 {
             assert_eq!(px_on(&st, f, 165, 120), RED, "frame {f} redone");
+        }
+    }
+
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+
+    /// Red on the left, blue on the right, inside a selection around both:
+    /// flipped, they trade sides about the selection's centre.
+    fn two_stripes(st: &mut AppState) {
+        paint(st, (100, 100, 110, 140), RED);
+        paint(st, (130, 100, 140, 140), BLUE);
+    }
+
+    #[test]
+    fn flipping_a_selection_lands_as_one_undo() {
+        let mut st = lasso();
+        two_stripes(&mut st);
+        drag(&mut st, (95.0, 95.0), (145.0, 145.0), None);
+        let steps = st.history.undo_len();
+        st.orient_art(Orient::FLIP_H);
+        assert!(st.selection.is_some(), "still floating, so it can be moved on");
+        st.land_float();
+        assert_eq!(px(&st, 105, 120), BLUE);
+        assert_eq!(px(&st, 135, 120), RED);
+        assert_eq!(px(&st, 60, 120)[3], 0, "nothing leaked outside");
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        assert_eq!(px(&st, 105, 120), RED);
+        assert_eq!(px(&st, 135, 120), BLUE);
+    }
+
+    #[test]
+    fn undo_while_floating_puts_the_flip_back() {
+        let mut st = lasso();
+        two_stripes(&mut st);
+        drag(&mut st, (95.0, 95.0), (145.0, 145.0), None);
+        let steps = st.history.undo_len();
+        st.orient_art(Orient::CW);
+        st.orient_art(Orient::FLIP_V);
+        st.undo();
+        assert!(st.selection.is_none());
+        assert_eq!(px(&st, 105, 120), RED);
+        assert_eq!(px(&st, 135, 120), BLUE);
+        assert_eq!(st.history.undo_len(), steps, "nothing recorded");
+    }
+
+    #[test]
+    fn all_frames_lands_the_flip_on_every_drawing() {
+        let mut st = animated();
+        for (cell, _) in st.layer_drawings(0) {
+            let c = st.project.cell_mut(cell).unwrap();
+            for y in 100..140u32 {
+                for x in 130..140u32 {
+                    let i = ((y * c.width + x) * 4) as usize;
+                    c.pixels_mut()[i..i + 4].copy_from_slice(&BLUE);
+                }
+            }
+        }
+        drag(&mut st, (95.0, 95.0), (145.0, 145.0), None);
+        st.sel_all_frames = true;
+        let steps = st.history.undo_len();
+        st.orient_art(Orient::FLIP_H);
+        st.land_float();
+        for f in 0..4 {
+            assert_eq!(px_on(&st, f, 104, 120), BLUE, "frame {f}");
+            assert_eq!(px_on(&st, f, 120, 120), RED, "frame {f}");
+            assert_eq!(px_on(&st, f, 136, 120), RED, "frame {f}");
+        }
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        for f in 0..4 {
+            assert_eq!(px_on(&st, f, 136, 120), BLUE, "frame {f} back");
         }
     }
 

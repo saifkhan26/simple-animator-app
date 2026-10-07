@@ -19,6 +19,7 @@
 
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::CellId;
+use crate::doc::orient::Orient;
 use crate::doc::transform::Transform;
 use crate::tools::lasso::Mask;
 use crate::tools::select_mask::SelectionMask;
@@ -299,6 +300,9 @@ pub struct Selection {
     pub lifted: bool,
     /// The cell's place in the document at the lift.
     pub placement: Placement,
+    /// Every mirror and quarter turn done to it since the lift, so the same
+    /// can be done to the other drawings an "All frames" landing cuts.
+    pub orient: Orient,
 }
 
 /// Outline loops of a cell-space mask, via the document mask's contour
@@ -352,6 +356,7 @@ impl Selection {
             pose: Pose::default(),
             lifted: false,
             placement,
+            orient: Orient::IDENTITY,
         }
     }
 
@@ -366,6 +371,7 @@ impl Selection {
             pose: Pose::default(),
             lifted: true,
             placement,
+            orient: Orient::IDENTITY,
         }
     }
 
@@ -376,6 +382,50 @@ impl Selection {
         }
         crate::tools::lasso::erase_masked(canvas, &self.mask);
         self.lifted = true;
+    }
+
+    /// Mirror or turn the floating pixels where they float, about the box's
+    /// centre, by moving them to other pixels rather than resampling.
+    ///
+    /// The source must already be lifted: it is erased through the mask, and
+    /// the mask is about to be turned with the pixels.
+    ///
+    /// The pose is rebuilt so the result is the float as it was on screen,
+    /// mirrored or turned about its centre in cell space. A mirror reverses
+    /// the rotation; a quarter turn swaps the scale's axes. The box turns
+    /// about its centre by moving its origin a whole number of pixels, so the
+    /// pose stays pixel-aligned (lossless) and a turn and its inverse land
+    /// exactly back — at the cost of the centre sitting half a pixel off when
+    /// width and height differ by an odd number.
+    pub fn orient(&mut self, o: Orient) {
+        if o.is_identity() {
+            return;
+        }
+        debug_assert!(self.lifted, "orient before the source is erased");
+        let (w, h) = (self.mask.w, self.mask.h);
+        let (nw, nh) = o.dims(w, h);
+        self.pixels = o.permute(&self.pixels, w, h, 4);
+        self.mask.cov = o.permute(&self.mask.cov, w, h, 1);
+        // Truncating division is symmetric about zero, so a turn there and
+        // back cancels exactly.
+        let shift = |at: u32, from: u32, to: u32, offset: &mut f32| {
+            let v = at as i64 + (from as i64 - to as i64) / 2;
+            // Off the cell's top or left edge: the mask can't sit there, so
+            // the pose carries the rest, still in whole pixels.
+            *offset += v.min(0) as f32;
+            v.max(0) as u32
+        };
+        self.mask.x = shift(self.mask.x, w, nw, &mut self.pose.offset.0);
+        self.mask.y = shift(self.mask.y, h, nh, &mut self.pose.offset.1);
+        (self.mask.w, self.mask.h) = (nw, nh);
+        if o.mirror {
+            self.pose.rot = -self.pose.rot;
+        }
+        if o.swaps_axes() {
+            self.pose.scale = (self.pose.scale.1, self.pose.scale.0);
+        }
+        self.outline = outline_of(&self.mask);
+        self.orient = self.orient.then(o);
     }
 
     /// Top-left of the floating pixels in cell space, for the pixel-aligned
@@ -820,6 +870,118 @@ mod tests {
     fn rgba(c: &Canvas, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * c.width + x) * 4) as usize;
         [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
+    }
+
+    /// A canvas with every pixel its own colour, so any misplaced byte shows.
+    fn ramp(w: u32, h: u32) -> Canvas {
+        let mut c = Canvas::new(w, h);
+        for (i, px) in c.pixels_mut().chunks_exact_mut(4).enumerate() {
+            px.copy_from_slice(&[(i % 251) as u8, (i / 251) as u8, 7, 255]);
+        }
+        c
+    }
+
+    /// Lifted, so it can be turned.
+    fn lifted(canvas: &mut Canvas, path: Vec<(f32, f32)>) -> Selection {
+        let mut sel = sel_on(canvas, path);
+        sel.lift_source(canvas);
+        sel
+    }
+
+    #[test]
+    fn a_flipped_float_mirrors_pixels_and_mask_in_place() {
+        let mut canvas = ramp(12, 10);
+        let before = canvas.clone();
+        let mut sel = lifted(&mut canvas, square(2.0, 3.0, 7.0, 5.0));
+        let mask = sel.mask.clone();
+        sel.orient(Orient::FLIP_H);
+        assert_eq!((sel.mask.x, sel.mask.y), (mask.x, mask.y), "the box stays put");
+        assert!(sel.pose.is_pixel_aligned());
+        sel.stamp(&mut canvas);
+        let mut checked = 0;
+        for v in 0..mask.h {
+            for u in 0..mask.w {
+                if mask.cov[(v * mask.w + u) as usize] != 255 {
+                    continue;
+                }
+                let (y, from) = (mask.y + v, mask.x + u);
+                let to = mask.x + mask.w - 1 - u;
+                assert_eq!(rgba(&canvas, to, y), rgba(&before, from, y), "{from} -> {to}");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 10, "{checked}");
+        // Outside the box nothing moved.
+        assert_eq!(rgba(&canvas, 11, 9), rgba(&before, 11, 9));
+    }
+
+    #[test]
+    fn quarter_turns_return_exactly() {
+        let mut canvas = ramp(16, 16);
+        let sel = lifted(&mut canvas, square(3.0, 4.0, 8.0, 6.0));
+        let start = (sel.origin(), sel.mask.w, sel.mask.h, sel.pixels.clone(), sel.mask.cov.clone());
+        let state = |s: &Selection| (s.origin(), s.mask.w, s.mask.h, s.pixels.clone(), s.mask.cov.clone());
+        let mut four = sel.clone();
+        for _ in 0..4 {
+            four.orient(Orient::CW);
+        }
+        assert_eq!(state(&four), start);
+        let mut there_and_back = sel.clone();
+        there_and_back.orient(Orient::CW);
+        assert_eq!((there_and_back.mask.w, there_and_back.mask.h), (sel.mask.h, sel.mask.w));
+        there_and_back.orient(Orient::CCW);
+        assert_eq!(state(&there_and_back), start);
+        assert_eq!(there_and_back.orient, Orient::IDENTITY);
+    }
+
+    /// A flip of a scaled, rotated float is the float as it was on screen,
+    /// mirrored about its centre: the pixel at the old top-left corner is
+    /// now where that corner's mirror image is.
+    #[test]
+    fn a_flip_of_a_rotated_float_mirrors_on_screen() {
+        let mut canvas = ramp(40, 40);
+        let mut sel = lifted(&mut canvas, square(10.0, 12.0, 20.0, 18.0));
+        sel.pose = Pose {
+            offset: (1.0, -2.0),
+            scale: (1.5, 0.8),
+            rot: 0.3,
+        };
+        let (w, h) = (sel.mask.w as f32, sel.mask.h as f32);
+        let centre = sel.buf_to_cell(w * 0.5, h * 0.5);
+        let corner_px = sel.buf_to_cell(0.5, 0.5);
+        sel.orient(Orient::FLIP_H);
+        let moved = sel.buf_to_cell(w - 0.5, 0.5);
+        assert!((moved.0 - (2.0 * centre.0 - corner_px.0)).abs() < 1e-3, "{moved:?}");
+        assert!((moved.1 - corner_px.1).abs() < 1e-3, "{moved:?}");
+        assert_eq!(sel.pose.rot, -0.3);
+    }
+
+    #[test]
+    fn a_quarter_turn_swaps_a_non_uniform_scale() {
+        let mut canvas = ramp(40, 40);
+        let mut sel = lifted(&mut canvas, square(10.0, 12.0, 20.0, 18.0));
+        sel.pose.scale = (2.0, 0.5);
+        sel.orient(Orient::CW);
+        assert_eq!(sel.pose.scale, (0.5, 2.0));
+        sel.orient(Orient::HALF);
+        assert_eq!(sel.pose.scale, (0.5, 2.0), "a half turn keeps them");
+    }
+
+    /// Turned against the top edge, the box can't move its origin up past
+    /// zero; the pose carries the rest, still whole pixels, and turning back
+    /// lands it exactly where it was.
+    #[test]
+    fn a_turn_near_the_cell_edge_keeps_its_place() {
+        let mut canvas = ramp(20, 20);
+        let sel = lifted(&mut canvas, square(0.0, 0.0, 6.0, 2.0));
+        let mut turned = sel.clone();
+        turned.orient(Orient::CW);
+        assert_eq!(turned.mask.y, 0);
+        assert_eq!(turned.pose.offset, (0.0, -2.0));
+        assert!(turned.pose.is_pixel_aligned());
+        turned.orient(Orient::CCW);
+        assert_eq!(turned.origin(), sel.origin());
+        assert_eq!(turned.pixels, sel.pixels);
     }
 
     #[test]

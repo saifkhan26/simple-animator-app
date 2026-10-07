@@ -2,6 +2,7 @@
 
 mod button_drag;
 mod grids;
+mod orient;
 mod select;
 
 pub use button_drag::ButtonDragState;
@@ -23,6 +24,7 @@ use crate::color::{Harmony, HarmonySet};
 use crate::doc::camera::{Camera, Ease};
 use crate::doc::canvas::{par_rows, Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
+use crate::doc::orient::Orient;
 use crate::doc::project::{Block, Project};
 use crate::doc::transform::Transform;
 use crate::input::button_drag::ButtonDrag;
@@ -4885,6 +4887,11 @@ impl AppState {
             }
             Action::FlipHorizontal => self.view.flip_x = !self.view.flip_x,
             Action::FlipVertical => self.view.flip_y = !self.view.flip_y,
+            Action::ArtFlipH => self.orient_art(Orient::FLIP_H),
+            Action::ArtFlipV => self.orient_art(Orient::FLIP_V),
+            Action::ArtRotateCw => self.orient_art(Orient::CW),
+            Action::ArtRotateCcw => self.orient_art(Orient::CCW),
+            Action::ArtRotate180 => self.orient_art(Orient::HALF),
             Action::CellCopy => self.cell_clip = self.project.copy_active_cell(),
             Action::CellCut => self.cut_cell(),
             Action::CellPaste => self.paste_cell(),
@@ -6214,6 +6221,31 @@ mod tests {
         assert_eq!(d.pos, Some([(w - 50) as usize, 100]), "a partial upload");
         assert_eq!(d.image.size(), [10, 10]);
         assert_eq!(uploaded_alpha(&delta, tex, 0, 0), 255);
+    }
+
+    /// Flipping or turning the base swaps its cell for a new one, maybe of
+    /// another size; the clipped layer must be cut against the new one.
+    #[test]
+    fn a_flipped_or_turned_base_recuts_its_clipped_layer() {
+        let mut st = clip_state();
+        let ctx = egui::Context::default();
+        let _ = sync(&mut st, &ctx);
+        let w = st.project.width as usize;
+        st.orient_drawings(0, Orient::FLIP_H, false);
+        let delta = sync(&mut st, &ctx);
+        let tex = st.layer_texture(1).expect("still drawn").1.id();
+        assert_eq!(uploaded_alpha(&delta, tex, 10, 10), 0, "the base left this side");
+        assert_eq!(uploaded_alpha(&delta, tex, w - 10, 10), 255, "and moved here");
+        // A quarter turn makes the base a different size: still a clean cut.
+        st.orient_drawings(0, Orient::CW, false);
+        let _ = sync(&mut st, &ctx);
+        assert!(st.layer_texture(1).is_some());
+        assert!(st.layer_texture(0).is_some());
+        st.undo();
+        st.undo();
+        let delta = sync(&mut st, &ctx);
+        let tex = st.layer_texture(1).unwrap().1.id();
+        assert_eq!(uploaded_alpha(&delta, tex, 10, 10), 255, "undone");
     }
 
     #[test]

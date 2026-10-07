@@ -169,6 +169,17 @@ in the way.
 
 A plain click outside the selection deselects.
 
+**Flipping and turning the art.** The flip and rotate buttons in the Lasso
+panel (also **Edit → Flip / rotate**, and unbound shortcuts in Settings)
+mirror or turn the pixels themselves — the `F` view flip only changes how the
+canvas is shown. With a selection they act on the selected pixels, about the
+selection's centre, and leave them floating so they can still be moved. With
+nothing selected (or Select All) they act on the current drawing about the
+canvas centre, or on every drawing of the layer with **All frames** on; a
+layer's right-click menu does the whole layer. Pixels only move, never
+resample, so flipping back gives the drawing back exactly. A quarter turn of a
+non-square drawing swaps its width and height rather than cropping it.
+
 **Moving pixels.** Drag inside the selection to move what's under it, or
 nudge with the arrow keys. Drag a handle on the box around it to scale:
 corners take both axes, edges take one, and `Shift` keeps it uniform. Drag

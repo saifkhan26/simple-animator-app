@@ -550,6 +550,35 @@ impl Canvas {
         out
     }
 
+    /// This canvas mirrored or turned by `o`, which never resamples (see
+    /// [`crate::doc::orient`]). Packed, and only what it holds is read, so an
+    /// 8K drawing with a doodle in one corner costs the doodle. A quarter
+    /// turn swaps the width and height.
+    pub fn oriented(&self, o: crate::doc::orient::Orient) -> Canvas {
+        let (nw, nh) = o.dims(self.width, self.height);
+        let mut out = Canvas::new(nw, nh);
+        let Some(held) = self.held_rect() else {
+            return out;
+        };
+        let (rw, rh) = (held.max_x - held.min_x, held.max_y - held.min_y);
+        let mut buf = vec![0u8; rw as usize * rh as usize * 4];
+        for (y, row) in (held.min_y..held.max_y).zip(buf.chunks_exact_mut(rw as usize * 4)) {
+            self.read_row_into(y, held.min_x, row);
+        }
+        let (x, y) = o.map_rect(held.min_x, held.min_y, rw, rh, self.width, self.height);
+        let (w, h) = o.dims(rw, rh);
+        out.store = Store::Packed {
+            rect: DirtyRect {
+                min_x: x,
+                min_y: y,
+                max_x: x + w,
+                max_y: y + h,
+            },
+            pixels: o.permute(&buf, rw, rh, 4),
+        };
+        out
+    }
+
     /// The smallest rect holding every pixel with any alpha, or `None` for a
     /// blank canvas. A packed canvas only scans what it holds.
     pub fn content_bounds(&self) -> Option<DirtyRect> {
@@ -627,6 +656,31 @@ mod tests {
             *b = (i * 7 % 251) as u8;
         }
         c
+    }
+
+    /// Orienting reads only what a packed canvas holds, and must come out the
+    /// same as turning the whole buffer over.
+    #[test]
+    fn orienting_a_packed_cell_matches_the_unpacked_one() {
+        use crate::doc::orient::Orient;
+        let full = sparse();
+        let mut packed = sparse();
+        packed.pack();
+        assert!(packed.is_packed());
+        for quarter in 0..4 {
+            for mirror in [false, true] {
+                let o = Orient { quarter, mirror };
+                let want = o.permute(&full.pixels(), full.width, full.height, 4);
+                let (w, h) = o.dims(40, 30);
+                for c in [&full, &packed] {
+                    let got = c.oriented(o);
+                    assert_eq!((got.width, got.height), (w, h), "{o:?}");
+                    assert_eq!(&got.pixels()[..], &want[..], "{o:?}");
+                    assert_ne!(got.rev(), c.rev());
+                }
+            }
+        }
+        assert!(Canvas::new(5, 3).oriented(Orient::CW).is_blank());
     }
 
     /// A drawing in one corner, with colour under zero alpha around it.
