@@ -3554,7 +3554,31 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                     state.shortcuts = crate::input::shortcuts::ShortcutMap::default();
                     crate::input::shortcuts::save(&state.shortcuts);
                 }
+                if ui
+                    .button(theme::icon_text(ic::FILE_TEXT, "Open shortcuts file"))
+                    .on_hover_text(
+                        "Opens shortcuts.toml in your editor, writing it out first if it                          isn't there yet. Saved edits load when you come back to this window.",
+                    )
+                    .clicked()
+                {
+                    use crate::input::shortcuts::{ensure_file, open_file};
+                    state.shortcuts_file_note = Some(
+                        ensure_file(&state.shortcuts)
+                            .and_then(|p| open_file(&p).map(|()| p))
+                            .map(|p| format!("opened {}", p.display()))
+                            .map_err(|e| format!("couldn't open shortcuts.toml: {e}")),
+                    );
+                }
             });
+            match &state.shortcuts_file_note {
+                Some(Ok(note)) => {
+                    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(11.0));
+                }
+                Some(Err(e)) => {
+                    ui.label(egui::RichText::new(e).color(DIAG_BAD).size(11.0));
+                }
+                None => {}
+            }
             // Bindings that share their combo with something. Recomputed each
             // frame: a few thousand comparisons, and only while this is open.
             let clashes = state.shortcuts.clashes();

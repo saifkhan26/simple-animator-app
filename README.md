@@ -547,7 +547,10 @@ app closed — the temp file stays on disk.
 ## Keyboard shortcuts
 
 Every action is bound and rebindable in **Settings → Shortcuts**, which also
-lists the current binding for each one. A few of the defaults:
+lists the current binding for each one. **Open shortcuts file** there opens
+`shortcuts.toml` (in `%APPDATA%nimator-app`) in your editor, writing it out
+first on a fresh install; saved edits load when you switch back to the app, and
+a file with a mistake in it is reported and left unloaded. A few of the defaults:
 
 | Shortcut                  | Action                        |
 |---------------------------|-------------------------------|

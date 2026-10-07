@@ -723,7 +723,7 @@ pub const CAPTURE_KEYS: [egui::Key; 65] = {
 /// An action the user unbound is saved as `action = ""` and kept in
 /// `unbound`, so loading doesn't hand it its default back. An action absent
 /// from both maps is unbound too, but takes its default on the next load.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShortcutMap {
     pub bindings: BTreeMap<Action, KeyCombo>,
     pub unbound: BTreeSet<Action>,
@@ -1089,8 +1089,16 @@ pub fn load() -> ShortcutMap {
 }
 
 /// A saved shortcuts file, migrated, with defaults for whatever it doesn't
-/// mention.
+/// mention. Defaults throughout when it can't be read.
 pub fn load_from_str(text: &str) -> ShortcutMap {
+    parse(text).unwrap_or_else(|e| {
+        log::warn!("shortcuts.toml parse failed ({e}); using defaults");
+        ShortcutMap::default()
+    })
+}
+
+/// [`load_from_str`], or why the text can't be read.
+pub fn parse(text: &str) -> Result<ShortcutMap, String> {
     match toml::from_str::<ShortcutMap>(text) {
         Ok(mut map) => {
             // Migration: the in-canvas eyedropper was folded into the screen
@@ -1127,13 +1135,52 @@ pub fn load_from_str(text: &str) -> ShortcutMap {
             for a in map.unbound {
                 full.clear(a);
             }
-            full
+            Ok(full)
         }
-        Err(e) => {
-            log::warn!("shortcuts.toml parse failed ({e}); using defaults");
-            ShortcutMap::default()
-        }
+        Err(e) => Err(e.message().to_string()),
     }
+}
+
+/// The shortcuts file as it is on disk now; `None` when there isn't one.
+/// For picking up edits made to it outside the app.
+pub fn read_file() -> Option<Result<ShortcutMap, String>> {
+    let text = std::fs::read_to_string(config_path()?).ok()?;
+    Some(parse(&text))
+}
+
+/// The shortcuts file's path, written out from `map` first if it isn't
+/// there yet — a fresh install has none until a binding changes — so an
+/// editor opens on every binding.
+pub fn ensure_file(map: &ShortcutMap) -> std::io::Result<PathBuf> {
+    use std::io::{Error, ErrorKind};
+    let path = config_path().ok_or_else(|| Error::new(ErrorKind::NotFound, "no config folder"))?;
+    ensure_at(&path, map)?;
+    Ok(path)
+}
+
+/// [`ensure_file`] at `path`.
+fn ensure_at(path: &std::path::Path, map: &ShortcutMap) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = toml::to_string_pretty(map).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+        std::fs::write(path, text)?;
+    }
+    Ok(())
+}
+
+/// Open `path` with whatever the system opens that kind of file with.
+pub fn open_file(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let program = "xdg-open";
+    // Not waited on: explorer exits non-zero even when it opened the file.
+    std::process::Command::new(program).arg(path).spawn().map(drop)
 }
 
 pub fn save(map: &ShortcutMap) {
@@ -1159,6 +1206,35 @@ pub fn save(map: &ShortcutMap) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opening the file on a fresh install writes it out first, with every
+    /// binding in it; an existing file — the user's edits — is left as it is.
+    #[test]
+    fn the_shortcuts_file_is_written_only_when_missing() {
+        let dir = std::env::temp_dir().join(format!("animator-keymap-{}", std::process::id()));
+        let path = dir.join("nested").join("shortcuts.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut map = ShortcutMap::default();
+        map.clear(Action::Undo);
+        ensure_at(&path, &map).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(parse(&written).unwrap(), map);
+        std::fs::write(&path, "undo = \"Ctrl+U\"
+").unwrap();
+        ensure_at(&path, &ShortcutMap::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "undo = \"Ctrl+U\"
+");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that doesn't read says why, rather than quietly turning into
+    /// the defaults — which a reload would then save over the user's file.
+    #[test]
+    fn a_broken_shortcuts_file_is_an_error_not_the_defaults() {
+        assert!(parse("undo = [").is_err());
+        assert_eq!(parse("").unwrap(), ShortcutMap::default());
+        assert_eq!(load_from_str("undo = ["), ShortcutMap::default());
+    }
 
     /// The selection's bindings must not collide with anything else's — a
     /// shared press fires both actions, and a shared held combo makes a
