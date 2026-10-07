@@ -1219,6 +1219,9 @@ pub struct AppState {
     pub shortcut_clashes_only: bool,
     /// In-progress inline layer rename in the layers panel.
     pub layer_rename: Option<LayerRename>,
+    /// Layers picked in the panel along with the active one (Ctrl- and
+    /// Shift-click), by uid. Cleared when the active layer moves elsewhere.
+    pub selected_layers: std::collections::BTreeSet<u64>,
     pub show_settings: bool,
     /// The brush settings window. Session-only, like `show_settings`:
     /// where a window sits persists through egui's own memory, but
@@ -1510,6 +1513,7 @@ impl AppState {
             hold_capture: Default::default(),
             shortcut_clashes_only: false,
             layer_rename: None,
+            selected_layers: Default::default(),
             show_settings: false,
             show_brush_settings: false,
             show_grid_settings: false,
@@ -2283,6 +2287,105 @@ impl AppState {
             p.relink_after_remove(li);
             p.current_layer = bi;
         });
+    }
+
+    /// Merge group `g` into one drawing layer that looks the same: its
+    /// layers' composite on every frame where any of them changes, as the
+    /// group draws it, with the group's opacity carried over as the layer's.
+    /// Hidden and reference layers aren't in the picture, so they aren't
+    /// merged away either: they stay, as plain layers just below. One undo
+    /// step.
+    pub fn merge_group(&mut self, g: usize) {
+        let p = &self.project;
+        if !p.is_group(g) || p.locked_eff(g) {
+            return;
+        }
+        self.playback.stop();
+        let kids = p.children(g);
+        let drawn: Vec<usize> = kids.clone().filter(|&c| p.layers[c].visible && !p.layers[c].reference).collect();
+        let kept: Vec<usize> = kids.clone().filter(|c| !drawn.contains(c)).collect();
+        let animated = drawn.iter().any(|&c| p.layers[c].transform_keys.len() >= 2);
+        let mut frames: Vec<usize> = if animated {
+            (0..p.frame_count).collect()
+        } else {
+            let mut fs: Vec<usize> = (0..p.frame_count)
+                .filter(|&f| drawn.iter().any(|&c| p.layers[c].is_key(f)))
+                .collect();
+            for &c in &drawn {
+                fs.extend(p.layers[c].transform_keys.iter().map(|k| k.frame.min(p.frame_count.saturating_sub(1))));
+            }
+            fs.push(0);
+            fs.sort_unstable();
+            fs.dedup();
+            fs
+        };
+        frames.retain(|&f| f < p.frame_count);
+        // One canvas size for every frame: big enough for wherever the layers
+        // go, capped at the texture limit.
+        let (mut bw, mut bh) = (p.width, p.height);
+        for &f in &frames {
+            let xf = |li: usize| p.layers[li].resolve_transform(f);
+            let (w, h) = crate::doc::clip::group_space(p, g, f, &xf);
+            (bw, bh) = (bw.max(w), bh.max(h));
+        }
+        let cap = self.max_tex;
+        (bw, bh) = (bw.min(cap), bh.min(cap));
+        // Baked as if the group were shown — a hidden group merges into a
+        // hidden layer, not an empty one. Its hidden layers and references
+        // stay out: render_group skips them.
+        let mut shown = p.clone();
+        shown.layers[g].visible = true;
+        let q = &shown;
+        let baked: Vec<(usize, Canvas)> = frames
+            .into_iter()
+            .map(|f| {
+                let mut out = Canvas::new(bw, bh);
+                let xf = |li: usize| q.layers[li].resolve_transform(f);
+                let all = DirtyRect {
+                    min_x: 0,
+                    min_y: 0,
+                    max_x: bw,
+                    max_y: bh,
+                };
+                crate::doc::clip::render_group(q, g, f, true, &xf, &mut out, all);
+                (f, out)
+            })
+            .collect();
+        let header = p.layers[g].clone();
+        let kept_layers: Vec<crate::doc::layer::Layer> = kept.iter().map(|&c| p.layers[c].clone()).collect();
+        let block = kids.start..g + 1;
+        self.structural_edit(false, move |p| {
+            let n = p.frame_count;
+            let mut merged = crate::doc::layer::Layer::new(header.name.clone(), n);
+            merged.opacity = header.opacity;
+            merged.visible = header.visible;
+            merged.cell_w = bw;
+            merged.cell_h = bh;
+            for (f, canvas) in baked {
+                let id = p.cells.len();
+                p.cells.push(canvas.into());
+                merged.set_key(f, id);
+            }
+            // The group's rows go; what was kept and the merged layer take
+            // their place, bottom first.
+            for i in block.clone().rev() {
+                p.layers.remove(i);
+                p.relink_after_remove(i);
+            }
+            let mut at = block.start;
+            for mut l in kept_layers {
+                l.in_group = false;
+                p.layers.insert(at, l);
+                p.relink_after_insert(at);
+                at += 1;
+            }
+            p.layers.insert(at, merged);
+            p.relink_after_insert(at);
+            p.current_layer = at;
+        });
+        self.selected_layers.clear();
+        self.layer_rename = None;
+        self.expand_cfg = None;
     }
 
     /// Transform that fits a `cw`×`ch` source within the canvas without
@@ -4775,6 +4878,12 @@ impl AppState {
         } else if now.0 != self.layer_watch.0 {
             self.prev_layer = Some(self.layer_watch.0);
         }
+        // Moving the active layer anywhere the panel's picks don't include
+        // ends the multi-selection.
+        let uid = self.project.layers.get(now.0).map(|l| l.uid);
+        if now != self.layer_watch && uid.is_some_and(|u| !self.selected_layers.contains(&u)) {
+            self.selected_layers.clear();
+        }
         self.layer_watch = now;
     }
 
@@ -4795,19 +4904,90 @@ impl AppState {
         }
     }
 
-    /// Swap the active layer with its neighbour, `up` meaning towards the top
-    /// of the Layers panel. One undo step; nothing at all at the end of the
-    /// stack, so a held key leaves no empty undo entries behind.
+    /// Move the active layer one step, `up` meaning towards the top of the
+    /// Layers panel: past its neighbour, or into or out of a group it meets
+    /// (see [`Project::move_item`]); a group moves whole. One undo step;
+    /// nothing at all at the end of the stack, so a held key leaves no empty
+    /// undo entries behind.
     pub fn move_active_layer(&mut self, up: bool) {
         let i = self.project.current_layer;
-        if up && i + 1 < self.project.layers.len() {
-            self.structural_edit(false, Project::move_layer_up);
-        } else if !up && i > 0 {
-            self.structural_edit(false, Project::move_layer_down);
-        } else {
+        if !self.project.clone().move_item(i, up) {
             return;
         }
+        self.structural_edit(false, |p| {
+            p.move_item(i, up);
+        });
         // Both edit buffers are keyed by layer index.
+        self.layer_rename = None;
+        self.expand_cfg = None;
+    }
+
+    /// Select the row `delta` rows down the Layers panel from the active
+    /// layer's (negative: up), stopping at either end. Folded groups' layers
+    /// aren't rows.
+    fn step_layer_row(&mut self, delta: isize) {
+        let rows = self.project.panel_rows();
+        let at = self.project.panel_row_of(self.project.current_layer);
+        let Some(pos) = rows.iter().position(|&r| r == at) else {
+            return;
+        };
+        let to = pos as isize + delta;
+        if (0..rows.len() as isize).contains(&to) {
+            self.select_layer(rows[to as usize]);
+        }
+    }
+
+    /// Every selected layer, bottom first: the active one, and any picked
+    /// alongside it in the panel.
+    pub fn selected_layer_indices(&self) -> Vec<usize> {
+        let cur = self.project.current_layer;
+        (0..self.project.layers.len())
+            .filter(|&i| i == cur || self.selected_layers.contains(&self.project.layers[i].uid))
+            .collect()
+    }
+
+    /// Put the selected layers in a new group. One undo step.
+    pub fn group_selected_layers(&mut self) {
+        let sel = self.selected_layer_indices();
+        if sel.is_empty() {
+            return;
+        }
+        self.structural_edit(false, |p| {
+            p.group_layers(&sel);
+        });
+        self.selected_layers.clear();
+        self.layer_rename = None;
+        self.expand_cfg = None;
+    }
+
+    /// Dissolve the active layer's group (or the active group), its layers
+    /// staying where they are. One undo step.
+    pub fn ungroup_active(&mut self) {
+        let cur = self.project.current_layer;
+        let Some(g) = (if self.project.is_group(cur) { Some(cur) } else { self.project.group_of(cur) }) else {
+            return;
+        };
+        self.structural_edit(false, |p| p.ungroup(g));
+        self.layer_rename = None;
+        self.expand_cfg = None;
+    }
+
+    /// Delete the selected layers — a group with its layers. One undo step;
+    /// never the last layer.
+    pub fn delete_selected_layers(&mut self) {
+        let uids: Vec<u64> = self
+            .selected_layer_indices()
+            .into_iter()
+            .map(|i| self.project.layers[i].uid)
+            .collect();
+        self.structural_edit(false, |p| {
+            for uid in uids {
+                if let Some(i) = p.layers.iter().position(|l| l.uid == uid) {
+                    p.delete_block(i);
+                }
+            }
+        });
+        self.selected_layers.clear();
         self.layer_rename = None;
         self.expand_cfg = None;
     }
@@ -4916,7 +5096,9 @@ impl AppState {
             Action::LayerAdd => self.structural_edit(false, |p| {
                 p.add_layer_above_active();
             }),
-            Action::LayerDelete => self.structural_edit(false, Project::delete_layer),
+            Action::LayerDelete => self.delete_selected_layers(),
+            Action::LayerGroup => self.group_selected_layers(),
+            Action::LayerUngroup => self.ungroup_active(),
             Action::LayerToggleVisible => {
                 if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
                     l.visible = !l.visible;
@@ -4924,16 +5106,18 @@ impl AppState {
             }
             Action::LayerLast => self.goto_last_layer(),
             // Panel order: the top row is the last layer.
-            Action::LayerSelectAbove => self.select_layer(self.project.current_layer + 1),
-            Action::LayerSelectBelow => {
-                if let Some(i) = self.project.current_layer.checked_sub(1) {
-                    self.select_layer(i);
+            Action::LayerSelectAbove => self.step_layer_row(-1),
+            Action::LayerSelectBelow => self.step_layer_row(1),
+            Action::LayerSelectTop => {
+                if let Some(&top) = self.project.panel_rows().first() {
+                    self.select_layer(top);
                 }
             }
-            Action::LayerSelectTop => {
-                self.select_layer(self.project.layers.len().saturating_sub(1))
+            Action::LayerSelectBottom => {
+                if let Some(&bottom) = self.project.panel_rows().last() {
+                    self.select_layer(bottom);
+                }
             }
-            Action::LayerSelectBottom => self.select_layer(0),
             Action::LayerMoveUp => self.move_active_layer(true),
             Action::LayerMoveDown => self.move_active_layer(false),
             Action::LayerPick1
@@ -4946,7 +5130,7 @@ impl AppState {
             | Action::LayerPick8
             | Action::LayerPick9 => {
                 let n = action.layer_pick().unwrap_or(1);
-                if let Some(i) = self.project.layers.len().checked_sub(n) {
+                if let Some(&i) = self.project.panel_rows().get(n - 1) {
                     self.select_layer(i);
                 }
             }

@@ -33,17 +33,43 @@ impl AppState {
     /// height rather than cropping it, so turning back is exact; turning a
     /// whole layer swaps the size its new drawings get too.
     pub fn orient_drawings(&mut self, li: usize, o: Orient, every: bool) {
+        if every {
+            self.orient_layers(&[li], o);
+            return;
+        }
         let Some(layer) = self.project.layers.get(li) else {
             return;
         };
         if !self.project.paintable(li) || o.is_identity() {
             return;
         }
-        let cells: Vec<_> = if every {
-            self.layer_drawings(li).into_iter().map(|(c, _)| c).collect()
-        } else {
-            layer.resolve(self.project.current_frame).into_iter().collect()
-        };
+        let cells: Vec<_> = layer.resolve(self.project.current_frame).into_iter().collect();
+        self.orient_cells(cells, &[], o);
+    }
+
+    /// Every drawing on each of `layers` — a group's layers, say — turned
+    /// over as [`AppState::orient_drawings`] does a whole layer, in one undo
+    /// step. Locked and reference layers are left alone.
+    pub fn orient_layers(&mut self, layers: &[usize], o: Orient) {
+        if o.is_identity() {
+            return;
+        }
+        let layers: Vec<usize> = layers.iter().copied().filter(|&li| self.project.paintable(li)).collect();
+        let mut cells = Vec::new();
+        for &li in &layers {
+            for (c, _) in self.layer_drawings(li) {
+                if !cells.contains(&c) {
+                    cells.push(c);
+                }
+            }
+        }
+        let resized = if o.swaps_axes() { layers } else { Vec::new() };
+        self.orient_cells(cells, &resized, o);
+    }
+
+    /// Turn `cells` over, and swap the cell size `resized` layers give their
+    /// new drawings. One undo step.
+    fn orient_cells(&mut self, cells: Vec<crate::doc::layer::CellId>, resized: &[usize], o: Orient) {
         let turned: Vec<_> = cells
             .into_iter()
             .filter_map(|c| Some((c, Arc::new(self.project.cell(c)?.oriented(o)))))
@@ -55,8 +81,8 @@ impl AppState {
             for (c, canvas) in turned {
                 p.cells[c] = canvas;
             }
-            if every && o.swaps_axes() {
-                let (pw, ph) = (p.width, p.height);
+            let (pw, ph) = (p.width, p.height);
+            for &li in resized {
                 let l = &mut p.layers[li];
                 let (w, h) = l.cell_size(pw, ph);
                 // Back to "the frame size" when that is what it is again.

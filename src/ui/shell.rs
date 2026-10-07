@@ -2444,23 +2444,6 @@ const LAYER_LIST_MAX_H: f32 = 320.0;
 /// Drag-and-drop payload for a layer row: the dragged layer's index.
 struct LayerDrag(usize);
 
-/// Where layer `from` ends up when dropped just above (`above`) or just below
-/// layer `target` in the stack — its final index, as `Project::move_layer`
-/// takes it. Dropped onto itself, or into the slot it already sits in, it
-/// stays put.
-fn drop_index(from: usize, target: usize, above: bool) -> usize {
-    if from == target {
-        return from;
-    }
-    // Taking `from` out first shifts everything above it down one.
-    match (above, from < target) {
-        (true, true) => target,
-        (true, false) => target + 1,
-        (false, true) => target - 1,
-        (false, false) => target,
-    }
-}
-
 fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
             ui.horizontal(|ui| {
@@ -2470,8 +2453,17 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                         p.add_layer_above_active();
                     });
                 }
-                if theme::icon_button(ui, ic::MINUS, "Delete layer").clicked() {
-                    state.structural_edit(false, |p| p.delete_layer());
+                let del = tip(state, Action::LayerDelete, "Delete the selected layers");
+                if theme::icon_button(ui, ic::MINUS, &del).clicked() {
+                    state.delete_selected_layers();
+                }
+                let grp = tip(
+                    state,
+                    Action::LayerGroup,
+                    "Group the selected layers (Ctrl- or Shift-click to pick several)",
+                );
+                if theme::icon_button(ui, ic::FOLDER_SIMPLE_PLUS, &grp).clicked() {
+                    state.group_selected_layers();
                 }
                 let up = tip(state, Action::LayerMoveUp, "Move layer up");
                 if theme::icon_button(ui, ic::ARROW_UP, &up).clicked() {
@@ -2530,7 +2522,17 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut toggle_clip: Option<usize> = None;
             let mut toggle_alpha_lock: Option<usize> = None;
             let mut orient_layer: Option<(usize, crate::doc::orient::Orient)> = None;
-            let mut drop: Option<(usize, usize)> = None;
+            let mut drop: Option<(usize, usize, bool)> = None;
+            // Group rows' own commands, and Ctrl/Shift-click picks.
+            let mut toggle_fold: Option<usize> = None;
+            let mut ungroup: Option<usize> = None;
+            let mut merge_group: Option<usize> = None;
+            let mut delete_group: Option<usize> = None;
+            let mut group_now = false;
+            let mut pick: Option<(usize, bool)> = None;
+            let rows = state.project.panel_rows();
+            let picked = state.selected_layers.clone();
+            let grp_key = combo_text(state, Action::LayerGroup);
             let krita_label = krita_menu_label(state);
             let clip_key = combo_text(state, Action::LayerClipToggle);
             let lock_key = combo_text(state, Action::LayerAlphaLockToggle);
@@ -2548,6 +2550,8 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 .collect();
             // Split borrow: rows need &mut layer while the rename edit buffer
             // lives on AppState next to it.
+            let headers: Vec<bool> = state.project.layers.iter().map(|l| l.is_group()).collect();
+            let layer_in_group: Vec<bool> = state.project.layers.iter().map(|l| l.in_group).collect();
             let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);
             // The rows scroll rather than growing the window: each one is three
             // lines tall, so a stack of them would otherwise push the Transform
@@ -2563,13 +2567,16 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 .max_height(LAYER_LIST_MAX_H)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for i in (0..n).rev() {
+                    for i in rows.iter().copied() {
                         let layer = &mut layers[i];
                         let selected = i == cur;
+                        let header = layer.is_group();
 
                         let row = Frame::none()
                             .fill(if selected {
                                 theme::ACCENT_DIM
+                            } else if picked.contains(&layer.uid) {
+                                theme::white_alpha(14)
                             } else {
                                 Color32::TRANSPARENT
                             })
@@ -2577,6 +2584,23 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                             .inner_margin(Margin::symmetric(6.0, 4.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
+                                    // A group's layers sit indented under it.
+                                    if layer.in_group {
+                                        ui.add_space(14.0);
+                                    }
+                                    // A group: fold it, and know it's a group.
+                                    if header {
+                                        let (chev, what) = if layer.collapsed {
+                                            (ic::CARET_RIGHT, "Show the group's layers")
+                                        } else {
+                                            (ic::CARET_DOWN, "Fold the group")
+                                        };
+                                        if theme::icon_button(ui, chev, what).clicked() {
+                                            toggle_fold = Some(i);
+                                        }
+                                        let folder = if layer.collapsed { ic::FOLDER_SIMPLE } else { ic::FOLDER_OPEN };
+                                        ui.label(egui::RichText::new(folder).size(16.0).color(theme::TEXT_MUTED));
+                                    }
                                     // A clipped layer sits indented, an arrow
                                     // pointing down at its base.
                                     if layer.clip {
@@ -2617,13 +2641,15 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                     if theme::icon_button(ui, lock_icon, "Toggle lock").clicked() {
                                         layer.locked = !layer.locked;
                                     }
-                                    // Reference / light-table toggle.
+                                    // Reference / light-table toggle. Not for a
+                                    // group, which has no drawings to show dim.
                                     let ref_color = if layer.reference {
                                         theme::ACCENT
                                     } else {
                                         theme::TEXT_MUTED
                                     };
-                                    if ui
+                                    if !header
+                                        && ui
                                         .add(
                                             egui::Button::new(
                                                 egui::RichText::new(ic::LIGHTBULB)
@@ -2675,7 +2701,16 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         if resp.double_clicked() {
                                             start_rename = Some(i);
                                         } else if resp.clicked() {
-                                            select = Some(i);
+                                            // Ctrl-click picks this one too;
+                                            // Shift-click, every row between.
+                                            let m = ui.input(|inp| inp.modifiers);
+                                            if m.command || m.ctrl {
+                                                pick = Some((i, false));
+                                            } else if m.shift {
+                                                pick = Some((i, true));
+                                            } else {
+                                                select = Some(i);
+                                            }
                                         }
                                         if layer.alpha_lock {
                                             ui.label(
@@ -2689,6 +2724,52 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             ));
                                         }
                                         resp.context_menu(|ui| {
+                                            if header {
+                                                if ui.button(theme::icon_text(ic::FOLDER_OPEN, "Ungroup")).clicked() {
+                                                    ungroup = Some(i);
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .button(theme::icon_text(ic::ARROWS_MERGE, "Merge group into one layer"))
+                                                    .on_hover_text(
+                                                        "Its layers as they show, at the group's opacity. \
+                                                         Hidden and reference layers stay as they are.",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    merge_group = Some(i);
+                                                    ui.close_menu();
+                                                }
+                                                if ui.button(theme::icon_text(ic::TRASH, "Delete group")).clicked() {
+                                                    delete_group = Some(i);
+                                                    ui.close_menu();
+                                                }
+                                                ui.separator();
+                                                ui.add_enabled_ui(!layer.locked, |ui| {
+                                                    for (o, _, icon, name, _) in ORIENT_ART {
+                                                        if ui
+                                                            .button(theme::icon_text(icon, &format!("{name} (whole group)")))
+                                                            .on_hover_text("Every drawing of every layer in the group")
+                                                            .clicked()
+                                                        {
+                                                            orient_layer = Some((i, o));
+                                                            ui.close_menu();
+                                                        }
+                                                    }
+                                                });
+                                                return;
+                                            }
+                                            if ui
+                                                .button(theme::icon_text(
+                                                    ic::FOLDER_SIMPLE_PLUS,
+                                                    &format!("Group selected layers ({grp_key})"),
+                                                ))
+                                                .clicked()
+                                            {
+                                                group_now = true;
+                                                ui.close_menu();
+                                            }
+                                            ui.separator();
                                             if ui
                                                 .selectable_label(
                                                     layer.clip,
@@ -2748,33 +2829,35 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                 ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
                                 // Flood fill on this layer reads its boundaries from
                                 // the linked layer — line art above, colour below.
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("lines from")
-                                            .color(theme::TEXT_MUTED)
-                                            .size(11.0),
-                                    );
-                                    let current = match layer.lines_from {
-                                        Some(s) => names.get(s).map(String::as_str).unwrap_or("—"),
-                                        None => "— none —",
-                                    };
-                                    egui::ComboBox::from_id_salt(("lines_from", i))
-                                        .selected_text(egui::RichText::new(current).size(11.0))
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(&mut layer.lines_from, None, "— none —");
-                                            for (j, name) in names.iter().enumerate() {
-                                                if j == i {
-                                                    continue;
+                                if !header {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("lines from")
+                                                .color(theme::TEXT_MUTED)
+                                                .size(11.0),
+                                        );
+                                        let current = match layer.lines_from {
+                                            Some(s) => names.get(s).map(String::as_str).unwrap_or("—"),
+                                            None => "— none —",
+                                        };
+                                        egui::ComboBox::from_id_salt(("lines_from", i))
+                                            .selected_text(egui::RichText::new(current).size(11.0))
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(&mut layer.lines_from, None, "— none —");
+                                                for (j, name) in names.iter().enumerate() {
+                                                    if j == i || headers[j] {
+                                                        continue;
+                                                    }
+                                                    ui.selectable_value(&mut layer.lines_from, Some(j), name);
                                                 }
-                                                ui.selectable_value(&mut layer.lines_from, Some(j), name);
-                                            }
-                                        });
-                                })
-                                .response
-                                .on_hover_text(
-                                    "Flood fill on this layer stops at the linked layer's strokes, \
-                                     so colour can be painted under line art.",
-                                );
+                                            });
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Flood fill on this layer stops at the linked layer's strokes, \
+                                         so colour can be painted under line art.",
+                                    );
+                                }
                             })
                             .response;
                         // Keep the active row in view when the selection
@@ -2790,28 +2873,89 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                         }
                         // Every row is a drop target: the top half drops the
                         // dragged layer above this one, the bottom half below.
+                        // Under a group's header, the line is indented: the
+                        // drop lands inside the group, as its top layer.
                         if let Some(from) = row.dnd_hover_payload::<LayerDrag>() {
                             let above = ui
                                 .input(|inp| inp.pointer.interact_pos())
                                 .is_some_and(|p| p.y < row.rect.center().y);
-                            let to = drop_index(from.0, i, above);
-                            if to != from.0 {
+                            if from.0 != i {
                                 let y = if above { row.rect.top() } else { row.rect.bottom() };
-                                ui.painter()
-                                    .hline(row.rect.x_range(), y, Stroke::new(2.0, theme::ACCENT));
+                                let inside = (header && !above && !headers[from.0]) || layer_in_group[i];
+                                let x = row.rect.x_range();
+                                let x = if inside { egui::Rangef::new(x.min + 14.0, x.max) } else { x };
+                                ui.painter().hline(x, y, Stroke::new(2.0, theme::ACCENT));
                             }
                             if row.dnd_release_payload::<LayerDrag>().is_some() {
-                                drop = Some((from.0, to));
+                                drop = Some((from.0, i, above));
                             }
                         }
                         ui.add_space(2.0);
                     }
             });
-            if let Some((from, to)) = drop.filter(|(from, to)| from != to) {
-                // One undo step. Both edit buffers below are keyed by index.
-                state.structural_edit(false, |p| p.move_layer(from, to));
+            if let Some((from, to, above)) = drop.filter(|&(from, to, above)| state.project.clone().drop_item(from, to, above)) {
+                // One undo step, ending on the dropped layer. Both edit
+                // buffers below are keyed by index.
+                let uid = state.project.layers[from].uid;
+                state.structural_edit(false, |p| {
+                    p.drop_item(from, to, above);
+                    if let Some(i) = p.layers.iter().position(|l| l.uid == uid) {
+                        p.current_layer = i;
+                    }
+                });
+                state.selected_layers.clear();
                 state.layer_rename = None;
                 state.expand_cfg = None;
+            }
+            if let Some(g) = toggle_fold {
+                if let Some(l) = state.project.layers.get_mut(g) {
+                    l.collapsed = !l.collapsed;
+                }
+                // Folded away under it, the active layer hands over to the
+                // group's row.
+                let cur = state.project.current_layer;
+                state.project.current_layer = state.project.panel_row_of(cur);
+            }
+            if let Some((i, range)) = pick {
+                let uid = |p: &crate::doc::project::Project, i: usize| p.layers[i].uid;
+                let cur = state.project.current_layer;
+                if range {
+                    let rows = state.project.panel_rows();
+                    let (a, b) = (
+                        rows.iter().position(|&r| r == cur),
+                        rows.iter().position(|&r| r == i),
+                    );
+                    if let (Some(a), Some(b)) = (a, b) {
+                        for &r in &rows[a.min(b)..=a.max(b)] {
+                            state.selected_layers.insert(uid(&state.project, r));
+                        }
+                    }
+                    state.project.current_layer = i;
+                } else {
+                    let u = uid(&state.project, i);
+                    state.selected_layers.insert(uid(&state.project, cur));
+                    if state.selected_layers.contains(&u) && i != cur {
+                        // Unpicked; the active layer stays where it is.
+                        state.selected_layers.remove(&u);
+                    } else {
+                        state.selected_layers.insert(u);
+                        state.project.current_layer = i;
+                    }
+                }
+            }
+            if let Some(g) = ungroup {
+                state.project.current_layer = g;
+                state.ungroup_active();
+            }
+            if let Some(g) = merge_group {
+                state.merge_group(g);
+            }
+            if let Some(g) = delete_group {
+                state.structural_edit(false, |p| p.delete_block(g));
+                state.selected_layers.clear();
+            }
+            if group_now {
+                state.group_selected_layers();
             }
             if rename_cancel {
                 state.layer_rename = None;
@@ -2834,6 +2978,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             }
             if let Some(i) = select {
                 state.project.current_layer = i;
+                state.selected_layers.clear();
             }
             if let Some(i) = krita_edit {
                 state.edit_in_krita(i);
@@ -2845,7 +2990,12 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 l.alpha_lock = !l.alpha_lock;
             }
             if let Some((i, o)) = orient_layer {
-                state.orient_drawings(i, o, true);
+                let layers: Vec<usize> = if state.project.is_group(i) {
+                    state.project.children(i).collect()
+                } else {
+                    vec![i]
+                };
+                state.orient_layers(&layers, o);
             }
 
             // --- Layer transform ---
@@ -8282,6 +8432,52 @@ mod layers_panel_tests {
         }
     }
 
+    /// Ctrl-click picks a second layer, the Group button groups both, and
+    /// folding the group takes its layers' rows away.
+    #[test]
+    fn ctrl_click_picks_and_a_group_folds() {
+        let (mut state, ctx, shapes) = setup();
+        assert_eq!(state.project.current_layer, 2, "Charlie active");
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        let at = name_rect(&ctx, &shapes, "Alpha").center();
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: ctrl,
+        };
+        for events in [vec![egui::Event::PointerMoved(at), click(true)], vec![click(false)]] {
+            let raw = egui::RawInput {
+                screen_rect: Some(SCREEN),
+                events,
+                modifiers: ctrl,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| draw(&mut state, ctx));
+        }
+        assert_eq!(state.project.current_layer, 0, "Alpha active");
+        assert_eq!(state.selected_layer_indices(), [0, 2], "Charlie still picked");
+        state.group_selected_layers();
+        assert_eq!(names(&state), ["Bravo", "Alpha", "Charlie", "Group 1"]);
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            shapes = frame(&ctx, &mut state, vec![]);
+        }
+        assert!(panel_shows(&ctx, &shapes, ic::FOLDER_OPEN));
+        let _ = name_rect(&ctx, &shapes, "Alpha");
+        state.project.layers[3].collapsed = true;
+        for _ in 0..2 {
+            shapes = frame(&ctx, &mut state, vec![]);
+        }
+        assert!(panel_shows(&ctx, &shapes, ic::FOLDER_SIMPLE));
+        assert!(!panel_shows(&ctx, &shapes, "Alpha"), "folded away");
+        assert!(panel_shows(&ctx, &shapes, "Bravo"));
+    }
+
     /// The layer keys walk the selection off the visible part of the list;
     /// the list follows it.
     #[test]
@@ -8338,21 +8534,6 @@ mod layers_panel_tests {
             &shapes,
             &format!("{} A name far too lo…", ic::STACK)
         ));
-    }
-
-    #[test]
-    fn drop_index_lands_just_above_or_below_the_target() {
-        // Up the stack: taking the layer out first shifts the target down.
-        assert_eq!(drop_index(0, 2, true), 2);
-        assert_eq!(drop_index(0, 2, false), 1);
-        // Down the stack.
-        assert_eq!(drop_index(3, 1, true), 2);
-        assert_eq!(drop_index(3, 1, false), 1);
-        // Onto itself, or into the slot it already fills: no move.
-        assert_eq!(drop_index(2, 2, true), 2);
-        assert_eq!(drop_index(2, 2, false), 2);
-        assert_eq!(drop_index(1, 2, false), 1);
-        assert_eq!(drop_index(2, 1, true), 2);
     }
 
     #[test]

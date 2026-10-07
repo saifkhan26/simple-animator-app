@@ -57,6 +57,24 @@ impl Project {
         }
     }
 
+    /// The rows the Layers panel lists, top first: every layer, except the
+    /// layers of a folded group.
+    pub fn panel_rows(&self) -> Vec<usize> {
+        (0..self.layers.len())
+            .rev()
+            .filter(|&li| self.group_of(li).map_or(true, |g| !self.layers[g].collapsed))
+            .collect()
+    }
+
+    /// Where layer `li` shows in the panel: its own row, or its folded
+    /// group's.
+    pub fn panel_row_of(&self, li: usize) -> usize {
+        match self.group_of(li) {
+            Some(g) if self.layers[g].collapsed => g,
+            _ => li,
+        }
+    }
+
     /// Whether layer `li` shows: its own eye, and its group's.
     pub fn shows(&self, li: usize) -> bool {
         self.layers.get(li).is_some_and(|l| l.visible)
@@ -321,6 +339,60 @@ impl Project {
         self.apply_order(&order, &flags);
         true
     }
+
+    /// Drop layer `from` — a group with its layers — on row `target`, just
+    /// above it or just below, the way the panel shows rows:
+    /// - on a group's layer: next to it, in that group;
+    /// - on a group's header: above it, outside the group; below it, as the
+    ///   group's top layer;
+    /// - anywhere else: next to it, outside any group.
+    ///
+    /// A group dropped among another group's rows lands beside that whole
+    /// group instead: groups never hold groups. `false` when nothing moved.
+    pub fn drop_item(&mut self, from: usize, target: usize, above: bool) -> bool {
+        let n = self.layers.len();
+        if from >= n || target >= n {
+            return false;
+        }
+        let moving = self.block(from);
+        if moving.contains(&target) {
+            return false;
+        }
+        let dragging_group = self.is_group(from);
+        // A group dropped inside another group goes beside it, as a whole.
+        let target = if dragging_group { self.group_of(target).unwrap_or(target) } else { target };
+        let t = &self.layers[target];
+        // Where it goes: next to `anchor` (after it when `after`), and
+        // whether it is then in a group.
+        let (anchor, after, member) = if t.in_group {
+            (target, above, true)
+        } else if t.is_group() && !above && !dragging_group {
+            // Below a header: the group's top layer.
+            (target, false, true)
+        } else if t.is_group() && !above {
+            // A group below a group: under its whole block.
+            (self.block(target).start, false, false)
+        } else {
+            (target, above, false)
+        };
+        let rest: Vec<usize> = (0..n).filter(|i| !moving.contains(i)).collect();
+        let Some(at) = rest.iter().position(|&r| r == anchor) else {
+            return false;
+        };
+        let at = if after { at + 1 } else { at };
+        let mut order = rest;
+        order.splice(at..at, moving.clone());
+        let mut member_of: Vec<bool> = self.layers.iter().map(|l| l.in_group).collect();
+        if !dragging_group {
+            member_of[from] = member;
+        }
+        let flags: Vec<bool> = order.iter().map(|&o| member_of[o]).collect();
+        if order.iter().copied().eq(0..n) && flags.iter().zip(&self.layers).all(|(&f, l)| f == l.in_group) {
+            return false;
+        }
+        self.apply_order(&order, &flags);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -472,6 +544,45 @@ mod tests {
         assert_eq!(rows(&p), [" b", " c", "[Group 1]", " a", " d", "[Group 2]"]);
         assert!(p.move_item(2, true));
         assert_eq!(rows(&p), [" a", " d", "[Group 2]", " b", " c", "[Group 1]"]);
+    }
+
+    #[test]
+    fn drops_follow_the_rows() {
+        let mut p = stack(&["a", "b", "c", "d"]);
+        p.group_layers(&[1, 2]).unwrap();
+        // [a,  b,  c, [G], d]
+        // d dropped on b's row, above it: into the group, over b.
+        assert!(p.drop_item(4, 1, true));
+        assert_eq!(rows(&p), ["a", " b", " d", " c", "[Group 1]"]);
+        // a dropped below the header: the group's top layer.
+        let g = by_name(&p, "Group 1");
+        assert!(p.drop_item(0, g, false));
+        assert_eq!(rows(&p), [" b", " d", " c", " a", "[Group 1]"]);
+        // a dropped above the header: out, over the group.
+        let g = by_name(&p, "Group 1");
+        assert!(p.drop_item(3, g, true));
+        assert_eq!(rows(&p), [" b", " d", " c", "[Group 1]", "a"]);
+        // The group dropped on its own layer goes nowhere.
+        let g = by_name(&p, "Group 1");
+        assert!(!p.drop_item(g, 0, true));
+        // The group dropped above a: the whole block moves.
+        assert!(p.drop_item(g, 4, true));
+        assert_eq!(rows(&p), ["a", " b", " d", " c", "[Group 1]"]);
+        assert!(p.groups_ok());
+    }
+
+    #[test]
+    fn a_group_dropped_into_a_group_lands_beside_it() {
+        let mut p = stack(&["a", "b", "c", "d"]);
+        p.group_layers(&[0, 1]).unwrap();
+        let c = by_name(&p, "c");
+        let d = by_name(&p, "d");
+        p.group_layers(&[c, d]).unwrap();
+        // [ a,  b, [G1],  c,  d, [G2]]
+        let g2 = by_name(&p, "Group 2");
+        assert!(p.drop_item(g2, 0, false), "dropped under G1's bottom layer");
+        assert_eq!(rows(&p), [" c", " d", "[Group 2]", " a", " b", "[Group 1]"]);
+        assert!(p.groups_ok());
     }
 
     #[test]

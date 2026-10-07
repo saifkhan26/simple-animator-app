@@ -283,6 +283,13 @@ mod tests {
         (st, g)
     }
 
+    impl AppState {
+        fn ungroup_active_of(&mut self, g: usize) {
+            self.project.current_layer = g;
+            self.ungroup_active();
+        }
+    }
+
     #[test]
     fn a_half_opaque_group_draws_one_merged_texture() {
         let (mut st, g) = grouped();
@@ -349,6 +356,92 @@ mod tests {
         st.project.layers[g].visible = false;
         let _ = sync(&mut st, &ctx);
         assert!(st.layer_texture(top).is_none());
+    }
+
+    /// Merging a half-opaque group gives one layer that exports the same.
+    #[test]
+    fn merge_group_matches_the_group_at_its_opacity() {
+        let (mut st, g) = grouped();
+        st.project.layers[g].opacity = 0.5;
+        let before = crate::io::composite::flatten_frame(&st.project, 0);
+        let steps = st.history.undo_len();
+        st.merge_group(g);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        assert!(!st.project.layers.iter().any(|l| l.is_group() || l.in_group));
+        assert_eq!(st.project.layers.len(), 2);
+        assert_eq!(st.project.layers[0].opacity, 0.5);
+        let after = crate::io::composite::flatten_frame(&st.project, 0);
+        let worst = before
+            .pixels()
+            .iter()
+            .zip(after.pixels().iter())
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap();
+        assert!(worst <= 1, "off by {worst}");
+        st.undo();
+        assert!(st.project.is_group(g), "one undo brings the group back");
+    }
+
+    #[test]
+    fn merge_group_keeps_its_hidden_layers() {
+        let (mut st, g) = grouped();
+        st.project.layers[0].visible = false;
+        st.merge_group(g);
+        let rows: Vec<(bool, bool)> = st.project.layers.iter().map(|l| (l.visible, l.is_group())).collect();
+        assert_eq!(rows, [(false, false), (true, false), (true, false)], "hidden kept, then merged, then top");
+    }
+
+    #[test]
+    fn grouping_the_picked_layers_is_one_undo() {
+        let (mut st, g) = grouped();
+        st.ungroup_active_of(g);
+        // [blue, red, green]: pick blue and green, active on green.
+        st.project.current_layer = 2;
+        st.selected_layers.insert(st.project.layers[0].uid);
+        let steps = st.history.undo_len();
+        st.group_selected_layers();
+        assert_eq!(st.history.undo_len(), steps + 1);
+        let rows: Vec<(bool, bool)> = st.project.layers.iter().map(|l| (l.is_group(), l.in_group)).collect();
+        assert_eq!(rows, [(false, false), (false, true), (false, true), (true, false)]);
+        st.undo();
+        assert!(!st.project.layers.iter().any(|l| l.is_group()));
+    }
+
+    #[test]
+    fn a_header_refuses_drawing_and_key_edits() {
+        let (mut st, g) = grouped();
+        st.project.current_layer = g;
+        let steps = st.history.undo_len();
+        st.set_tool(crate::tools::ActiveTool::Ink);
+        st.pointer_down(st.make_sample(10.0, 10.0, 0.0));
+        st.pointer_move(st.make_sample(40.0, 10.0, 0.1));
+        st.pointer_up();
+        st.dispatch(crate::input::shortcuts::Action::KeyBlank);
+        st.dispatch(crate::input::shortcuts::Action::LayerClipToggle);
+        assert_eq!(st.history.undo_len(), steps);
+        assert!(st.project.layers[g].exposures.iter().all(Option::is_none));
+        assert!(!st.project.layers[g].clip);
+        // Nor does merging down cross into or out of a group.
+        st.project.current_layer = g + 1;
+        assert!(!st.can_merge_down());
+    }
+
+    #[test]
+    fn the_layer_keys_walk_the_rows_the_panel_shows() {
+        let (mut st, g) = grouped();
+        let top = st.project.layers.len() - 1;
+        st.project.layers[g].collapsed = true;
+        st.project.current_layer = top;
+        st.dispatch(crate::input::shortcuts::Action::LayerSelectBelow);
+        assert_eq!(st.project.current_layer, g, "onto the folded group");
+        st.dispatch(crate::input::shortcuts::Action::LayerSelectBelow);
+        assert_eq!(st.project.current_layer, g, "its layers are out of sight");
+        st.project.layers[g].collapsed = false;
+        st.dispatch(crate::input::shortcuts::Action::LayerSelectBelow);
+        assert_eq!(st.project.current_layer, g - 1, "unfolded, into it");
+        st.dispatch(crate::input::shortcuts::Action::LayerPick1);
+        assert_eq!(st.project.current_layer, top);
     }
 
     #[test]
