@@ -332,9 +332,6 @@ struct UiPrefs {
     /// buttons arrive as those buttons, so this is muscle memory too.
     middle_drag: ButtonDrag,
     right_drag: ButtonDrag,
-    /// Where the pen puts the pointer while the app is active. Workspace, not
-    /// project: it's about the desk, the monitors and the tablet driver.
-    pen_area: crate::input::tablet::PenArea,
     /// Whether the timeline wraps. On (default): playback repeats the loop
     /// range and frame stepping wraps at both ends. Off: playback runs once
     /// and stops, and stepping clamps.
@@ -461,7 +458,6 @@ impl Default for UiPrefs {
             invert_timeline_scroll: false,
             middle_drag: ButtonDrag::Scrub,
             right_drag: ButtonDrag::SwatchPie,
-            pen_area: Default::default(),
             loop_timeline: true,
             smoothing: SmoothingOptions::default(),
             tool_brushes: None,
@@ -1512,11 +1508,7 @@ impl AppState {
             bg_opacity: prefs.bg_opacity,
             bg_color: prefs.bg_color,
             show_checker: prefs.show_checker,
-            pen: {
-                let mut pen = PenInput::new();
-                pen.set_area(prefs.pen_area);
-                pen
-            },
+            pen: PenInput::new(),
             pen_record: None,
             pen_record_saved: None,
             window_focused: true,
@@ -5725,7 +5717,6 @@ impl eframe::App for AppState {
                 invert_timeline_scroll: self.invert_timeline_scroll,
                 middle_drag: self.middle_drag,
                 right_drag: self.right_drag,
-                pen_area: self.pen.area(),
                 loop_timeline: self.loop_timeline,
                 smoothing: self.smoothing,
                 tool_brushes: Some(tool_brushes),
@@ -8605,17 +8596,6 @@ mod tests {
         let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
         assert!(!old.show_panels);
         assert_eq!(old.perspective, PerspectiveConfig::default());
-    }
-
-    #[test]
-    fn the_pen_area_is_kept_between_runs() {
-        use crate::input::tablet::PenArea;
-        let prefs = UiPrefs { pen_area: PenArea::Driver, ..UiPrefs::default() };
-        let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
-        assert_eq!(AppState::with_prefs(back, 8192, None).pen.area(), PenArea::Driver);
-        // Prefs from before the setting follow the window's monitor.
-        let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
-        assert_eq!(AppState::with_prefs(old, 8192, None).pen.area(), PenArea::Window);
     }
 
     #[test]

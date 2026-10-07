@@ -374,58 +374,6 @@ pub struct DriverArea {
     pub tablet: (i32, i32),
 }
 
-/// Where the pen moves the pointer while this app's window is active.
-///
-/// The app's context is a system context — some drivers send packets to
-/// nothing else — and the topmost system context steers the pointer. So the
-/// screen area it is opened with replaces the driver's work area for as long
-/// as the app has focus. The driver's own figure can't fill that in: XP-Pen
-/// reports the whole desktop for its default context whatever work area is
-/// set, and with that the pen spread over every monitor the moment the app
-/// was focused.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PenArea {
-    /// The monitor the window is on, followed as the window moves.
-    #[default]
-    Window,
-    /// Whatever the driver reports for its default context.
-    Driver,
-    /// Not a system context at all, so the driver keeps the pointer to
-    /// itself. Some drivers then send no packets — this one once did, though
-    /// at a time when packets were also being misread.
-    Untouched,
-}
-
-impl PenArea {
-    pub const ALL: [PenArea; 3] = [PenArea::Window, PenArea::Driver, PenArea::Untouched];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            PenArea::Window => "This window's monitor",
-            PenArea::Driver => "What the driver reports",
-            PenArea::Untouched => "Leave it to the driver",
-        }
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            PenArea::Window => {
-                "While this app is active the tablet covers the monitor its window is on, \
-                 whatever the driver's work area is."
-            }
-            PenArea::Driver => {
-                "Use the area the driver reports. Right for drivers that report their work \
-                 area truthfully; XP-Pen's reports the whole desktop."
-            }
-            PenArea::Untouched => {
-                "Read the pen without steering the pointer, so the driver's work area holds. \
-                 Some drivers then send no pen data at all: if the readout's packet count \
-                 stays at zero, pick another option."
-            }
-        }
-    }
-}
-
 /// The desktop a context was opened against.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplaySig {
@@ -436,16 +384,12 @@ pub struct DisplaySig {
     pub monitors: Vec<(ScreenRect, bool)>,
     /// `None` when there is no driver to ask.
     pub driver: Option<DriverArea>,
-    /// The monitor the window is on, when the pen area follows it
-    /// ([`PenArea::Window`]); `None` otherwise.
-    pub window_monitor: Option<ScreenRect>,
 }
 
 /// Why the context was last reopened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReopenReason {
     Monitors,
-    Window,
     Driver,
     Requested,
 }
@@ -454,7 +398,6 @@ impl ReopenReason {
     pub fn label(self) -> &'static str {
         match self {
             ReopenReason::Monitors => "monitors changed",
-            ReopenReason::Window => "window moved to another monitor",
             ReopenReason::Driver => "driver area changed",
             ReopenReason::Requested => "reconnect pressed",
         }
@@ -510,8 +453,6 @@ impl DisplayWatch {
             let old = self.at_open.as_ref()?;
             self.pending = if sig.desktop != old.desktop || sig.monitors != old.monitors {
                 Some(ReopenReason::Monitors)
-            } else if sig.window_monitor != old.window_monitor {
-                Some(ReopenReason::Window)
             } else if sig.driver.is_some() && sig.driver != old.driver {
                 Some(ReopenReason::Driver)
             } else {
@@ -655,10 +596,13 @@ pub struct PenDiagnostics {
     /// Desktop pixels the whole tablet covers, as the cursor shows it — see
     /// [`pen_reach`].
     pub reach: Option<(f32, f32)>,
-    /// The screen area the context was opened with: where the pen puts the
-    /// pointer while this app is active. See [`PenArea`].
+    /// The screen area the context was opened with (`lcSys*`).
     pub context_area: Option<ScreenRect>,
-    pub area: PenArea,
+    /// The window the context is bound to, and the one `FindWindowA` finds
+    /// by title — how the context was bound before it took the handle from
+    /// the app. Recorded to tell the two apart, should they differ.
+    pub hwnd: Option<isize>,
+    pub hwnd_by_title: Option<isize>,
     /// The desktop and the driver's area, read when the snapshot is taken.
     pub display: DisplaySig,
     /// Times the context was reopened, and the latest reason.
@@ -699,7 +643,6 @@ pub struct PenInput {
     reopens: u32,
     last_reopen: Option<ReopenReason>,
     init_error: Option<String>,
-    area: PenArea,
 }
 
 impl PenInput {
@@ -720,21 +663,7 @@ impl PenInput {
             reopens: 0,
             last_reopen: None,
             init_error: None,
-            area: PenArea::default(),
         }
-    }
-
-    /// Where the pen puts the pointer while the app is active. A change
-    /// reopens the context, as Reconnect does.
-    pub fn set_area(&mut self, area: PenArea) {
-        if area != self.area {
-            self.area = area;
-            self.reconnect = true;
-        }
-    }
-
-    pub fn area(&self) -> PenArea {
-        self.area
     }
 
     /// The app window's handle, so the context binds to this window rather
@@ -771,13 +700,9 @@ impl PenInput {
             let reason = if self.reconnect && !pointer_down {
                 Some(ReopenReason::Requested)
             } else if self.backend.is_some() {
-                let (backend, hwnd, area) = (self.backend.as_ref(), self.hwnd, self.area);
-                self.watch.tick(
-                    now,
-                    || windows_backend::display_sig(backend, hwnd, area),
-                    pointer_down,
-                    nudged,
-                )
+                let backend = self.backend.as_ref();
+                self.watch
+                    .tick(now, || windows_backend::display_sig(backend), pointer_down, nudged)
             } else {
                 None
             };
@@ -793,11 +718,10 @@ impl PenInput {
                 self.retry = Retry::default();
             }
             if self.backend.is_none() && self.retry.due(now) {
-                match windows_backend::Wintab::try_init(self.hwnd, self.area) {
+                match windows_backend::Wintab::try_init(self.hwnd) {
                     Ok(w) => {
                         log::info!("Wintab pen backend ready");
-                        let sig = windows_backend::display_sig(Some(&w), self.hwnd, self.area);
-                        self.watch.opened(sig, now);
+                        self.watch.opened(windows_backend::display_sig(Some(&w)), now);
                         self.retry = Retry::default();
                         self.init_error = None;
                         self.backend = Some(w);
@@ -868,10 +792,11 @@ impl PenInput {
         d.init_error = self.init_error.clone().filter(|_| !self.is_active());
         d.retry_in = self.retry.wait(std::time::Instant::now());
         d.waiting_for_reconnect = self.retry.parked();
-        d.area = self.area;
+        d.hwnd = self.hwnd;
         #[cfg(target_os = "windows")]
         {
-            d.display = windows_backend::display_sig(self.backend.as_ref(), self.hwnd, self.area);
+            d.display = windows_backend::display_sig(self.backend.as_ref());
+            d.hwnd_by_title = windows_backend::window_by_title();
         }
         #[cfg(target_os = "windows")]
         if let Some(w) = self.backend.as_ref() {
@@ -951,7 +876,7 @@ mod windows_backend {
     //! Wintab backend. The app hands over its window handle on the first
     //! frame; until then the window is found by title.
 
-    use super::{InitFail, PenArea, PenPacket, ScreenRect};
+    use super::{InitFail, PenPacket, ScreenRect};
     use anyhow::{anyhow, Context, Result};
     use libloading::{Library, Symbol};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -959,8 +884,7 @@ mod windows_backend {
     use windows::core::PCSTR;
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{
-        ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR,
-        MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         FindWindowA, GetClientRect, GetSystemMetrics, MONITORINFOF_PRIMARY, MSG,
@@ -1096,19 +1020,16 @@ mod windows_backend {
         NUDGE.swap(false, Ordering::Relaxed)
     }
 
-    /// The whole of the monitor `hwnd` is on (nearest, if it's on none).
-    fn monitor_of(hwnd: HWND) -> Option<ScreenRect> {
-        let m = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        unsafe { GetMonitorInfoW(m, &mut info) }.as_bool().then(|| {
-            let r = info.rcMonitor;
-            ScreenRect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top }
-        })
+    /// The window titled "Animator" — the title main.rs sets — which is how
+    /// the context is bound until the app hands its own handle over.
+    pub fn window_by_title() -> Option<isize> {
+        let h = unsafe { FindWindowA(None, PCSTR(c"Animator".as_ptr().cast())) };
+        (h.0 != 0).then_some(h.0)
     }
 
-    /// The desktop as it stands, the driver's area when there is a context to
-    /// ask through, and the window's monitor when the pen area follows it.
-    pub fn display_sig(w: Option<&Wintab>, hwnd: Option<isize>, area: PenArea) -> super::DisplaySig {
+    /// The desktop as it stands, and the driver's area when there is a
+    /// context to ask through.
+    pub fn display_sig(w: Option<&Wintab>) -> super::DisplaySig {
         let metric = |i| unsafe { GetSystemMetrics(i) };
         let desktop = ScreenRect {
             x: metric(SM_XVIRTUALSCREEN),
@@ -1159,15 +1080,10 @@ mod windows_backend {
                 tablet: (lc.lcInExtXYZ.x, lc.lcInExtXYZ.y),
             })
         });
-        let window_monitor = match area {
-            PenArea::Window => hwnd.map(HWND).and_then(monitor_of),
-            PenArea::Driver | PenArea::Untouched => None,
-        };
         super::DisplaySig {
             desktop,
             monitors,
             driver,
-            window_monitor,
         }
     }
 
@@ -1175,24 +1091,19 @@ mod windows_backend {
         /// Open a context on `hwnd`, or on the window found by title when the
         /// app hasn't handed its handle over yet. A failure says which kind it
         /// was, which decides when to try again.
-        pub fn try_init(hwnd: Option<isize>, area: PenArea) -> std::result::Result<Self, (InitFail, String)> {
+        pub fn try_init(hwnd: Option<isize>) -> std::result::Result<Self, (InitFail, String)> {
             let hwnd = match hwnd {
                 Some(h) => HWND(h),
-                None => {
-                    // The title must match what main.rs sets.
-                    let title = b"Animator\0";
-                    let hwnd = unsafe { FindWindowA(None, PCSTR(title.as_ptr())) };
-                    if hwnd.0 == 0 {
-                        return Err((InitFail::NoWindow, "window not up yet".into()));
-                    }
-                    hwnd
-                }
+                None => match window_by_title() {
+                    Some(h) => HWND(h),
+                    None => return Err((InitFail::NoWindow, "window not up yet".into())),
+                },
             };
             let lib = library().map_err(|e| (InitFail::NoDriver, format!("{e:#}")))?;
-            Self::open(hwnd, lib, area).map_err(|e| (InitFail::Context, format!("{e:#}")))
+            Self::open(hwnd, lib).map_err(|e| (InitFail::Context, format!("{e:#}")))
         }
 
-        fn open(hwnd: HWND, lib: &'static Library, area: PenArea) -> Result<Self> {
+        fn open(hwnd: HWND, lib: &'static Library) -> Result<Self> {
             let wt_open: WTOpen<'static> =
                 unsafe { lib.get(c"WTOpenA".to_bytes()).context("WTOpenA")? };
             let wt_info: WTInfo<'static> =
@@ -1216,23 +1127,16 @@ mod windows_backend {
 
             let base_out_org = log_context.lcOutOrgXYZ;
             let base_out_ext = log_context.lcOutExtXYZ;
-            if log_context.lcSysExtXY.x == 0
-                || log_context.lcSysExtXY.y == 0
-                || base_out_ext.x == 0
-                || base_out_ext.y == 0
-            {
-                return Err(anyhow!("DEFSYSCTX has an empty mapping"));
-            }
-            // Where the pen puts the pointer while this context is on top —
-            // that is, while the app is active. See `PenArea`.
-            if let Some(m) = (area == PenArea::Window).then(|| monitor_of(hwnd)).flatten() {
-                log_context.lcSysOrgXY.x = m.x;
-                log_context.lcSysOrgXY.y = m.y;
-                log_context.lcSysExtXY.x = m.w;
-                log_context.lcSysExtXY.y = m.h;
-            }
+            // The driver's own area, as reported, and left as it is: while the
+            // app is active its context is on top and steers the pointer, and
+            // with XP-Pen any other area here moved the pointer off the work
+            // area — a monitor-sized one shrank the pen to 61% of the monitor
+            // (2560 / 4160), and a non-system context got no packets at all.
             let sys_org = log_context.lcSysOrgXY;
             let sys_ext = log_context.lcSysExtXY;
+            if sys_ext.x == 0 || sys_ext.y == 0 || base_out_ext.x == 0 || base_out_ext.y == 0 {
+                return Err(anyhow!("DEFSYSCTX has an empty mapping"));
+            }
 
             // The output area we want packets reported in: screen coordinates.
             //
@@ -1260,11 +1164,7 @@ mod windows_backend {
             // separately. Clearing CXO_SYSTEM here stopped packets arriving
             // at all, which is worth a comment because the fix looks like a
             // no-op otherwise.
-            if area == PenArea::Untouched {
-                log_context.lcOptions &= !CXO::SYSTEM;
-            } else {
-                log_context.lcOptions |= CXO::SYSTEM;
-            }
+            log_context.lcOptions |= CXO::SYSTEM;
             // Only the fields actually read. Asking for everything invites a
             // packet whose length depends on what the device happens to
             // support, and the length is the one thing that must be right:
@@ -2049,7 +1949,6 @@ mod tests {
                 screen: rect(0, 0, 4160, 1440),
                 tablet: (50800, 28575),
             }),
-            window_monitor: Some(rect(0, 0, 2560, 1440)),
         }
     }
 
@@ -2084,9 +1983,6 @@ mod tests {
         w.opened(reported(), later(1300));
         let silent = || DisplaySig { driver: None, ..reported() };
         assert_eq!(w.tick(later(2000), silent, false, false), None);
-        // The window dragged onto the small monitor: the pen area follows it.
-        let dragged = || DisplaySig { window_monitor: Some(rect(2560, 0, 1600, 900)), ..reported() };
-        assert_eq!(w.tick(later(2600), dragged, false, false), Some(ReopenReason::Window));
     }
 
     #[test]
