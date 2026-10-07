@@ -399,11 +399,24 @@ impl Project {
     /// The base layer `li` is clipped to: the nearest layer below it that is
     /// not clipped itself. `None` when `li` isn't clipped, or nothing under it
     /// can be a base — a clipped bottom layer shows as if it weren't.
+    ///
+    /// Groups keep their own: a layer in a group clips to one below it in
+    /// the same group (the bottom one of a group clips to nothing), and a
+    /// layer outside groups looks past a group's layers to its header — a
+    /// whole group can be a base.
     pub fn clip_base(&self, li: usize) -> Option<usize> {
-        if !self.layers.get(li)?.clip {
+        let layer = self.layers.get(li)?;
+        if !layer.clip || layer.is_group() {
             return None;
         }
-        (0..li).rev().find(|&j| !self.layers[j].clip)
+        if layer.in_group {
+            let start = self.group_of(li).map_or(li, |g| self.children(g).start);
+            return (start..li).rev().find(|&j| !self.layers[j].clip);
+        }
+        (0..li)
+            .rev()
+            .filter(|&j| !self.layers[j].in_group)
+            .find(|&j| !self.layers[j].clip)
     }
 
     /// Frame of the nearest drawing key on the active layer strictly *before*
@@ -432,7 +445,7 @@ impl Project {
 
     /// Keep `lines_from` links valid after a layer is inserted at `at`:
     /// everything from `at` up shifted one slot higher.
-    fn relink_after_insert(&mut self, at: usize) {
+    pub(crate) fn relink_after_insert(&mut self, at: usize) {
         for layer in &mut self.layers {
             if let Some(src) = layer.lines_from {
                 if src >= at {
@@ -456,25 +469,12 @@ impl Project {
 
     /// Keep `lines_from` links valid after the layers were reordered, with
     /// `to_new(old)` giving each layer's new index.
-    fn relink(&mut self, to_new: impl Fn(usize) -> usize) {
+    pub(crate) fn relink(&mut self, to_new: impl Fn(usize) -> usize) {
         for layer in &mut self.layers {
             if let Some(src) = layer.lines_from {
                 layer.lines_from = Some(to_new(src));
             }
         }
-    }
-
-    /// Keep `lines_from` links valid after layers `a` and `b` swap places.
-    fn relink_after_swap(&mut self, a: usize, b: usize) {
-        self.relink(|i| {
-            if i == a {
-                b
-            } else if i == b {
-                a
-            } else {
-                i
-            }
-        });
     }
 
     pub fn add_layer(&mut self) {
@@ -490,7 +490,11 @@ impl Project {
     pub fn add_layer_above_active(&mut self) -> usize {
         let idx = (self.current_layer + 1).min(self.layers.len());
         let name = format!("Layer {}", self.layers.len() + 1);
-        self.layers.insert(idx, Layer::new(name, self.frame_count));
+        let mut layer = Layer::new(name, self.frame_count);
+        // Over a group's layer, it joins the group; over a header, it sits
+        // above the whole group.
+        layer.in_group = self.layers.get(self.current_layer).is_some_and(|l| l.in_group);
+        self.layers.insert(idx, layer);
         self.relink_after_insert(idx);
         self.current_layer = idx;
         idx
@@ -498,6 +502,7 @@ impl Project {
 
     /// Move layer `from` so it ends up at index `to`, the others closing up
     /// behind it, and select it. Out-of-range indices are a no-op.
+    #[cfg(test)]
     pub fn move_layer(&mut self, from: usize, to: usize) {
         let n = self.layers.len();
         if from >= n || to >= n || from == to {
@@ -542,7 +547,12 @@ impl Project {
     /// shifts up by one). Returns the new layer's index.
     pub fn add_layer_below_active(&mut self, name: impl Into<String>) -> usize {
         let idx = self.current_layer.min(self.layers.len());
-        let layer = Layer::new(name, self.frame_count);
+        let mut layer = Layer::new(name, self.frame_count);
+        // Under a group's layer, or under a header, it is in the group.
+        layer.in_group = self
+            .layers
+            .get(self.current_layer)
+            .is_some_and(|l| l.in_group || l.is_group());
         self.layers.insert(idx, layer);
         self.relink_after_insert(idx);
         self.current_layer = idx + 1;
@@ -561,6 +571,7 @@ impl Project {
         0
     }
 
+    #[cfg(test)]
     pub fn delete_layer(&mut self) {
         if self.layers.len() <= 1 {
             return;
@@ -569,24 +580,6 @@ impl Project {
         self.layers.remove(i);
         self.relink_after_remove(i);
         self.current_layer = self.current_layer.min(self.layers.len() - 1);
-    }
-
-    pub fn move_layer_up(&mut self) {
-        let i = self.current_layer;
-        if i + 1 < self.layers.len() {
-            self.layers.swap(i, i + 1);
-            self.relink_after_swap(i, i + 1);
-            self.current_layer = i + 1;
-        }
-    }
-
-    pub fn move_layer_down(&mut self) {
-        let i = self.current_layer;
-        if i > 0 {
-            self.layers.swap(i, i - 1);
-            self.relink_after_swap(i, i - 1);
-            self.current_layer = i - 1;
-        }
     }
 
     // --- Drawing blocks (the timeline tracks) ---
@@ -786,7 +779,7 @@ impl Project {
     /// Whether a drag from `src` to `dst` may land. Nothing ever edits a
     /// locked or reference layer, and only a move edits its source.
     pub fn drop_allowed(&self, src: usize, dst: usize, copy: bool) -> bool {
-        let editable = |i: usize| self.layers.get(i).is_some_and(|l| !l.locked && !l.reference);
+        let editable = |i: usize| self.paintable(i);
         editable(dst) && (copy || editable(src))
     }
 

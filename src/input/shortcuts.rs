@@ -46,6 +46,8 @@ pub enum Action {
     OnionToggle,
     LayerAdd,
     LayerDelete,
+    LayerGroup,
+    LayerUngroup,
     LayerToggleVisible,
     LayerLast,
     /// Step the active layer one row up / down the Layers panel. Stops at the
@@ -165,6 +167,8 @@ impl Action {
         Action::OnionToggle,
         Action::LayerAdd,
         Action::LayerDelete,
+        Action::LayerGroup,
+        Action::LayerUngroup,
         Action::LayerToggleVisible,
         Action::LayerLast,
         Action::LayerSelectAbove,
@@ -269,6 +273,8 @@ impl Action {
             Action::OnionToggle => "Toggle onion skin",
             Action::LayerAdd => "Add layer",
             Action::LayerDelete => "Delete layer",
+            Action::LayerGroup => "Group selected layers",
+            Action::LayerUngroup => "Ungroup",
             Action::LayerToggleVisible => "Toggle layer visibility",
             Action::LayerLast => "Go to last selected layer",
             Action::LayerSelectAbove => "Select layer above",
@@ -781,7 +787,7 @@ impl Default for ShortcutMap {
         b.insert(Action::ToolLasso, KeyCombo::plain(K::Y));
         // Perspective grid: the G family, beside the Shape tool it guides.
         b.insert(Action::ToolPerspective, KeyCombo::shift(K::G));
-        b.insert(Action::TogglePerspectiveGrid, KeyCombo::ctrl(K::G));
+        b.insert(Action::TogglePerspectiveGrid, KeyCombo::shift_alt(K::G));
         b.insert(Action::TogglePerspectiveSnap, KeyCombo::ctrl_shift(K::G));
         b.insert(Action::PerspectiveNextGrid, KeyCombo::alt(K::G));
         // Frame navigation: A / S.
@@ -801,6 +807,8 @@ impl Default for ShortcutMap {
         // Layers.
         b.insert(Action::LayerAdd, KeyCombo::plain(K::T));
         b.insert(Action::LayerDelete, KeyCombo::shift(K::T));
+        // Ctrl+G groups, as in Krita and Photoshop.
+        b.insert(Action::LayerGroup, KeyCombo::ctrl(K::G));
         b.insert(Action::LayerToggleVisible, KeyCombo::plain(K::V));
         b.insert(Action::LayerLast, KeyCombo::plain(K::Z));
         // Shifted sibling of the layer jump: push every other layer back.
@@ -1100,6 +1108,15 @@ pub fn load_from_str(text: &str) -> ShortcutMap {
             if map.bindings.get(&Action::PasteImage) == Some(&KeyCombo::ctrl(egui::Key::V)) {
                 map.bindings
                     .insert(Action::PasteImage, KeyCombo::ctrl_shift(egui::Key::V));
+            }
+            // Migration: Ctrl+G became "group layers", and the perspective
+            // grid toggle moved off it. A file from before keeps its grid on
+            // Ctrl+G, and grouping starts unbound there instead of clashing.
+            let grid_on_ctrl_g = map.bindings.get(&Action::TogglePerspectiveGrid)
+                == Some(&KeyCombo::ctrl(egui::Key::G));
+            if grid_on_ctrl_g && !map.bindings.contains_key(&Action::LayerGroup) && !map.unbound.contains(&Action::LayerGroup)
+            {
+                map.unbound.insert(Action::LayerGroup);
             }
             // Merge in any missing defaults so newly added actions are bound,
             // except where the user unbound one on purpose.
@@ -1485,6 +1502,27 @@ mod tests {
         for a in [Action::HoldToolAdjust, Action::HoldScrub, Action::HoldFlip, Action::HoldSwatchPie] {
             assert_eq!(map.get(a), None, "{a:?} starts unbound");
         }
+    }
+
+    /// A fresh install groups on Ctrl+G and finds the perspective grid on
+    /// Shift+Alt+G; a file from before keeps its grid on Ctrl+G and gets
+    /// grouping unbound, rather than a clash.
+    #[test]
+    fn ctrl_g_groups_unless_an_old_file_has_the_grid_there() {
+        let map = ShortcutMap::default();
+        assert_eq!(map.get(Action::LayerGroup), Some(KeyCombo::ctrl(egui::Key::G)));
+        assert_eq!(map.get(Action::TogglePerspectiveGrid), Some(KeyCombo::shift_alt(egui::Key::G)));
+        assert_eq!(map.get(Action::LayerUngroup), None);
+        let old = load_from_str("toggle_perspective_grid = \"Ctrl+G\"\ntool_pencil = \"Q\"\n");
+        assert_eq!(old.get(Action::TogglePerspectiveGrid), Some(KeyCombo::ctrl(egui::Key::G)));
+        assert_eq!(old.get(Action::LayerGroup), None);
+        assert_eq!(old.conflict_count(), map.conflict_count(), "no new clash");
+        // Saved and loaded again, it stays that way.
+        let again = load_from_str(&toml::to_string_pretty(&old).unwrap());
+        assert_eq!(again.get(Action::LayerGroup), None);
+        // A file that already says what grouping is keeps it.
+        let set = load_from_str("toggle_perspective_grid = \"Ctrl+G\"\nlayer_group = \"Ctrl+Shift+G\"\n");
+        assert_eq!(set.get(Action::LayerGroup), Some(KeyCombo::ctrl_shift(egui::Key::G)));
     }
 
     #[test]

@@ -162,6 +162,9 @@ impl From<LayerV2> for Layer {
             cell_h: 0,
             clip: false,
             alpha_lock: false,
+            kind: Default::default(),
+            in_group: false,
+            collapsed: false,
         }
     }
 }
@@ -204,6 +207,9 @@ impl From<LayerV3> for Layer {
             cell_h: 0,
             clip: false,
             alpha_lock: false,
+            kind: Default::default(),
+            in_group: false,
+            collapsed: false,
         }
     }
 }
@@ -227,6 +233,9 @@ impl From<LayerV4> for Layer {
             cell_h: l.cell_h,
             clip: false,
             alpha_lock: false,
+            kind: Default::default(),
+            in_group: false,
+            collapsed: false,
         }
     }
 }
@@ -329,12 +338,102 @@ impl From<LayerV6> for Layer {
             cell_h: l.cell_h,
             clip: false,
             alpha_lock: false,
+            kind: Default::default(),
+            in_group: false,
+            collapsed: false,
         }
     }
 }
 
 impl From<ProjectV6> for Project {
     fn from(p: ProjectV6) -> Self {
+        Project {
+            width: p.width,
+            height: p.height,
+            fps: p.fps,
+            cells: p.cells.into_iter().map(Arc::new).collect(),
+            layers: p.layers.into_iter().map(Into::into).collect(),
+            frame_count: p.frame_count,
+            current_frame: p.current_frame,
+            current_layer: p.current_layer,
+            loop_start: p.loop_start,
+            loop_end: p.loop_end,
+            camera: p.camera,
+            camera_keys: p.camera_keys,
+        }
+    }
+}
+
+/// `Layer` as serialized by format v7 — before `kind`, `in_group` and
+/// `collapsed` were appended for layer groups.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LayerV7 {
+    pub name: String,
+    pub opacity: f32,
+    pub visible: bool,
+    pub locked: bool,
+    pub reference: bool,
+    pub exposures: Vec<Option<usize>>,
+    #[serde(default)]
+    pub transform: Transform,
+    #[serde(default)]
+    pub transform_keys: Vec<TransformKey>,
+    #[serde(default)]
+    pub track_points: Vec<TrackSample>,
+    #[serde(default)]
+    pub cell_w: u32,
+    #[serde(default)]
+    pub cell_h: u32,
+    #[serde(default)]
+    pub clip: bool,
+    #[serde(default)]
+    pub alpha_lock: bool,
+}
+
+/// `Project` as serialized by format v7.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ProjectV7 {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    pub cells: Vec<Canvas>,
+    pub layers: Vec<LayerV7>,
+    pub frame_count: usize,
+    pub current_frame: usize,
+    pub current_layer: usize,
+    pub loop_start: usize,
+    pub loop_end: usize,
+    #[serde(default)]
+    pub camera: Camera,
+    #[serde(default)]
+    pub camera_keys: Vec<CameraKey>,
+}
+
+impl From<LayerV7> for Layer {
+    fn from(l: LayerV7) -> Self {
+        Layer {
+            clip: l.clip,
+            alpha_lock: l.alpha_lock,
+            ..LayerV6 {
+                name: l.name,
+                opacity: l.opacity,
+                visible: l.visible,
+                locked: l.locked,
+                reference: l.reference,
+                exposures: l.exposures,
+                transform: l.transform,
+                transform_keys: l.transform_keys,
+                track_points: l.track_points,
+                cell_w: l.cell_w,
+                cell_h: l.cell_h,
+            }
+            .into()
+        }
+    }
+}
+
+impl From<ProjectV7> for Project {
+    fn from(p: ProjectV7) -> Self {
         Project {
             width: p.width,
             height: p.height,

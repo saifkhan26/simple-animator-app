@@ -207,11 +207,163 @@ pub fn shown(p: &Project, li: usize, frame: usize) -> Option<std::borrow::Cow<'_
         return Some(std::borrow::Cow::Borrowed(cell));
     };
     let base = &p.layers[b];
-    if !base.visible || base.reference {
+    if !p.shows(b) || base.reference {
         return None;
+    }
+    if base.is_group() {
+        let mask = group_mask(p, b, frame)?;
+        let at = Placement::of_group(p, li, frame);
+        return Some(std::borrow::Cow::Owned(masked(cell, Some(&mask), &at)));
     }
     let base_cell = p.cell(base.resolve(frame)?)?;
     Some(std::borrow::Cow::Owned(masked(cell, Some(base_cell), &Placement::of(p, li, b, frame))))
+}
+
+/// What group `g` covers on `frame`, as a mask a layer clipped to the group
+/// is cut by: the union of what its showing, non-reference layers show, each
+/// as clipped as it is. Opacities don't count, as a single base's opacity
+/// doesn't.
+///
+/// The mask lives in "group space": a canvas centred on the document and
+/// placed by the identity transform ([`Placement::of_group`]), frame-sized
+/// unless a layer reaches further, when it grows to hold it. `None` when
+/// nothing in the group shows on the frame.
+pub fn group_mask(p: &Project, g: usize, frame: usize) -> Option<Canvas> {
+    let xf = |li: usize| p.layers[li].resolve_transform(frame);
+    let (w, h) = group_space(p, g, frame, &xf);
+    let mut out = Canvas::new(w, h);
+    let all = DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: w,
+        max_y: h,
+    };
+    render_group(p, g, frame, false, &xf, &mut out, all).then_some(out)
+}
+
+/// The layers of group `g` that draw on `frame`: showing, not references,
+/// with a drawing there.
+fn group_kids(p: &Project, g: usize, frame: usize) -> impl Iterator<Item = usize> + '_ {
+    p.children(g)
+        .filter(move |&c| p.shows(c) && !p.layers[c].reference && p.layers[c].resolve(frame).is_some())
+}
+
+/// The size of group `g`'s group-space canvas on `frame`, with its layers
+/// placed by `xf`: the frame, grown by whole pixels each side as far as any
+/// of them reaches, so its centre stays the document's.
+pub fn group_space(p: &Project, g: usize, frame: usize, xf: &dyn Fn(usize) -> Transform) -> (u32, u32) {
+    let (pw, ph) = (p.width as f32, p.height as f32);
+    let mut reach = (pw / 2.0, ph / 2.0);
+    for c in group_kids(p, g, frame) {
+        let Some(cell) = p.layers[c].resolve(frame).and_then(|id| p.cell(id)) else {
+            continue;
+        };
+        let (cw, ch) = (cell.width as f32, cell.height as f32);
+        let t = xf(c);
+        for (x, y) in [(0.0, 0.0), (cw, 0.0), (0.0, ch), (cw, ch)] {
+            let (dx, dy) = t.cell_to_doc(x, y, cw, ch, pw, ph);
+            reach.0 = reach.0.max((dx - pw / 2.0).abs());
+            reach.1 = reach.1.max((dy - ph / 2.0).abs());
+        }
+    }
+    let grow = |half: f32, side: u32| side + 2 * ((half - side as f32 / 2.0).max(0.0).ceil() as u32);
+    (grow(reach.0, p.width), grow(reach.1, p.height))
+}
+
+/// Draw group `g`'s layers on `frame`, merged, into `rect` of `out` — a
+/// group-space canvas — clearing that rect first. With `opacity` each layer
+/// goes down at its own opacity, as the group shows; without, at full, as
+/// the mask a layer clipped to the group is cut by. Layers are placed by
+/// `xf`. Whether any layer drew at all.
+pub fn render_group(
+    p: &Project,
+    g: usize,
+    frame: usize,
+    opacity: bool,
+    xf: &dyn Fn(usize) -> Transform,
+    out: &mut Canvas,
+    rect: DirtyRect,
+) -> bool {
+    let (w, h) = (out.width, out.height);
+    let (x0, y0, x1, y1) = (rect.min_x.min(w), rect.min_y.min(h), rect.max_x.min(w), rect.max_y.min(h));
+    if x0 < x1 && y0 < y1 {
+        let px = out.pixels_mut();
+        for y in y0..y1 {
+            let at = (y * w) as usize * 4;
+            px[at + x0 as usize * 4..at + x1 as usize * 4].fill(0);
+        }
+    }
+    let mut any = false;
+    for c in group_kids(p, g, frame) {
+        let Some(src) = shown(p, c, frame) else {
+            continue;
+        };
+        any = true;
+        let op = if opacity { p.layers[c].opacity } else { 1.0 };
+        crate::io::composite::composite_layer_in(out, &src, &xf(c), op, w, h, rect);
+    }
+    out.dirty = None;
+    any
+}
+
+/// What an image of group `g` on `frame` is made from, as a hash: the
+/// canvas size, and each layer's drawing, placement, visibility, opacity
+/// (when it counts) and clip base. Equal hashes mean the same image, give or
+/// take pixel edits, which are tracked by cell instead.
+pub fn group_sig(p: &Project, g: usize, frame: usize, opacity: bool, xf: &dyn Fn(usize) -> Transform) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut s = std::collections::hash_map::DefaultHasher::new();
+    group_space(p, g, frame, xf).hash(&mut s);
+    for c in p.children(g) {
+        let l = &p.layers[c];
+        (c, p.shows(c), l.reference, l.resolve(frame)).hash(&mut s);
+        let t = xf(c);
+        [t.tx, t.ty, t.scale, t.rot].map(f32::to_bits).hash(&mut s);
+        if opacity {
+            l.opacity.to_bits().hash(&mut s);
+        }
+        if let Some(b) = p.clip_base(c) {
+            (b, p.layers[b].resolve(frame), p.shows(b)).hash(&mut s);
+            let t = xf(b);
+            [t.tx, t.ty, t.scale, t.rot].map(f32::to_bits).hash(&mut s);
+        }
+    }
+    s.finish()
+}
+
+/// The cells group `g`'s image on `frame` is drawn from, each with whether
+/// it lies pixel for pixel on the group-space canvas — so a change to one
+/// redoes the same rect there rather than all of it.
+pub fn group_cells(p: &Project, g: usize, frame: usize, xf: &dyn Fn(usize) -> Transform) -> Vec<(CellId, bool)> {
+    let space = group_space(p, g, frame, xf);
+    let mut out = Vec::new();
+    for c in group_kids(p, g, frame) {
+        let Some(id) = p.layers[c].resolve(frame) else {
+            continue;
+        };
+        let aligned = p
+            .cell(id)
+            .is_some_and(|cell| (cell.width, cell.height) == space && xf(c).is_identity() && p.clip_base(c).is_none());
+        out.push((id, aligned));
+        // A clipped layer redraws whenever its base does.
+        if let Some(bid) = p.clip_base(c).and_then(|b| p.layers[b].resolve(frame)) {
+            out.push((bid, false));
+        }
+    }
+    out
+}
+
+impl Placement {
+    /// Where layer `li` sits on `frame` against its group's mask, which sits
+    /// in group space — see [`group_mask`].
+    pub fn of_group(p: &Project, li: usize, frame: usize) -> Self {
+        Self {
+            xf: p.layers[li].resolve_transform(frame),
+            base_xf: Transform::default(),
+            pw: p.width,
+            ph: p.height,
+        }
+    }
 }
 
 /// Bake every clipped layer's mask into its pixels and unclip it — for a copy
@@ -231,26 +383,41 @@ pub fn bake_clipping(p: &mut Project) -> HashMap<CellId, CellId> {
         let Some(b) = base else {
             continue;
         };
-        let mut made: HashMap<(CellId, Option<CellId>), CellId> = HashMap::new();
+        // What the base shows on a frame, by drawing: one cell, or a group's
+        // layers' cells.
+        let group = p.is_group(b);
+        let base_on = |p: &Project, f: usize| -> Vec<Option<CellId>> {
+            if group {
+                p.children(b).map(|c| p.layers[c].resolve(f)).collect()
+            } else {
+                vec![p.layers[b].resolve(f)]
+            }
+        };
+        let mut made: HashMap<(CellId, Vec<Option<CellId>>), CellId> = HashMap::new();
         let mut exposures = vec![None; p.layers[li].exposures.len().max(fc)];
         let mut last = None;
         for (f, slot) in exposures.iter_mut().enumerate().take(fc) {
             let Some(c) = p.layers[li].resolve(f) else {
                 continue;
             };
-            let pair = (c, p.layers[b].resolve(f));
-            if last == Some(pair) {
+            let pair = (c, base_on(p, f));
+            if last.as_ref() == Some(&pair) {
                 continue;
             }
-            last = Some(pair);
+            last = Some(pair.clone());
             let id = match made.get(&pair) {
                 Some(&id) => id,
                 None => {
                     let Some(cell) = p.cell(c) else {
                         continue;
                     };
-                    let base_cell = pair.1.and_then(|id| p.cell(id));
-                    let baked = masked(cell, base_cell, &Placement::of(p, li, b, f));
+                    let baked = if group {
+                        let mask = group_mask(p, b, f).filter(|_| p.layers[b].visible);
+                        masked(cell, mask.as_ref(), &Placement::of_group(p, li, f))
+                    } else {
+                        let base_cell = pair.1[0].and_then(|id| p.cell(id));
+                        masked(cell, base_cell, &Placement::of(p, li, b, f))
+                    };
                     let id = p.cells.len();
                     p.cells.push(baked.into());
                     made.insert(pair, id);

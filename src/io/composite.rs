@@ -1,7 +1,7 @@
 //! CPU composite — used for PNG / GIF export where we need flat pixels for a
 //! given frame. Onion skins and reference layers are excluded from export.
 
-use crate::doc::canvas::Canvas;
+use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::project::Project;
 use crate::doc::transform::Transform;
 
@@ -30,16 +30,37 @@ fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
     let mut out = Canvas::new(project.width, project.height);
     let (pw, ph) = (project.width, project.height);
     let cam = project.resolve_camera(frame);
-    for (li, layer) in project.layers.iter().enumerate() {
-        if !layer.visible || layer.reference {
-            continue;
+    let draw = |dst: &mut Canvas, li: usize| {
+        let layer = &project.layers[li];
+        if !project.shows(li) || layer.reference || layer.is_group() {
+            return;
         }
         let Some(src) = crate::doc::clip::shown(project, li, frame) else {
-            continue;
+            return;
         };
         let xform = layer.resolve_transform(frame);
         let xform = if through_camera { cam.apply(&xform) } else { xform };
-        composite_layer(&mut out, &src, &xform, layer.opacity, pw, ph);
+        composite_layer(dst, &src, &xform, layer.opacity, pw, ph);
+    };
+    for (li, layer) in project.layers.iter().enumerate() {
+        // A group's layers are drawn at its header, which sits directly
+        // above them, so the stacking order is the same.
+        if layer.in_group && project.group_of(li).is_some() {
+            continue;
+        }
+        if !layer.is_group() {
+            draw(&mut out, li);
+        } else if layer.visible && layer.opacity >= 1.0 {
+            // Over is associative: at full opacity a group composited on its
+            // own and then laid down is exactly its layers laid down directly.
+            project.children(li).for_each(|c| draw(&mut out, c));
+        } else if layer.visible && layer.opacity > 0.0 {
+            // Otherwise its layers merge first and the group's opacity applies
+            // once, so they don't show through one another.
+            let mut group = Canvas::new(pw, ph);
+            project.children(li).for_each(|c| draw(&mut group, c));
+            composite_over(&mut out, &group, layer.opacity);
+        }
     }
     out
 }
@@ -49,8 +70,34 @@ fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
 /// size; otherwise inverse-maps each destination pixel and bilinearly samples
 /// the source.
 pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacity: f32, pw: u32, ph: u32) {
+    let all = DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: pw,
+        max_y: ph,
+    };
+    composite_layer_in(dst, src, xform, opacity, pw, ph, all);
+}
+
+/// [`composite_layer`], writing only `rect` of `dst` — what redoing part of
+/// a group's merged image takes.
+pub fn composite_layer_in(
+    dst: &mut Canvas,
+    src: &Canvas,
+    xform: &Transform,
+    opacity: f32,
+    pw: u32,
+    ph: u32,
+    rect: DirtyRect,
+) {
+    let rect = DirtyRect {
+        min_x: rect.min_x.min(pw),
+        min_y: rect.min_y.min(ph),
+        max_x: rect.max_x.min(pw),
+        max_y: rect.max_y.min(ph),
+    };
     if xform.is_identity() && src.width == pw && src.height == ph {
-        composite_over(dst, src, opacity);
+        composite_over_in(dst, src, opacity, rect);
         return;
     }
 
@@ -61,8 +108,8 @@ pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacit
     let (cw, ch) = (src.width as f32, src.height as f32);
     let (pwf, phf) = (pw as f32, ph as f32);
 
-    for y in 0..ph {
-        for x in 0..pw {
+    for y in rect.min_y..rect.max_y {
+        for x in rect.min_x..rect.max_x {
             let (u, v) = xform.doc_to_cell(x as f32 + 0.5, y as f32 + 0.5, cw, ch, pwf, phf);
             // Sample on a half-pixel grid.
             let su = u - 0.5;
@@ -127,6 +174,98 @@ mod tests {
         // Unclipped, it covers the frame.
         p.layers[1].clip = false;
         assert_eq!(&flatten_frame(&p, 0).pixels()[24..28], &[255, 0, 0, 255]);
+    }
+    /// Three frame-sized layers on an 8×4 project, bottom first: blue on the
+    /// left half, red on the left half too, green over everything. Each
+    /// opaque. Layers 0 and 1 then go into a group.
+    fn grouped() -> (Project, usize) {
+        let mut p = Project::new(8, 4, 12.0);
+        p.add_layer();
+        p.add_layer();
+        let paint = |x0: u32, x1: u32, rgba: [u8; 4]| {
+            let mut c = Canvas::new(8, 4);
+            for y in 0..4u32 {
+                for x in x0..x1 {
+                    let i = ((y * 8 + x) * 4) as usize;
+                    c.pixels_mut()[i..i + 4].copy_from_slice(&rgba);
+                }
+            }
+            c
+        };
+        let cells = [paint(0, 4, [0, 0, 255, 255]), paint(0, 4, [255, 0, 0, 255]), paint(0, 8, [0, 255, 0, 255])];
+        for (li, c) in cells.into_iter().enumerate() {
+            let id = p.cells.len();
+            p.cells.push(c.into());
+            p.layers[li].set_key(0, id);
+        }
+        let g = p.group_layers(&[0, 1]).unwrap();
+        (p, g)
+    }
+
+    fn px(c: &Canvas, x: u32) -> [u8; 4] {
+        c.px(x, 1)
+    }
+
+    /// At half opacity the group's layers merge first: blue under red never
+    /// shows through, only the merged red at half strength.
+    #[test]
+    fn a_half_opaque_group_composites_first() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].visible = false;
+        p.layers[g].opacity = 0.5;
+        let out = flatten_frame(&p, 0);
+        let c = px(&out, 1);
+        assert_eq!(c[2], 0, "no blue through the red: {c:?}");
+        assert!((c[3] as i32 - 128).abs() <= 1, "{c:?}");
+        // Without the group, each at half, blue would show through.
+        p.layers[g].opacity = 1.0;
+        p.layers[0].opacity = 0.5;
+        p.layers[1].opacity = 0.5;
+        assert!(px(&flatten_frame(&p, 0), 1)[2] > 0);
+    }
+
+    #[test]
+    fn an_opaque_group_matches_direct_drawing() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].opacity = 0.4;
+        let grouped = flatten_frame(&p, 0);
+        p.ungroup(g);
+        let plain = flatten_frame(&p, 0);
+        assert!(grouped.pixels() == plain.pixels());
+    }
+
+    #[test]
+    fn a_hidden_group_exports_nothing() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].visible = false;
+        p.layers[g].visible = false;
+        assert!(flatten_frame(&p, 0).pixels().iter().all(|&b| b == 0));
+    }
+
+    /// Green clipped to the group shows only over what the group covers —
+    /// the left half — and the mask ignores the layers' opacity.
+    #[test]
+    fn a_layer_clipped_to_a_group_shows_over_all_of_it() {
+        let (mut p, g) = grouped();
+        let top = p.layers.len() - 1;
+        p.layers[top].clip = true;
+        p.layers[0].opacity = 0.3;
+        assert_eq!(p.clip_base(top), Some(g));
+        let out = flatten_frame(&p, 0);
+        assert_eq!(px(&out, 1), [0, 255, 0, 255], "over the group");
+        assert_eq!(px(&out, 6)[3], 0, "past it");
+        // Hiding the group hides what is clipped to it.
+        p.layers[g].visible = false;
+        assert_eq!(px(&flatten_frame(&p, 0), 1)[3], 0);
+        p.layers[g].visible = true;
+        // Baking for Krita cuts it the same way.
+        let mut baked = p.clone();
+        crate::doc::clip::bake_clipping(&mut baked);
+        assert!(!baked.layers[top].clip);
+        assert!(flatten_frame(&baked, 0).pixels() == out.pixels());
     }
     use crate::doc::camera::Camera;
 
@@ -265,7 +404,18 @@ pub(crate) fn sample_bilinear(src: &Canvas, x: f32, y: f32) -> [u8; 4] {
 }
 
 /// In-place src-over composite, scaled by `opacity` (1:1, same-size path).
-fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32) {
+pub(crate) fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32) {
+    let all = DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: dst.width,
+        max_y: dst.height,
+    };
+    composite_over_in(dst, src, opacity, all);
+}
+
+/// [`composite_over`] over only `rect`.
+fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, rect: DirtyRect) {
     debug_assert_eq!(dst.width, src.width);
     debug_assert_eq!(dst.height, src.height);
     let op = opacity.clamp(0.0, 1.0);
@@ -273,9 +423,15 @@ fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32) {
     let out = dst.pixels_mut();
     // Row by row over what the source holds: a packed one skips its blank
     // margins outright.
-    for y in 0..src.height {
+    for y in rect.min_y..rect.max_y.min(src.height) {
         let (x0, span) = src.row_span(y);
-        let at = (y as usize * w + x0 as usize) * 4;
+        let x1 = x0 + (span.len() / 4) as u32;
+        let (a, b) = (x0.max(rect.min_x), x1.min(rect.max_x));
+        if a >= b {
+            continue;
+        }
+        let span = &span[(a - x0) as usize * 4..(b - x0) as usize * 4];
+        let at = (y as usize * w + a as usize) * 4;
         for (s, d) in span.chunks_exact(4).zip(out[at..at + span.len()].chunks_exact_mut(4)) {
             let sa = (s[3] as f32 / 255.0) * op;
             if sa <= 0.0 {

@@ -6,6 +6,7 @@
 pub mod camera;
 pub mod canvas;
 pub mod clip;
+pub mod groups;
 pub mod layer;
 pub mod orient;
 pub mod project;

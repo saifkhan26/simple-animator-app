@@ -30,7 +30,8 @@ const MAGIC: &[u8; 4] = b"ANIM";
 // layout is identical to v5, so both versions decode into the same mirror and
 // only the inflate step differs.
 // v7 appends `clip` and `alpha_lock` to each layer. Still deflated.
-const VERSION: u32 = 7;
+// v8 appends `kind`, `in_group` and `collapsed` to each layer: layer groups.
+const VERSION: u32 = 8;
 const EXT: &str = "anim";
 
 /// Compression level. Deliberately [`Compression::fast`] (level 1) rather than
@@ -98,8 +99,11 @@ fn decode_from(mut input: impl Read) -> Result<Project> {
         bail!("not an Animator project file");
     }
     let version = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
-    let project: Project = match version {
-        7 => stream(input).context("parsing project body")?,
+    let mut project: Project = match version {
+        8 => stream(input).context("parsing project body")?,
+        7 => stream::<crate::io::legacy::ProjectV7>(input)
+            .context("parsing v7 project body")?
+            .into(),
         6 => stream::<crate::io::legacy::ProjectV6>(input)
             .context("parsing v6 project body")?
             .into(),
@@ -109,6 +113,9 @@ fn decode_from(mut input: impl Read) -> Result<Project> {
             decode_uncompressed(version, &body)?
         }
     };
+    // A file another build wrote, or one damaged, could break the group
+    // invariants everything else relies on.
+    project.normalize_groups();
     Ok(project)
 }
 
@@ -529,10 +536,77 @@ mod tests {
         p.layers[1].clip = true;
         p.layers[2].alpha_lock = true;
         let (bytes, _) = encode(&p).unwrap();
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), VERSION);
         let q = decode(&bytes).unwrap();
         let flags: Vec<(bool, bool)> = q.layers.iter().map(|l| (l.clip, l.alpha_lock)).collect();
         assert_eq!(flags, [(false, false), (true, false), (false, true)]);
+    }
+
+    #[test]
+    fn groups_survive_a_save() {
+        let mut p = Project::new(4, 3, 24.0);
+        p.add_layer();
+        p.add_layer();
+        let g = p.group_layers(&[0, 1]).expect("grouped");
+        p.layers[g].collapsed = true;
+        p.layers[g].opacity = 0.5;
+        let (bytes, _) = encode(&p).unwrap();
+        let q = decode(&bytes).unwrap();
+        let rows: Vec<(bool, bool, bool)> = q.layers.iter().map(|l| (l.is_group(), l.in_group, l.collapsed)).collect();
+        assert_eq!(rows, [(false, true, false), (false, true, false), (true, false, true), (false, false, false)]);
+        assert_eq!(q.layers[g].opacity, 0.5);
+    }
+
+    /// A v7 file — clipping, no groups — opens with every layer ungrouped.
+    #[test]
+    fn a_v7_file_opens_without_groups() {
+        use std::io::Write;
+        let mut p = Project::new(4, 3, 24.0);
+        p.add_layer();
+        p.layers[1].clip = true;
+        let mirror = crate::io::legacy::ProjectV7 {
+            width: p.width,
+            height: p.height,
+            fps: p.fps,
+            cells: p.cells.iter().map(|c| (**c).clone()).collect(),
+            layers: p
+                .layers
+                .iter()
+                .map(|l| crate::io::legacy::LayerV7 {
+                    name: l.name.clone(),
+                    opacity: l.opacity,
+                    visible: l.visible,
+                    locked: l.locked,
+                    reference: l.reference,
+                    exposures: l.exposures.clone(),
+                    transform: l.transform,
+                    transform_keys: l.transform_keys.clone(),
+                    track_points: l.track_points.clone(),
+                    cell_w: l.cell_w,
+                    cell_h: l.cell_h,
+                    clip: l.clip,
+                    alpha_lock: l.alpha_lock,
+                })
+                .collect(),
+            frame_count: p.frame_count,
+            current_frame: p.current_frame,
+            current_layer: p.current_layer,
+            loop_start: p.loop_start,
+            loop_end: p.loop_end,
+            camera: p.camera,
+            camera_keys: p.camera_keys.clone(),
+        };
+        let raw = postcard::to_stdvec(&mirror).unwrap();
+        let mut enc = ZlibEncoder::new(Vec::new(), level());
+        enc.write_all(&raw).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&enc.finish().unwrap());
+        let q = decode(&bytes).expect("v7 decode");
+        assert_eq!(q.layers.len(), 2);
+        assert!(q.layers[1].clip, "clipping kept");
+        assert!(q.layers.iter().all(|l| !l.is_group() && !l.in_group && !l.collapsed));
     }
 
     /// The point of the whole format bump. Blank cells are runs of zero bytes,

@@ -2,6 +2,7 @@
 
 mod button_drag;
 mod grids;
+mod groups;
 mod liquify;
 mod orient;
 mod select;
@@ -540,15 +541,19 @@ struct TexEntry {
 enum TexKind {
     Cell,
     Ghost,
-    /// A clipped drawing; `id` is the clipped cell, this its base's.
-    Clip(CellId),
+    /// A clipped drawing; `id` is the clipped cell, this what it is cut by.
+    Clip(groups::BaseKey),
+    /// A group drawn as one image, or a group's mask; `id` is unused.
+    Group(groups::GroupKey),
 }
 
 /// A clipped layer as it shows on the current frame: see
 /// [`AppState::clip_pair`].
 struct ClipPair {
     cell: CellId,
-    base: CellId,
+    base: groups::BaseKey,
+    /// The base's layer: a drawing layer, or a group's header.
+    base_layer: usize,
     at: crate::doc::clip::Placement,
 }
 
@@ -923,8 +928,11 @@ pub struct AppState {
     /// Clipped layers' drawings as the canvas shows them, keyed by (clipped
     /// cell, base cell), drawn in place of the plain cell texture. See
     /// `sync_clip_textures`.
-    clip_textures: HashMap<(CellId, CellId), ClipTex>,
-    clip_tex_used: HashMap<(CellId, CellId), u64>,
+    clip_textures: HashMap<(CellId, groups::BaseKey), ClipTex>,
+    clip_tex_used: HashMap<(CellId, groups::BaseKey), u64>,
+    /// Groups drawn as one image, and group masks. See `app::groups`.
+    group_images: HashMap<groups::GroupKey, groups::GroupImage>,
+    group_used: HashMap<groups::GroupKey, u64>,
     ghost_tex_used: HashMap<CellId, u64>,
     /// Frame the playhead sat on at the last sync, and since when (egui time).
     /// A ghost not built yet waits for the playhead to rest, so a scrub
@@ -1211,6 +1219,9 @@ pub struct AppState {
     pub shortcut_clashes_only: bool,
     /// In-progress inline layer rename in the layers panel.
     pub layer_rename: Option<LayerRename>,
+    /// Layers picked in the panel along with the active one (Ctrl- and
+    /// Shift-click), by uid. Cleared when the active layer moves elsewhere.
+    pub selected_layers: std::collections::BTreeSet<u64>,
     pub show_settings: bool,
     /// The brush settings window. Session-only, like `show_settings`:
     /// where a window sits persists through egui's own memory, but
@@ -1245,6 +1256,9 @@ pub struct AppState {
     /// Timeline snapshot captured at the start of a layer-transform drag, used
     /// to push a single undo entry when the drag ends.
     layer_xform_before: Option<undo::TimelineState>,
+    /// What a group being transformed turns and scales about, in document
+    /// space: the middle of its layers when the drag started.
+    group_pivot: Option<(f32, f32)>,
     /// Last (layer, frame) the transform edit buffer was synced for, so the
     /// buffer is only reloaded from keys when the cursor actually moves.
     xform_sync_last: Option<(usize, usize)>,
@@ -1390,6 +1404,8 @@ impl AppState {
             cell_tex_used: HashMap::new(),
             clip_textures: HashMap::new(),
             clip_tex_used: HashMap::new(),
+            group_images: HashMap::new(),
+            group_used: HashMap::new(),
             ghost_tex_used: HashMap::new(),
             playhead_rest: (usize::MAX, 0.0),
             tool: ActiveTool::Pencil,
@@ -1500,6 +1516,7 @@ impl AppState {
             hold_capture: Default::default(),
             shortcut_clashes_only: false,
             layer_rename: None,
+            selected_layers: Default::default(),
             show_settings: false,
             show_brush_settings: false,
             show_grid_settings: false,
@@ -1514,6 +1531,7 @@ impl AppState {
             layer_xform: false,
             nav_to_layer: false,
             layer_xform_before: None,
+            group_pivot: None,
             xform_sync_last: None,
             camera_edit: false,
             nav_to_camera: false,
@@ -1876,7 +1894,7 @@ impl AppState {
         for (&(c, base), t) in self.clip_textures.iter_mut() {
             if c == id {
                 t.pending = t.pending.with(region);
-            } else if base == id {
+            } else if base == groups::BaseKey::Cell(id) {
                 let inside = match region {
                     Dirty::Clean => None,
                     Dirty::Rect(r) if t.aligned => rect_meet(r, t.rect),
@@ -1886,6 +1904,7 @@ impl AppState {
                 t.pending = t.pending.with(inside.map_or(Dirty::Clean, Dirty::Rect));
             }
         }
+        self.mark_group_region(id, region);
         self.blank_cache.remove(&id);
         // The ghost is baked from these pixels, so it needs rebuilding — but
         // re-uploaded in place, never freed. See `ghost_stale`.
@@ -1939,7 +1958,13 @@ impl AppState {
             self.cell_dirty.remove(&id);
             self.retire_ghost(id);
             self.ghost_tex_used.remove(&id);
-            let gone: Vec<_> = self.clip_textures.keys().copied().filter(|&(c, b)| c == id || b == id).collect();
+            self.retire_group_images(Some(id));
+            let gone: Vec<_> = self
+                .clip_textures
+                .keys()
+                .copied()
+                .filter(|&(c, b)| c == id || b == groups::BaseKey::Cell(id))
+                .collect();
             for key in gone {
                 if let Some(t) = self.clip_textures.remove(&key) {
                     self.retired_textures.push(t.tex);
@@ -1994,6 +2019,9 @@ impl AppState {
         self.retired_textures
             .extend(self.clip_textures.drain().map(|(_, t)| t.tex));
         self.clip_tex_used.clear();
+        self.retired_textures
+            .extend(self.group_images.drain().filter_map(|(_, g)| g.tex));
+        self.group_used.clear();
     }
 
     /// Park every ghost for release on the next sync. See `retired_textures`.
@@ -2141,11 +2169,10 @@ impl AppState {
         if li == 0 {
             return false;
         }
-        let (Some(top), Some(below)) = (self.project.layers.get(li), self.project.layers.get(li - 1))
-        else {
-            return false;
-        };
-        !top.locked && !below.locked && !top.reference && !below.reference
+        // Both editable drawing layers, in the same group or both in none.
+        self.project.paintable(li)
+            && self.project.paintable(li - 1)
+            && self.project.group_of(li) == self.project.group_of(li - 1)
     }
 
     /// Merge the active layer onto the layer below and remove it.
@@ -2264,6 +2291,105 @@ impl AppState {
             p.relink_after_remove(li);
             p.current_layer = bi;
         });
+    }
+
+    /// Merge group `g` into one drawing layer that looks the same: its
+    /// layers' composite on every frame where any of them changes, as the
+    /// group draws it, with the group's opacity carried over as the layer's.
+    /// Hidden and reference layers aren't in the picture, so they aren't
+    /// merged away either: they stay, as plain layers just below. One undo
+    /// step.
+    pub fn merge_group(&mut self, g: usize) {
+        let p = &self.project;
+        if !p.is_group(g) || p.locked_eff(g) {
+            return;
+        }
+        self.playback.stop();
+        let kids = p.children(g);
+        let drawn: Vec<usize> = kids.clone().filter(|&c| p.layers[c].visible && !p.layers[c].reference).collect();
+        let kept: Vec<usize> = kids.clone().filter(|c| !drawn.contains(c)).collect();
+        let animated = drawn.iter().any(|&c| p.layers[c].transform_keys.len() >= 2);
+        let mut frames: Vec<usize> = if animated {
+            (0..p.frame_count).collect()
+        } else {
+            let mut fs: Vec<usize> = (0..p.frame_count)
+                .filter(|&f| drawn.iter().any(|&c| p.layers[c].is_key(f)))
+                .collect();
+            for &c in &drawn {
+                fs.extend(p.layers[c].transform_keys.iter().map(|k| k.frame.min(p.frame_count.saturating_sub(1))));
+            }
+            fs.push(0);
+            fs.sort_unstable();
+            fs.dedup();
+            fs
+        };
+        frames.retain(|&f| f < p.frame_count);
+        // One canvas size for every frame: big enough for wherever the layers
+        // go, capped at the texture limit.
+        let (mut bw, mut bh) = (p.width, p.height);
+        for &f in &frames {
+            let xf = |li: usize| p.layers[li].resolve_transform(f);
+            let (w, h) = crate::doc::clip::group_space(p, g, f, &xf);
+            (bw, bh) = (bw.max(w), bh.max(h));
+        }
+        let cap = self.max_tex;
+        (bw, bh) = (bw.min(cap), bh.min(cap));
+        // Baked as if the group were shown — a hidden group merges into a
+        // hidden layer, not an empty one. Its hidden layers and references
+        // stay out: render_group skips them.
+        let mut shown = p.clone();
+        shown.layers[g].visible = true;
+        let q = &shown;
+        let baked: Vec<(usize, Canvas)> = frames
+            .into_iter()
+            .map(|f| {
+                let mut out = Canvas::new(bw, bh);
+                let xf = |li: usize| q.layers[li].resolve_transform(f);
+                let all = DirtyRect {
+                    min_x: 0,
+                    min_y: 0,
+                    max_x: bw,
+                    max_y: bh,
+                };
+                crate::doc::clip::render_group(q, g, f, true, &xf, &mut out, all);
+                (f, out)
+            })
+            .collect();
+        let header = p.layers[g].clone();
+        let kept_layers: Vec<crate::doc::layer::Layer> = kept.iter().map(|&c| p.layers[c].clone()).collect();
+        let block = kids.start..g + 1;
+        self.structural_edit(false, move |p| {
+            let n = p.frame_count;
+            let mut merged = crate::doc::layer::Layer::new(header.name.clone(), n);
+            merged.opacity = header.opacity;
+            merged.visible = header.visible;
+            merged.cell_w = bw;
+            merged.cell_h = bh;
+            for (f, canvas) in baked {
+                let id = p.cells.len();
+                p.cells.push(canvas.into());
+                merged.set_key(f, id);
+            }
+            // The group's rows go; what was kept and the merged layer take
+            // their place, bottom first.
+            for i in block.clone().rev() {
+                p.layers.remove(i);
+                p.relink_after_remove(i);
+            }
+            let mut at = block.start;
+            for mut l in kept_layers {
+                l.in_group = false;
+                p.layers.insert(at, l);
+                p.relink_after_insert(at);
+                at += 1;
+            }
+            p.layers.insert(at, merged);
+            p.relink_after_insert(at);
+            p.current_layer = at;
+        });
+        self.selected_layers.clear();
+        self.layer_rename = None;
+        self.expand_cfg = None;
     }
 
     /// Transform that fits a `cw`×`ch` source within the canvas without
@@ -2534,6 +2660,67 @@ impl AppState {
     /// Snapshot timeline state at the start of a layer-transform drag.
     pub fn begin_layer_xform(&mut self) {
         self.layer_xform_before = Some(undo::TimelineState::capture(&self.project));
+        // A group turns and scales about the middle of its layers, as they
+        // stand when the drag starts.
+        let p = &self.project;
+        let g = p.current_layer;
+        self.group_pivot = p.is_group(g).then(|| {
+            let f = p.current_frame;
+            let kids: Vec<Transform> = p.children(g).map(|c| p.layers[c].resolve_transform(f)).collect();
+            let n = kids.len().max(1) as f32;
+            let (sx, sy) = kids.iter().fold((0.0, 0.0), |(x, y), t| (x + t.tx, y + t.ty));
+            (p.width as f32 / 2.0 + sx / n, p.height as f32 / 2.0 + sy / n)
+        });
+    }
+
+    /// Move, turn or scale every layer of the active group by `f`, a change
+    /// to a layer's pose. A layer whose transform is keyed has every key
+    /// changed the same way, so it moves along on every frame — or, with
+    /// auto-key on, gets a key here instead, as a single layer would. Layers
+    /// locked on their own stay put.
+    fn transform_group(&mut self, f: impl Fn(Transform) -> Transform) {
+        let p = &mut self.project;
+        let g = p.current_layer;
+        if !p.is_group(g) || p.locked_eff(g) {
+            return;
+        }
+        let frame = p.current_frame;
+        let auto = self.auto_key_transform;
+        for c in p.children(g) {
+            if p.layers[c].locked {
+                continue;
+            }
+            let l = &mut p.layers[c];
+            if auto {
+                let pose = f(l.resolve_transform(frame));
+                l.set_transform_key(frame, pose);
+                l.transform = pose;
+            } else {
+                for k in &mut l.transform_keys {
+                    k.transform = f(k.transform);
+                }
+                l.transform = f(l.transform);
+            }
+        }
+    }
+
+    /// What scaling the whole group by `k` and turning it by `rot` about its
+    /// pivot does to one layer's pose. Owns its inputs, so it can be handed
+    /// to [`AppState::transform_group`].
+    fn about_group_pivot(&self, k: f32, rot: f32) -> impl Fn(Transform) -> Transform {
+        let (hw, hh) = (self.project.width as f32 / 2.0, self.project.height as f32 / 2.0);
+        let (px, py) = self.group_pivot.unwrap_or((hw, hh));
+        let (s, c) = rot.sin_cos();
+        move |t: Transform| {
+            let (cx, cy) = (hw + t.tx - px, hh + t.ty - py);
+            let (x, y) = (k * (cx * c - cy * s), k * (cx * s + cy * c));
+            Transform {
+                tx: px + x - hw,
+                ty: py + y - hh,
+                scale: (t.scale * k).clamp(0.01, 100.0),
+                rot: t.rot + rot,
+            }
+        }
     }
 
     /// Push a single undo entry for a completed layer-transform drag.
@@ -2558,16 +2745,23 @@ impl AppState {
         }
     }
 
+    /// Locked itself or by its group — or a group header, which has nothing
+    /// to edit.
     fn active_layer_locked(&self) -> bool {
-        self.project
-            .layers
-            .get(self.project.current_layer)
-            .map(|l| l.locked)
-            .unwrap_or(true)
+        let li = self.project.current_layer;
+        self.project.locked_eff(li) || self.project.is_group(li)
     }
 
     /// Translate the active layer by a document-space delta.
     pub fn apply_layer_pan(&mut self, dx: f32, dy: f32) {
+        if self.project.is_group(self.project.current_layer) {
+            self.transform_group(|t| Transform {
+                tx: t.tx + dx,
+                ty: t.ty + dy,
+                ..t
+            });
+            return;
+        }
         if self.active_layer_locked() {
             return;
         }
@@ -2579,6 +2773,11 @@ impl AppState {
 
     /// Scale the active layer by `factor` (multiplicative).
     pub fn apply_layer_scale(&mut self, factor: f32) {
+        if self.project.is_group(self.project.current_layer) {
+            let f = self.about_group_pivot(factor, 0.0);
+            self.transform_group(f);
+            return;
+        }
         if self.active_layer_locked() {
             return;
         }
@@ -2589,6 +2788,11 @@ impl AppState {
 
     /// Rotate the active layer by `d` radians.
     pub fn apply_layer_rotate(&mut self, d: f32) {
+        if self.project.is_group(self.project.current_layer) {
+            let f = self.about_group_pivot(1.0, d);
+            self.transform_group(f);
+            return;
+        }
         if self.active_layer_locked() {
             return;
         }
@@ -2819,12 +3023,12 @@ impl AppState {
         let li = self.project.current_layer;
         let f = self.project.current_frame;
         let n = self.project.frame_count;
+        if self.project.locked_eff(li) || self.project.is_group(li) {
+            return;
+        }
         let Some(l) = self.project.layers.get_mut(li) else {
             return;
         };
-        if l.locked {
-            return;
-        }
         if l.track_points.len() < n {
             l.track_points.resize(n, TrackSample::default());
         }
@@ -3197,7 +3401,8 @@ impl AppState {
             // which redoes just the changed rect of it.
             let cur = self.project.current_layer;
             let clipping = self.project.clip_base(cur).is_some()
-                || (0..self.project.layers.len()).any(|i| self.project.clip_base(i) == Some(cur));
+                || (0..self.project.layers.len()).any(|i| self.project.clip_base(i) == Some(cur))
+                || self.feeds_group_image(cur);
             if !clipping && self.cell_textures.contains_key(&target) {
                 self.cell_tex_used.insert(target, now);
                 // What the stroke flushed, and anything left over from
@@ -3222,9 +3427,24 @@ impl AppState {
         // textures, so a ghosted cell's plain texture isn't needed at all.
         let mut needed: Vec<CellId> = Vec::new();
         let mut clipped: Vec<ClipPair> = Vec::new();
+        let mut merged: Vec<usize> = Vec::new();
         let cur = self.project.current_frame;
+        if !self.group_images.is_empty() {
+            self.retire_group_images(None);
+        }
         for (li, layer) in self.project.layers.iter().enumerate() {
-            if !layer.visible {
+            if !self.project.shows(li) {
+                continue;
+            }
+            // A group has no drawing of its own; one drawn merged is one
+            // image, its layers inside it.
+            if layer.is_group() {
+                if self.group_drawn_whole(li) {
+                    merged.push(li);
+                }
+                continue;
+            }
+            if self.in_group_image(li) {
                 continue;
             }
             // A clipped layer shows as its clipped texture instead — or not
@@ -3243,6 +3463,7 @@ impl AppState {
                 }
             }
         }
+        self.sync_group_images(ctx, now, &merged, &clipped);
         self.sync_clip_textures(ctx, now, &clipped);
 
         for id in needed {
@@ -3296,14 +3517,37 @@ impl AppState {
         let p = &self.project;
         let f = p.current_frame;
         let base = p.layers.get(b)?;
-        if !base.visible || base.reference {
+        if !p.shows(b) || base.reference {
             return None;
         }
+        let cell = p.layers[li].resolve(f)?;
+        let xf = self.display_transform(li, f);
+        if base.is_group() {
+            // Cut by the group's mask, which sits in group space.
+            let shows_any = p
+                .children(b)
+                .any(|c| p.shows(c) && !p.layers[c].reference && p.layers[c].resolve(f).is_some());
+            if !shows_any {
+                return None;
+            }
+            return Some(ClipPair {
+                cell,
+                base: groups::BaseKey::Group(self.group_key(b, false)),
+                base_layer: b,
+                at: crate::doc::clip::Placement {
+                    xf,
+                    base_xf: crate::doc::transform::Transform::default(),
+                    pw: p.width,
+                    ph: p.height,
+                },
+            });
+        }
         Some(ClipPair {
-            cell: p.layers[li].resolve(f)?,
-            base: base.resolve(f)?,
+            cell,
+            base: groups::BaseKey::Cell(base.resolve(f)?),
+            base_layer: b,
             at: crate::doc::clip::Placement {
-                xf: self.display_transform(li, f),
+                xf,
                 base_xf: self.display_transform(b, f),
                 pw: p.width,
                 ph: p.height,
@@ -3339,7 +3583,11 @@ impl AppState {
         for pair in pairs {
             let key = (pair.cell, pair.base);
             self.clip_tex_used.insert(key, now);
-            let (Some(clip), Some(base)) = (self.project.cell(pair.cell), self.project.cell(pair.base)) else {
+            let base = match pair.base {
+                groups::BaseKey::Cell(id) => self.project.cell(id),
+                groups::BaseKey::Group(k) => self.group_images.get(&k).map(|g| &g.canvas),
+            };
+            let (Some(clip), Some(base)) = (self.project.cell(pair.cell), base) else {
                 continue;
             };
             let cell = [clip.width, clip.height];
@@ -3360,7 +3608,7 @@ impl AppState {
                 }
                 TexPlan::Rebuild(rect) => {
                     let image = crop_image(rect, || mask_rect(clip, Some(base), &pair.at, rect));
-                    let name = format!("clip_{}_{}", pair.cell, pair.base);
+                    let name = format!("clip_{}_{}", pair.cell, pair.base_layer);
                     let tex = ctx.load_texture(name, image, TextureOptions::LINEAR);
                     let fresh = ClipTex {
                         tex,
@@ -3520,8 +3768,17 @@ impl AppState {
                 bytes: bytes(&t.tex),
             });
         }
+        for (&key, img) in &self.group_images {
+            entries.push(TexEntry {
+                kind: TexKind::Group(key),
+                id: 0,
+                used: self.group_used.get(&key).copied().unwrap_or(0),
+                bytes: img.bytes(),
+            });
+        }
         for e in evictions(&entries, TEXTURE_BUDGET, self.sync_frame, self.playback.playing) {
             match e.kind {
+                TexKind::Group(key) => self.drop_group_image(key),
                 TexKind::Ghost => {
                     self.retire_ghost(e.id);
                     self.ghost_tex_used.remove(&e.id);
@@ -3613,10 +3870,8 @@ impl AppState {
     /// The cell a paint edit on the active slot should write to, allocating
     /// it if the slot is empty. `None` on a locked or reference layer.
     fn begin_edit_cell(&mut self) -> Option<CellId> {
-        if let Some(layer) = self.project.layers.get(self.project.current_layer) {
-            if layer.locked || layer.reference {
-                return None;
-            }
+        if !self.project.paintable(self.project.current_layer) {
+            return None;
         }
         // Auto-key: break the hold first, so the stroke starts a drawing of
         // this frame's own instead of editing the cell every frame in the hold
@@ -4025,7 +4280,7 @@ impl AppState {
     fn pen_cell(&self) -> Option<Option<CellId>> {
         let p = &self.project;
         let l = p.layers.get(p.current_layer)?;
-        if l.locked || l.reference {
+        if !p.paintable(p.current_layer) {
             return None;
         }
         match self.held_for_auto_key() {
@@ -4041,7 +4296,7 @@ impl AppState {
         let p = &self.project;
         let l = p.layers.get(p.current_layer)?;
         let f = p.current_frame;
-        if !self.auto_key_draw || l.locked || l.reference || l.is_key(f) {
+        if !self.auto_key_draw || !p.paintable(p.current_layer) || l.is_key(f) {
             return None;
         }
         l.resolve(f)
@@ -4334,12 +4589,7 @@ impl AppState {
 
     /// Whether every one of `layers` may be edited.
     fn layers_editable(&self, layers: impl IntoIterator<Item = usize>) -> bool {
-        layers.into_iter().all(|i| {
-            self.project
-                .layers
-                .get(i)
-                .is_some_and(|l| !l.locked && !l.reference)
-        })
+        layers.into_iter().all(|i| self.project.paintable(i))
     }
 
     /// Run a track edit as one undo step, then select what it hands back.
@@ -4711,6 +4961,12 @@ impl AppState {
         } else if now.0 != self.layer_watch.0 {
             self.prev_layer = Some(self.layer_watch.0);
         }
+        // Moving the active layer anywhere the panel's picks don't include
+        // ends the multi-selection.
+        let uid = self.project.layers.get(now.0).map(|l| l.uid);
+        if now != self.layer_watch && uid.is_some_and(|u| !self.selected_layers.contains(&u)) {
+            self.selected_layers.clear();
+        }
         self.layer_watch = now;
     }
 
@@ -4731,19 +4987,90 @@ impl AppState {
         }
     }
 
-    /// Swap the active layer with its neighbour, `up` meaning towards the top
-    /// of the Layers panel. One undo step; nothing at all at the end of the
-    /// stack, so a held key leaves no empty undo entries behind.
+    /// Move the active layer one step, `up` meaning towards the top of the
+    /// Layers panel: past its neighbour, or into or out of a group it meets
+    /// (see [`Project::move_item`]); a group moves whole. One undo step;
+    /// nothing at all at the end of the stack, so a held key leaves no empty
+    /// undo entries behind.
     pub fn move_active_layer(&mut self, up: bool) {
         let i = self.project.current_layer;
-        if up && i + 1 < self.project.layers.len() {
-            self.structural_edit(false, Project::move_layer_up);
-        } else if !up && i > 0 {
-            self.structural_edit(false, Project::move_layer_down);
-        } else {
+        if !self.project.clone().move_item(i, up) {
             return;
         }
+        self.structural_edit(false, |p| {
+            p.move_item(i, up);
+        });
         // Both edit buffers are keyed by layer index.
+        self.layer_rename = None;
+        self.expand_cfg = None;
+    }
+
+    /// Select the row `delta` rows down the Layers panel from the active
+    /// layer's (negative: up), stopping at either end. Folded groups' layers
+    /// aren't rows.
+    fn step_layer_row(&mut self, delta: isize) {
+        let rows = self.project.panel_rows();
+        let at = self.project.panel_row_of(self.project.current_layer);
+        let Some(pos) = rows.iter().position(|&r| r == at) else {
+            return;
+        };
+        let to = pos as isize + delta;
+        if (0..rows.len() as isize).contains(&to) {
+            self.select_layer(rows[to as usize]);
+        }
+    }
+
+    /// Every selected layer, bottom first: the active one, and any picked
+    /// alongside it in the panel.
+    pub fn selected_layer_indices(&self) -> Vec<usize> {
+        let cur = self.project.current_layer;
+        (0..self.project.layers.len())
+            .filter(|&i| i == cur || self.selected_layers.contains(&self.project.layers[i].uid))
+            .collect()
+    }
+
+    /// Put the selected layers in a new group. One undo step.
+    pub fn group_selected_layers(&mut self) {
+        let sel = self.selected_layer_indices();
+        if sel.is_empty() {
+            return;
+        }
+        self.structural_edit(false, |p| {
+            p.group_layers(&sel);
+        });
+        self.selected_layers.clear();
+        self.layer_rename = None;
+        self.expand_cfg = None;
+    }
+
+    /// Dissolve the active layer's group (or the active group), its layers
+    /// staying where they are. One undo step.
+    pub fn ungroup_active(&mut self) {
+        let cur = self.project.current_layer;
+        let Some(g) = (if self.project.is_group(cur) { Some(cur) } else { self.project.group_of(cur) }) else {
+            return;
+        };
+        self.structural_edit(false, |p| p.ungroup(g));
+        self.layer_rename = None;
+        self.expand_cfg = None;
+    }
+
+    /// Delete the selected layers — a group with its layers. One undo step;
+    /// never the last layer.
+    pub fn delete_selected_layers(&mut self) {
+        let uids: Vec<u64> = self
+            .selected_layer_indices()
+            .into_iter()
+            .map(|i| self.project.layers[i].uid)
+            .collect();
+        self.structural_edit(false, |p| {
+            for uid in uids {
+                if let Some(i) = p.layers.iter().position(|l| l.uid == uid) {
+                    p.delete_block(i);
+                }
+            }
+        });
+        self.selected_layers.clear();
         self.layer_rename = None;
         self.expand_cfg = None;
     }
@@ -4759,6 +5086,26 @@ impl AppState {
     }
 
     pub fn dispatch(&mut self, action: Action) {
+        // A group's header has no drawings and no pixels: what edits the
+        // active slot leaves it alone.
+        let slot_edit = matches!(
+            action,
+            Action::KeyBlank
+                | Action::KeyCopy
+                | Action::Hold
+                | Action::ClearCell
+                | Action::CellCut
+                | Action::CellPaste
+                | Action::SelectionPaste
+                | Action::SelectionCut
+                | Action::SelectionDelete
+                | Action::SelectionFill
+                | Action::LayerClipToggle
+                | Action::LayerAlphaLockToggle
+        );
+        if slot_edit && self.project.is_group(self.project.current_layer) {
+            return;
+        }
         match action {
             Action::ToolPencil => self.set_tool(ActiveTool::Pencil),
             Action::ToolInk => self.set_tool(ActiveTool::Ink),
@@ -4832,7 +5179,9 @@ impl AppState {
             Action::LayerAdd => self.structural_edit(false, |p| {
                 p.add_layer_above_active();
             }),
-            Action::LayerDelete => self.structural_edit(false, Project::delete_layer),
+            Action::LayerDelete => self.delete_selected_layers(),
+            Action::LayerGroup => self.group_selected_layers(),
+            Action::LayerUngroup => self.ungroup_active(),
             Action::LayerToggleVisible => {
                 if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
                     l.visible = !l.visible;
@@ -4840,16 +5189,18 @@ impl AppState {
             }
             Action::LayerLast => self.goto_last_layer(),
             // Panel order: the top row is the last layer.
-            Action::LayerSelectAbove => self.select_layer(self.project.current_layer + 1),
-            Action::LayerSelectBelow => {
-                if let Some(i) = self.project.current_layer.checked_sub(1) {
-                    self.select_layer(i);
+            Action::LayerSelectAbove => self.step_layer_row(-1),
+            Action::LayerSelectBelow => self.step_layer_row(1),
+            Action::LayerSelectTop => {
+                if let Some(&top) = self.project.panel_rows().first() {
+                    self.select_layer(top);
                 }
             }
-            Action::LayerSelectTop => {
-                self.select_layer(self.project.layers.len().saturating_sub(1))
+            Action::LayerSelectBottom => {
+                if let Some(&bottom) = self.project.panel_rows().last() {
+                    self.select_layer(bottom);
+                }
             }
-            Action::LayerSelectBottom => self.select_layer(0),
             Action::LayerMoveUp => self.move_active_layer(true),
             Action::LayerMoveDown => self.move_active_layer(false),
             Action::LayerPick1
@@ -4862,7 +5213,7 @@ impl AppState {
             | Action::LayerPick8
             | Action::LayerPick9 => {
                 let n = action.layer_pick().unwrap_or(1);
-                if let Some(i) = self.project.layers.len().checked_sub(n) {
+                if let Some(&i) = self.project.panel_rows().get(n - 1) {
                     self.select_layer(i);
                 }
             }
@@ -5667,7 +6018,7 @@ impl AppState {
         link.baseline = None;
         // Reference and `-x` layers stay here: not sent, and unlinked if they
         // were linked before.
-        let keep: Vec<bool> = self.project.layers.iter().map(|l| !krita_link::stays_here(l)).collect();
+        let keep: Vec<bool> = krita_link::sendable(&self.project);
         let mut uuids = Vec::new();
         let mut kept_out = Vec::new();
         for (l, &k) in self.project.layers.iter().zip(&keep) {
@@ -5985,6 +6336,9 @@ impl AppState {
             locked: bool,
             cells: Vec<Canvas>,
             keys: Vec<(usize, usize)>,
+            group: bool,
+            in_group: bool,
+            collapsed: bool,
         }
         let mut layers: Vec<Imported> = Vec::new();
         for kl in &doc.layers {
@@ -6019,7 +6373,23 @@ impl AppState {
                 locked: kl.locked,
                 cells,
                 keys,
+                group: kl.group,
+                in_group: kl.in_group,
+                collapsed: kl.collapsed,
             });
+        }
+        // A group of nothing — every layer in it held back — isn't worth
+        // bringing in.
+        let mut i = 0;
+        while i < layers.len() {
+            if layers[i].group && (i == 0 || !layers[i - 1].in_group) {
+                layers.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        if layers.iter().all(|l| l.group) {
+            layers.clear();
         }
         if layers.is_empty() {
             let why = if doc.held.is_empty() {
@@ -6030,28 +6400,46 @@ impl AppState {
             self.krita_notice(why, true);
             return;
         }
-        let n = layers.len();
+        let n = layers.iter().filter(|l| !l.group).count();
+        let has_groups = layers.iter().any(|l| l.group);
         self.structural_edit(false, move |p| {
             p.ensure_frame_count(need);
             // Bottom first: each lands on top of the one before, all under
-            // the active layer.
+            // the active layer — and in its group, unless what comes in has
+            // groups of its own, which can't go inside one: then under the
+            // whole group.
+            let cur = p.current_layer;
+            let at0 = if has_groups { p.block(p.group_of(cur).unwrap_or(cur)).start } else { cur };
+            let inherit = !has_groups && p.layers.get(cur).is_some_and(|l| l.in_group || l.is_group());
+            let mut at = at0.min(p.layers.len());
             for im in layers {
-                let idx = p.add_layer_below_active(im.name);
-                let base = p.cells.len();
-                let size = im.cells.first().map(|c| (c.width, c.height));
-                p.cells.extend(im.cells.into_iter().map(std::sync::Arc::new));
-                let l = &mut p.layers[idx];
+                let mut l = if im.group {
+                    crate::doc::layer::Layer::group(im.name, p.frame_count)
+                } else {
+                    crate::doc::layer::Layer::new(im.name, p.frame_count)
+                };
                 l.opacity = im.opacity as f32 / 255.0;
                 l.visible = im.visible;
                 l.locked = im.locked;
-                if let Some((cw, ch)) = size.filter(|&s| s != (pw, ph)) {
+                l.in_group = im.in_group || (inherit && !im.group);
+                l.collapsed = im.collapsed;
+                let base = p.cells.len();
+                if let Some((cw, ch)) = im.cells.first().map(|c| (c.width, c.height)).filter(|&s| s != (pw, ph)) {
                     l.cell_w = cw;
                     l.cell_h = ch;
                 }
+                p.cells.extend(im.cells.into_iter().map(std::sync::Arc::new));
                 for (t, ci) in im.keys {
                     l.set_key(t, base + ci);
                 }
+                p.layers.insert(at, l);
+                p.relink_after_insert(at);
+                at += 1;
             }
+            if cur >= at0 {
+                p.current_layer = cur + (at - at0);
+            }
+            p.normalize_groups();
         });
         let mut warnings = doc.warnings;
         if let Some(fps) = doc.fps.filter(|f| (f - self.project.fps).abs() > 0.01) {
@@ -6786,7 +7174,7 @@ mod tests {
         let mut link = KritaLink::new(path.clone());
         link.poll_every = Duration::ZERO;
         link.settle = Duration::ZERO;
-        let keep: Vec<bool> = st.project.layers.iter().map(|l| !krita_link::stays_here(l)).collect();
+        let keep: Vec<bool> = krita_link::sendable(&st.project);
         assert_eq!(keep, [false, true]);
         let ink_uuid = krita_link::new_uuid();
         link.uuids.insert(st.project.layers[ink].uid, ink_uuid.clone());

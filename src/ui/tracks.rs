@@ -85,15 +85,20 @@ pub fn header_rect(ctx: &egui::Context) -> Option<Rect> {
 
 /// Screen mapping for this frame.
 #[derive(Clone, Copy)]
-struct Geo {
+struct Geo<'a> {
     tracks: Rect,
     fw: f32,
     scroll: egui::Vec2,
     n_layers: usize,
     frame_count: usize,
+    /// The layers that get a row, top first, as the Layers panel lists them:
+    /// a folded group's layers have none.
+    rows: &'a [usize],
+    /// Each layer's row: its own, or for a folded group's layer, the group's.
+    row_of: &'a [usize],
 }
 
-impl Geo {
+impl Geo<'_> {
     fn x(&self, frame: f32) -> f32 {
         self.tracks.min.x + frame * self.fw - self.scroll.x
     }
@@ -116,9 +121,10 @@ impl Geo {
     /// Top of layer `layer`'s row. The top layer is drawn first, matching the
     /// Layers panel.
     fn row_y(&self, layer: usize) -> f32 {
-        let r = self.n_layers - 1 - layer;
+        let r = self.row_of.get(layer).copied().unwrap_or(0);
         self.tracks.min.y + r as f32 * ROW_H - self.scroll.y
     }
+
 
     fn row(&self, layer: usize) -> Rect {
         let y = self.row_y(layer);
@@ -128,13 +134,13 @@ impl Geo {
     /// Layer under screen `y`, or `None` off the rows.
     fn layer_at(&self, y: f32) -> Option<usize> {
         let r = ((y - self.tracks.min.y + self.scroll.y) / ROW_H).floor();
-        (r >= 0.0 && (r as usize) < self.n_layers).then(|| self.n_layers - 1 - r as usize)
+        (r >= 0.0).then(|| self.rows.get(r as usize).copied()).flatten()
     }
 
     /// Layer under screen `y`, clamped onto the sheet.
     fn layer_on_sheet(&self, y: f32) -> usize {
         let r = ((y - self.tracks.min.y + self.scroll.y) / ROW_H).floor() as isize;
-        self.n_layers - 1 - r.clamp(0, self.n_layers as isize - 1) as usize
+        self.rows[r.clamp(0, self.rows.len() as isize - 1) as usize]
     }
 
     /// Bar for frames `start..end` on `layer`.
@@ -280,7 +286,14 @@ pub fn show(state: &mut AppState, ui: &mut egui::Ui) {
 
     wheel(state, ui, ruler.union(tracks), header);
     follow_cursor(state, ui, tracks, id);
-    clamp_scroll(state, tracks, fc, n_layers);
+    let rows = state.project.panel_rows();
+    clamp_scroll(state, tracks, fc, rows.len());
+    let row_of: Vec<usize> = (0..n_layers)
+        .map(|li| {
+            let r = state.project.panel_row_of(li);
+            rows.iter().position(|&x| x == r).unwrap_or(0)
+        })
+        .collect();
 
     let g = Geo {
         tracks,
@@ -288,6 +301,8 @@ pub fn show(state: &mut AppState, ui: &mut egui::Ui) {
         scroll: state.track_scroll,
         n_layers,
         frame_count: fc,
+        rows: &rows,
+        row_of: &row_of,
     };
 
     corner_ui(state, ui, corner, id);
@@ -517,8 +532,9 @@ fn follow_cursor(state: &mut AppState, ui: &egui::Ui, tracks: Rect, id: Id) {
     } else if x0 + fw + margin > s.x + tracks.width() {
         s.x = x0 + fw + margin - tracks.width();
     }
-    let n = state.project.layers.len();
-    let y0 = (n.saturating_sub(1 + cur.1)) as f32 * ROW_H;
+    let row = state.project.panel_row_of(cur.1);
+    let rows = state.project.panel_rows();
+    let y0 = rows.iter().position(|&r| r == row).unwrap_or(0) as f32 * ROW_H;
     if y0 < s.y {
         s.y = y0;
     } else if y0 + ROW_H > s.y + tracks.height() {
@@ -715,7 +731,7 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
 fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id: Id) {
     let painter = ui.painter_at(header);
     let cur = state.project.current_layer;
-    for layer in (0..g.n_layers).rev() {
+    for &layer in g.rows {
         let y = g.row_y(layer);
         let row = Rect::from_min_max(pos2(header.min.x, y), pos2(header.max.x, y + ROW_H));
         if !row.intersects(header) {
@@ -735,6 +751,22 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
         let eye = Rect::from_center_size(pos2(row.min.x + 20.0, row.center().y), vec2(20.0, 20.0));
         let lock = eye.translate(vec2(21.0, 0.0));
         let name = Rect::from_min_max(pos2(lock.max.x + 5.0, row.min.y), pos2(row.max.x - 6.0, row.max.y));
+        // A group's layers sit indented; a group shows a folder that folds it.
+        let (is_group, folded) = {
+            let l = &state.project.layers[layer];
+            (l.is_group(), l.collapsed)
+        };
+        let name = if state.project.layers[layer].in_group {
+            Rect::from_min_max(pos2(name.min.x + 12.0, name.min.y), name.max)
+        } else {
+            name
+        };
+        let (fold, name) = if is_group {
+            let f = Rect::from_min_size(name.min, vec2(16.0, ROW_H));
+            (Some(f), Rect::from_min_max(pos2(f.max.x + 2.0, name.min.y), name.max))
+        } else {
+            (None, name)
+        };
 
         // Interaction rects are clipped by hand: `ui.interact` would let a
         // row scrolled out of the header take clicks meant for the ruler.
@@ -781,8 +813,18 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
                 state.project.layers[layer].locked = !locked;
             }
         }
+        if let Some(r) = fold.and_then(|f| hit(f, "fold").map(|r| (f, r))) {
+            let (f, r) = r;
+            let r = r.on_hover_text(if folded { "Show the group's layers" } else { "Fold the group" });
+            icon(f, if folded { ic::FOLDER_SIMPLE } else { ic::FOLDER_OPEN }, false, r.hovered());
+            if r.clicked() {
+                state.project.layers[layer].collapsed = !folded;
+                let cur = state.project.current_layer;
+                state.project.current_layer = state.project.panel_row_of(cur);
+            }
+        }
         if let Some(r) = hit(name, "name") {
-            let color = if active || r.hovered() {
+            let color = if active || r.hovered() || is_group {
                 theme::TEXT
             } else {
                 theme::TEXT_MUTED
@@ -830,7 +872,7 @@ fn well_lines(ui: &egui::Ui, outer: Rect, header: Rect, ruler: Rect) {
 fn scrollbars(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, id: Id) {
     let content = vec2(
         (g.frame_count as f32 + END_SLACK) * g.fw,
-        g.n_layers as f32 * ROW_H,
+        g.rows.len() as f32 * ROW_H,
     );
     let view = g.tracks.size();
     let both = content.x > view.x && content.y > view.y;
@@ -901,7 +943,7 @@ fn paint(
     let painter = ui.painter_at(g.tracks);
     let fc = g.frame_count;
     let cur_layer = state.project.current_layer;
-    for layer in 0..g.n_layers {
+    for &layer in g.rows {
         let row = g.row(layer);
         if !row.intersects(g.tracks) {
             continue;
@@ -955,7 +997,7 @@ fn paint(
 
     // Gather first: `cell_is_blank` needs the state mutably.
     let mut todo: Vec<BarPaint> = Vec::new();
-    for layer in 0..g.n_layers {
+    for &layer in g.rows {
         if !g.row(layer).intersects(g.tracks) {
             continue;
         }
@@ -1076,8 +1118,24 @@ fn paint(
         ui.ctx().request_repaint();
     }
 
+    // A group's row: a tick wherever one of its layers has a key, so a
+    // folded group still shows where its drawings change.
+    for &layer in g.rows {
+        let row = g.row(layer);
+        if !row.intersects(g.tracks) || !state.project.is_group(layer) {
+            continue;
+        }
+        let kids = state.project.children(layer);
+        for f in 0..fc {
+            if kids.clone().any(|c| state.project.layers[c].is_key(f)) {
+                let x = g.x(f as f32 + 0.5);
+                painter.vline(x, (row.center().y - 4.0)..=(row.center().y + 4.0), Stroke::new(2.0, theme::TEXT_MUTED));
+            }
+        }
+    }
+
     // Transform keys, per layer, in the gap under each row's bars.
-    for layer in 0..g.n_layers {
+    for &layer in g.rows {
         let row = g.row(layer);
         if !row.intersects(g.tracks) {
             continue;
@@ -1373,6 +1431,27 @@ mod tests {
         state.project = sheet(3, &[0, 1, 2]);
         drag(&mut state, at(0, 0), at(2, 0), egui::Modifiers::NONE);
         assert_eq!(row(&state.project, 0), vec![2, 3, 1], "A lands on 2, B and C close up");
+    }
+
+    /// A group's row takes no drawings, and a folded group's layers have no
+    /// rows at all.
+    #[test]
+    fn a_group_row_takes_no_drawings_and_folding_hides_its_layers() {
+        let mut state = AppState::for_test();
+        state.project = sheet(3, &[0, 1, 2]);
+        state.project.add_layer();
+        let g = state.project.group_layers(&[0]).unwrap();
+        // Rows, top first: the top layer, the group, its layer.
+        assert_eq!(state.project.panel_rows(), [2, g, 0]);
+        let before = row(&state.project, 0);
+        drag(&mut state, at(0, 2), at(0, 1), egui::Modifiers::NONE);
+        assert_eq!(row(&state.project, 0), before, "nothing lands on a group's row");
+        assert!(state.project.layers[g].exposures.iter().all(Option::is_none));
+        // Folded: two rows, and the group's drawings can't be picked up.
+        state.project.layers[g].collapsed = true;
+        assert_eq!(state.project.panel_rows(), [2, g]);
+        drag(&mut state, at(0, 2), at(1, 2), egui::Modifiers::NONE);
+        assert_eq!(row(&state.project, 0), before, "no row to drag from");
     }
 
     #[test]

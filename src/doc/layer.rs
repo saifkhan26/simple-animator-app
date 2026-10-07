@@ -80,15 +80,37 @@ pub struct Layer {
     /// Clipped to the layer below: it only shows where the first layer under
     /// it that isn't clipped itself — its base — has pixels. See
     /// [`crate::doc::clip`].
-    ///
-    /// These two must stay the LAST fields: the `.anim` format (postcard) is
-    /// positional, and v7 appended them.
     #[serde(default)]
     pub clip: bool,
     /// Painting only changes pixels that already have paint: strokes and
     /// fills recolour, never add coverage, and the eraser does nothing.
     #[serde(default)]
     pub alpha_lock: bool,
+    /// A drawing layer, or a group's header row. See [`crate::doc::groups`].
+    ///
+    /// These three must stay the LAST fields: the `.anim` format (postcard)
+    /// is positional, and v8 appended them.
+    #[serde(default)]
+    pub kind: LayerKind,
+    /// One of the layers of the group whose header sits directly above this
+    /// one's run. Groups hold layers, never groups.
+    #[serde(default)]
+    pub in_group: bool,
+    /// A group header shown folded, its layers out of sight in the panel and
+    /// the tracks.
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// What a row of the layer stack is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LayerKind {
+    /// Drawings on the timeline.
+    #[default]
+    Paint,
+    /// A group's header: no drawings of its own. Its layers are the run of
+    /// `in_group` layers directly below it.
+    Group,
 }
 
 impl Layer {
@@ -110,7 +132,22 @@ impl Layer {
             cell_h: 0,
             clip: false,
             alpha_lock: false,
+            kind: LayerKind::Paint,
+            in_group: false,
+            collapsed: false,
         }
+    }
+
+    /// A group header named `name`, as long as the timeline.
+    pub fn group(name: impl Into<String>, frames: usize) -> Self {
+        Self {
+            kind: LayerKind::Group,
+            ..Self::new(name, frames)
+        }
+    }
+
+    pub fn is_group(&self) -> bool {
+        self.kind == LayerKind::Group
     }
 
     /// Size of the cells this layer draws into: its own override, or the

@@ -18,6 +18,9 @@ threads except export.
   for tracing / rotoscoping.
 - **Layers** with opacity, visibility, lock, and a *Reference* (light-table)
   flag that dims the layer and excludes it from export.
+- **Layer groups** — fold, hide, lock, fade, move and clip to a whole group;
+  a group at 50% fades as one picture, as in Krita, and goes to Krita and back
+  as a real group.
 - **Onion skin** drawn as colored silhouettes — blue past, red future — that
   step by *drawing* rather than by frame, so holds don't waste ghosts.
 - **X-sheet (exposure sheet)** — frames × layers grid. Click any slot to
@@ -266,6 +269,30 @@ Pasting an image from the system clipboard as a new layer is
 
 Layers paint bottom-up. The list shows them top-down (top of list = on top).
 
+#### Groups
+
+Ctrl-click layer names to pick several (Shift-click picks a range), then
+**Group** (`Ctrl+G` on a new install) puts them in a group. Groups are one
+level deep: a group holds layers, not other groups.
+
+- **Group row** — the chevron folds it; its eye, lock and opacity cover every
+  layer inside. Opacity is a true group composite: the layers are mixed first
+  and the result faded, so overlapping lines inside don't show through each
+  other — the same picture Krita draws.
+- **Drag** a layer onto a layer inside a group to put it in; drag it out to
+  take it out. Dragging the group row moves the whole group.
+- **Right-click the group row** — *Ungroup*, *Merge group* (one layer holding
+  exactly what the group showed, at the group's opacity; hidden and reference
+  layers inside are kept as layers), *Delete group*, and flip / turn every
+  drawing inside.
+- **Clip to the layer below** on a layer sitting just above a group clips it
+  to everything the group shows. Inside a group, a layer clips to the layer
+  below it in the same group.
+- **Move a whole group** — pick the group row and use the layer transform
+  (move, turn, scale): every layer inside moves together, as one undo step.
+- The **timeline tracks** and the **X-sheet** show a group row with its
+  layers' keys under it, and indent the layers inside; folding hides them.
+
 ### X-sheet window
 
 Grid view: rows = frames, columns = layers. Each cell shows the **CellId**
@@ -444,7 +471,11 @@ exported.
 opens with that layer selected) writes the project as an animated `.kra` to a
 temp folder and opens it in Krita. Keys, holds, layer names, opacity,
 visibility and lock all travel; a drawing reused at several frames arrives as
-a Krita cloned frame.
+a Krita cloned frame. Groups arrive as Krita group layers, folded, faded and
+hidden as they are here, and come back the same way: a group made in Krita,
+or a layer moved in or out of one there, shows up here. Krita groups nested
+inside groups fold into the outermost one, since groups here are one level
+deep.
 
 Every time you save in Krita, the app notices within a couple of seconds and
 folds the save back in as **one undo step**, touching only what Krita changed:
@@ -531,6 +562,7 @@ lists the current binding for each one. A few of the defaults:
 | Ctrl+Shift / Ctrl+Alt / Shift+Alt (held) | Add to / remove from / intersect the selection |
 | Alt+X / C / V             | Drawing cut / copy / paste    |
 | Ctrl+Z / Ctrl+Y           | Undo / redo                   |
+| Ctrl+G                    | Group the picked layers (new installs; Shift+Alt+G is the perspective grid) |
 | Ctrl+S / Ctrl+Shift+S     | Save / Save As                |
 | Tab                       | Hide / show panels            |
 
@@ -545,7 +577,7 @@ does nothing. An unbound action (the × beside it) stays unbound.
 ## Files
 
 Projects save as a binary `.anim` file (**File → Save**, `Ctrl+S`) — postcard
-over a magic + version header, currently version 5, with migrations for every
+over a magic + version header, currently version 8, with migrations for every
 older version the format has had.
 
 ## Roadmap
