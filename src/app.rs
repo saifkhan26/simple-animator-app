@@ -1175,6 +1175,10 @@ pub struct AppState {
     pub show_checker: bool,
 
     pub pen: PenInput,
+    /// A pen recording under way (Tablet readout), and where the last one
+    /// went — or why it couldn't be written.
+    pub pen_record: Option<crate::input::pen_record::PenRecord>,
+    pub pen_record_saved: Option<Result<std::path::PathBuf, String>>,
 
     pub history: History,
     /// Full-pixel snapshot of the cell before the in-flight stroke started.
@@ -1507,6 +1511,8 @@ impl AppState {
                 pen.set_area(prefs.pen_area);
                 pen
             },
+            pen_record: None,
+            pen_record_saved: None,
             history: History::default(),
             stroke_pre_pixels: Vec::new(),
             stroke_pre_live: false,
@@ -5792,6 +5798,14 @@ impl eframe::App for AppState {
         }
 
         self.pen.poll(ctx.input(|i| i.pointer.any_down()));
+        if let Some(rec) = &mut self.pen_record {
+            if rec.frame(ctx, &self.pen) {
+                let rec = self.pen_record.take().expect("recording");
+                self.pen_record_saved = Some(rec.finish().map_err(|e| e.to_string()));
+            }
+            // Every frame, pen or no pen: a quiet spell is part of the record.
+            ctx.request_repaint();
+        }
         // Sampled here rather than in the pointer handlers: those run off
         // tablet packets and never see an `InputState`.
         (self.shift_held, self.alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));

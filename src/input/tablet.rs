@@ -390,15 +390,20 @@ pub enum PenArea {
     Window,
     /// Whatever the driver reports for its default context.
     Driver,
+    /// Not a system context at all, so the driver keeps the pointer to
+    /// itself. Some drivers then send no packets — this one once did, though
+    /// at a time when packets were also being misread.
+    Untouched,
 }
 
 impl PenArea {
-    pub const ALL: [PenArea; 2] = [PenArea::Window, PenArea::Driver];
+    pub const ALL: [PenArea; 3] = [PenArea::Window, PenArea::Driver, PenArea::Untouched];
 
     pub fn label(self) -> &'static str {
         match self {
             PenArea::Window => "This window's monitor",
             PenArea::Driver => "What the driver reports",
+            PenArea::Untouched => "Leave it to the driver",
         }
     }
 
@@ -411,6 +416,11 @@ impl PenArea {
             PenArea::Driver => {
                 "Use the area the driver reports. Right for drivers that report their work \
                  area truthfully; XP-Pen's reports the whole desktop."
+            }
+            PenArea::Untouched => {
+                "Read the pen without steering the pointer, so the driver's work area holds. \
+                 Some drivers then send no pen data at all: if the readout's packet count \
+                 stays at zero, pick another option."
             }
         }
     }
@@ -1151,7 +1161,7 @@ mod windows_backend {
         });
         let window_monitor = match area {
             PenArea::Window => hwnd.map(HWND).and_then(monitor_of),
-            PenArea::Driver => None,
+            PenArea::Driver | PenArea::Untouched => None,
         };
         super::DisplaySig {
             desktop,
@@ -1250,7 +1260,11 @@ mod windows_backend {
             // separately. Clearing CXO_SYSTEM here stopped packets arriving
             // at all, which is worth a comment because the fix looks like a
             // no-op otherwise.
-            log_context.lcOptions |= CXO::SYSTEM;
+            if area == PenArea::Untouched {
+                log_context.lcOptions &= !CXO::SYSTEM;
+            } else {
+                log_context.lcOptions |= CXO::SYSTEM;
+            }
             // Only the fields actually read. Asking for everything invites a
             // packet whose length depends on what the device happens to
             // support, and the length is the one thing that must be right:

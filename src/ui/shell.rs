@@ -1613,6 +1613,33 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
         });
         state.pen.set_area(area);
     }
+    ui.horizontal(|ui| {
+        if state.pen_record.is_some() {
+            ui.label(
+                egui::RichText::new("recording — sweep the pen over the tablet, edge to edge")
+                    .color(DIAG_BAD)
+                    .size(11.0),
+            );
+        } else if ui
+            .small_button("Record pen (6 s)")
+            .on_hover_text(
+                "Writes where the pen, the cursor and this app's pointer are, frame by                  frame, while this window is active — what a screenshot of this readout                  can't show, since the screenshot tool takes over.",
+            )
+            .clicked()
+        {
+            state.pen_record_saved = None;
+            state.pen_record = Some(crate::input::pen_record::PenRecord::start(&state.pen));
+        }
+    });
+    match &state.pen_record_saved {
+        Some(Ok(path)) => {
+            ui.label(egui::RichText::new(format!("saved {}", path.display())).color(theme::TEXT_MUTED).size(11.0));
+        }
+        Some(Err(e)) => {
+            ui.label(egui::RichText::new(format!("couldn't save: {e}")).color(DIAG_BAD).size(11.0));
+        }
+        None => {}
+    }
     display_diagnostics(ui, &d);
 
     if !d.backend {
