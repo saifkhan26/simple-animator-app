@@ -28,6 +28,16 @@ fn tip(state: &AppState, action: Action, base: &str) -> String {
     }
 }
 
+/// [`tip`] for a key-jump button, naming the layer whose drawings it also
+/// stops at when the active layer is linked to one.
+fn key_jump_tip(state: &AppState, action: Action, base: &str) -> String {
+    let p = &state.project;
+    match p.key_link(p.current_layer) {
+        Some(s) => tip(state, action, &format!("{base} — this layer + {}", p.layers[s].name)),
+        None => tip(state, action, base),
+    }
+}
+
 /// Bare shortcut text for an action (e.g. "Ctrl+S"), empty if unbound.
 pub(crate) fn combo_text(state: &AppState, action: Action) -> String {
     state
@@ -89,13 +99,14 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     save_error_dialog(state, ctx);
     save_toast(state, ctx);
     krita_toast(state, ctx);
-    timeline_wheel_scrub(state, ctx);
+    wheel_map(state, ctx);
 
     egui::CentralPanel::default()
         .frame(Frame::none().fill(Color32::TRANSPARENT))
         .show(ctx, |ui| {
             let avail = ui.available_size();
             let (canvas_rect, resp) = ui.allocate_exact_size(avail, Sense::drag());
+            state.canvas_rect = canvas_rect;
             // Republish the doc → screen scale before anything reads it: the
             // brush-size lock and the stroke input filter both need it, and
             // only the canvas knows the fit-to-window base scale.
@@ -344,12 +355,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                                 let cursor = resp
                                     .interact_pointer_pos()
                                     .unwrap_or_else(|| canvas_rect.center());
-                                let before = Xform::new(state, canvas_rect).screen_to_doc(cursor);
-                                let factor = (-dy * 0.01).exp();
-                                state.view.zoom = (state.view.zoom * factor).clamp(0.05, 64.0);
-                                let after =
-                                    Xform::new(state, canvas_rect).doc_to_screen(before.0, before.1);
-                                state.view.pan += cursor - after;
+                                zoom_view_at(state, canvas_rect, cursor, (-dy * 0.01).exp());
                             }
                         }
                         None if state.button_drag.is_some() => {
@@ -620,7 +626,9 @@ fn panel_meta(id: PanelId) -> (&'static str, &'static str) {
     }
 }
 
-/// Mouse wheel over the canvas or the timeline scrubs the frame.
+/// The mouse wheel over the canvas, the Timeline or the mini timeline, doing
+/// what the wheel map in Settings holds for the modifiers down
+/// ([`ShortcutMap::wheel_action`](crate::input::shortcuts::ShortcutMap::wheel_action)).
 ///
 /// Reads the raw `MouseWheel` events rather than `smooth_scroll_delta`: a mouse
 /// reports whole `Line`s (one per notch), which maps to one step with no
@@ -628,7 +636,8 @@ fn panel_meta(id: PanelId) -> (&'static str, &'static str) {
 /// whichever `ScrollArea` the pointer sits over. The raw events survive that
 /// consumption, so the layer test below is what stops us double-handling a
 /// scroll meant for a panel's own list.
-fn timeline_wheel_scrub(state: &mut AppState, ctx: &egui::Context) {
+fn wheel_map(state: &mut AppState, ctx: &egui::Context) {
+    use crate::input::shortcuts::WheelAction;
     // Mid-stroke or mid-nav-drag the frame must not move: the stroke is writing
     // into the cell resolved for the frame it started on.
     if state.stroke.is_some() || state.nav_drag.is_some() {
@@ -638,44 +647,42 @@ fn timeline_wheel_scrub(state: &mut AppState, ctx: &egui::Context) {
     // Which surface is under the pointer? Same trick as the colour-pick guard
     // above: the canvas is `Order::Background`, floating panels are `Middle`,
     // so a layer id identifies the window. Only the canvas and the two timeline
-    // windows scrub — everything else keeps scrolling normally.
-    let Some(layer) = ctx
-        .input(|i| i.pointer.hover_pos())
-        .and_then(|p| ctx.layer_id_at(p))
-    else {
+    // windows take the wheel — everything else keeps scrolling normally.
+    let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) else {
         return;
     };
+    let Some(layer) = ctx.layer_id_at(pointer) else {
+        return;
+    };
+    let over_canvas = layer.order == egui::Order::Background;
     let over_timeline = layer.id == egui::Id::new(panel_key(PanelId::Timeline));
-    let scrubs = layer.order == egui::Order::Background
-        || over_timeline
-        || layer.id == egui::Id::new("mini_timeline");
-    if !scrubs {
+    if !(over_canvas || over_timeline || layer.id == egui::Id::new("mini_timeline")) {
         return;
     }
-    // The tracks own the modified wheel (Ctrl zooms, Shift pans) and the
-    // wheel over the layer names (scrolls the rows).
+    let mods = ctx.input(|i| i.modifiers);
+    let action = state.shortcuts.wheel_action(mods);
+    // The tracks zoom and pan themselves (`tracks::wheel`), and the wheel
+    // over the layer names scrolls the rows.
     if over_timeline {
-        let mods = ctx.input(|i| i.modifiers);
-        let pointer = ctx.input(|i| i.pointer.hover_pos());
-        let on_names = crate::ui::tracks::header_rect(ctx)
-            .zip(pointer)
-            .is_some_and(|(r, p)| r.contains(p));
-        if mods.command || mods.shift || on_names {
+        let on_names = crate::ui::tracks::header_rect(ctx).is_some_and(|r| r.contains(pointer));
+        if on_names || matches!(action, WheelAction::Zoom | WheelAction::PanTimeline) {
             return;
         }
     }
 
-    // Only the vertical axis. Horizontal (shift+wheel, trackpad-X) is left for
-    // the frame strip's own `ScrollArea` to pan with.
+    // The vertical axis. Horizontal (a sideways trackpad swipe) is left for
+    // the tracks to pan with — except under Shift, which a Mac reports as a
+    // sideways scroll of the wheel itself.
     let (lines, points) = ctx.input(|i| {
         let mut lines = 0.0_f32;
         let mut points = 0.0_f32;
         for e in &i.events {
             if let egui::Event::MouseWheel { unit, delta, .. } = e {
+                let d = if mods.shift { delta.y + delta.x } else { delta.y };
                 match unit {
-                    egui::MouseWheelUnit::Line => lines += delta.y,
-                    egui::MouseWheelUnit::Point => points += delta.y,
-                    egui::MouseWheelUnit::Page => lines += delta.y,
+                    egui::MouseWheelUnit::Line => lines += d,
+                    egui::MouseWheelUnit::Point => points += d,
+                    egui::MouseWheelUnit::Page => lines += d,
                 }
             }
         }
@@ -698,19 +705,68 @@ fn timeline_wheel_scrub(state: &mut AppState, ctx: &egui::Context) {
     if notches == 0.0 {
         return;
     }
+    // Positive is wheel *up*.
+    let n = notches.abs() as usize;
+    let up = notches > 0.0;
 
-    // Wheel *down* gives a negative y, and down advances the timeline by
-    // default — hence the negation.
-    let mut dir = -notches.signum() as isize;
-    if state.invert_timeline_scroll {
-        dir = -dir;
+    match action {
+        WheelAction::Frames | WheelAction::Drawings => {
+            // Down advances the timeline by default.
+            let forward = up == state.invert_timeline_scroll;
+            // Playback rewrites `current_frame` every tick, so a scrub during
+            // playback would be invisible. Stop it, as a pointer-down on the
+            // canvas already does.
+            state.playback.stop();
+            if action == WheelAction::Frames {
+                let dir = if forward { 1 } else { -1 };
+                let delta = dir * n as isize * state.frame_step_delta();
+                state.project.step(delta, state.loop_timeline);
+            } else {
+                // Key to key, clamped like Shift+A / Shift+S.
+                for _ in 0..n {
+                    let to = if forward {
+                        state.project.next_key_frame()
+                    } else {
+                        state.project.prev_key_frame()
+                    };
+                    let Some(f) = to else { break };
+                    state.project.goto(f);
+                }
+            }
+        }
+        WheelAction::Zoom => {
+            if over_canvas && state.canvas_rect.is_positive() {
+                let rect = state.canvas_rect;
+                zoom_view_at(state, rect, pointer, WHEEL_ZOOM_STEP.powf(notches));
+            }
+        }
+        WheelAction::BrushSize => {
+            let a = if up { Action::SizeUp } else { Action::SizeDown };
+            for _ in 0..n {
+                state.dispatch(a);
+            }
+        }
+        WheelAction::Layers => {
+            let a = if up { Action::LayerSelectAbove } else { Action::LayerSelectBelow };
+            for _ in 0..n {
+                state.dispatch(a);
+            }
+        }
+        // Panning is the tracks' own, above.
+        WheelAction::PanTimeline | WheelAction::Nothing => {}
     }
-    // Playback rewrites `current_frame` every tick, so a scrub during playback
-    // would be invisible. Stop it, as a pointer-down on the canvas already does.
-    state.playback.stop();
-    let delta = dir * notches.abs() as isize * state.frame_step_delta();
-    let wrap = state.loop_timeline;
-    state.project.step(delta, wrap);
+}
+
+/// View zoom per wheel notch.
+const WHEEL_ZOOM_STEP: f32 = 1.15;
+
+/// Scale the view by `factor` about the screen point `at`, keeping the doc
+/// point under it where it is.
+fn zoom_view_at(state: &mut AppState, canvas_rect: Rect, at: egui::Pos2, factor: f32) {
+    let before = Xform::new(state, canvas_rect).screen_to_doc(at);
+    state.view.zoom = (state.view.zoom * factor).clamp(0.05, 64.0);
+    let after = Xform::new(state, canvas_rect).doc_to_screen(before.0, before.1);
+    state.view.pan += at - after;
 }
 
 /// Trackpad scroll (in points) that counts as one wheel notch.
@@ -1244,13 +1300,13 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
         // target frame has to be in hand first.
         let key_prev = state.project.prev_key_frame();
         let key_next = state.project.next_key_frame();
-        let key_prev_tip = tip(state, Action::KeyJumpPrev, "Previous drawing key");
+        let key_prev_tip = key_jump_tip(state, Action::KeyJumpPrev, "Previous drawing key");
         ui.add_enabled_ui(key_prev.is_some(), |ui| {
             if theme::icon_button(ui, ic::CARET_LINE_LEFT, &key_prev_tip).clicked() {
                 state.project.goto(key_prev.unwrap_or_default());
             }
         });
-        let key_next_tip = tip(state, Action::KeyJumpNext, "Next drawing key");
+        let key_next_tip = key_jump_tip(state, Action::KeyJumpNext, "Next drawing key");
         ui.add_enabled_ui(key_next.is_some(), |ui| {
             if theme::icon_button(ui, ic::CARET_LINE_RIGHT, &key_next_tip).clicked() {
                 state.project.goto(key_next.unwrap_or_default());
@@ -1935,13 +1991,13 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 // duration, so the target frame has to be in hand first.
                 let key_prev = state.project.prev_key_frame();
                 let key_next = state.project.next_key_frame();
-                let key_prev_tip = tip(state, Action::KeyJumpPrev, "Previous drawing key");
+                let key_prev_tip = key_jump_tip(state, Action::KeyJumpPrev, "Previous drawing key");
                 ui.add_enabled_ui(key_prev.is_some(), |ui| {
                     if theme::icon_button(ui, ic::CARET_LINE_LEFT, &key_prev_tip).clicked() {
                         state.project.goto(key_prev.unwrap_or_default());
                     }
                 });
-                let key_next_tip = tip(state, Action::KeyJumpNext, "Next drawing key");
+                let key_next_tip = key_jump_tip(state, Action::KeyJumpNext, "Next drawing key");
                 ui.add_enabled_ui(key_next.is_some(), |ui| {
                     if theme::icon_button(ui, ic::CARET_LINE_RIGHT, &key_next_tip).clicked() {
                         state.project.goto(key_next.unwrap_or_default());
@@ -2571,6 +2627,10 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut toggle_clip: Option<usize> = None;
             let mut toggle_alpha_lock: Option<usize> = None;
             let mut orient_layer: Option<(usize, crate::doc::orient::Orient)> = None;
+            // A layer's key-jump link set (`Some(uid)`) or cleared (`None`),
+            // and a cleanup layer to add over a rough.
+            let mut set_key_link: Option<(usize, Option<u64>)> = None;
+            let mut cleanup_of: Option<usize> = None;
             let mut drop: Option<(usize, usize, bool)> = None;
             // Group rows' own commands, and Ctrl/Shift-click picks.
             let mut toggle_fold: Option<usize> = None;
@@ -2600,6 +2660,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             // Split borrow: rows need &mut layer while the rename edit buffer
             // lives on AppState next to it.
             let headers: Vec<bool> = state.project.layers.iter().map(|l| l.is_group()).collect();
+            let uids: Vec<u64> = state.project.layers.iter().map(|l| l.uid).collect();
+            // Where each layer's key jumps are linked to, resolved.
+            let key_links: Vec<Option<usize>> = (0..n).map(|i| state.project.key_link(i)).collect();
             let layer_in_group: Vec<bool> = state.project.layers.iter().map(|l| l.in_group).collect();
             let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);
             // The rows scroll rather than growing the window: each one is three
@@ -2772,6 +2835,25 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                                  changes pixels that already have paint"
                                             ));
                                         }
+                                        // The key-jump link, shown only while there is one.
+                                        if let Some(s) = key_links[i] {
+                                            let chip = ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new(format!("{} {}", ic::LINK, names[s]))
+                                                            .size(11.0)
+                                                            .color(theme::ACCENT),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(format!(
+                                                    "Key jumps here also stop at {}'s drawings. Click to unlink.",
+                                                    names[s]
+                                                ));
+                                            if chip.clicked() {
+                                                set_key_link = Some((i, None));
+                                            }
+                                        }
                                         resp.context_menu(|ui| {
                                             if header {
                                                 if ui.button(theme::icon_text(ic::FOLDER_OPEN, "Ungroup")).clicked() {
@@ -2845,6 +2927,40 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                                 .clicked()
                                             {
                                                 toggle_alpha_lock = Some(i);
+                                                ui.close_menu();
+                                            }
+                                            ui.separator();
+                                            ui.menu_button(theme::icon_text(ic::LINK, "Jump keys with"), |ui| {
+                                                if ui.selectable_label(key_links[i].is_none(), "— none —").clicked() {
+                                                    set_key_link = Some((i, None));
+                                                    ui.close_menu();
+                                                }
+                                                // Top of the stack first, as the panel lists them.
+                                                for j in (0..names.len()).rev() {
+                                                    if j == i || headers[j] {
+                                                        continue;
+                                                    }
+                                                    if ui.selectable_label(key_links[i] == Some(j), &names[j]).clicked() {
+                                                        set_key_link = Some((i, Some(uids[j])));
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            })
+                                            .response
+                                            .on_hover_text(
+                                                "Shift+A / Shift+S, the jump buttons and the wheel on \
+                                                 this layer also stop at that layer's drawings — for \
+                                                 redrawing a rough on a layer over it",
+                                            );
+                                            if ui
+                                                .button(theme::icon_text(ic::STACK_PLUS, "New cleanup layer"))
+                                                .on_hover_text(
+                                                    "A layer over this one to redraw it on, its key \
+                                                     jumps following this layer's drawings",
+                                                )
+                                                .clicked()
+                                            {
+                                                cleanup_of = Some(i);
                                                 ui.close_menu();
                                             }
                                             ui.separator();
@@ -3037,6 +3153,14 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             }
             if let Some(l) = toggle_alpha_lock.and_then(|i| state.project.layers.get_mut(i)) {
                 l.alpha_lock = !l.alpha_lock;
+            }
+            if let Some((i, uid)) = set_key_link {
+                if let Some(l) = state.project.layers.get_mut(i) {
+                    l.keys_from = uid;
+                }
+            }
+            if let Some(i) = cleanup_of {
+                state.add_cleanup_layer(i);
             }
             if let Some((i, o)) = orient_layer {
                 let layers: Vec<usize> = if state.project.is_group(i) {
@@ -3491,9 +3615,9 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
             drag_by_title_only(ui);
             ui.checkbox(&mut state.invert_timeline_scroll, "Invert timeline scroll")
                 .on_hover_text(
-                    "Mouse wheel over the canvas or the timeline scrubs frames.\n\n\
-                     Off (default): wheel down advances.  On: wheel up advances.\n\n\
-                     Each notch moves by the timeline's step size (×N).",
+                    "Which way the wheel goes through the timeline, for the wheel \
+                     slots set to Step frames or Jump drawings (Mouse wheel, below).\n\n\
+                     Off (default): wheel down advances.  On: wheel up advances.",
                 );
             ui.add_space(4.0);
             // Pen barrel buttons arrive as these same two buttons.
@@ -3669,9 +3793,56 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                                 }
                             });
                     }
+                    // Turned, not pressed: one action per modifier, so nothing
+                    // here can clash, and the clash filter hides it.
+                    if !only_clashes {
+                        wheel_rows(state, ui);
+                    }
                 });
         });
     state.show_settings = open;
+}
+
+/// The wheel map in Settings: a picker per modifier. A change goes into
+/// shortcuts.toml in place, like a rebind.
+fn wheel_rows(state: &mut AppState, ui: &mut egui::Ui) {
+    use crate::input::shortcuts::{WheelAction, WheelSlot};
+    ui.add_space(8.0);
+    theme::section_header(ui, ic::MOUSE_SCROLL, "Mouse wheel");
+    ui.label(
+        egui::RichText::new(
+            "Over the canvas, the Timeline and the mini timeline. Two modifiers at once do \
+             nothing.",
+        )
+        .color(theme::TEXT_MUTED)
+        .size(11.0),
+    );
+    egui::Grid::new("wheel_grid")
+        .num_columns(2)
+        .striped(true)
+        .min_col_width(100.0)
+        .show(ui, |ui| {
+            for slot in WheelSlot::ALL {
+                let was = state.shortcuts.wheel.get(&slot).copied().unwrap_or(WheelAction::Nothing);
+                let mut pick = was;
+                ui.label(slot.label());
+                egui::ComboBox::from_id_salt(("wheel_slot", slot.key()))
+                    .selected_text(pick.label())
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        for a in WheelAction::ALL {
+                            ui.selectable_value(&mut pick, a, a.label()).on_hover_text(a.hint());
+                        }
+                    })
+                    .response
+                    .on_hover_text(pick.hint());
+                if pick != was {
+                    state.shortcuts.set_wheel(slot, pick);
+                    crate::input::shortcuts::save(&state.shortcuts);
+                }
+                ui.end_row();
+            }
+        });
 }
 
 /// One binding in Settings: its name, the combo as a press-to-rebind button,
@@ -8843,6 +9014,183 @@ mod fill_tests {
         frame(&ctx, &mut state, vec![]);
         assert!(!state.fill_dragging());
         assert_eq!(state.history.undo_len(), 1);
+    }
+}
+
+/// The mouse wheel through the real UI, as the wheel map has it.
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+    use crate::input::shortcuts::{WheelAction, WheelSlot};
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
+    const AT: Pos2 = pos2(600.0, 400.0);
+
+    fn mods(ctrl: bool, shift: bool, alt: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            ctrl,
+            command: ctrl,
+            shift,
+            alt,
+            ..Default::default()
+        }
+    }
+
+    /// One frame; returns the Timeline's layer-name column, when it drew one.
+    fn frame(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) -> Option<Rect> {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            modifiers,
+            ..Default::default()
+        };
+        let mut header = None;
+        let _ = ctx.run(raw, |ctx| {
+            draw(state, ctx);
+            header = crate::ui::tracks::header_rect(ctx);
+        });
+        header
+    }
+
+    /// `notches` of the wheel at `at` (positive is up), with `m` held.
+    fn turn(ctx: &egui::Context, state: &mut AppState, at: Pos2, notches: f32, m: egui::Modifiers) {
+        frame(ctx, state, vec![egui::Event::PointerMoved(at)], m);
+        frame(
+            ctx,
+            state,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: vec2(0.0, notches),
+                modifiers: m,
+            }],
+            m,
+        );
+    }
+
+    /// Twelve frames, drawings on 0 / 3 / 6 / 9 of the bottom layer (the
+    /// rough), and an empty layer over it (the cleanup), active.
+    fn state() -> AppState {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        while state.project.frame_count < 12 {
+            state.project.add_frame();
+        }
+        let (w, h) = (state.project.width, state.project.height);
+        for f in [0, 3, 6, 9] {
+            let id = state.project.cells.len();
+            state.project.cells.push(crate::doc::canvas::Canvas::new(w, h).into());
+            state.project.layers[0].set_key(f, id);
+        }
+        state.project.add_layer();
+        state.project.goto(0);
+        state
+    }
+
+    #[test]
+    fn the_plain_wheel_still_steps_frames() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![], mods(false, false, false));
+        turn(&ctx, &mut state, AT, -1.0, mods(false, false, false));
+        assert_eq!(state.project.current_frame, 1, "down advances one frame");
+        turn(&ctx, &mut state, AT, -2.0, mods(false, false, false));
+        assert_eq!(state.project.current_frame, 3);
+    }
+
+    /// The ask: drawing on an empty cleanup layer linked to its rough, Shift
+    /// and the wheel walk the rough's drawings.
+    #[test]
+    fn shift_wheel_jumps_through_the_linked_drawings() {
+        let mut state = state();
+        let clean = state.project.current_layer;
+        state.project.layers[clean].keys_from = Some(state.project.layers[0].uid);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![], mods(false, false, false));
+        let shift = mods(false, true, false);
+        turn(&ctx, &mut state, AT, -1.0, shift);
+        assert_eq!(state.project.current_frame, 3);
+        turn(&ctx, &mut state, AT, -2.0, shift);
+        assert_eq!(state.project.current_frame, 9);
+        turn(&ctx, &mut state, AT, -1.0, shift);
+        assert_eq!(state.project.current_frame, 9, "clamps at the last drawing");
+        turn(&ctx, &mut state, AT, 1.0, shift);
+        assert_eq!(state.project.current_frame, 6, "up goes back");
+        assert_eq!(state.project.current_layer, clean, "never left the cleanup layer");
+        // Unlinked, the empty layer has nowhere to jump.
+        state.project.layers[clean].keys_from = None;
+        turn(&ctx, &mut state, AT, -1.0, shift);
+        assert_eq!(state.project.current_frame, 6);
+    }
+
+    #[test]
+    fn ctrl_wheel_zooms_the_view_about_the_pointer() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![], mods(false, false, false));
+        let at = pos2(500.0, 300.0);
+        let before = Xform::new(&state, state.canvas_rect).screen_to_doc(at);
+        let zoom = state.view.zoom;
+        turn(&ctx, &mut state, at, 2.0, mods(true, false, false));
+        assert!(state.view.zoom > zoom * 1.3, "{} → {}", zoom, state.view.zoom);
+        assert_eq!(state.project.current_frame, 0, "and doesn't scrub");
+        let after = Xform::new(&state, state.canvas_rect).doc_to_screen(before.0, before.1);
+        assert!((after - at).length() < 0.5, "{after:?}");
+    }
+
+    /// The map is the user's: whatever a slot holds is what it does.
+    #[test]
+    fn a_remapped_slot_does_its_new_job() {
+        let mut state = state();
+        state.shortcuts.set_wheel(WheelSlot::Plain, WheelAction::Layers);
+        state.shortcuts.set_wheel(WheelSlot::Alt, WheelAction::BrushSize);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![], mods(false, false, false));
+        let top = state.project.current_layer;
+        turn(&ctx, &mut state, AT, -1.0, mods(false, false, false));
+        assert_eq!(state.project.current_layer, 0, "down walks to the layer below");
+        assert_eq!(state.project.current_frame, 0);
+        turn(&ctx, &mut state, AT, 1.0, mods(false, false, false));
+        assert_eq!(state.project.current_layer, top);
+        let r = state.brush.radius;
+        turn(&ctx, &mut state, AT, 1.0, mods(false, false, true));
+        assert!(state.brush.radius > r);
+    }
+
+    /// Over the Timeline, Alt pans the tracks and leaves the frame alone;
+    /// Shift jumps drawings there too instead of panning as it used to.
+    #[test]
+    fn over_the_timeline_alt_pans_and_shift_jumps() {
+        let mut state = state();
+        state.show_panels = true;
+        // Padded at the end: the drawings stay on 0 / 3 / 6 / 9.
+        state.project.ensure_frame_count(300);
+        let ctx = egui::Context::default();
+        let mut header = None;
+        for _ in 0..3 {
+            header = frame(&ctx, &mut state, vec![], mods(false, false, false));
+        }
+        let header = header.expect("the Timeline drew its tracks");
+        let over = pos2(header.max.x + 120.0, header.min.y + 6.0);
+        let x = state.track_scroll.x;
+        turn(&ctx, &mut state, over, -2.0, mods(false, false, true));
+        assert!(state.track_scroll.x > x + 40.0, "{x} → {}", state.track_scroll.x);
+        assert_eq!(state.project.current_frame, 0);
+        // The empty, unlinked layer has no drawing to jump to.
+        let x = state.track_scroll.x;
+        turn(&ctx, &mut state, over, -1.0, mods(false, true, false));
+        assert_eq!(state.track_scroll.x, x, "Shift no longer pans");
+        assert_eq!(state.project.current_frame, 0);
+        let clean = state.project.current_layer;
+        state.project.layers[clean].keys_from = Some(state.project.layers[0].uid);
+        turn(&ctx, &mut state, over, -1.0, mods(false, true, false));
+        assert_eq!(state.project.current_frame, 3, "the rough's next drawing");
     }
 }
 

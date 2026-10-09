@@ -237,15 +237,18 @@ fn adjusts_brush(t: ActiveTool) -> bool {
 }
 
 /// The frame of the drawing `steps` key drawings away from the one showing on
-/// `from`, on the active layer. Clamps at the first and last drawing; no
-/// drawing that way stays on `from`.
+/// `from`, on the active layer — counting its linked layer's drawings, as the
+/// key jumps do ([`Project::jumps_at`]). Clamps at the first and last drawing;
+/// no drawing that way stays on `from`.
 fn key_steps(p: &Project, from: usize, steps: i32) -> usize {
-    let Some(layer) = p.layers.get(p.current_layer) else {
+    let li = p.current_layer;
+    if p.layers.get(li).is_none() {
         return from;
-    };
+    }
+    let is_key = |f: usize| p.jumps_at(li, f);
     let n = p.frame_count;
     if steps > 0 {
-        let after: Vec<usize> = (from + 1..n).filter(|&f| layer.is_key(f)).collect();
+        let after: Vec<usize> = (from + 1..n).filter(|&f| is_key(f)).collect();
         after
             .get(steps as usize - 1)
             .or(after.last())
@@ -254,11 +257,11 @@ fn key_steps(p: &Project, from: usize, steps: i32) -> usize {
     } else if steps < 0 {
         // Back from the drawing that is showing, not from `from` itself: on a
         // held frame the drawing started earlier.
-        let showing = (0..=from.min(n.saturating_sub(1))).rev().find(|&f| layer.is_key(f));
+        let showing = (0..=from.min(n.saturating_sub(1))).rev().find(|&f| is_key(f));
         let Some(showing) = showing else {
             return from;
         };
-        let before: Vec<usize> = (0..showing).rev().filter(|&f| layer.is_key(f)).collect();
+        let before: Vec<usize> = (0..showing).rev().filter(|&f| is_key(f)).collect();
         before
             .get((-steps) as usize - 1)
             .or(before.last())
@@ -361,6 +364,24 @@ mod tests {
         assert_eq!(st.button_drag_readout().as_deref(), Some("10 / 12 · keys"));
         st.end_button_drag();
         assert_eq!(st.project.current_frame, 7);
+    }
+
+    /// Flipping on an empty cleanup layer linked to the rough flips through
+    /// the rough's drawings, as Shift+A / Shift+S do.
+    #[test]
+    fn flipping_a_linked_layer_follows_the_linked_drawings() {
+        let mut st = timeline();
+        st.project.add_layer();
+        let clean = st.project.current_layer;
+        assert_ne!(clean, 0);
+        st.project.layers[clean].keys_from = Some(st.project.layers[0].uid);
+        st.project.goto(4);
+        st.begin_button_drag(ButtonDrag::Flip, AT);
+        st.button_drag_to(AT + vec2(30.0, 0.0));
+        assert_eq!(st.project.current_frame, 6);
+        st.button_drag_to(AT + vec2(-30.0, 0.0));
+        assert_eq!(st.project.current_frame, 0, "back one from frame 3's drawing");
+        st.end_button_drag();
     }
 
     #[test]

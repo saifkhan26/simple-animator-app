@@ -419,26 +419,75 @@ impl Project {
             .find(|&j| !self.layers[j].clip)
     }
 
+    /// The layer whose drawings `li`'s key jumps also stop at — its
+    /// `keys_from` link, resolved. `None` when unset, dangling (the target was
+    /// deleted), pointing at itself or at a group header.
+    pub fn key_link(&self, li: usize) -> Option<usize> {
+        let uid = self.layers.get(li)?.keys_from?;
+        let at = self.layers.iter().position(|l| l.uid == uid)?;
+        (at != li && !self.layers[at].is_group()).then_some(at)
+    }
+
+    /// Whether a key jump on layer `li` stops at frame `f`: a drawing of its
+    /// own starts there, or one of its linked layer's does. A cleanup layer
+    /// linked to its rough steps through the rough's timing before it has a
+    /// drawing of its own, and through any inbetween it adds after.
+    pub fn jumps_at(&self, li: usize, f: usize) -> bool {
+        self.layers.get(li).is_some_and(|l| l.is_key(f))
+            || self.key_link(li).is_some_and(|s| self.layers[s].is_key(f))
+    }
+
+    /// Link layer `li`'s key jumps to the nearest drawing layer under it in
+    /// the stack, or unlink it when that is already its link. `false` when
+    /// there is nothing to link: `li` is a header, or nothing draws below it.
+    pub fn toggle_key_link_below(&mut self, li: usize) -> bool {
+        if self.layers.get(li).map_or(true, Layer::is_group) {
+            return false;
+        }
+        let Some(below) = (0..li).rev().find(|&j| !self.layers[j].is_group()) else {
+            return false;
+        };
+        let linked = self.key_link(li) == Some(below);
+        let uid = self.layers[below].uid;
+        self.layers[li].keys_from = (!linked).then_some(uid);
+        true
+    }
+
+    /// Add a layer directly above `of` for redrawing it clean: named after
+    /// it, its key jumps linked to it, and active. `None` for a header.
+    pub fn add_cleanup_layer(&mut self, of: usize) -> Option<usize> {
+        let rough = self.layers.get(of).filter(|l| !l.is_group())?;
+        let (name, uid) = (format!("{} clean", rough.name), rough.uid);
+        self.current_layer = of;
+        let at = self.add_layer_above_active();
+        self.layers[at].name = name;
+        self.layers[at].keys_from = Some(uid);
+        Some(at)
+    }
+
     /// Frame of the nearest drawing key on the active layer strictly *before*
-    /// the current frame, or `None` when there is none.
+    /// the current frame, or `None` when there is none. Keys of the layer it
+    /// is linked to count too — see [`Project::jumps_at`].
     ///
     /// Holds are skipped: on a scene animated on 2s or 3s most frames repeat an
     /// earlier drawing, so stepping by one lands on the same picture. This is
     /// what the timeline's jump-to-key buttons navigate by. `None` is the
     /// clamp — the caller greys its button out rather than wrapping.
     pub fn prev_key_frame(&self) -> Option<usize> {
-        let layer = self.layers.get(self.current_layer)?;
+        let li = self.current_layer;
+        self.layers.get(li)?;
         (0..self.current_frame.min(self.frame_count))
             .rev()
-            .find(|&f| layer.is_key(f))
+            .find(|&f| self.jumps_at(li, f))
     }
 
     /// Frame of the nearest drawing key on the active layer strictly *after*
     /// the current frame, or `None` when there is none. See
     /// [`Project::prev_key_frame`].
     pub fn next_key_frame(&self) -> Option<usize> {
-        let layer = self.layers.get(self.current_layer)?;
-        (self.current_frame.saturating_add(1)..self.frame_count).find(|&f| layer.is_key(f))
+        let li = self.current_layer;
+        self.layers.get(li)?;
+        (self.current_frame.saturating_add(1)..self.frame_count).find(|&f| self.jumps_at(li, f))
     }
 
     // --- Layer edits ---
@@ -1451,6 +1500,49 @@ mod tests {
         // …while layer 0 still has its seed key.
         p.current_layer = 0;
         assert_eq!(p.prev_key_frame(), Some(0));
+    }
+
+    /// The cleanup case: a layer linked to the rough under it stops at the
+    /// rough's drawings and at its own, and nowhere else.
+    #[test]
+    fn a_linked_layer_jumps_through_its_own_and_the_linked_drawings() {
+        let mut p = keyed_on_fours();
+        p.add_layer();
+        assert_eq!(p.current_layer, 1);
+        p.current_frame = 2;
+        assert_eq!(p.next_key_frame(), None, "unlinked, the clean layer has nothing");
+        p.layers[1].keys_from = Some(p.layers[0].uid);
+        assert_eq!(p.key_link(1), Some(0));
+        assert_eq!(p.next_key_frame(), Some(4), "the rough's drawing");
+        assert_eq!(p.prev_key_frame(), Some(0));
+        // An inbetween the cleanup adds that the rough lacks counts too.
+        p.current_frame = 6;
+        p.insert_blank_key_here();
+        p.current_frame = 4;
+        assert_eq!(p.next_key_frame(), Some(6));
+        p.current_frame = 8;
+        assert_eq!(p.prev_key_frame(), Some(6));
+        // The rough's own jumps are untouched by the link pointing at it.
+        p.current_layer = 0;
+        p.current_frame = 4;
+        assert_eq!(p.next_key_frame(), Some(8));
+    }
+
+    /// A link that can't resolve is no link: its target deleted, itself, or
+    /// a group header.
+    #[test]
+    fn a_broken_key_link_is_ignored() {
+        let mut p = keyed_on_fours();
+        p.add_layer();
+        p.current_frame = 2;
+        p.layers[1].keys_from = Some(u64::MAX);
+        assert_eq!(p.key_link(1), None, "dangling");
+        assert_eq!(p.next_key_frame(), None);
+        p.layers[1].keys_from = Some(p.layers[1].uid);
+        assert_eq!(p.key_link(1), None, "itself");
+        p.layers[1].keys_from = Some(p.layers[0].uid);
+        p.layers[0].kind = crate::doc::layer::LayerKind::Group;
+        assert_eq!(p.key_link(1), None, "a header");
     }
 
     // --- Drawing blocks ---
