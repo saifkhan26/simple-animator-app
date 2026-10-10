@@ -75,7 +75,7 @@ pub fn krita_import_window(state: &mut AppState, ctx: &egui::Context) {
         None => {}
     }
     if !open {
-        state.krita_import = None;
+        state.close_krita_import();
     }
 }
 

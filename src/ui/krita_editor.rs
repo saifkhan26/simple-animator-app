@@ -113,7 +113,7 @@ pub fn krita_editor(state: &mut AppState, ui: &mut egui::Ui) {
             Ok(new_id) => {
                 state.brush.krita_id = Some(new_id);
                 state.brush.krita_overrides.clear();
-                state.brush_thumbs.retain(|k, _| !k.starts_with("user/"));
+                state.forget_user_brush_thumbs();
                 ui.data_mut(|d| d.remove::<String>(error_id));
             }
             Err(e) => ui.data_mut(|d| d.insert_temp(error_id, format!("Couldn't save: {e:#}"))),

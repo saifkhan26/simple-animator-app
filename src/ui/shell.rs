@@ -9926,6 +9926,82 @@ mod krita_brush_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// One whole app frame — textures synced, then drawn — returning the
+    /// textures egui frees with it.
+    fn frame_frees(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) -> Vec<egui::TextureId> {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| {
+            state.sync_textures(ctx);
+            draw(state, ctx);
+        })
+        .textures_delta
+        .free
+    }
+
+    /// The import window's X closes it, and its thumbnails outlive the frame
+    /// that drew them. Freed in that frame, egui-wgpu destroys them before
+    /// the frame is submitted and wgpu refuses the submit — which closed the
+    /// whole app.
+    #[test]
+    fn closing_the_krita_import_window_frees_its_thumbnails_a_frame_later() {
+        use crate::brush_library::import::{tests as fake, KritaImport};
+        let (ctx, mut state) = picker_state();
+        let (root, places) = fake::fake_krita("close");
+        let brushes = root.join("brushes");
+        state.brush_library = crate::brush_library::BrushLibrary::new(Some(brushes.clone()));
+        settle_library(&mut state);
+        state.krita_import = Some(KritaImport::start(places, Some(brushes)));
+        fake::settle(state.krita_import.as_mut().unwrap());
+        for _ in 0..3 {
+            frame_frees(&ctx, &mut state, vec![]);
+        }
+        let thumbs: Vec<egui::TextureId> =
+            state.krita_import.as_ref().unwrap().thumbs.values().map(|t| t.id()).collect();
+        assert!(!thumbs.is_empty(), "the fake presets carry thumbnails");
+
+        // The X sits on the diagonal in from the title bar's right corner.
+        let r = egui::AreaState::load(&ctx, egui::Id::new("window_krita_import")).unwrap().rect();
+        let x = egui::pos2(r.max.x - 19.0, r.min.y + 19.0);
+        frame_frees(&ctx, &mut state, vec![egui::Event::PointerMoved(x)]);
+        frame_frees(&ctx, &mut state, vec![button(x, true)]);
+        let freed = frame_frees(&ctx, &mut state, vec![button(x, false)]);
+        assert!(state.krita_import.is_none(), "the X closed it");
+        assert!(!thumbs.iter().any(|t| freed.contains(t)), "none freed in the frame that drew them");
+        let freed = frame_frees(&ctx, &mut state, vec![]);
+        assert!(thumbs.iter().all(|t| freed.contains(t)), "all freed the frame after");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same for the picker's thumbnails of imported brushes, which an
+    /// import or a Save as new throws away to load afresh — while Brush
+    /// settings, open beside them, has just drawn them.
+    #[test]
+    fn rescanning_brushes_frees_the_pickers_thumbnails_a_frame_later() {
+        let (ctx, mut state) = picker_state();
+        let mut ids = Vec::new();
+        let raw = || egui::RawInput {
+            screen_rect: Some(SCREEN),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw(), |ctx| {
+            for id in ["user/Mine", "krita/Theirs"] {
+                let tex = ctx.load_texture(id, egui::ColorImage::example(), egui::TextureOptions::LINEAR);
+                ids.push(tex.id());
+                state.brush_thumbs.insert(id.to_owned(), tex);
+            }
+        });
+        let freed = ctx.run(raw(), |_| state.rescan_brushes()).textures_delta.free;
+        assert!(!state.brush_thumbs.contains_key("user/Mine"), "dropped from the picker");
+        assert!(state.brush_thumbs.contains_key("krita/Theirs"));
+        assert!(!freed.contains(&ids[0]), "but not freed in the frame that may have drawn it");
+        let freed = frame_frees(&ctx, &mut state, vec![]);
+        assert!(freed.contains(&ids[0]) && !freed.contains(&ids[1]), "{freed:?}");
+    }
+
     /// The editor under a picked Krita preset: an edit is an override the
     /// stroke paints with, Reset drops it, and Save as new keeps it as a
     /// brush of its own.
