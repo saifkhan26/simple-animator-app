@@ -1868,11 +1868,32 @@ impl AppState {
         self.krita_import = Some(crate::brush_library::import::KritaImport::start(places, root));
     }
 
+    /// Close the Import Krita brushes window. The window drew its thumbnails
+    /// this frame, so they are parked for the next one rather than dropped
+    /// with it — see `retired_textures`.
+    pub fn close_krita_import(&mut self) {
+        if let Some(mut imp) = self.krita_import.take() {
+            self.retired_textures.extend(imp.thumbs.drain().map(|(_, t)| t));
+        }
+    }
+
     /// Re-read the imported brushes after an import, dropping thumbnails
     /// a reused folder name would otherwise keep.
     pub fn rescan_brushes(&mut self) {
         self.brush_library.rescan();
-        self.brush_thumbs.retain(|id, _| !id.starts_with("user/"));
+        self.forget_user_brush_thumbs();
+    }
+
+    /// Have the picker load the imported brushes' thumbnails afresh. The old
+    /// ones are parked, not dropped: Brush settings, open beside whatever
+    /// asked for this, may have drawn them this frame — see
+    /// `retired_textures`.
+    pub fn forget_user_brush_thumbs(&mut self) {
+        let user: Vec<String> =
+            self.brush_thumbs.keys().filter(|id| id.starts_with("user/")).cloned().collect();
+        for id in user {
+            self.retired_textures.extend(self.brush_thumbs.remove(&id));
+        }
     }
 
     /// Brush radius in active-cell pixels. With `lock_brush_to_view` the stored
