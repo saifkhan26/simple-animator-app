@@ -59,6 +59,13 @@ pub struct Layer {
     /// shift `track_points`, so a pin stays on its drawing.
     #[serde(skip)]
     pub onion_pins: Vec<OnionPin>,
+    /// [`Layer::uid`] of the layer whose drawings this one's key jumps also
+    /// stop at — the rough under a cleanup layer. By uid, not index, so it
+    /// rides through reorders, undo and the Krita reload untouched; a deleted
+    /// target simply stops resolving. Session-only like `lines_from`. See
+    /// [`crate::doc::project::Project::jumps_at`].
+    #[serde(skip)]
+    pub keys_from: Option<u64>,
     /// Session-unique identity. Undo snapshots clone it, so a layer keeps it
     /// through undo/redo; a load hands out fresh ones. What the Krita link
     /// (`crate::krita_link`) keys its layers by — an index shifts with every
@@ -126,6 +133,7 @@ impl Layer {
             transform_keys: Vec::new(),
             lines_from: None,
             onion_pins: Vec::new(),
+            keys_from: None,
             uid: next_uid(),
             track_points: Vec::new(),
             cell_w: 0,

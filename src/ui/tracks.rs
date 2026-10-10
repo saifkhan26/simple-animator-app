@@ -7,11 +7,11 @@
 //! One custom-painted widget rather than nested `ScrollArea`s, for two
 //! reasons. egui has no frozen panes, and the header column has to stay put
 //! while the frames scroll sideways, the ruler while the rows scroll down. And
-//! the plain wheel over the Timeline scrubs frames
-//! (`shell::timeline_wheel_scrub`), so a `ScrollArea` in here would scroll and
-//! scrub on the same notch. The tracks take only the modified wheel — Ctrl
-//! zooms, Shift pans — and the wheel over the layer names, and leave the rest
-//! to the scrubber.
+//! the wheel over the Timeline scrubs frames or jumps drawings
+//! (`shell::wheel_map`), so a `ScrollArea` in here would scroll and scrub on
+//! the same notch. The tracks take only what the wheel map gives them —
+//! zooming and panning, Ctrl and Alt by default — and the wheel over the
+//! layer names, and leave the rest to the scrubber.
 
 use egui::{pos2, vec2, Color32, CursorIcon, Id, Pos2, Rect, Sense, Stroke};
 use egui_phosphor::regular as ic;
@@ -19,7 +19,7 @@ use egui_phosphor::regular as ic;
 use crate::app::AppState;
 use crate::doc::layer::CellId;
 use crate::doc::project::{layer_retime, ripple_move, Block, CellReq};
-use crate::input::shortcuts::Action;
+use crate::input::shortcuts::{Action, WheelAction};
 use crate::ui::shell::{combo_text, DIAG_BAD, KEY_CAMERA, KEY_LAYER};
 use crate::ui::theme;
 
@@ -461,10 +461,11 @@ fn click(state: &mut AppState, h: Hit, mods: egui::Modifiers) {
     state.project.goto(h.frame);
 }
 
-/// The modified wheel over the tracks: Ctrl zooms the frame width about the
-/// pointer, Shift (or a sideways trackpad swipe) pans. The plain wheel over
-/// the layer names scrolls the rows. The plain wheel over the frames is left
-/// alone — that is the scrubber's.
+/// The wheel over the tracks, where the wheel map gives it to them: Zoom
+/// widens the frames about the pointer, Pan timeline scrolls them sideways,
+/// as a sideways trackpad swipe does too. Any wheel over the layer names
+/// scrolls the rows. The rest over the frames is left alone — that is
+/// `shell::wheel_map`'s.
 fn wheel(state: &mut AppState, ui: &egui::Ui, frames: Rect, header: Rect) {
     let Some(p) = ui.input(|i| i.pointer.hover_pos()) else {
         return;
@@ -496,17 +497,22 @@ fn wheel(state: &mut AppState, ui: &egui::Ui, frames: Rect, header: Rect) {
     }
     if over_header {
         state.track_scroll.y -= delta.y;
-    } else if mods.command {
-        let old = state.track_frame_w;
-        let new = (old * 1.15f32.powf(delta.y / 40.0)).clamp(MIN_FRAME_W, MAX_FRAME_W);
-        // Keep the frame under the pointer where it is.
-        let at = (p.x - frames.min.x + state.track_scroll.x) / old;
-        state.track_frame_w = new;
-        state.track_scroll.x = at * new - (p.x - frames.min.x);
-    } else if mods.shift {
-        state.track_scroll.x -= delta.x + delta.y;
-    } else {
-        state.track_scroll.x -= delta.x;
+        return;
+    }
+    match state.shortcuts.wheel_action(mods) {
+        WheelAction::Zoom => {
+            let old = state.track_frame_w;
+            let new = (old * 1.15f32.powf(delta.y / 40.0)).clamp(MIN_FRAME_W, MAX_FRAME_W);
+            // Keep the frame under the pointer where it is.
+            let at = (p.x - frames.min.x + state.track_scroll.x) / old;
+            state.track_frame_w = new;
+            state.track_scroll.x = at * new - (p.x - frames.min.x);
+        }
+        WheelAction::PanTimeline => state.track_scroll.x -= delta.x + delta.y,
+        // Under Shift a Mac turns the wheel sideways, and `wheel_map` takes
+        // that as the wheel; a sideways swipe pans only without it.
+        _ if mods.shift => {}
+        _ => state.track_scroll.x -= delta.x,
     }
 }
 
@@ -574,7 +580,7 @@ fn autoscroll(state: &mut AppState, ctx: &egui::Context, tracks: Rect, p: Pos2, 
     }
 }
 
-/// Above the layer names: a label, and zoom buttons — Ctrl+wheel does the
+/// Above the layer names: a label, and zoom buttons — the wheel can do the
 /// same, but a gesture nobody can see is one nobody finds.
 fn corner_ui(state: &mut AppState, ui: &mut egui::Ui, corner: Rect, id: Id) {
     let painter = ui.painter_at(corner);
@@ -591,9 +597,17 @@ fn corner_ui(state: &mut AppState, ui: &mut egui::Ui, corner: Rect, id: Id) {
         size,
     );
     let minus = plus.translate(vec2(-(size.x + 1.0), 0.0));
+    // Name the wheel that zooms, as the map has it now.
+    let on_wheel = state
+        .shortcuts
+        .wheel_slot_of(WheelAction::Zoom)
+        .map(|s| format!(" ({})", s.label()))
+        .unwrap_or_default();
+    let narrower = format!("Narrower frames{on_wheel}");
+    let wider = format!("Wider frames{on_wheel}");
     for (rect, glyph, factor, tip) in [
-        (minus, ic::MAGNIFYING_GLASS_MINUS, 1.0 / 1.25, "Narrower frames (Ctrl+wheel)"),
-        (plus, ic::MAGNIFYING_GLASS_PLUS, 1.25, "Wider frames (Ctrl+wheel)"),
+        (minus, ic::MAGNIFYING_GLASS_MINUS, 1.0 / 1.25, narrower.as_str()),
+        (plus, ic::MAGNIFYING_GLASS_PLUS, 1.25, wider.as_str()),
     ] {
         let r = ui.interact(rect, id.with(glyph), Sense::click()).on_hover_text(tip);
         if r.hovered() {
@@ -1130,6 +1144,27 @@ fn paint(
             if kids.clone().any(|c| state.project.layers[c].is_key(f)) {
                 let x = g.x(f as f32 + 0.5);
                 painter.vline(x, (row.center().y - 4.0)..=(row.center().y + 4.0), Stroke::new(2.0, theme::TEXT_MUTED));
+            }
+        }
+    }
+
+    // The active layer's key-jump link: a tick dropping in from the top of
+    // its row wherever the linked layer has a drawing it doesn't — where
+    // Shift+A / Shift+S will stop, over its own bars or an empty row alike.
+    if let Some(src) = state.project.key_link(cur_layer) {
+        let row = g.row(cur_layer);
+        if g.rows.contains(&cur_layer) && row.intersects(g.tracks) {
+            let (own, linked) = (&state.project.layers[cur_layer], &state.project.layers[src]);
+            for f in (0..fc).filter(|&f| linked.is_key(f) && !own.is_key(f)) {
+                let x = g.x(f as f32 + 0.5);
+                if x < g.tracks.min.x || x > g.tracks.max.x {
+                    continue;
+                }
+                painter.vline(
+                    x,
+                    (row.min.y + 1.0)..=(row.min.y + BAR_INSET + 5.0),
+                    Stroke::new(1.5, theme::TEXT_MUTED),
+                );
             }
         }
     }

@@ -98,7 +98,7 @@ impl Project {
     ///   isn't itself in a group;
     /// - a run of `in_group` layers has a header directly above it, or its
     ///   layers aren't in a group;
-    /// - no fill reads its lines from a header.
+    /// - no fill reads its lines from a header, and no key jump follows one.
     pub fn normalize_groups(&mut self) {
         let frames = self.frame_count.max(1);
         for l in self.layers.iter_mut().filter(|l| l.is_group()) {
@@ -113,6 +113,7 @@ impl Project {
             l.cell_w = 0;
             l.cell_h = 0;
             l.lines_from = None;
+            l.keys_from = None;
         }
         let n = self.layers.len();
         let mut j = 0;
@@ -130,9 +131,13 @@ impl Project {
             j = end;
         }
         let headers: Vec<bool> = self.layers.iter().map(Layer::is_group).collect();
+        let header_uids: Vec<u64> = self.layers.iter().filter(|l| l.is_group()).map(|l| l.uid).collect();
         for l in &mut self.layers {
             if l.lines_from.is_some_and(|s| headers.get(s).copied().unwrap_or(true)) {
                 l.lines_from = None;
+            }
+            if l.keys_from.is_some_and(|u| header_uids.contains(&u)) {
+                l.keys_from = None;
             }
         }
         self.current_layer = self.current_layer.min(n.saturating_sub(1));
@@ -454,11 +459,15 @@ mod tests {
         p.layers[2].set_key(0, 0);
         p.layers[1].in_group = true;
         p.layers[0].lines_from = Some(2);
+        p.layers[0].keys_from = Some(p.layers[2].uid);
+        p.layers[1].keys_from = Some(p.layers[0].uid);
         p.normalize_groups();
         assert_eq!(rows(&p), [" a", " b", "[c]"], "a and b now under c's header");
         assert!(p.layers[2].exposures.iter().all(Option::is_none));
         assert!(!p.layers[2].clip);
         assert_eq!(p.layers[0].lines_from, None, "no fill reads a header");
+        assert_eq!(p.layers[0].keys_from, None, "no key jump follows a header");
+        assert_eq!(p.layers[1].keys_from, Some(p.layers[0].uid), "a link to a drawing layer stays");
         // And a run with nothing above it at all.
         let mut p = stack(&["a", "b"]);
         p.layers[1].in_group = true;

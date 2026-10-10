@@ -991,7 +991,8 @@ pub struct AppState {
     pub track_drag: Option<crate::ui::tracks::TrackDrag>,
     /// Track scroll offset in points: x across frames, y down the layers.
     pub track_scroll: egui::Vec2,
-    /// Width of one frame column in the tracks, in points. Ctrl+wheel.
+    /// Width of one frame column in the tracks, in points. The wheel zooms it
+    /// (Ctrl by default; see `WheelAction::Zoom`).
     pub track_frame_w: f32,
     /// The N in the tracks' "On N" timing menu.
     pub track_timing_n: usize,
@@ -1160,10 +1161,13 @@ pub struct AppState {
     /// A pen stroke should show none from the cursor.
     pub stroke_pen_samples: u32,
     pub stroke_mouse_samples: u32,
-    /// Leftover trackpad scroll (in points) not yet worth a whole frame step.
-    /// Session-only: a wheel gesture never spans a run. Mice report whole
-    /// lines and bypass this entirely — see `ui::shell::timeline_wheel_scrub`.
+    /// Leftover trackpad scroll (in points) not yet worth a whole wheel
+    /// notch. Session-only: a wheel gesture never spans a run. Mice report
+    /// whole lines and bypass this entirely — see `ui::shell::wheel_map`.
     pub wheel_scrub_accum: f32,
+    /// The canvas's screen rect as of the last frame, for what needs it
+    /// before the canvas is laid out again: zooming the view on the wheel.
+    pub canvas_rect: egui::Rect,
 
     pub bg_opacity: f32,
     /// Background clear color (RGB, 0..1).
@@ -1503,6 +1507,7 @@ impl AppState {
             stroke_pen_samples: 0,
             stroke_mouse_samples: 0,
             wheel_scrub_accum: 0.0,
+            canvas_rect: egui::Rect::NOTHING,
             bg_opacity: prefs.bg_opacity,
             bg_color: prefs.bg_color,
             show_checker: prefs.show_checker,
@@ -5017,6 +5022,21 @@ impl AppState {
         self.expand_cfg = None;
     }
 
+    /// A new layer over `of` to redraw it clean, its key jumps linked to it
+    /// (see [`Project::add_cleanup_layer`]). One undo step.
+    pub fn add_cleanup_layer(&mut self, of: usize) {
+        if self.project.layers.get(of).map_or(true, |l| l.is_group()) {
+            return;
+        }
+        self.structural_edit(false, |p| {
+            p.add_cleanup_layer(of);
+        });
+        // Both edit buffers are keyed by layer index, and the insert shifted
+        // every index above it.
+        self.layer_rename = None;
+        self.expand_cfg = None;
+    }
+
     /// Select the row `delta` rows down the Layers panel from the active
     /// layer's (negative: up), stopping at either end. Folded groups' layers
     /// aren't rows.
@@ -5239,6 +5259,9 @@ impl AppState {
                 if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
                     l.alpha_lock = !l.alpha_lock;
                 }
+            }
+            Action::LayerKeyLinkBelow => {
+                self.project.toggle_key_link_below(self.project.current_layer);
             }
             Action::KeyBlank => {
                 self.structural_edit(false, |p| {
@@ -8837,6 +8860,46 @@ mod tests {
         state.project.layers[1].lines_from = None;
         state.project.layers[2].lines_from = Some(0);
         assert_eq!(state.layer_view_alpha(0), 0.5);
+    }
+
+    /// The keymap's link toggle: to the nearest drawing layer below, past a
+    /// header; again to unlink; nothing under the bottom layer.
+    #[test]
+    fn the_key_link_toggle_links_the_layer_below() {
+        let mut state = AppState::for_test();
+        state.project.add_layer();
+        state.project.add_layer();
+        state.project.layers[1].kind = crate::doc::layer::LayerKind::Group;
+        state.project.current_layer = 2;
+        state.dispatch(Action::LayerKeyLinkBelow);
+        assert_eq!(state.project.key_link(2), Some(0), "past the header");
+        state.dispatch(Action::LayerKeyLinkBelow);
+        assert_eq!(state.project.layers[2].keys_from, None, "again unlinks");
+        state.project.current_layer = 0;
+        state.dispatch(Action::LayerKeyLinkBelow);
+        assert_eq!(state.project.layers[0].keys_from, None, "nothing under the bottom");
+        assert_eq!(state.history.undo_len(), 0, "a link is no undo step");
+    }
+
+    /// "New cleanup layer": over the rough, named after it, linked to it,
+    /// active — and one undo takes the lot back.
+    #[test]
+    fn a_cleanup_layer_is_linked_and_one_undo() {
+        let mut state = AppState::for_test();
+        state.project.add_layer();
+        state.project.layers[0].name = "Rough".into();
+        let rough = state.project.layers[0].uid;
+        let n = state.project.layers.len();
+        state.add_cleanup_layer(0);
+        assert_eq!(state.project.layers.len(), n + 1);
+        assert_eq!(state.project.current_layer, 1, "directly over the rough");
+        let clean = &state.project.layers[1];
+        assert_eq!(clean.name, "Rough clean");
+        assert_eq!(clean.keys_from, Some(rough));
+        assert_eq!(state.history.undo_len(), 1);
+        state.undo();
+        assert_eq!(state.project.layers.len(), n);
+        assert!(state.project.layers.iter().all(|l| l.keys_from.is_none()));
     }
 
     #[test]

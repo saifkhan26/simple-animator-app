@@ -72,6 +72,9 @@ pub enum Action {
     FadeOthersToggle,
     LayerClipToggle,
     LayerAlphaLockToggle,
+    /// Link the active layer's key jumps to the nearest drawing layer below
+    /// it, or unlink when it already is. Unbound by default.
+    LayerKeyLinkBelow,
     KeyBlank,
     KeyCopy,
     Hold,
@@ -189,6 +192,7 @@ impl Action {
         Action::FadeOthersToggle,
         Action::LayerClipToggle,
         Action::LayerAlphaLockToggle,
+        Action::LayerKeyLinkBelow,
         Action::KeyBlank,
         Action::KeyCopy,
         Action::Hold,
@@ -295,6 +299,7 @@ impl Action {
             Action::FadeOthersToggle => "Fade other layers",
             Action::LayerClipToggle => "Clip layer to the one below",
             Action::LayerAlphaLockToggle => "Lock layer alpha",
+            Action::LayerKeyLinkBelow => "Toggle key link to layer below",
             Action::KeyBlank => "Insert blank key",
             Action::KeyCopy => "Insert duplicate key",
             Action::Hold => "Hold (delete key)",
@@ -730,6 +735,158 @@ pub const CAPTURE_KEYS: [egui::Key; 65] = {
     ]
 };
 
+// --- the mouse wheel ---
+
+/// The modifier the wheel is turned with. Each holds one [`WheelAction`], so
+/// the wheel can't clash with itself; two modifiers or more do nothing.
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug)]
+pub enum WheelSlot {
+    Plain,
+    Shift,
+    Ctrl,
+    Alt,
+}
+
+impl WheelSlot {
+    pub const ALL: [WheelSlot; 4] = [WheelSlot::Plain, WheelSlot::Shift, WheelSlot::Ctrl, WheelSlot::Alt];
+
+    /// The line it goes by in `shortcuts.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            WheelSlot::Plain => "wheel",
+            WheelSlot::Shift => "shift_wheel",
+            WheelSlot::Ctrl => "ctrl_wheel",
+            WheelSlot::Alt => "alt_wheel",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WheelSlot::Plain => "Wheel",
+            WheelSlot::Shift => "Shift+Wheel",
+            WheelSlot::Ctrl => "Ctrl+Wheel",
+            WheelSlot::Alt => "Alt+Wheel",
+        }
+    }
+
+    /// The slot a file line names, if it names one.
+    fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.key() == name)
+    }
+
+    /// The slot the wheel turns in with `mods` held; `None` for two or more.
+    pub fn of(mods: egui::Modifiers) -> Option<Self> {
+        match (mods.command || mods.ctrl, mods.shift, mods.alt) {
+            (false, false, false) => Some(WheelSlot::Plain),
+            (false, true, false) => Some(WheelSlot::Shift),
+            (true, false, false) => Some(WheelSlot::Ctrl),
+            (false, false, true) => Some(WheelSlot::Alt),
+            _ => None,
+        }
+    }
+}
+
+/// What a notch of the wheel does, in whichever [`WheelSlot`] it sits.
+/// Over the canvas, the Timeline and the mini timeline alike — except
+/// [`WheelAction::PanTimeline`], which only the Timeline's tracks have.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub enum WheelAction {
+    /// Step frames by the timeline's step size.
+    Frames,
+    /// Jump drawing to drawing, as Shift+A / Shift+S do.
+    Drawings,
+    /// Zoom the view about the pointer; over the tracks, widen the frames.
+    Zoom,
+    BrushSize,
+    /// Walk the active layer up and down the stack.
+    Layers,
+    /// Scroll the Timeline's tracks sideways.
+    PanTimeline,
+    Nothing,
+}
+
+impl WheelAction {
+    pub const ALL: [WheelAction; 7] = [
+        WheelAction::Frames,
+        WheelAction::Drawings,
+        WheelAction::Zoom,
+        WheelAction::BrushSize,
+        WheelAction::Layers,
+        WheelAction::PanTimeline,
+        WheelAction::Nothing,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WheelAction::Frames => "Step frames",
+            WheelAction::Drawings => "Jump drawings",
+            WheelAction::Zoom => "Zoom",
+            WheelAction::BrushSize => "Brush size",
+            WheelAction::Layers => "Walk layers",
+            WheelAction::PanTimeline => "Pan timeline",
+            WheelAction::Nothing => "Nothing",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            WheelAction::Frames => {
+                "Each notch steps by the timeline's step size (×N). Wheel down advances \
+                 unless Invert timeline scroll is on."
+            }
+            WheelAction::Drawings => {
+                "Each notch jumps to the next or previous drawing, skipping holds — the \
+                 drawings Shift+A / Shift+S stop at, the linked layer's included."
+            }
+            WheelAction::Zoom => {
+                "Over the canvas, zooms the view about the pointer. Over the Timeline, \
+                 widens or narrows the frames."
+            }
+            WheelAction::BrushSize => "Each notch is one press of Brush size up / down.",
+            WheelAction::Layers => "Wheel up selects the layer above, down the one below.",
+            WheelAction::PanTimeline => {
+                "Over the Timeline, scrolls the tracks sideways. Does nothing elsewhere."
+            }
+            WheelAction::Nothing => "The wheel does nothing with this held.",
+        }
+    }
+
+    /// The value it is written as in `shortcuts.toml`.
+    pub fn name(self) -> &'static str {
+        match self {
+            WheelAction::Frames => "frames",
+            WheelAction::Drawings => "drawings",
+            WheelAction::Zoom => "zoom",
+            WheelAction::BrushSize => "brush_size",
+            WheelAction::Layers => "layers",
+            WheelAction::PanTimeline => "pan_timeline",
+            WheelAction::Nothing => "nothing",
+        }
+    }
+
+    /// A file value, read in any case. `""` and `none` mean nothing too, as
+    /// they unbind a key.
+    fn named(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("none") {
+            return Some(WheelAction::Nothing);
+        }
+        Self::ALL.into_iter().find(|a| a.name().eq_ignore_ascii_case(s))
+    }
+}
+
+/// What the wheel does with nothing changed: frames, Shift for drawings, Ctrl
+/// zooms as it always has over the tracks, and Alt pans them — the job Shift
+/// had there before it went to the drawings.
+fn default_wheel() -> BTreeMap<WheelSlot, WheelAction> {
+    BTreeMap::from([
+        (WheelSlot::Plain, WheelAction::Frames),
+        (WheelSlot::Shift, WheelAction::Drawings),
+        (WheelSlot::Ctrl, WheelAction::Zoom),
+        (WheelSlot::Alt, WheelAction::PanTimeline),
+    ])
+}
+
 // --- the map itself ---
 
 /// Every action's combo, saved as `action = "Combo"` lines.
@@ -747,16 +904,27 @@ pub struct ShortcutMap {
     /// action is bound here — a typo in a hand edit is the user's to fix, not
     /// the app's to overwrite.
     pub unread: Vec<(String, String)>,
+    /// What the wheel does in each slot, saved as `wheel = "frames"`,
+    /// `shift_wheel = "drawings"` and so on. Always holds all four.
+    pub wheel: BTreeMap<WheelSlot, WheelAction>,
 }
 
 impl Serialize for ShortcutMap {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
         let mut out: BTreeMap<Action, String> =
             self.bindings.iter().map(|(&a, c)| (a, c.display())).collect();
         for &a in &self.unbound {
             out.insert(a, String::new());
         }
-        out.serialize(ser)
+        let mut m = ser.serialize_map(Some(out.len() + self.wheel.len()))?;
+        for (a, c) in &out {
+            m.serialize_entry(a, c)?;
+        }
+        for (slot, a) in &self.wheel {
+            m.serialize_entry(slot.key(), a.name())?;
+        }
+        m.end()
     }
 }
 
@@ -777,6 +945,7 @@ impl<'de> Deserialize<'de> for ShortcutMap {
             bindings: BTreeMap::new(),
             unbound: BTreeSet::new(),
             unread: Vec::new(),
+            wheel: BTreeMap::new(),
         };
         for (name, value) in raw {
             let Raw::Text(combo) = value else {
@@ -784,6 +953,18 @@ impl<'de> Deserialize<'de> for ShortcutMap {
                 map.unread.push((name, "(not text)".into()));
                 continue;
             };
+            if let Some(slot) = WheelSlot::named(&name) {
+                match WheelAction::named(&combo) {
+                    Some(a) => {
+                        map.wheel.insert(slot, a);
+                    }
+                    None => {
+                        log::warn!("shortcuts: bad wheel action {combo:?} for {name}, using the default");
+                        map.unread.push((name, combo));
+                    }
+                }
+                continue;
+            }
             let Some(action) = action_named(&name) else {
                 log::warn!("shortcuts: unknown action {name:?}, skipped");
                 map.unread.push((name, combo));
@@ -974,6 +1155,7 @@ impl Default for ShortcutMap {
             bindings: b,
             unbound: BTreeSet::new(),
             unread: Vec::new(),
+            wheel: default_wheel(),
         }
     }
 }
@@ -1007,6 +1189,25 @@ impl ShortcutMap {
     fn forget_unread(&mut self, action: Action) {
         let key = key_of(action);
         self.unread.retain(|(name, _)| *name != key);
+    }
+
+    /// What the wheel does with `mods` held. Two modifiers or more: nothing.
+    pub fn wheel_action(&self, mods: egui::Modifiers) -> WheelAction {
+        WheelSlot::of(mods)
+            .and_then(|s| self.wheel.get(&s).copied())
+            .unwrap_or(WheelAction::Nothing)
+    }
+
+    /// The slot holding `action`, if one does — the first, if several.
+    pub fn wheel_slot_of(&self, action: WheelAction) -> Option<WheelSlot> {
+        self.wheel.iter().find(|(_, &a)| a == action).map(|(&s, _)| s)
+    }
+
+    /// Put `action` in `slot`. The file's unreadable line for the slot can
+    /// go, as a rebind's does.
+    pub fn set_wheel(&mut self, slot: WheelSlot, action: WheelAction) {
+        self.wheel.insert(slot, action);
+        self.unread.retain(|(name, _)| name != slot.key());
     }
 
     /// Unbind `action`, for good: it stays unbound across a save and load
@@ -1201,6 +1402,7 @@ pub fn parse(text: &str) -> Result<ShortcutMap, String> {
                 full.clear(a);
             }
             full.unread = map.unread;
+            full.wheel.extend(map.wheel);
             Ok(full)
         }
         Err(e) => Err(e.message().to_string()),
@@ -1291,6 +1493,9 @@ fn save_text(old: &str, map: &ShortcutMap) -> Option<String> {
     for &a in &map.unbound {
         want.insert(key_of(a), String::new());
     }
+    for (slot, a) in &map.wheel {
+        want.insert(slot.key().to_string(), a.name().to_string());
+    }
     let keep: BTreeSet<&str> = map.unread.iter().map(|(n, _)| n.as_str()).collect();
     // Actions the map no longer mentions (a reset dropped them). A name that
     // isn't an action is not ours to remove.
@@ -1302,7 +1507,10 @@ fn save_text(old: &str, map: &ShortcutMap) -> Option<String> {
     for k in stale {
         doc.remove(&k);
     }
-    let same = |written: &str, want: &str| {
+    let same = |key: &str, written: &str, want: &str| {
+        if WheelSlot::named(key).is_some() {
+            return WheelAction::named(written).is_some_and(|w| Some(w) == WheelAction::named(want));
+        }
         let unbound = |s: &str| s.trim().is_empty() || s.trim().eq_ignore_ascii_case("none");
         (unbound(written) && unbound(want))
             || (!unbound(want) && parse_combo(written.trim()).is_some_and(|c| Some(c) == parse_combo(want)))
@@ -1311,7 +1519,7 @@ fn save_text(old: &str, map: &ShortcutMap) -> Option<String> {
         if keep.contains(k.as_str()) {
             continue;
         }
-        if !doc.get(k).and_then(|i| i.as_str()).is_some_and(|w| same(w, v)) {
+        if !doc.get(k).and_then(|i| i.as_str()).is_some_and(|w| same(k, w, v)) {
             doc[k.as_str()] = toml_edit::value(v.as_str());
         }
     }
@@ -1962,5 +2170,79 @@ mod tests {
             |ctx| fired = map.poll_actions(ctx),
         );
         assert_eq!(fired, vec![Action::SelectionFill]);
+    }
+
+    fn mods(ctrl: bool, shift: bool, alt: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            ctrl,
+            command: ctrl,
+            shift,
+            alt,
+            ..Default::default()
+        }
+    }
+
+    /// Out of the box: frames, Shift for drawings, Ctrl zooms, Alt pans the
+    /// tracks. Two modifiers do nothing.
+    #[test]
+    fn the_wheel_defaults_and_its_modifiers() {
+        let map = ShortcutMap::default();
+        assert_eq!(map.wheel_action(mods(false, false, false)), WheelAction::Frames);
+        assert_eq!(map.wheel_action(mods(false, true, false)), WheelAction::Drawings);
+        assert_eq!(map.wheel_action(mods(true, false, false)), WheelAction::Zoom);
+        assert_eq!(map.wheel_action(mods(false, false, true)), WheelAction::PanTimeline);
+        assert_eq!(map.wheel_action(mods(true, true, false)), WheelAction::Nothing);
+        assert_eq!(map.wheel_slot_of(WheelAction::Zoom), Some(WheelSlot::Ctrl));
+        assert_eq!(map.wheel_slot_of(WheelAction::Layers), None);
+    }
+
+    /// The wheel lines read in any case, `none` empties a slot, and a slot
+    /// the file doesn't name keeps its default.
+    #[test]
+    fn wheel_lines_read_from_the_file() {
+        let map = parse("shift_wheel = \"Zoom\"\nctrl_wheel = \"none\"\nalt_wheel = \"brush_size\"\n").unwrap();
+        assert_eq!(map.wheel[&WheelSlot::Shift], WheelAction::Zoom);
+        assert_eq!(map.wheel[&WheelSlot::Ctrl], WheelAction::Nothing);
+        assert_eq!(map.wheel[&WheelSlot::Alt], WheelAction::BrushSize);
+        assert_eq!(map.wheel[&WheelSlot::Plain], WheelAction::Frames, "the default");
+        assert!(map.unread.is_empty());
+    }
+
+    /// A wheel line that doesn't read costs that slot only: its default
+    /// stands in, and the line stays as written through a save until the
+    /// slot is set here.
+    #[test]
+    fn a_bad_wheel_line_is_kept_as_written() {
+        let old = "# wheel\nshift_wheel = \"sideways\"\nundo = \"Ctrl+Z\"\n";
+        let mut map = parse(old).unwrap();
+        assert_eq!(map.unread, [("shift_wheel".to_string(), "sideways".to_string())]);
+        assert_eq!(map.wheel[&WheelSlot::Shift], WheelAction::Drawings, "default meanwhile");
+        let new = save_text(old, &map).unwrap();
+        assert!(new.contains("shift_wheel = \"sideways\""), "{new}");
+        map.set_wheel(WheelSlot::Shift, WheelAction::Layers);
+        assert!(map.unread.is_empty());
+        let fixed = save_text(&new, &map).unwrap();
+        assert!(fixed.contains("shift_wheel = \"layers\"") && !fixed.contains("sideways"), "{fixed}");
+    }
+
+    /// A save writes the wheel lines into the file in place: comments and
+    /// the user's own spelling stay, and a changed slot is rewritten.
+    #[test]
+    fn a_save_writes_the_wheel_in_place() {
+        let old = "# my wheel\nwheel = \"FRAMES\"  # notches\n";
+        let mut map = parse(old).unwrap();
+        let new = save_text(old, &map).unwrap();
+        assert!(new.starts_with("# my wheel\nwheel = \"FRAMES\"  # notches\n"), "{new}");
+        assert!(new.contains("shift_wheel = \"drawings\""), "{new}");
+        assert_eq!(parse(&new).unwrap(), map);
+        map.set_wheel(WheelSlot::Plain, WheelAction::Drawings);
+        let changed = save_text(&new, &map).unwrap();
+        assert!(changed.starts_with("# my wheel\nwheel = \"drawings\""), "{changed}");
+        assert!(!changed.contains("FRAMES"), "{changed}");
+        assert_eq!(parse(&changed).unwrap(), map);
+        // A fresh file carries them as well.
+        let fresh = toml::to_string_pretty(&map).unwrap();
+        assert_eq!(parse(&fresh).unwrap(), map);
+        assert!(fresh.contains("alt_wheel = \"pan_timeline\""), "{fresh}");
     }
 }
