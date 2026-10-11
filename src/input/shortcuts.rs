@@ -1330,7 +1330,16 @@ pub fn config_dir() -> Option<PathBuf> {
 }
 
 /// Path to the persisted shortcuts file.
+///
+/// None under test. A test's `AppState` loads and saves like the app's, so a
+/// test that rebinds a key saved its map — the defaults it started from —
+/// over the real keymap of whoever ran `cargo test`, and every test read
+/// that file for its bindings. Tests that want a file bring their own path
+/// (`ensure_at`, `save_at`).
 fn config_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     config_dir().map(|d| d.join("shortcuts.toml"))
 }
 
@@ -1529,6 +1538,18 @@ fn save_text(old: &str, map: &ShortcutMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The test suite has no shortcuts file: nothing of the user's to read,
+    /// and nowhere for a rebind in a test to be saved over it.
+    #[test]
+    fn tests_never_reach_the_users_shortcuts_file() {
+        assert_eq!(config_path(), None);
+        assert!(read_file().is_none());
+        assert_eq!(load(), (ShortcutMap::default(), None));
+        assert!(ensure_file(&ShortcutMap::default()).is_err());
+        // Saving is a no-op rather than a write.
+        save(&ShortcutMap::default());
+    }
 
     /// Opening the file on a fresh install writes it out first, with every
     /// binding in it; an existing file — the user's edits — is left as it is.
