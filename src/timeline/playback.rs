@@ -134,3 +134,61 @@ mod tests {
         assert!(!pb.playing);
     }
 }
+
+/// How playback steps, pinned before the camera could outlast the loop: with
+/// the camera's move left at one loop this is still every frame it visits.
+#[cfg(test)]
+mod pins {
+    use super::*;
+
+    fn scene() -> Project {
+        let mut p = Project::new(32, 32, 10.0);
+        p.ensure_frame_count(8);
+        p.loop_start = 2;
+        p.loop_end = 6;
+        p.goto(2);
+        p
+    }
+
+    /// The playhead after each of `steps` ticks, `frames` frames of wall
+    /// clock apart — each a quarter frame late, so rounding in the clock
+    /// can't land a tick just short of its frame.
+    fn run(p: &mut Project, looping: bool, frames: f64, steps: usize) -> (Vec<usize>, bool) {
+        let mut pb = Playback::default();
+        pb.toggle(0.0);
+        let mut seen = Vec::new();
+        for i in 1..=steps {
+            pb.tick(p, (i as f64 * frames + 0.25) / p.fps as f64, looping);
+            seen.push(p.current_frame);
+        }
+        (seen, pb.playing)
+    }
+
+    #[test]
+    fn a_loop_range_plays_round_and_round() {
+        let (seen, playing) = run(&mut scene(), true, 1.0, 10);
+        assert_eq!(seen, [3, 4, 5, 2, 3, 4, 5, 2, 3, 4]);
+        assert!(playing);
+    }
+
+    #[test]
+    fn without_looping_it_stops_on_the_last_frame_of_the_range() {
+        let (seen, playing) = run(&mut scene(), false, 1.0, 6);
+        assert_eq!(seen, [3, 4, 5, 5, 5, 5]);
+        assert!(!playing);
+    }
+
+    #[test]
+    fn a_slow_frame_skips_ahead_by_the_time_it_took() {
+        let (seen, _) = run(&mut scene(), true, 2.5, 4);
+        assert_eq!(seen, [4, 3, 5, 4]);
+    }
+
+    #[test]
+    fn a_playhead_past_the_range_wraps_into_it() {
+        let mut p = scene();
+        p.goto(7);
+        let (seen, _) = run(&mut p, true, 1.0, 3);
+        assert_eq!(seen, [4, 5, 2]);
+    }
+}

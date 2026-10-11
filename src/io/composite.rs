@@ -453,3 +453,145 @@ fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, rect: DirtyRe
         }
     }
 }
+
+/// Exports pinned before the camera got its own size, a smooth path and a move
+/// stretched over loops. With those options left at their defaults every byte
+/// here stays what it was, so these hashes are not to be updated alongside a
+/// camera change: one that moves them changed what existing projects export.
+///
+/// The hashes are of float maths, so a toolchain that rounds `sin`/`powf`
+/// differently could move them too. Check that by running them on the
+/// commit before the bump.
+#[cfg(test)]
+pub(crate) mod pins {
+    use super::*;
+    use crate::doc::camera::{Camera, CameraKey, Ease};
+    use crate::doc::transform::{Transform, TransformKey};
+
+    /// FNV-1a, 64 bit.
+    pub(crate) fn fnv(bytes: &[u8]) -> u64 {
+        bytes
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
+    }
+
+    /// Speckle a cell: clear, half and full alpha, in colours that depend on
+    /// `seed`, so every layer and drawing is told apart.
+    fn speckle(c: &mut Canvas, seed: u32) {
+        let (w, h) = (c.width, c.height);
+        let px = c.pixels_mut();
+        for y in 0..h {
+            for x in 0..w {
+                let mut v = (x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ seed.wrapping_mul(83_492_791))
+                    .wrapping_mul(2_654_435_761);
+                v ^= v >> 15;
+                let a = match v % 4 {
+                    0 => 0,
+                    1 => 128,
+                    _ => 255,
+                };
+                let i = ((y * w + x) * 4) as usize;
+                let rgb = if a == 0 { [0; 3] } else { [(v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8] };
+                px[i..i + 3].copy_from_slice(&rgb);
+                px[i + 3] = a;
+            }
+        }
+    }
+
+    /// Sixteen frames of everything an export goes through: a background with
+    /// two drawings, a layer with a keyed pose, a half-opaque group of two, a
+    /// clipped layer with an oversized cell on top, and a camera keyed through
+    /// a pan, a push-in, a pull-out and a roll with every ease.
+    pub(crate) fn scene() -> Project {
+        const FRAMES: usize = 16;
+        let mut p = Project::new(24, 16, 12.0);
+        p.ensure_frame_count(FRAMES);
+        for _ in 0..4 {
+            p.add_layer();
+        }
+        p.layers[4].cell_w = 32;
+        p.layers[4].cell_h = 24;
+        let draw = |p: &mut Project, layer: usize, frame: usize, seed: u32| {
+            let id = p.alloc_cell_for(layer);
+            speckle(p.cell_mut(id).unwrap(), seed);
+            p.layers[layer].set_key(frame, id);
+        };
+        draw(&mut p, 0, 0, 1);
+        draw(&mut p, 0, 8, 2);
+        draw(&mut p, 1, 0, 3);
+        draw(&mut p, 2, 0, 4);
+        draw(&mut p, 3, 0, 5);
+        draw(&mut p, 4, 0, 6);
+        p.layers[1].transform_keys = vec![
+            TransformKey {
+                frame: 0,
+                transform: Transform { tx: -3.0, ty: 1.0, scale: 0.75, rot: 0.3 },
+                ease: Ease::In,
+            },
+            TransformKey {
+                frame: 15,
+                transform: Transform { tx: 5.0, ty: -2.0, scale: 1.2, rot: -0.4 },
+                ease: Ease::Linear,
+            },
+        ];
+        p.layers[3].transform.tx = 2.0;
+        p.layers[4].opacity = 0.8;
+        let g = p.group_layers(&[2, 3]).unwrap();
+        p.layers[g].opacity = 0.5;
+        let top = p.layers.len() - 1;
+        p.layers[top].clip = true;
+        let key = |frame, tx, ty, zoom, rot, ease| CameraKey {
+            frame,
+            camera: Camera { tx, ty, zoom, rot },
+            ease,
+        };
+        p.camera_keys = vec![
+            key(0, 0.0, 0.0, 1.0, 0.0, Ease::Both),
+            key(5, 4.0, -2.0, 1.5, 0.2, Ease::In),
+            key(10, -3.0, 3.0, 0.6, -0.15, Ease::Out),
+            key(15, 0.0, 0.0, 1.0, 0.0, Ease::Linear),
+        ];
+        p.current_frame = 0;
+        p.current_layer = 0;
+        p
+    }
+
+    fn hashes(p: &Project, frames: &[usize], flat: fn(&Project, usize) -> Canvas) -> Vec<u64> {
+        frames.iter().map(|&f| fnv(&flat(p, f).pixels())).collect()
+    }
+
+    #[test]
+    fn frames_through_a_keyed_camera_are_what_they_were() {
+        let got = hashes(&scene(), &[0, 2, 5, 7, 10, 13, 15], flatten_frame);
+        let was = [
+            0xac89a6e677e37180,
+            0xc08667107a1efe16,
+            0x3b35a229f4d08191,
+            0xa5015a9d50da8e8f,
+            0x87f16f4ae1ad8156,
+            0xc075d4ab17ea6e6c,
+            0xd6d6779d0a6dd757,
+        ];
+        assert_eq!(got, was, "{got:#x?}");
+    }
+
+    #[test]
+    fn frames_through_a_still_camera_are_what_they_were() {
+        let mut p = scene();
+        p.camera_keys.clear();
+        p.camera = Camera { tx: 2.5, ty: -1.5, zoom: 1.25, rot: 0.1 };
+        let moved = hashes(&p, &[0, 9], flatten_frame);
+        // At rest the frame is the canvas: the 1:1 path.
+        p.camera = Camera::default();
+        let rest = hashes(&p, &[0, 9], flatten_frame);
+        assert_eq!(moved, [0xccedc6e9a8f9137c, 0x4de5a45f31f3a90b], "{moved:#x?}");
+        assert_eq!(rest, [0xac89a6e677e37180, 0x03c2b89450323cd8], "{rest:#x?}");
+    }
+
+    #[test]
+    fn frames_in_document_space_are_what_they_were() {
+        let got = hashes(&scene(), &[0, 8, 15], flatten_doc);
+        let was = [0xac89a6e677e37180, 0x202c1034061b5d09, 0xd6d6779d0a6dd757];
+        assert_eq!(got, was, "{got:#x?}");
+    }
+}
