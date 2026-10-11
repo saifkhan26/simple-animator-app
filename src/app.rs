@@ -311,6 +311,14 @@ pub struct CamDrag {
     pub start: Camera,
 }
 
+/// A camera key picked up off the timeline ruler: the frame it is keyed on,
+/// and the frame the drag has reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CamKeyDrag {
+    pub from: usize,
+    pub to: usize,
+}
+
 /// A one-click way to frame the canvas with the camera.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CameraFraming {
@@ -1315,6 +1323,8 @@ pub struct AppState {
     camera_drag_before: Option<undo::TimelineState>,
     /// The camera's frame, while a handle of it is being dragged.
     pub cam_drag: Option<CamDrag>,
+    /// A camera key, while it is being dragged along the timeline ruler.
+    pub cam_key_drag: Option<CamKeyDrag>,
     /// Last frame the camera edit buffer was synced for.
     cam_sync_last: Option<usize>,
     /// Lock the editor viewport to the camera, so what you see is the shot.
@@ -1592,6 +1602,7 @@ impl AppState {
             nav_to_camera: false,
             camera_drag_before: None,
             cam_drag: None,
+            cam_key_drag: None,
             cam_sync_last: None,
             camera_look_through: false,
             show_camera_guide: prefs.show_camera_guide,
@@ -1700,6 +1711,7 @@ impl AppState {
         self.nav_to_camera = false;
         self.camera_drag_before = None;
         self.cam_drag = None;
+        self.cam_key_drag = None;
         self.cam_sync_last = None;
         self.camera_look_through = false;
         self.expand_cfg = None;
@@ -3138,6 +3150,19 @@ impl AppState {
             p.delete_camera_key(f);
             // Keep the live buffer consistent with the new resolved value.
             p.camera = p.resolve_camera(f);
+        });
+    }
+
+    /// Move the camera key on `from` to `to`, or copy it there. Undoable.
+    /// See [`Project::move_camera_key`].
+    pub fn move_camera_key(&mut self, from: usize, to: usize, copy: bool) {
+        if from == to || !self.project.has_camera_key(from) {
+            return;
+        }
+        self.structural_edit(false, |p| {
+            p.move_camera_key(from, to, copy);
+            // Keep the live buffer on what the keys now say for this frame.
+            p.camera = p.resolve_camera(p.current_frame);
         });
     }
 
@@ -5672,6 +5697,7 @@ impl AppState {
         self.nav_to_camera = false;
         self.camera_drag_before = None;
         self.cam_drag = None;
+        self.cam_key_drag = None;
     }
 
     pub fn undo(&mut self) {

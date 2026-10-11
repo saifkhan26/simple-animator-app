@@ -118,6 +118,23 @@ impl Project {
         self.camera_keys.retain(|k| k.frame != frame);
     }
 
+    /// Move the camera key on `from` to `to` — or, with `copy`, leave it and
+    /// put a copy there. It keeps its ease and takes the place of any key
+    /// already on `to`. `false`, with nothing changed, when there is no key on
+    /// `from` or it isn't going anywhere.
+    pub fn move_camera_key(&mut self, from: usize, to: usize, copy: bool) -> bool {
+        if from == to {
+            return false;
+        }
+        let Some(key) = self.camera_keys.iter().find(|k| k.frame == from).copied() else {
+            return false;
+        };
+        self.camera_keys.retain(|k| k.frame != to && (copy || k.frame != from));
+        self.camera_keys.push(CameraKey { frame: to, ..key });
+        self.camera_keys.sort_by_key(|k| k.frame);
+        true
+    }
+
     pub fn cell(&self, id: CellId) -> Option<&Canvas> {
         self.cells.get(id).map(|c| &**c)
     }
@@ -1286,6 +1303,43 @@ mod tests {
         p.goto(0);
         p.step(-5, false);
         assert_eq!(p.current_frame, 0, "so is the first, however big the step");
+    }
+
+    #[test]
+    fn a_camera_key_moves_with_its_ease_and_takes_the_place_of_one_it_lands_on() {
+        use crate::doc::camera::{CameraKey, Ease};
+        let mut p = Project::new(8, 8, 12.0);
+        p.ensure_frame_count(12);
+        let key = |frame, tx, ease| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ..Default::default()
+            },
+            ease,
+        };
+        p.camera_keys = vec![key(2, 20.0, Ease::In), key(6, 60.0, Ease::Out), key(9, 90.0, Ease::Both)];
+        let frames = |p: &Project| p.camera_keys.iter().map(|k| (k.frame, k.camera.tx)).collect::<Vec<_>>();
+
+        // Past another key: the keys stay in frame order.
+        assert!(p.move_camera_key(2, 8, false));
+        assert_eq!(frames(&p), [(6, 60.0), (8, 20.0), (9, 90.0)]);
+        assert_eq!(p.camera_keys[1].ease, Ease::In, "its ease came along");
+
+        // Onto another key: it takes its place.
+        assert!(p.move_camera_key(8, 9, false));
+        assert_eq!(frames(&p), [(6, 60.0), (9, 20.0)]);
+
+        // A copy leaves the original.
+        assert!(p.move_camera_key(6, 1, true));
+        assert_eq!(frames(&p), [(1, 60.0), (6, 60.0), (9, 20.0)]);
+        assert_eq!(p.camera_keys[0].ease, Ease::Out);
+
+        // Nothing to move, or nowhere to go.
+        let before = frames(&p);
+        assert!(!p.move_camera_key(4, 5, false));
+        assert!(!p.move_camera_key(6, 6, false));
+        assert_eq!(frames(&p), before);
     }
 
     /// With the camera held on the canvas, a key that left it — and every
