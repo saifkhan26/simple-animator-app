@@ -4,7 +4,7 @@
 use egui::{Align, Color32, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as ic;
 
-use crate::app::{AppState, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
+use crate::app::{AppState, CameraFraming, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
 use crate::color::{fmt_rgb, parse_color};
 use crate::doc::camera::Ease;
 use crate::doc::canvas::DirtyRect;
@@ -2446,6 +2446,17 @@ fn camera_size_ui(state: &mut AppState, ui: &mut egui::Ui) {
             (w, h) = canvas;
             changed = true;
         }
+        // The size doesn't outlive the session; this is how it comes back.
+        if let Some((lw, lh)) = state.last_camera_size.filter(|&last| last != (w, h)) {
+            if ui
+                .button(format!("Last: {lw}×{lh}"))
+                .on_hover_text("The camera size set last")
+                .clicked()
+            {
+                (w, h) = (lw, lh);
+                changed = true;
+            }
+        }
     });
     if changed {
         state.set_camera_size(Some((w, h)));
@@ -2513,6 +2524,43 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
             state.project.camera.rot = deg.to_radians();
         }
     });
+    ui.horizontal(|ui| {
+        for (label, how, tip) in [
+            (
+                "Fit",
+                CameraFraming::Fit,
+                "Centre on the canvas and pull out until all of it is in the frame",
+            ),
+            (
+                "Fill",
+                CameraFraming::Fill,
+                "Centre on the canvas, as wide as the frame goes without showing past its edge",
+            ),
+            (
+                "1:1",
+                CameraFraming::OneToOne,
+                "Zoom 1: one canvas pixel to one exported pixel",
+            ),
+            (
+                "Centre",
+                CameraFraming::Centre,
+                "Back over the middle of the canvas",
+            ),
+        ] {
+            if ui.button(label).on_hover_text(tip).clicked() {
+                state.frame_camera(how);
+            }
+        }
+    });
+    ui.checkbox(
+        &mut state.project.camera_opts.keep_inside,
+        "Keep inside canvas",
+    )
+    .on_hover_text(
+        "Push in and move the camera by the least that keeps its whole frame on the canvas, \
+         on every frame, so an export never shows past the edge. Kept until the project is \
+         closed.",
+    );
 
     let cf = state.project.current_frame;
     let nkeys = state.project.camera_keys.len();
@@ -2586,6 +2634,11 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     );
     ui.checkbox(&mut state.show_camera_guide, "Show camera frame");
     ui.checkbox(&mut state.dim_outside_camera, "Dim outside camera");
+    ui.checkbox(&mut state.camera_overlay, "Thirds and safe areas")
+        .on_hover_text(
+            "Thirds, the centre, and the action-safe (90%) and title-safe (80%) boxes inside \
+             the camera's frame. Never exported.",
+        );
     ui.checkbox(&mut state.show_layer_bounds, "Show active layer bounds");
 
     if state.project.camera.zoom > 1.001 {
@@ -5403,7 +5456,52 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
+    if state.camera_overlay {
+        for line in camera_overlay_lines(cam_corners) {
+            // Two-tone, like the frame: readable over ink and over paper.
+            painter.line_segment(line, Stroke::new(2.0, Color32::from_black_alpha(70)));
+            painter.line_segment(line, Stroke::new(1.0, Color32::from_white_alpha(150)));
+        }
+    }
+
     draw_perspective_grids(state, &painter, &xf, rect);
+}
+
+/// The composition guides inside a camera frame `q` (TL, TR, BR, BL on
+/// screen): thirds, the action-safe (90%) and title-safe (80%) boxes, and a
+/// cross on the centre. Placed by fractions of the frame, so they turn and
+/// scale with it.
+fn camera_overlay_lines(q: [egui::Pos2; 4]) -> Vec<[egui::Pos2; 2]> {
+    let at = |u: f32, v: f32| {
+        let top = q[0] + (q[1] - q[0]) * u;
+        let bottom = q[3] + (q[2] - q[3]) * u;
+        top + (bottom - top) * v
+    };
+    let mut lines = Vec::with_capacity(14);
+    for t in [1.0 / 3.0, 2.0 / 3.0] {
+        lines.push([at(t, 0.0), at(t, 1.0)]);
+        lines.push([at(0.0, t), at(1.0, t)]);
+    }
+    for inset in [0.05, 0.10] {
+        let (a, b) = (inset, 1.0 - inset);
+        let c = [at(a, a), at(b, a), at(b, b), at(a, b)];
+        for i in 0..4 {
+            lines.push([c[i], c[(i + 1) % 4]]);
+        }
+    }
+    // The cross's arms are the same length on screen both ways, however
+    // wide the frame is.
+    let (across, down) = (q[1] - q[0], q[3] - q[0]);
+    let arm = (across.length().min(down.length()) * 0.03).clamp(3.0, 14.0);
+    let centre = at(0.5, 0.5);
+    for dir in [across, down] {
+        let len = dir.length();
+        if len > 1e-3 {
+            let d = dir / len * arm;
+            lines.push([centre - d, centre + d]);
+        }
+    }
+    lines
 }
 
 /// The perspective grids, over everything else: guides, not artwork.
@@ -10376,6 +10474,84 @@ mod camera_panel_tests {
         let xf = Xform::new(&state, view);
         assert!(near(xf.doc_to_screen(960.0, 540.0), view.min), "the frame's corner, mid-canvas");
         assert!(near(xf.doc_to_screen(2880.0, 1620.0), view.max));
+    }
+
+    /// A 1080p frame on the 4K canvas: fit and fill are both half, 1:1 is
+    /// one, and only 1:1 leaves the camera where it stands.
+    #[test]
+    fn the_framing_buttons_frame_the_canvas() {
+        let (ctx, mut state) = setup();
+        state.set_camera_size(Some((1920, 1080)));
+        state.project.camera.tx = 300.0;
+        state.project.camera.zoom = 3.0;
+        click(&ctx, &mut state, "Fit");
+        let cam = state.project.camera;
+        assert!((cam.zoom - 0.5).abs() < 1e-5 && cam.tx == 0.0, "{cam:?}");
+
+        state.project.camera.tx = 300.0;
+        click(&ctx, &mut state, "1:1");
+        let cam = state.project.camera;
+        assert_eq!((cam.zoom, cam.tx), (1.0, 300.0));
+
+        click(&ctx, &mut state, "Centre");
+        let cam = state.project.camera;
+        assert_eq!((cam.zoom, cam.tx, cam.ty), (1.0, 0.0, 0.0));
+
+        // A square frame fills by its height, and fits by its width.
+        state.set_camera_size(Some((1080, 1080)));
+        click(&ctx, &mut state, "Fill");
+        assert!((state.project.camera.zoom - 0.5).abs() < 1e-5);
+        click(&ctx, &mut state, "Fit");
+        assert!((state.project.camera.zoom - 1080.0 / 3840.0).abs() < 1e-5);
+
+        // Each is one step back.
+        state.undo();
+        assert!((state.project.camera.zoom - 0.5).abs() < 1e-5);
+    }
+
+    /// The size is the session's; the last one set is offered again.
+    #[test]
+    fn the_last_size_set_is_one_click_away_in_a_new_project() {
+        let (ctx, mut state) = setup();
+        assert!(!frame(&ctx, &mut state, vec![]).iter().any(|(t, _)| t.starts_with("Last:")));
+        click(&ctx, &mut state, "Full HD");
+        click(&ctx, &mut state, "Portrait");
+        assert_eq!(state.last_camera_size, Some((1080, 1920)));
+        assert!(
+            !frame(&ctx, &mut state, vec![]).iter().any(|(t, _)| t.starts_with("Last:")),
+            "not offered while it is the size in use",
+        );
+
+        state.load_project(crate::doc::project::Project::new(3840, 2160, 24.0), None);
+        assert_eq!(state.project.camera_opts.size, None, "a project opens on its canvas");
+        click(&ctx, &mut state, "Last: 1080×1920");
+        assert_eq!(state.project.output_size(), (1080, 1920));
+    }
+
+    #[test]
+    fn keep_inside_canvas_holds_the_panel_s_edits() {
+        let (ctx, mut state) = setup();
+        state.set_camera_size(Some((1920, 1080)));
+        click(&ctx, &mut state, "Keep inside canvas");
+        assert!(state.project.camera_opts.keep_inside);
+        state.apply_camera_pan(5000.0, 0.0);
+        assert_eq!(state.project.camera.tx, 960.0, "half the canvas less half the frame");
+        state.apply_camera_zoom(0.01);
+        assert!((state.project.camera.zoom - 0.5).abs() < 1e-5, "no further out than the canvas");
+        assert_eq!(state.project.camera.tx, 0.0);
+    }
+
+    /// Fourteen lines, all of them inside the frame, the thirds a third in.
+    #[test]
+    fn the_overlay_is_drawn_inside_the_frame() {
+        let q = [pos2(100.0, 50.0), pos2(400.0, 50.0), pos2(400.0, 200.0), pos2(100.0, 200.0)];
+        let lines = camera_overlay_lines(q);
+        assert_eq!(lines.len(), 4 + 8 + 2);
+        let frame = Rect::from_min_max(q[0], q[2]).expand(1e-3);
+        assert!(lines.iter().flatten().all(|p| frame.contains(*p)));
+        assert_eq!(lines[0], [pos2(200.0, 50.0), pos2(200.0, 200.0)]);
+        // Title-safe: a tenth in from each edge.
+        assert_eq!(lines[8][0], pos2(130.0, 65.0));
     }
 
     #[test]

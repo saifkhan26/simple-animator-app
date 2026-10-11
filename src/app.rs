@@ -301,6 +301,23 @@ const DEFAULT_BG_COLOR: [f32; 3] = [0.12, 0.12, 0.13];
 /// The longest side a camera frame may have — a canvas's limit too.
 const MAX_CAMERA_SIDE: u32 = 16384;
 
+/// How far the camera pulls out and pushes in.
+pub const CAMERA_ZOOM_MIN: f32 = 0.05;
+pub const CAMERA_ZOOM_MAX: f32 = 64.0;
+
+/// A one-click way to frame the canvas with the camera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraFraming {
+    /// Centred, pulled out until the whole canvas is in the frame.
+    Fit,
+    /// Centred, as wide as the frame goes while showing nothing but canvas.
+    Fill,
+    /// One canvas pixel per exported pixel, where the camera stands.
+    OneToOne,
+    /// Back over the middle of the canvas, zoom as it is.
+    Centre,
+}
+
 /// Storage key for [`UiPrefs`].
 const UI_PREFS_KEY: &str = "ui_prefs";
 
@@ -383,6 +400,9 @@ struct UiPrefs {
     /// The Color panel's harmony scheme. Only the scheme persists: the set
     /// is rebuilt around the brush colour each launch.
     harmony: Harmony,
+    /// The camera frame size last set. The size itself lasts only for the
+    /// session, so this is what brings it back with one click the next time.
+    last_camera_size: Option<(u32, u32)>,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -478,6 +498,7 @@ impl Default for UiPrefs {
             bg_opacity: 1.0,
             show_checker: false,
             harmony: Harmony::default(),
+            last_camera_size: None,
         }
     }
 }
@@ -1294,6 +1315,12 @@ pub struct AppState {
     pub show_camera_guide: bool,
     /// Dim everything the camera can't see.
     pub dim_outside_camera: bool,
+    /// Draw thirds and the safe areas inside the camera's frame. A
+    /// composition aid for the moment: off each launch.
+    pub camera_overlay: bool,
+    /// The camera frame size last set, kept between runs — the size itself
+    /// is not. See [`AppState::set_camera_size`].
+    pub last_camera_size: Option<(u32, u32)>,
     /// Outline the active layer's cell bounds, so it's visible where a layer's
     /// drawable buffer ends (strokes past it are silently clipped).
     pub show_layer_bounds: bool,
@@ -1560,6 +1587,8 @@ impl AppState {
             camera_look_through: false,
             show_camera_guide: prefs.show_camera_guide,
             dim_outside_camera: prefs.dim_outside_camera,
+            camera_overlay: false,
+            last_camera_size: prefs.last_camera_size,
             show_layer_bounds: prefs.show_layer_bounds,
             expand_cfg: None,
             prev_layer: None,
@@ -2948,16 +2977,20 @@ impl AppState {
     pub fn apply_camera_pan(&mut self, dx: f32, dy: f32) {
         self.project.camera.tx += dx;
         self.project.camera.ty += dy;
+        self.hold_camera_inside();
     }
 
     /// Push the camera in/out by `factor` (multiplicative).
     pub fn apply_camera_zoom(&mut self, factor: f32) {
-        self.project.camera.zoom = (self.project.camera.zoom * factor).clamp(0.05, 64.0);
+        self.project.camera.zoom =
+            (self.project.camera.zoom * factor).clamp(CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
+        self.hold_camera_inside();
     }
 
     /// Roll the camera by `d` radians.
     pub fn apply_camera_rotate(&mut self, d: f32) {
         self.project.camera.rot += d;
+        self.hold_camera_inside();
     }
 
     /// Reset the camera to identity — frame rect back on the document rect.
@@ -2978,6 +3011,37 @@ impl AppState {
         self.project.camera_opts.size = size
             .map(|(w, h)| (w.clamp(1, MAX_CAMERA_SIDE), h.clamp(1, MAX_CAMERA_SIDE)))
             .filter(|&s| s != canvas);
+        if let Some(own) = self.project.camera_opts.size {
+            self.last_camera_size = Some(own);
+        }
+        self.hold_camera_inside();
+    }
+
+    /// Keep the live camera on the canvas while it is set to stay there. A
+    /// no-op otherwise, and for a camera already inside.
+    pub fn hold_camera_inside(&mut self) {
+        self.project.camera = self.project.held_inside(self.project.camera);
+    }
+
+    /// Frame the canvas with the live camera. Undoable, like the reset.
+    pub fn frame_camera(&mut self, how: CameraFraming) {
+        self.structural_edit(false, |p| {
+            let canvas = (p.width as f32, p.height as f32);
+            let (ow, oh) = p.output_size();
+            let out = (ow as f32, oh as f32);
+            let mut cam = p.camera;
+            match how {
+                CameraFraming::Fit => cam.zoom = cam.fit_zoom(canvas, out),
+                CameraFraming::Fill => cam.zoom = cam.fill_zoom(canvas, out),
+                CameraFraming::OneToOne => cam.zoom = 1.0,
+                CameraFraming::Centre => {}
+            }
+            if how != CameraFraming::OneToOne {
+                (cam.tx, cam.ty) = (0.0, 0.0);
+            }
+            cam.zoom = cam.zoom.clamp(CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
+            p.camera = p.held_inside(cam);
+        });
     }
 
     /// Add (or replace) a camera key at the current frame from the live camera.
@@ -5796,6 +5860,7 @@ impl eframe::App for AppState {
                 bg_opacity: self.bg_opacity,
                 show_checker: self.show_checker,
                 harmony: self.harmony.scheme,
+                last_camera_size: self.last_camera_size,
             },
         );
     }
@@ -5905,6 +5970,9 @@ impl eframe::App for AppState {
         self.sync_selection();
         self.sync_liquify();
         self.sync_camera_buffer();
+        // However the live camera was just moved — a drag, the panel's
+        // fields, a new frame size.
+        self.hold_camera_inside();
         // After the camera and layer buffers, which grids may follow.
         self.sync_grid_buffers();
 
@@ -8473,7 +8541,7 @@ mod tests {
     /// `eframe::Storage` in memory, so prefs go through the same RON
     /// serialisation the app's `ui.ron` does.
     #[derive(Default)]
-    struct MemStorage(HashMap<String, String>);
+    pub(super) struct MemStorage(HashMap<String, String>);
 
     impl eframe::Storage for MemStorage {
         fn get_string(&self, key: &str) -> Option<String> {
@@ -9340,6 +9408,25 @@ mod camera_rig_tests {
         assert_eq!(st.project.output_size(), (320, 180), "the size stayed");
         st.redo();
         assert_eq!(st.project.output_size(), (320, 180));
+    }
+
+    /// The size itself is the session's, but the last one set is kept
+    /// between runs — and an older prefs blob without it still loads.
+    #[test]
+    fn the_last_camera_size_is_kept_between_runs() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.set_camera_size(Some((640, 360)));
+        st.set_camera_size(None);
+        assert_eq!(st.last_camera_size, Some((640, 360)), "handing it back keeps the memory");
+        let mut storage = tests::MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        assert_eq!(prefs.last_camera_size, Some((640, 360)));
+        let next = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(next.last_camera_size, Some((640, 360)));
+        assert_eq!(next.project.camera_opts.size, None, "the size is not");
+        assert_eq!(UiPrefs::default().last_camera_size, None);
     }
 
     #[test]

@@ -81,7 +81,17 @@ impl Project {
 
     /// The camera showing on `frame`.
     pub fn resolve_camera(&self, frame: usize) -> Camera {
-        Camera::resolve(&self.camera_keys, self.camera, frame)
+        self.held_inside(Camera::resolve(&self.camera_keys, self.camera, frame))
+    }
+
+    /// `cam` as the camera's session options have it: held on the canvas
+    /// when it is set to stay there, and otherwise just `cam`.
+    pub fn held_inside(&self, cam: Camera) -> Camera {
+        if !self.camera_opts.keep_inside {
+            return cam;
+        }
+        let (ow, oh) = self.output_size();
+        cam.kept_inside((self.width as f32, self.height as f32), (ow as f32, oh as f32))
     }
 
     pub fn has_camera_key(&self, frame: usize) -> bool {
@@ -1276,6 +1286,32 @@ mod tests {
         p.goto(0);
         p.step(-5, false);
         assert_eq!(p.current_frame, 0, "so is the first, however big the step");
+    }
+
+    /// With the camera held on the canvas, a key that left it — and every
+    /// frame tweened towards one — comes back inside; with it off, they are
+    /// exactly what the keys say.
+    #[test]
+    fn a_held_camera_stays_on_the_canvas_on_every_frame() {
+        use crate::doc::camera::{CameraKey, Ease};
+        let mut p = Project::new(400, 200, 12.0);
+        p.ensure_frame_count(11);
+        p.camera_opts.size = Some((100, 50));
+        let key = |frame, tx| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ..Default::default()
+            },
+            ease: Ease::Linear,
+        };
+        p.camera_keys = vec![key(0, 0.0), key(10, 300.0)];
+        assert_eq!(p.resolve_camera(10).tx, 300.0);
+        assert_eq!(p.resolve_camera(5).tx, 150.0);
+        p.camera_opts.keep_inside = true;
+        assert_eq!(p.resolve_camera(10).tx, 150.0, "half the canvas less half the frame");
+        assert_eq!(p.resolve_camera(8).tx, 150.0);
+        assert_eq!(p.resolve_camera(2).tx, 60.0, "frames already inside are as keyed");
     }
 
     /// A symmetric grow leaves the old pixels centered, which is what keeps a

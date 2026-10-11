@@ -59,6 +59,10 @@ pub struct CameraOpts {
     /// frame. `None` = the canvas size, the frame a resting camera has always
     /// had. Smaller than the canvas, it is a window to pan around it.
     pub size: Option<(u32, u32)>,
+    /// Hold the whole frame on the canvas: pushed in and moved over by the
+    /// least that takes, so no frame — keyed, tweened or dragged — shows
+    /// past the canvas's edge. See [`Camera::kept_inside`].
+    pub keep_inside: bool,
 }
 
 impl Camera {
@@ -126,6 +130,48 @@ impl Camera {
             ty: z * (dx * s + dy * c),
             scale: l.scale * z,
             rot: l.rot - self.rot,
+        }
+    }
+
+    /// Half the size of the box the frame takes up in the document at zoom
+    /// 1: a frame `out`, rolled as this camera is.
+    fn rolled_half(&self, out: (f32, f32)) -> (f32, f32) {
+        let (s, c) = self.rot.sin_cos();
+        let (s, c) = (s.abs(), c.abs());
+        ((c * out.0 + s * out.1) * 0.5, (s * out.0 + c * out.1) * 0.5)
+    }
+
+    /// The least zoom at which a frame `out`, rolled as this camera is, lies
+    /// wholly on a canvas `canvas` — the frame as big as it can be and still
+    /// show nothing but canvas.
+    pub fn fill_zoom(&self, canvas: (f32, f32), out: (f32, f32)) -> f32 {
+        let (hx, hy) = self.rolled_half(out);
+        (2.0 * hx / canvas.0.max(1e-6)).max(2.0 * hy / canvas.1.max(1e-6))
+    }
+
+    /// The greatest zoom at which a frame `out`, rolled as this camera is,
+    /// takes in the whole of a canvas `canvas` when centred on it.
+    pub fn fit_zoom(&self, canvas: (f32, f32), out: (f32, f32)) -> f32 {
+        // The canvas inside the rolled frame is the canvas rolled the other
+        // way inside a level one.
+        let (hx, hy) = self.rolled_half(canvas);
+        (out.0 / (2.0 * hx).max(1e-6)).min(out.1 / (2.0 * hy).max(1e-6))
+    }
+
+    /// This camera with its whole frame on the canvas: pushed in until the
+    /// frame fits, then moved over until none of it hangs off an edge. A
+    /// rolled frame is held by the box around it. A camera already inside
+    /// comes back exactly as it was.
+    pub fn kept_inside(self, canvas: (f32, f32), out: (f32, f32)) -> Camera {
+        let zoom = self.zoom.max(self.fill_zoom(canvas, out));
+        let (hx, hy) = self.rolled_half(out);
+        let room_x = (canvas.0 * 0.5 - hx / zoom).max(0.0);
+        let room_y = (canvas.1 * 0.5 - hy / zoom).max(0.0);
+        Camera {
+            tx: self.tx.clamp(-room_x, room_x),
+            ty: self.ty.clamp(-room_y, room_y),
+            zoom,
+            rot: self.rot,
         }
     }
 
@@ -233,6 +279,88 @@ mod tests {
             approx(fu, u);
             approx(fv, v);
         }
+    }
+
+    const CANVAS: (f32, f32) = (400.0, 200.0);
+    const FRAME: (f32, f32) = (100.0, 50.0);
+
+    /// A camera already showing nothing but canvas is not touched — to the
+    /// bit, so turning the hold on changes no frame that didn't need it.
+    #[test]
+    fn a_camera_inside_the_canvas_is_left_exactly_as_it_was() {
+        for cam in [
+            Camera::default(),
+            Camera {
+                tx: 150.0,
+                ty: -75.0,
+                zoom: 1.0,
+                rot: 0.0,
+            },
+            Camera {
+                tx: 31.7,
+                ty: 12.3,
+                zoom: 2.4,
+                rot: 0.7,
+            },
+        ] {
+            assert_eq!(cam.kept_inside(CANVAS, FRAME), cam);
+        }
+    }
+
+    #[test]
+    fn a_camera_past_the_edge_is_moved_back_onto_the_canvas() {
+        let cam = Camera {
+            tx: 900.0,
+            ty: -900.0,
+            ..Default::default()
+        };
+        let held = cam.kept_inside(CANVAS, FRAME);
+        // Half the canvas less half the frame.
+        approx(held.tx, 150.0);
+        approx(held.ty, -75.0);
+        approx(held.zoom, 1.0);
+    }
+
+    #[test]
+    fn a_camera_pulled_out_too_far_is_pushed_in_until_it_fits() {
+        let cam = Camera {
+            zoom: 0.1,
+            tx: 40.0,
+            ..Default::default()
+        };
+        let held = cam.kept_inside(CANVAS, FRAME);
+        // 100 wide in 400 and 50 tall in 200: both bind at a quarter.
+        approx(held.zoom, 0.25);
+        approx(held.tx, 0.0);
+        approx(held.ty, 0.0);
+        approx(cam.fill_zoom(CANVAS, FRAME), 0.25);
+    }
+
+    /// A rolled frame is held by the box around it: on its side, a 100×50
+    /// frame is 50 wide and 100 tall.
+    #[test]
+    fn a_rolled_frame_is_held_by_the_box_around_it() {
+        let cam = Camera {
+            tx: 900.0,
+            ty: 900.0,
+            rot: std::f32::consts::FRAC_PI_2,
+            ..Default::default()
+        };
+        let held = cam.kept_inside(CANVAS, FRAME);
+        approx(held.tx, 200.0 - 25.0);
+        approx(held.ty, 100.0 - 50.0);
+        approx(held.rot, cam.rot);
+    }
+
+    /// Fit takes in the whole canvas; fill shows nothing but canvas. On a
+    /// frame the canvas's shape they are the same zoom.
+    #[test]
+    fn fit_takes_in_the_canvas_and_fill_stays_on_it() {
+        let cam = Camera::default();
+        approx(cam.fit_zoom(CANVAS, FRAME), 0.25);
+        // A square frame on the 2:1 canvas: fit by its width, fill by its height.
+        approx(cam.fit_zoom(CANVAS, (100.0, 100.0)), 0.25);
+        approx(cam.fill_zoom(CANVAS, (100.0, 100.0)), 0.5);
     }
 
     /// Keys hold flat outside their range and ease within a segment.
