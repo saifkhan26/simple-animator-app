@@ -9,14 +9,16 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::doc::camera::{Camera, CameraKey};
+use crate::doc::camera::{Camera, CameraKey, CameraOpts};
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer, TrackSample};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Project {
-    /// Output resolution, and the size of the camera's frame rect. Layers may
-    /// sit outside it — see `crate::doc::camera`.
+    /// Canvas size: the document rect, and the size of a layer's cells unless
+    /// it has its own. The camera's frame is this size too unless it is given
+    /// one — see [`Project::output_size`]. Layers may sit outside it — see
+    /// `crate::doc::camera`.
     pub width: u32,
     pub height: u32,
     pub fps: f32,
@@ -42,6 +44,10 @@ pub struct Project {
     /// Sorted camera keyframes. Empty = static `camera`.
     #[serde(default)]
     pub camera_keys: Vec<CameraKey>,
+    /// Session-only, like `Layer::lines_from`: skipped, so the `.anim` layout
+    /// is what it was and a load brings back the defaults.
+    #[serde(skip)]
+    pub camera_opts: CameraOpts,
 }
 
 impl Project {
@@ -63,7 +69,14 @@ impl Project {
             loop_end: 1,
             camera: Camera::default(),
             camera_keys: Vec::new(),
+            camera_opts: CameraOpts::default(),
         }
+    }
+
+    /// Size of the camera's frame, and so of every exported frame: its own,
+    /// or the canvas's.
+    pub fn output_size(&self) -> (u32, u32) {
+        self.camera_opts.size.unwrap_or((self.width, self.height))
     }
 
     /// The camera showing on `frame`.

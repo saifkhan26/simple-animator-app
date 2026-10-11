@@ -21,8 +21,8 @@ const NQ_SAMPLE_FACTOR: i32 = 10; // 1..=30; 10 = quality/speed sweet spot.
 /// one GIF that repeats forever.
 pub fn export_to(project: &Project, path: &PathBuf, order: &[usize]) -> Result<()> {
     let file = File::create(path).with_context(|| format!("creating {path:?}"))?;
-    let w = project.width as u16;
-    let h = project.height as u16;
+    let (w, h) = project.output_size();
+    let (w, h) = (w as u16, h as u16);
     let mut encoder = Encoder::new(file, w, h, &[]).context("gif Encoder init")?;
     encoder.set_repeat(Repeat::Infinite)?;
 
@@ -81,4 +81,27 @@ fn encode_frame(rgba: &[u8], w: u16, h: u16, delay_cs: u16) -> Frame<'static> {
         frame.dispose = gif::DisposalMethod::Background;
     }
     frame
+}
+
+#[cfg(test)]
+mod camera_size_tests {
+    use super::*;
+
+    /// The logical screen size a GIF's header declares.
+    fn size(path: &PathBuf) -> (u16, u16) {
+        let b = std::fs::read(path).unwrap();
+        (u16::from_le_bytes([b[6], b[7]]), u16::from_le_bytes([b[8], b[9]]))
+    }
+
+    #[test]
+    fn a_gif_is_the_camera_s_size() {
+        let mut p = Project::new(8, 6, 12.0);
+        let path = std::env::temp_dir().join(format!("animator-gif-cam-{}.gif", std::process::id()));
+        export_to(&p, &path, &[0]).unwrap();
+        assert_eq!(size(&path), (8, 6), "the canvas's, with none of its own");
+        p.camera_opts.size = Some((4, 2));
+        export_to(&p, &path, &[0]).unwrap();
+        assert_eq!(size(&path), (4, 2));
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -52,8 +52,7 @@ pub fn export_to(
     settings: &Mp4Settings,
     order: &[usize],
 ) -> Result<()> {
-    let w = project.width;
-    let h = project.height;
+    let (w, h) = project.output_size();
     // Even dimensions are required by yuv420p; pad odd sizes up by a pixel.
     let pad = "pad=ceil(iw/2)*2:ceil(ih/2)*2";
     let size = format!("{w}x{h}");

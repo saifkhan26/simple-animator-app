@@ -1,6 +1,6 @@
 //! Sprite-sheet export — a frame range laid out as a grid in one PNG.
 //!
-//! Cells are the project frame size, composited exactly as every other export
+//! Cells are the camera's frame size, composited exactly as every other export
 //! is (`composite::flatten_frame`), so a sheet cell matches the same frame from
 //! the PNG sequence pixel for pixel. Padding sits *between* cells only: an
 //! outer margin would offset every cell by half a gutter and make the frame
@@ -69,7 +69,7 @@ pub fn export_to(
         bail!("empty frame range");
     }
     let n = end - start + 1;
-    let (fw, fh) = (project.width, project.height);
+    let (fw, fh) = project.output_size();
     let (cols, rows) = grid(n, opts.columns);
     let (sw, sh) = sheet_size(fw, fh, cols, rows, opts.padding);
 
@@ -147,5 +147,23 @@ mod tests {
                 assert!(x + fw <= sw && y + fh <= sh, "n={n} cell {i} overflows");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod camera_size_tests {
+    use super::*;
+
+    #[test]
+    fn cells_are_the_camera_s_frame() {
+        let mut p = Project::new(8, 6, 12.0);
+        p.ensure_frame_count(2);
+        p.camera_opts.size = Some((4, 2));
+        let path = std::env::temp_dir().join(format!("animator-sheet-cam-{}.png", std::process::id()));
+        let opts = SheetOptions { columns: 2, padding: 1 };
+        export_to(&p, &path, (0, 1), &opts).unwrap();
+        let img = image::open(&path).unwrap();
+        assert_eq!((img.width(), img.height()), (4 + 1 + 4, 2));
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -348,7 +348,14 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
     zip.write_all(xml::animation_index(project.fps, last, project.current_frame.min(last)).as_bytes())?;
 
     // Thumbnails for file browsers and other apps; Krita itself reads layers.
-    let merged = composite::flatten_frame(project, project.current_frame.min(last));
+    // A camera frame of its own size isn't the image Krita opens, so then the
+    // thumbnail is the canvas.
+    let at = project.current_frame.min(last);
+    let merged = if project.output_size() == (pw, ph) {
+        composite::flatten_frame(project, at)
+    } else {
+        composite::flatten_doc(project, at)
+    };
     let img = image::RgbaImage::from_raw(merged.width, merged.height, merged.into_pixels())
         .context("flattened frame has the wrong size")?;
     zip.start_file("mergedimage.png", deflated)?;

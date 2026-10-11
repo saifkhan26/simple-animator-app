@@ -6,8 +6,9 @@ use crate::doc::project::Project;
 use crate::doc::transform::Transform;
 
 /// Composite all visible non-reference layers of `frame` into a fresh
-/// RGBA8 unmultiplied buffer sized to the output frame, applying each layer's
-/// transform as seen through the camera.
+/// RGBA8 unmultiplied buffer sized to the camera's frame
+/// ([`Project::output_size`]), applying each layer's transform as seen
+/// through the camera.
 ///
 /// The camera is folded into each layer transform rather than applied as a
 /// second pass: both are similarity transforms, so the composition is just
@@ -20,15 +21,21 @@ pub fn flatten_frame(project: &Project, frame: usize) -> Canvas {
     flatten(project, frame, true)
 }
 
-/// [`flatten_frame`], but in document space: the frame rect as the document
+/// [`flatten_frame`], but in document space: the canvas rect as the document
 /// has it, no camera.
 pub fn flatten_doc(project: &Project, frame: usize) -> Canvas {
     flatten(project, frame, false)
 }
 
 fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
-    let mut out = Canvas::new(project.width, project.height);
-    let (pw, ph) = (project.width, project.height);
+    // The folded transform is about the centre of what it draws into, so a
+    // camera frame of another size needs nothing more than its own size here.
+    let (pw, ph) = if through_camera {
+        project.output_size()
+    } else {
+        (project.width, project.height)
+    };
+    let mut out = Canvas::new(pw, ph);
     let cam = project.resolve_camera(frame);
     let draw = |dst: &mut Canvas, li: usize| {
         let layer = &project.layers[li];
@@ -593,5 +600,92 @@ pub(crate) mod pins {
         let got = hashes(&scene(), &[0, 8, 15], flatten_doc);
         let was = [0xac89a6e677e37180, 0x202c1034061b5d09, 0xd6d6779d0a6dd757];
         assert_eq!(got, was, "{got:#x?}");
+    }
+}
+
+#[cfg(test)]
+mod camera_size_tests {
+    use super::*;
+    use crate::doc::camera::Camera;
+
+    /// `[x0, x0 + w) × [y0, y0 + h)` of `c`, as its own pixels.
+    fn crop(c: &Canvas, x0: u32, y0: u32, w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                out.extend_from_slice(&c.px(x, y));
+            }
+        }
+        out
+    }
+
+    /// The pinned scene on its 24×16 canvas, with the camera at rest.
+    fn scene() -> Project {
+        let mut p = pins::scene();
+        p.camera_keys.clear();
+        p.camera = Camera::default();
+        p
+    }
+
+    #[test]
+    fn a_smaller_frame_is_a_window_onto_the_canvas() {
+        let mut p = scene();
+        let whole = flatten_frame(&p, 3);
+        p.camera_opts.size = Some((12, 8));
+        let window = flatten_frame(&p, 3);
+        assert_eq!((window.width, window.height), (12, 8));
+        // Same pixels at the same size: the middle of the canvas, 1:1 —
+        // group, clipped layer and turned layer included.
+        assert!(window.pixels()[..] == crop(&whole, 6, 4, 12, 8)[..]);
+    }
+
+    #[test]
+    fn panning_moves_the_window_across_the_canvas() {
+        let mut p = scene();
+        let whole = flatten_frame(&p, 3);
+        p.camera_opts.size = Some((12, 8));
+        p.camera = Camera {
+            tx: 6.0,
+            ty: -4.0,
+            ..Default::default()
+        };
+        assert!(flatten_frame(&p, 3).pixels()[..] == crop(&whole, 12, 0, 12, 8)[..]);
+    }
+
+    #[test]
+    fn a_portrait_frame_stands_on_end() {
+        let mut p = scene();
+        let whole = flatten_frame(&p, 0);
+        p.camera_opts.size = Some((8, 12));
+        let tall = flatten_frame(&p, 0);
+        assert_eq!((tall.width, tall.height), (8, 12));
+        assert!(tall.pixels()[..] == crop(&whole, 8, 2, 8, 12)[..]);
+    }
+
+    #[test]
+    fn a_frame_bigger_than_the_canvas_shows_nothing_past_its_edge() {
+        let mut p = Project::new(4, 2, 12.0);
+        let id = p.layers[0].resolve(0).unwrap();
+        p.cell_mut(id).unwrap().pixels_mut().fill(255);
+        p.camera_opts.size = Some((8, 4));
+        let out = flatten_frame(&p, 0);
+        assert_eq!((out.width, out.height), (8, 4));
+        for y in 0..4 {
+            for x in 0..8 {
+                let inside = (2..6).contains(&x) && (1..3).contains(&y);
+                assert_eq!(out.px(x, y)[3], if inside { 255 } else { 0 }, "({x}, {y})");
+            }
+        }
+    }
+
+    /// The fill tool's source is the canvas, whatever the camera frames.
+    #[test]
+    fn document_space_is_the_canvas_whatever_the_camera_s_size() {
+        let mut p = scene();
+        let before = flatten_doc(&p, 3);
+        p.camera_opts.size = Some((12, 8));
+        let after = flatten_doc(&p, 3);
+        assert_eq!((after.width, after.height), (24, 16));
+        assert!(after.pixels() == before.pixels());
     }
 }

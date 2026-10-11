@@ -298,6 +298,9 @@ pub enum NavKind {
 /// The canvas backdrop colour before the artist picks one.
 const DEFAULT_BG_COLOR: [f32; 3] = [0.12, 0.12, 0.13];
 
+/// The longest side a camera frame may have — a canvas's limit too.
+const MAX_CAMERA_SIDE: u32 = 16384;
+
 /// Storage key for [`UiPrefs`].
 const UI_PREFS_KEY: &str = "ui_prefs";
 
@@ -2961,6 +2964,20 @@ impl AppState {
     /// Undoable.
     pub fn reset_camera(&mut self) {
         self.structural_edit(false, |p| p.camera = Camera::default());
+    }
+
+    /// Give the camera a frame of its own size — or, with `None` or the
+    /// canvas's size, hand it back the canvas's. Zoom and keys are left
+    /// alone, so what it frames keeps its scale and the frame takes in more
+    /// or less of the canvas.
+    ///
+    /// A setting for the session rather than an edit: not on the undo stack,
+    /// so undoing a stroke never changes what the export comes out at.
+    pub fn set_camera_size(&mut self, size: Option<(u32, u32)>) {
+        let canvas = (self.project.width, self.project.height);
+        self.project.camera_opts.size = size
+            .map(|(w, h)| (w.clamp(1, MAX_CAMERA_SIDE), h.clamp(1, MAX_CAMERA_SIDE)))
+            .filter(|&s| s != canvas);
     }
 
     /// Add (or replace) a camera key at the current frame from the live camera.
@@ -9277,5 +9294,59 @@ mod tests {
                 .map_or((cx, cy), |r| ((r.min_x + r.max_x) as f32 / 2.0, (r.min_y + r.max_y) as f32 / 2.0));
             probe_stroke(&mut st, &ctx, "old drawing, 600 px", (mid.0 - 300.0, mid.1), (mid.0 + 300.0, mid.1 + 100.0));
         }
+    }
+}
+
+#[cfg(test)]
+mod camera_rig_tests {
+    use super::*;
+
+    #[test]
+    fn a_camera_the_size_of_the_canvas_has_no_size_of_its_own() {
+        let mut st = AppState::for_test();
+        let canvas = (st.project.width, st.project.height);
+        assert_eq!(st.project.output_size(), canvas);
+        st.set_camera_size(Some((640, 360)));
+        assert_eq!(st.project.output_size(), (640, 360));
+        st.set_camera_size(Some(canvas));
+        assert_eq!(st.project.camera_opts.size, None);
+        st.set_camera_size(Some((0, 99_999)));
+        assert_eq!(st.project.output_size(), (1, MAX_CAMERA_SIDE));
+        st.set_camera_size(None);
+        assert_eq!(st.project.output_size(), canvas);
+    }
+
+    /// Changing the size is not a camera move: zoom and keys stay as they
+    /// were, so the frame shows the same pixels at the same scale.
+    #[test]
+    fn a_new_size_leaves_zoom_and_keys_alone() {
+        let mut st = AppState::for_test();
+        st.project.camera.zoom = 1.5;
+        st.add_camera_key();
+        let (cam, keys) = (st.project.camera, st.project.camera_keys.len());
+        st.set_camera_size(Some((640, 360)));
+        assert_eq!(st.project.camera, cam);
+        assert_eq!(st.project.camera_keys.len(), keys);
+    }
+
+    #[test]
+    fn undo_never_changes_the_camera_s_size() {
+        let mut st = AppState::for_test();
+        st.set_camera_size(Some((640, 360)));
+        st.add_camera_key();
+        st.set_camera_size(Some((320, 180)));
+        st.undo();
+        assert!(st.project.camera_keys.is_empty(), "the key went");
+        assert_eq!(st.project.output_size(), (320, 180), "the size stayed");
+        st.redo();
+        assert_eq!(st.project.output_size(), (320, 180));
+    }
+
+    #[test]
+    fn opening_a_project_starts_the_camera_on_its_canvas() {
+        let mut st = AppState::for_test();
+        st.set_camera_size(Some((640, 360)));
+        st.load_project(Project::new(1280, 720, 24.0), None);
+        assert_eq!(st.project.output_size(), (1280, 720));
     }
 }

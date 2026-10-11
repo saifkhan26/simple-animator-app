@@ -90,6 +90,17 @@ mod tests {
     }
 
     #[test]
+    fn frames_come_out_at_the_camera_s_size() {
+        let dir = tmp("camsize");
+        let mut p = project();
+        p.camera_opts.size = Some((4, 2));
+        export_to(&p, &dir, &[0]).unwrap();
+        let img = image::open(dir.join("frame_0000.png")).unwrap();
+        assert_eq!((img.width(), img.height()), (4, 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn looped_order_numbers_sequentially_and_copies_repeats() {
         let dir = tmp("loop");
         // Ping-pong of 0..=2 is 0 1 2 1; two cycles fill 8 frames (1/3 s).

@@ -836,4 +836,15 @@ mod pins {
     fn the_format_version_has_not_moved() {
         assert_eq!(super::VERSION, 8);
     }
+
+    #[test]
+    fn the_camera_s_session_options_stay_out_of_the_file() {
+        let mut set = scene();
+        set.camera_opts.size = Some((640, 360));
+        assert_eq!(postcard::to_stdvec(&set).unwrap(), postcard::to_stdvec(&scene()).unwrap());
+        let (bytes, _) = super::encode(&set).unwrap();
+        let back = super::decode(&bytes).unwrap();
+        assert_eq!(back.camera_opts, Default::default());
+        assert_eq!(back.output_size(), (24, 16));
+    }
 }

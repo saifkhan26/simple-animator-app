@@ -2408,6 +2408,63 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// The camera's frame size, which is what every export comes out at. Its
+/// own, it is a window onto a bigger canvas: zoom and keys are left alone when
+/// it changes, so the frame just takes in more or less.
+fn camera_size_ui(state: &mut AppState, ui: &mut egui::Ui) {
+    let canvas = (state.project.width, state.project.height);
+    let own = state.project.camera_opts.size.is_some();
+    let (mut w, mut h) = state.project.output_size();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("W");
+        changed |= ui
+            .add(egui::DragValue::new(&mut w).range(1..=MAX_SIDE).speed(1))
+            .changed();
+        ui.label("H");
+        changed |= ui
+            .add(egui::DragValue::new(&mut h).range(1..=MAX_SIDE).speed(1))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= orientation_toggle(ui, &mut w, &mut h);
+    });
+    ui.horizontal_wrapped(|ui| {
+        // As in New project: a preset keeps the orientation picked above.
+        let landscape = w >= h;
+        for &(label, pw, ph) in &SIZE_PRESETS[..4] {
+            if ui.button(label).clicked() {
+                (w, h) = if landscape { (pw, ph) } else { (ph, pw) };
+                changed = true;
+            }
+        }
+        if ui
+            .add_enabled(own, egui::Button::new("Match canvas"))
+            .on_hover_text("Give the camera the canvas's size again")
+            .clicked()
+        {
+            (w, h) = canvas;
+            changed = true;
+        }
+    });
+    if changed {
+        state.set_camera_size(Some((w, h)));
+    }
+    let note = if state.project.camera_opts.size.is_some() {
+        format!(
+            "Exports are {w}×{h}: at zoom 1, that much of the {}×{} canvas. Kept until the \
+             project is closed, not saved in it.",
+            canvas.0, canvas.1
+        )
+    } else {
+        format!(
+            "The canvas's size, {}×{}. Make it smaller to pan a frame around the canvas.",
+            canvas.0, canvas.1
+        )
+    };
+    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(10.5));
+}
+
 /// Camera panel — what the export sees, and how that moves over time.
 fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     ui.label(
@@ -2419,6 +2476,11 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
         .size(10.5),
     );
     ui.add_space(6.0);
+
+    theme::section_header(ui, ic::FRAME_CORNERS, "Resolution");
+    camera_size_ui(state, ui);
+    ui.add_space(6.0);
+    ui.separator();
 
     ui.checkbox(&mut state.camera_edit, "Camera edit mode");
     let toggle = combo_text(state, Action::CameraEditToggle);
@@ -2527,12 +2589,13 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     ui.checkbox(&mut state.show_layer_bounds, "Show active layer bounds");
 
     if state.project.camera.zoom > 1.001 {
+        let (ow, oh) = state.project.output_size();
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(format!(
                 "Zoom {:.2}× upscales: the export is fixed at {}×{}. For a clean push-in, \
                  expand the layer canvas and start zoomed out.",
-                state.project.camera.zoom, state.project.width, state.project.height
+                state.project.camera.zoom, ow, oh
             ))
             .color(theme::TEXT_MUTED)
             .size(10.5),
@@ -5242,12 +5305,15 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // resting camera looks. Layers can sit anywhere in doc space, so the guide
     // is what tells the user which slab of their world the export will contain.
     let cam = state.display_camera(cur_frame);
-    let cam_corners = layer_screen_corners(&xf, cam.as_frame_transform(), pw, ph, pw, ph);
+    let (ow, oh) = state.project.output_size();
+    let cam_corners =
+        layer_screen_corners(&xf, cam.as_frame_transform(), ow as f32, oh as f32, pw, ph);
 
     // Faint doc-rect outline. Skipped when the bright guide would land on the
     // exact same pixels.
     let outline_a = (state.bg_opacity * 180.0) as u8;
-    if outline_a > 0 && !(state.show_camera_guide && cam.is_identity()) {
+    let on_canvas = cam.is_identity() && state.project.camera_opts.size.is_none();
+    if outline_a > 0 && !(state.show_camera_guide && on_canvas) {
         painter.add(egui::Shape::closed_line(
             corners.to_vec(),
             Stroke::new(1.0, theme::premul(80, 80, 80, outline_a)),
@@ -5758,7 +5824,11 @@ impl Xform {
         // locked.
         let (scale, rotation, pan) = if state.camera_look_through {
             let cam = state.display_camera(state.project.current_frame);
-            let s = (base * cam.zoom).max(1e-6);
+            // What fills the view is the camera's frame — the canvas's size
+            // unless the camera has its own.
+            let (ow, oh) = state.project.output_size();
+            let fit = (rect.width() / ow as f32).min(rect.height() / oh as f32);
+            let s = (fit * cam.zoom).max(1e-6);
             let (sn, cs) = (-cam.rot).sin_cos();
             let pan = Vec2::new(
                 -(cam.tx * cs - cam.ty * sn) * s,
@@ -6893,6 +6963,48 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
 /// about six rows, so a long list never pushes Create off the screen.
 const PRESET_LIST_MAX_H: f32 = 170.0;
 
+/// One-click sizes, written landscape: a canvas in New project, a camera
+/// frame in the Camera panel.
+const SIZE_PRESETS: [(&str, u32, u32); 6] = [
+    ("HD 720p", 1280, 720),
+    ("Full HD", 1920, 1080),
+    ("2K", 2048, 1080),
+    ("4K UHD", 3840, 2160),
+    ("6K", 6144, 3456),
+    ("8K", 7680, 4320),
+];
+
+/// The longest side a camera frame may have: a canvas's limit, the largest
+/// texture a GPU takes.
+const MAX_SIDE: u32 = 16384;
+
+/// Landscape / Portrait over a size, swapping the two when the other one is
+/// picked. Returns whether it did.
+///
+/// Orientation is read back out of the numbers rather than stored, so the
+/// toggle can never disagree with a size the user typed by hand. A square
+/// reads as landscape.
+fn orientation_toggle(ui: &mut egui::Ui, w: &mut u32, h: &mut u32) -> bool {
+    let landscape = *w >= *h;
+    let mut want = landscape;
+    if ui
+        .selectable_label(landscape, theme::icon_text(ic::MONITOR, "Landscape"))
+        .clicked()
+    {
+        want = true;
+    }
+    if ui
+        .selectable_label(!landscape, theme::icon_text(ic::DEVICE_MOBILE, "Portrait"))
+        .clicked()
+    {
+        want = false;
+    }
+    if want != landscape {
+        std::mem::swap(w, h);
+    }
+    want != landscape
+}
+
 fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
     if !state.show_new_project {
         return;
@@ -6932,27 +7044,8 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                // Orientation is read back out of the numbers rather than
-                // stored, so the toggle can never disagree with a size the
-                // user typed by hand. A square canvas reads as landscape.
                 let cfg = &mut state.new_project_cfg;
-                let landscape = cfg.width >= cfg.height;
-                let mut want = landscape;
-                if ui
-                    .selectable_label(landscape, theme::icon_text(ic::MONITOR, "Landscape"))
-                    .clicked()
-                {
-                    want = true;
-                }
-                if ui
-                    .selectable_label(!landscape, theme::icon_text(ic::DEVICE_MOBILE, "Portrait"))
-                    .clicked()
-                {
-                    want = false;
-                }
-                if want != landscape {
-                    std::mem::swap(&mut cfg.width, &mut cfg.height);
-                }
+                orientation_toggle(ui, &mut cfg.width, &mut cfg.height);
             });
 
             ui.add_space(4.0);
@@ -6972,14 +7065,7 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
                 // whichever orientation is currently selected, so picking one
                 // doesn't quietly undo the choice.
                 let landscape = state.new_project_cfg.width >= state.new_project_cfg.height;
-                for &(label, w, h) in &[
-                    ("HD 720p", 1280, 720),
-                    ("Full HD", 1920, 1080),
-                    ("2K", 2048, 1080),
-                    ("4K UHD", 3840, 2160),
-                    ("6K", 6144, 3456),
-                    ("8K", 7680, 4320),
-                ] {
+                for &(label, w, h) in &SIZE_PRESETS {
                     if ui.button(label).clicked() {
                         let (w, h) = if landscape { (w, h) } else { (h, w) };
                         state.new_project_cfg.width = w;
@@ -7193,12 +7279,10 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
         .collapsible(false)
         .frame(floating_frame())
         .show(ctx, |ui| {
+            let (out_w, out_h) = state.project.output_size();
             ui.label(format!(
                 "{} x {} @ {:.0} fps - {} frames",
-                state.project.width,
-                state.project.height,
-                state.project.fps,
-                state.project.frame_count,
+                out_w, out_h, state.project.fps, state.project.frame_count,
             ));
             ui.add_space(8.0);
 
@@ -7319,8 +7403,8 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                     let (cols, rows) =
                         crate::io::sprite_sheet::grid(count, state.export_cfg.sheet_columns);
                     let (sw, sh) = crate::io::sprite_sheet::sheet_size(
-                        state.project.width,
-                        state.project.height,
+                        out_w,
+                        out_h,
                         cols,
                         rows,
                         state.export_cfg.sheet_padding,
@@ -10184,5 +10268,124 @@ mod color_panel_layout_tests {
         assert!(color.top() >= brush.bottom(), "{brush:?} vs {color:?}");
         assert!(color.bottom() <= 1080.0, "{color:?}");
         assert!(!color.intersects(rect(PanelId::Timeline)), "{color:?}");
+    }
+}
+
+#[cfg(test)]
+mod camera_panel_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(300.0, 1600.0));
+
+    /// One frame of the Camera panel's contents on their own — clear of the
+    /// other panels, which overlap it at their default spots — and where each
+    /// piece of text was drawn.
+    pub(super) fn frame(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, Pos2)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => {
+                    out.push((t.galley.text().to_string(), t.pos + t.galley.rect.center().to_vec2()));
+                }
+                _ => {}
+            }
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let full = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| camera_content(state, ui));
+        });
+        let mut out = Vec::new();
+        for s in &full.shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// Click the button whose label ends in `label` (an icon may lead it).
+    pub(super) fn click(ctx: &egui::Context, state: &mut AppState, label: &str) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let at = frame(ctx, state, vec![])
+            .into_iter()
+            .find(|(t, _)| t.ends_with(label))
+            .unwrap_or_else(|| panic!("no `{label}` drawn"))
+            .1;
+        frame(ctx, state, vec![egui::Event::PointerMoved(at), button(at, true)]);
+        frame(ctx, state, vec![button(at, false)]);
+        frame(ctx, state, vec![]);
+    }
+
+    pub(super) fn setup() -> (egui::Context, AppState) {
+        let mut state = AppState::for_test();
+        state.load_project(crate::doc::project::Project::new(3840, 2160, 24.0), None);
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        frame(&ctx, &mut state, vec![]);
+        (ctx, state)
+    }
+
+    #[test]
+    fn a_preset_gives_the_camera_a_frame_of_its_own() {
+        let (ctx, mut state) = setup();
+        assert_eq!(state.project.output_size(), (3840, 2160));
+        click(&ctx, &mut state, "Full HD");
+        assert_eq!(state.project.output_size(), (1920, 1080));
+        assert_eq!((state.project.width, state.project.height), (3840, 2160), "the canvas is as it was");
+        assert!(state.project.camera.is_identity(), "and the camera has not moved");
+    }
+
+    #[test]
+    fn portrait_stands_the_frame_on_end_and_presets_keep_it_so() {
+        let (ctx, mut state) = setup();
+        click(&ctx, &mut state, "Full HD");
+        click(&ctx, &mut state, "Portrait");
+        assert_eq!(state.project.output_size(), (1080, 1920));
+        click(&ctx, &mut state, "HD 720p");
+        assert_eq!(state.project.output_size(), (720, 1280));
+        click(&ctx, &mut state, "Landscape");
+        assert_eq!(state.project.output_size(), (1280, 720));
+    }
+
+    /// Looking through a camera with a frame of its own fills the view with
+    /// that frame; with none, with the canvas, as it always has.
+    #[test]
+    fn looking_through_fits_the_camera_s_frame() {
+        let (_, mut state) = setup();
+        state.camera_look_through = true;
+        let view = Rect::from_min_size(pos2(10.0, 20.0), egui::vec2(960.0, 540.0));
+        let near = |a: Pos2, b: Pos2| (a - b).length() < 1e-2;
+
+        let xf = Xform::new(&state, view);
+        assert!(near(xf.doc_to_screen(0.0, 0.0), view.min));
+        assert!(near(xf.doc_to_screen(3840.0, 2160.0), view.max));
+
+        state.set_camera_size(Some((1920, 1080)));
+        let xf = Xform::new(&state, view);
+        assert!(near(xf.doc_to_screen(960.0, 540.0), view.min), "the frame's corner, mid-canvas");
+        assert!(near(xf.doc_to_screen(2880.0, 1620.0), view.max));
+    }
+
+    #[test]
+    fn match_canvas_hands_the_frame_back() {
+        let (ctx, mut state) = setup();
+        click(&ctx, &mut state, "Match canvas");
+        assert_eq!(state.project.camera_opts.size, None, "greyed out with nothing to hand back");
+        click(&ctx, &mut state, "Full HD");
+        click(&ctx, &mut state, "Match canvas");
+        assert_eq!(state.project.camera_opts.size, None);
+        assert_eq!(state.project.output_size(), (3840, 2160));
     }
 }

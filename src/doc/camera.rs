@@ -1,12 +1,15 @@
 //! The camera — which slab of document space each exported frame shows.
 //!
-//! `Project::width`/`height` is the output resolution and the size of the
-//! camera's frame rect. Layers, however, may sit anywhere in document space
-//! (see `Layer::transform`), so drawings can live entirely off-frame and the
-//! camera pans/zooms/rolls over them across the timeline.
+//! The camera's frame rect is the output resolution. It is the size of the
+//! canvas (`Project::width`/`height`) unless the camera is given a size of its
+//! own — see [`CameraOpts::size`] and `Project::output_size`. Layers, however,
+//! may sit anywhere in document space (see `Layer::transform`), so drawings can
+//! live entirely off-frame and the camera pans/zooms/rolls over them across
+//! the timeline.
 //!
-//! The identity camera puts the frame rect exactly on the document rect, which
-//! is the pre-camera behaviour — so existing projects export unchanged.
+//! The identity camera with no size of its own puts the frame rect exactly on
+//! the document rect, which is the pre-camera behaviour — so existing projects
+//! export unchanged.
 
 use crate::doc::transform::Transform;
 
@@ -45,6 +48,17 @@ pub struct CameraKey {
     pub camera: Camera,
     #[serde(default)]
     pub ease: Ease,
+}
+
+/// Camera settings that last for the session. Not written to `.anim`, so a
+/// project always opens with the defaults — and the defaults are the camera
+/// as it has always been.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraOpts {
+    /// Size of the camera's frame, which is the size of every exported
+    /// frame. `None` = the canvas size, the frame a resting camera has always
+    /// had. Smaller than the canvas, it is a window to pan around it.
+    pub size: Option<(u32, u32)>,
 }
 
 impl Camera {
@@ -115,9 +129,9 @@ impl Camera {
         }
     }
 
-    /// The camera's frame rect expressed as a transform placing a `pw`×`ph`
-    /// "cell" into document space. Lets the editor reuse the cell-corner
-    /// helpers to draw the camera guide.
+    /// The camera's frame rect expressed as a transform placing a "cell" the
+    /// size of the frame into document space. Lets the editor reuse the
+    /// cell-corner helpers to draw the camera guide.
     pub fn as_frame_transform(&self) -> Transform {
         Transform {
             tx: self.tx,
@@ -184,6 +198,38 @@ mod tests {
             let (cu, cv) = Transform::default().doc_to_cell(dx, dy, pw, ph, pw, ph);
             // ...must land back on (u,v) once folded through the camera.
             let (fu, fv) = eff.cell_to_doc(cu, cv, pw, ph, pw, ph);
+            approx(fu, u);
+            approx(fv, v);
+        }
+    }
+
+    /// A frame of its own size is still placed by its centre: one of its
+    /// pixels mapped into the document, onto a layer's cell and back through
+    /// the fold lands where it started, with the frame's size standing where
+    /// the canvas's would.
+    #[test]
+    fn a_frame_of_its_own_size_folds_about_its_centre() {
+        let (pw, ph) = (320.0f32, 200.0f32);
+        let (ow, oh) = (120.0f32, 90.0f32);
+        let (cw, ch) = (200.0f32, 150.0f32);
+        let cam = Camera {
+            tx: 40.0,
+            ty: -25.0,
+            zoom: 1.6,
+            rot: 0.5,
+        };
+        let layer = Transform {
+            tx: 12.0,
+            ty: 7.0,
+            scale: 0.8,
+            rot: -0.3,
+        };
+        let eff = cam.apply(&layer);
+        let frame_t = cam.as_frame_transform();
+        for (u, v) in [(0.0, 0.0), (ow, 0.0), (ow, oh), (37.0, 61.0)] {
+            let (dx, dy) = frame_t.cell_to_doc(u, v, ow, oh, pw, ph);
+            let (cu, cv) = layer.doc_to_cell(dx, dy, cw, ch, pw, ph);
+            let (fu, fv) = eff.cell_to_doc(cu, cv, cw, ch, ow, oh);
             approx(fu, u);
             approx(fv, v);
         }
