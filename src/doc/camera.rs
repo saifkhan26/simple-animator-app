@@ -65,7 +65,25 @@ pub struct CameraOpts {
     pub keep_inside: bool,
 }
 
+/// Which part of the camera's frame a press landed on. The same grabs, by
+/// the same rules, as a selection's transform box
+/// (`crate::tools::selection::grab_at`) — less its one-axis handles, which a
+/// frame of a fixed shape has no use for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CamGrab {
+    /// Inside the frame: the drag moves the camera.
+    Move,
+    /// A corner: dragging it away from the centre widens the frame.
+    Zoom,
+    /// Just outside a corner: the drag rolls the camera about its centre.
+    Roll,
+}
+
 impl Camera {
+    /// How far the camera pulls out and pushes in.
+    pub const ZOOM_MIN: f32 = 0.05;
+    pub const ZOOM_MAX: f32 = 64.0;
+
     pub fn is_identity(&self) -> bool {
         self.tx == 0.0 && self.ty == 0.0 && (self.zoom - 1.0).abs() < 1e-6 && self.rot == 0.0
     }
@@ -173,6 +191,69 @@ impl Camera {
             zoom,
             rot: self.rot,
         }
+    }
+
+    /// The middle of the frame, in the document of a canvas `canvas`.
+    fn centre(&self, canvas: (f32, f32)) -> (f32, f32) {
+        (canvas.0 * 0.5 + self.tx, canvas.1 * 0.5 + self.ty)
+    }
+
+    /// What a press at document point `p` grabs of a frame `out`, if
+    /// anything. `tol` is a handle's half-size in document pixels, so the
+    /// handles are a constant size on screen at any view zoom.
+    ///
+    /// Tested in the frame's own space, where it is a plain rect whatever
+    /// the roll: a corner first, then the ring diagonally outside one, then
+    /// the inside.
+    pub fn grab_at(&self, p: (f32, f32), canvas: (f32, f32), out: (f32, f32), tol: f32) -> Option<CamGrab> {
+        let z = self.zoom.max(1e-6);
+        let (cx, cy) = self.centre(canvas);
+        let (dx, dy) = (p.0 - cx, p.1 - cy);
+        let (s, c) = self.rot.sin_cos();
+        // Distance from the centre along each of the frame's axes, in its
+        // own (exported) pixels.
+        let (u, v) = (((dx * c + dy * s) * z).abs(), ((dy * c - dx * s) * z).abs());
+        let (hw, hh) = (out.0 * 0.5, out.1 * 0.5);
+        // Capped so the corners of a small frame cannot swallow its inside.
+        let (tu, tv) = ((tol * z).min(out.0 * 0.2), (tol * z).min(out.1 * 0.2));
+
+        if (u - hw).abs() <= tu && (v - hh).abs() <= tv {
+            return Some(CamGrab::Zoom);
+        }
+        if u > hw && v > hh && u - hw <= tu * 3.0 && v - hh <= tv * 3.0 {
+            return Some(CamGrab::Roll);
+        }
+        (u <= hw && v <= hh).then_some(CamGrab::Move)
+    }
+
+    /// This camera after its frame is dragged by `grab` from document point
+    /// `from` to `to`: moved by as much, or zoomed or rolled about its
+    /// centre so the grabbed corner follows the cursor.
+    pub fn dragged(self, grab: CamGrab, from: (f32, f32), to: (f32, f32), canvas: (f32, f32)) -> Camera {
+        let (cx, cy) = self.centre(canvas);
+        let (ax, ay) = (from.0 - cx, from.1 - cy);
+        let (bx, by) = (to.0 - cx, to.1 - cy);
+        let mut cam = self;
+        match grab {
+            CamGrab::Move => {
+                cam.tx += to.0 - from.0;
+                cam.ty += to.1 - from.1;
+            }
+            CamGrab::Zoom => {
+                // The frame covers 1/zoom of the document: a corner twice
+                // as far out is half the zoom.
+                let (was, now) = (ax.hypot(ay), bx.hypot(by));
+                if was > 1e-3 && now > 1e-3 {
+                    cam.zoom = (self.zoom * was / now).clamp(Self::ZOOM_MIN, Self::ZOOM_MAX);
+                }
+            }
+            CamGrab::Roll => {
+                if ax.hypot(ay) > 1e-3 && bx.hypot(by) > 1e-3 {
+                    cam.rot += by.atan2(bx) - ay.atan2(ax);
+                }
+            }
+        }
+        cam
     }
 
     /// The camera's frame rect expressed as a transform placing a "cell" the
@@ -361,6 +442,92 @@ mod tests {
         // A square frame on the 2:1 canvas: fit by its width, fill by its height.
         approx(cam.fit_zoom(CANVAS, (100.0, 100.0)), 0.25);
         approx(cam.fill_zoom(CANVAS, (100.0, 100.0)), 0.5);
+    }
+
+    /// A level 100×50 frame at zoom 1 in the middle of the 400×200 canvas
+    /// covers x 150..250, y 75..125.
+    #[test]
+    fn a_press_grabs_the_inside_a_corner_or_the_ring_past_one() {
+        let cam = Camera::default();
+        let at = |x, y| cam.grab_at((x, y), CANVAS, FRAME, 4.0);
+        assert_eq!(at(200.0, 100.0), Some(CamGrab::Move));
+        assert_eq!(at(160.0, 120.0), Some(CamGrab::Move));
+        assert_eq!(at(150.0, 75.0), Some(CamGrab::Zoom));
+        assert_eq!(at(252.0, 127.0), Some(CamGrab::Zoom), "a corner reaches a little past itself");
+        assert_eq!(at(258.0, 133.0), Some(CamGrab::Roll));
+        assert_eq!(at(142.0, 67.0), Some(CamGrab::Roll));
+        assert_eq!(at(258.0, 100.0), None, "beside an edge is not the frame");
+        assert_eq!(at(300.0, 180.0), None);
+    }
+
+    /// The handles are found where the frame is drawn, however it is moved,
+    /// pushed in and rolled.
+    #[test]
+    fn grabs_follow_a_moved_zoomed_and_rolled_frame() {
+        let cam = Camera {
+            tx: 60.0,
+            ty: -20.0,
+            zoom: 2.0,
+            rot: 0.6,
+        };
+        let t = cam.as_frame_transform();
+        let doc = |u: f32, v: f32| t.cell_to_doc(u, v, FRAME.0, FRAME.1, CANVAS.0, CANVAS.1);
+        let at = |p| cam.grab_at(p, CANVAS, FRAME, 2.0);
+        assert_eq!(at(doc(50.0, 25.0)), Some(CamGrab::Move));
+        for corner in [(0.0, 0.0), (100.0, 0.0), (100.0, 50.0), (0.0, 50.0)] {
+            assert_eq!(at(doc(corner.0, corner.1)), Some(CamGrab::Zoom), "{corner:?}");
+        }
+        assert_eq!(at(doc(-8.0, -8.0)), Some(CamGrab::Roll));
+        assert_eq!(at(doc(-40.0, 25.0)), None);
+    }
+
+    #[test]
+    fn dragging_moves_zooms_and_rolls_about_the_centre() {
+        let cam = Camera {
+            tx: 10.0,
+            ty: 5.0,
+            zoom: 2.0,
+            rot: 0.3,
+        };
+        let moved = cam.dragged(CamGrab::Move, (100.0, 100.0), (130.0, 80.0), CANVAS);
+        approx(moved.tx, 40.0);
+        approx(moved.ty, -15.0);
+        assert_eq!((moved.zoom, moved.rot), (cam.zoom, cam.rot));
+
+        // The centre is at (210, 105). A corner pulled twice as far from it
+        // doubles the frame: half the zoom.
+        let wider = cam.dragged(CamGrab::Zoom, (220.0, 105.0), (230.0, 105.0), CANVAS);
+        approx(wider.zoom, 1.0);
+        assert_eq!((wider.tx, wider.ty, wider.rot), (cam.tx, cam.ty, cam.rot));
+
+        // A quarter turn round the centre.
+        let rolled = cam.dragged(CamGrab::Roll, (260.0, 105.0), (210.0, 155.0), CANVAS);
+        approx(rolled.rot, 0.3 + std::f32::consts::FRAC_PI_2);
+        assert_eq!((rolled.tx, rolled.ty, rolled.zoom), (cam.tx, cam.ty, cam.zoom));
+    }
+
+    /// The corner under the cursor stays under it: after a zoom drag the
+    /// grabbed corner is where the cursor went.
+    #[test]
+    fn a_dragged_corner_follows_the_cursor() {
+        let cam = Camera {
+            tx: -30.0,
+            ty: 12.0,
+            zoom: 1.5,
+            rot: 0.0,
+        };
+        let corner = |c: &Camera| {
+            c.as_frame_transform()
+                .cell_to_doc(FRAME.0, FRAME.1, FRAME.0, FRAME.1, CANVAS.0, CANVAS.1)
+        };
+        let from = corner(&cam);
+        let (cx, cy) = (CANVAS.0 * 0.5 + cam.tx, CANVAS.1 * 0.5 + cam.ty);
+        // Straight out along the diagonal, half as far again.
+        let to = (cx + (from.0 - cx) * 1.5, cy + (from.1 - cy) * 1.5);
+        let after = cam.dragged(CamGrab::Zoom, from, to, CANVAS);
+        let now = corner(&after);
+        approx(now.0, to.0);
+        approx(now.1, to.1);
     }
 
     /// Keys hold flat outside their range and ease within a segment.

@@ -23,7 +23,7 @@ use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
 use crate::brush_library::BrushLibrary;
 use crate::color::{Harmony, HarmonySet};
-use crate::doc::camera::{Camera, Ease};
+use crate::doc::camera::{CamGrab, Camera, Ease};
 use crate::doc::canvas::{par_rows, Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
 use crate::doc::orient::Orient;
@@ -301,9 +301,15 @@ const DEFAULT_BG_COLOR: [f32; 3] = [0.12, 0.12, 0.13];
 /// The longest side a camera frame may have — a canvas's limit too.
 const MAX_CAMERA_SIDE: u32 = 16384;
 
-/// How far the camera pulls out and pushes in.
-pub const CAMERA_ZOOM_MIN: f32 = 0.05;
-pub const CAMERA_ZOOM_MAX: f32 = 64.0;
+/// The camera's frame held by one of its handles: what was grabbed, where,
+/// and the camera as it was — every step of the drag is solved from that,
+/// so nothing drifts.
+#[derive(Clone, Copy, Debug)]
+pub struct CamDrag {
+    pub grab: CamGrab,
+    pub from: (f32, f32),
+    pub start: Camera,
+}
 
 /// A one-click way to frame the canvas with the camera.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1307,6 +1313,8 @@ pub struct AppState {
     /// Timeline snapshot captured at the start of a camera drag, so the whole
     /// drag lands as one undo entry.
     camera_drag_before: Option<undo::TimelineState>,
+    /// The camera's frame, while a handle of it is being dragged.
+    pub cam_drag: Option<CamDrag>,
     /// Last frame the camera edit buffer was synced for.
     cam_sync_last: Option<usize>,
     /// Lock the editor viewport to the camera, so what you see is the shot.
@@ -1583,6 +1591,7 @@ impl AppState {
             camera_edit: false,
             nav_to_camera: false,
             camera_drag_before: None,
+            cam_drag: None,
             cam_sync_last: None,
             camera_look_through: false,
             show_camera_guide: prefs.show_camera_guide,
@@ -1690,6 +1699,7 @@ impl AppState {
         self.camera_edit = false;
         self.nav_to_camera = false;
         self.camera_drag_before = None;
+        self.cam_drag = None;
         self.cam_sync_last = None;
         self.camera_look_through = false;
         self.expand_cfg = None;
@@ -2972,6 +2982,70 @@ impl AppState {
         }
     }
 
+    /// The camera the view is locked to while looking through it: the live
+    /// one — or, while its frame is being dragged, the one the drag began
+    /// from. A view that followed a frame that follows the cursor would run
+    /// away from it; this way the view holds still and catches up on release.
+    pub fn look_through_camera(&self) -> Camera {
+        match self.cam_drag {
+            Some(d) => d.start,
+            None => self.display_camera(self.project.current_frame),
+        }
+    }
+
+    /// A press at document point `p` while editing the camera: take hold of
+    /// its frame — inside to move it, a corner to zoom, just outside a corner
+    /// to roll. `false`, with nothing changed, when camera edit mode is off
+    /// or the press missed the frame; the active tool gets it then.
+    pub fn camera_frame_down(&mut self, p: (f32, f32)) -> bool {
+        if !self.camera_edit || self.playback.playing {
+            return false;
+        }
+        let cam = self.project.camera;
+        let tol = crate::tools::selection::HANDLE_PX / self.view_scale.max(1e-6);
+        let Some(grab) = cam.grab_at(p, self.canvas_size(), self.camera_frame_size(), tol) else {
+            return false;
+        };
+        self.begin_camera_drag();
+        self.cam_drag = Some(CamDrag {
+            grab,
+            from: p,
+            start: cam,
+        });
+        true
+    }
+
+    /// The held frame's drag has reached document point `p`.
+    pub fn camera_frame_move(&mut self, p: (f32, f32)) {
+        let Some(d) = self.cam_drag else {
+            return;
+        };
+        self.project.camera = d.start.dragged(d.grab, d.from, p, self.canvas_size());
+        self.hold_camera_inside();
+    }
+
+    /// Let go of the camera's frame: one undo step for the whole drag, and
+    /// none for a press that moved nothing.
+    pub fn camera_frame_up(&mut self) {
+        let Some(d) = self.cam_drag.take() else {
+            return;
+        };
+        if self.project.camera == d.start {
+            self.camera_drag_before = None;
+        } else {
+            self.commit_camera_drag();
+        }
+    }
+
+    fn canvas_size(&self) -> (f32, f32) {
+        (self.project.width as f32, self.project.height as f32)
+    }
+
+    fn camera_frame_size(&self) -> (f32, f32) {
+        let (w, h) = self.project.output_size();
+        (w as f32, h as f32)
+    }
+
     /// Move the camera by a document-space delta. The guide rect follows the
     /// cursor, so dragging right shows what is to the right.
     pub fn apply_camera_pan(&mut self, dx: f32, dy: f32) {
@@ -2983,7 +3057,7 @@ impl AppState {
     /// Push the camera in/out by `factor` (multiplicative).
     pub fn apply_camera_zoom(&mut self, factor: f32) {
         self.project.camera.zoom =
-            (self.project.camera.zoom * factor).clamp(CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
+            (self.project.camera.zoom * factor).clamp(Camera::ZOOM_MIN, Camera::ZOOM_MAX);
         self.hold_camera_inside();
     }
 
@@ -3039,7 +3113,7 @@ impl AppState {
             if how != CameraFraming::OneToOne {
                 (cam.tx, cam.ty) = (0.0, 0.0);
             }
-            cam.zoom = cam.zoom.clamp(CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
+            cam.zoom = cam.zoom.clamp(Camera::ZOOM_MIN, Camera::ZOOM_MAX);
             p.camera = p.held_inside(cam);
         });
     }
@@ -5597,6 +5671,7 @@ impl AppState {
         self.cam_sync_last = None;
         self.nav_to_camera = false;
         self.camera_drag_before = None;
+        self.cam_drag = None;
     }
 
     pub fn undo(&mut self) {
@@ -9427,6 +9502,100 @@ mod camera_rig_tests {
         assert_eq!(next.last_camera_size, Some((640, 360)));
         assert_eq!(next.project.camera_opts.size, None, "the size is not");
         assert_eq!(UiPrefs::default().last_camera_size, None);
+    }
+
+    /// A 1280×720 canvas with a 640×360 frame in the middle of it: x
+    /// 320..960, y 180..540, the centre at (640, 360).
+    fn framed() -> AppState {
+        let mut st = AppState::for_test();
+        st.load_project(Project::new(1280, 720, 24.0), None);
+        st.set_camera_size(Some((640, 360)));
+        st.view_scale = 1.0;
+        st.camera_edit = true;
+        st
+    }
+
+    #[test]
+    fn dragging_inside_the_frame_moves_the_camera_in_one_undo_step() {
+        let mut st = framed();
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((650.0, 320.0));
+        st.camera_frame_move((700.0, 280.0));
+        st.camera_frame_up();
+        let cam = st.project.camera;
+        assert_eq!((cam.tx, cam.ty, cam.zoom, cam.rot), (100.0, -20.0, 1.0, 0.0));
+        assert_eq!(st.history.undo_len(), 1);
+        st.undo();
+        assert!(st.project.camera.is_identity());
+    }
+
+    #[test]
+    fn dragging_a_corner_zooms_and_past_a_corner_rolls() {
+        let mut st = framed();
+        // The corner at (960, 540) pulled out to twice as far from the centre.
+        assert!(st.camera_frame_down((960.0, 540.0)));
+        st.camera_frame_move((1280.0, 720.0));
+        st.camera_frame_up();
+        assert!((st.project.camera.zoom - 0.5).abs() < 1e-5);
+        assert_eq!((st.project.camera.tx, st.project.camera.rot), (0.0, 0.0));
+
+        // The frame is the whole canvas now; just past its corner rolls it.
+        assert!(st.camera_frame_down((1288.0, 728.0)));
+        st.camera_frame_move((1288.0, 728.0));
+        assert_eq!(st.cam_drag.map(|d| d.grab), Some(CamGrab::Roll));
+        st.camera_frame_move((640.0 - 368.0, 360.0 + 648.0));
+        st.camera_frame_up();
+        assert!((st.project.camera.rot - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        assert_eq!(st.history.undo_len(), 2);
+    }
+
+    /// Off the frame, and always with camera edit off, the press is the
+    /// tool's — nothing is grabbed and nothing lands on the undo stack.
+    #[test]
+    fn a_press_off_the_frame_or_outside_edit_mode_is_left_to_the_tool() {
+        let mut st = framed();
+        assert!(!st.camera_frame_down((100.0, 100.0)));
+        st.camera_edit = false;
+        assert!(!st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((700.0, 300.0));
+        st.camera_frame_up();
+        assert!(st.project.camera.is_identity());
+        assert!(st.cam_drag.is_none());
+        assert_eq!(st.history.undo_len(), 0);
+    }
+
+    #[test]
+    fn a_click_on_the_frame_that_moves_nothing_is_no_undo_step() {
+        let mut st = framed();
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_up();
+        assert_eq!(st.history.undo_len(), 0);
+        assert!(st.cam_drag.is_none());
+    }
+
+    #[test]
+    fn a_dragged_frame_is_held_on_the_canvas_when_asked() {
+        let mut st = framed();
+        st.project.camera_opts.keep_inside = true;
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((5000.0, 300.0));
+        st.camera_frame_up();
+        assert_eq!(st.project.camera.tx, 320.0, "half the canvas less half the frame");
+    }
+
+    /// Looking through the camera, the view stays where it was while the
+    /// frame is dragged — following it would move the ground under the
+    /// cursor — and catches up when it is let go.
+    #[test]
+    fn the_view_holds_still_under_a_dragged_frame() {
+        let mut st = framed();
+        st.camera_look_through = true;
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((700.0, 300.0));
+        assert_eq!(st.project.camera.tx, 100.0);
+        assert!(st.look_through_camera().is_identity());
+        st.camera_frame_up();
+        assert_eq!(st.look_through_camera().tx, 100.0);
     }
 
     #[test]

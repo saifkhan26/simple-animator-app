@@ -224,7 +224,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     // One complaint per stroke, not one per frame.
                     state.pen_outlier_logged = false;
                     if let Some(pos) = resp.interact_pointer_pos() {
-                        if state.tool == ActiveTool::Tracker {
+                        if state.camera_frame_down(canvas_to_doc(pos)) {
+                            // In camera edit mode a press on the camera's
+                            // frame takes hold of it; anywhere else, and
+                            // always with the mode off, the tool has it.
+                        } else if state.tool == ActiveTool::Tracker {
                             // Tracker takes the raw doc-space point — no cell
                             // mapping, no cell allocation.
                             state.tracker_click(canvas_to_doc(pos));
@@ -361,6 +365,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                         None if state.button_drag.is_some() => {
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 state.button_drag_to(pos);
+                            }
+                        }
+                        None if state.cam_drag.is_some() => {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                state.camera_frame_move(canvas_to_doc(pos));
                             }
                         }
                         None if state.tool == ActiveTool::Perspective => {
@@ -2497,7 +2506,8 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     let toggle = combo_text(state, Action::CameraEditToggle);
     ui.label(
         egui::RichText::new(format!(
-            "Toggle ({toggle}), then drag with your canvas gesture keys: pan-key = move the \
+            "Toggle ({toggle}), then drag the frame: inside moves it, a corner zooms, just \
+             outside a corner rolls. Or use your canvas gesture keys: pan-key = move the \
              camera, zoom-key = push in, rotate-key = roll.",
         ))
         .color(theme::TEXT_MUTED)
@@ -5456,6 +5466,17 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
+    // The frame's handles while it can be dragged: the same squares, at the
+    // same fixed screen size, as a selection's — the size `grab_at` tests.
+    if state.camera_edit {
+        let r = crate::tools::selection::HANDLE_PX;
+        for c in cam_corners {
+            let handle = egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 2.0));
+            painter.rect_filled(handle, 1.0, Color32::from_rgb(255, 190, 90));
+            painter.rect_stroke(handle, 1.0, Stroke::new(1.0, Color32::from_black_alpha(200)));
+        }
+    }
+
     if state.camera_overlay {
         for line in camera_overlay_lines(cam_corners) {
             // Two-tone, like the frame: readable over ink and over paper.
@@ -5921,7 +5942,7 @@ impl Xform {
         // keeps `screen_to_doc` an exact inverse, so drawing still works while
         // locked.
         let (scale, rotation, pan) = if state.camera_look_through {
-            let cam = state.display_camera(state.project.current_frame);
+            let cam = state.look_through_camera();
             // What fills the view is the camera's frame — the canvas's size
             // unless the camera has its own.
             let (ow, oh) = state.project.output_size();
@@ -6108,6 +6129,8 @@ fn finish_canvas_drag(state: &mut AppState) {
         state.commit_camera_drag();
     } else if state.button_drag.is_some() {
         state.end_button_drag();
+    } else if state.cam_drag.is_some() {
+        state.camera_frame_up();
     } else if state.nav_drag.is_none() {
         // Both are no-ops when idle, so a tool change mid-drag
         // cannot strand either.
@@ -10563,5 +10586,96 @@ mod camera_panel_tests {
         click(&ctx, &mut state, "Match canvas");
         assert_eq!(state.project.camera_opts.size, None);
         assert_eq!(state.project.output_size(), (3840, 2160));
+    }
+}
+
+#[cfg(test)]
+mod camera_frame_drag_tests {
+    use super::*;
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 900.0));
+
+    fn run(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| draw(state, ctx));
+    }
+
+    /// Press at `from`, drag by `by`, let go.
+    fn drag(ctx: &egui::Context, state: &mut AppState, from: Pos2, by: Vec2) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(ctx, state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=10 {
+            run(ctx, state, vec![egui::Event::PointerMoved(from + by * (i as f32 / 10.0))]);
+        }
+        run(ctx, state, vec![button(from + by, false)]);
+        run(ctx, state, vec![]);
+    }
+
+    /// A 1280×720 canvas, nothing but the canvas on screen, a 640×360 camera
+    /// frame in the middle of it and the pencil in hand.
+    fn setup() -> (egui::Context, AppState, CellId) {
+        let mut state = AppState::for_test();
+        state.load_project(crate::doc::project::Project::new(1280, 720, 24.0), None);
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolPencil);
+        state.set_camera_size(Some((640, 360)));
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        run(&ctx, &mut state, vec![]);
+        run(&ctx, &mut state, vec![]);
+        let id = state.project.ensure_active_cell();
+        (ctx, state, id)
+    }
+
+    fn painted(state: &AppState, id: CellId) -> usize {
+        state.project.cell(id).unwrap().pixels().chunks(4).filter(|p| p[3] > 0).count()
+    }
+
+    /// The pin for everything that isn't camera edit mode: with it off, a
+    /// drag across the frame is a stroke, as it always was.
+    #[test]
+    fn with_camera_edit_off_a_drag_over_the_frame_draws() {
+        let (ctx, mut state, id) = setup();
+        let from = Xform::new(&state, state.canvas_rect).doc_to_screen(560.0, 360.0);
+        drag(&ctx, &mut state, from, vec2(120.0, 0.0));
+        assert!(painted(&state, id) > 50, "painted {}", painted(&state, id));
+        assert!(state.project.camera.is_identity());
+        assert_eq!(state.history.undo_len(), 1);
+    }
+
+    #[test]
+    fn in_camera_edit_mode_a_drag_inside_the_frame_moves_the_camera_instead() {
+        let (ctx, mut state, id) = setup();
+        state.camera_edit = true;
+        let xf = Xform::new(&state, state.canvas_rect);
+        let from = xf.doc_to_screen(560.0, 360.0);
+        let by = xf.doc_to_screen(680.0, 400.0) - from;
+        drag(&ctx, &mut state, from, by);
+        assert_eq!(painted(&state, id), 0, "nothing was drawn");
+        let cam = state.project.camera;
+        assert!((cam.tx - 120.0).abs() < 0.5 && (cam.ty - 40.0).abs() < 0.5, "{cam:?}");
+        assert_eq!(state.history.undo_len(), 1, "one step for the drag");
+        assert!(state.cam_drag.is_none());
+    }
+
+    #[test]
+    fn in_camera_edit_mode_a_drag_clear_of_the_frame_still_draws() {
+        let (ctx, mut state, id) = setup();
+        state.camera_edit = true;
+        let from = Xform::new(&state, state.canvas_rect).doc_to_screen(80.0, 80.0);
+        drag(&ctx, &mut state, from, vec2(60.0, 0.0));
+        assert!(painted(&state, id) > 20, "painted {}", painted(&state, id));
+        assert!(state.project.camera.is_identity());
     }
 }
