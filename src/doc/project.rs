@@ -81,7 +81,12 @@ impl Project {
 
     /// The camera showing on `frame`.
     pub fn resolve_camera(&self, frame: usize) -> Camera {
-        self.held_inside(Camera::resolve(&self.camera_keys, self.camera, frame))
+        let cam = if self.camera_opts.smooth {
+            Camera::resolve_at(&self.camera_keys, self.camera, frame as f32, true)
+        } else {
+            Camera::resolve(&self.camera_keys, self.camera, frame)
+        };
+        self.held_inside(cam)
     }
 
     /// `cam` as the camera's session options have it: held on the canvas
@@ -1340,6 +1345,33 @@ mod tests {
         assert!(!p.move_camera_key(4, 5, false));
         assert!(!p.move_camera_key(6, 6, false));
         assert_eq!(frames(&p), before);
+    }
+
+    /// The smooth path is an option of the session: off, every frame is what
+    /// the keys have always given; on, the frames between three keys curve.
+    #[test]
+    fn the_smooth_path_is_only_taken_when_asked_for() {
+        use crate::doc::camera::{CameraKey, Ease};
+        let mut p = Project::new(400, 200, 12.0);
+        p.ensure_frame_count(21);
+        let key = |frame, tx, ty| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ty,
+                ..Default::default()
+            },
+            ease: Ease::Linear,
+        };
+        p.camera_keys = vec![key(0, 0.0, 0.0), key(10, 100.0, 0.0), key(20, 100.0, 100.0)];
+        let straight: Vec<Camera> = (0..21).map(|f| p.resolve_camera(f)).collect();
+        for (f, cam) in straight.iter().enumerate() {
+            assert_eq!(*cam, Camera::resolve(&p.camera_keys, p.camera, f));
+        }
+        p.camera_opts.smooth = true;
+        assert_eq!(p.resolve_camera(10), straight[10], "keys are where they were");
+        assert_ne!(p.resolve_camera(5), straight[5]);
+        assert!(p.resolve_camera(5).ty < 0.0, "swinging wide of the corner");
     }
 
     /// With the camera held on the canvas, a key that left it — and every

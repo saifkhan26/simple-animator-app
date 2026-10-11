@@ -3103,6 +3103,13 @@ impl AppState {
         self.hold_camera_inside();
     }
 
+    /// One of the camera's session options changed what the keys resolve to
+    /// — the smooth path, the hold on the canvas: bring the live camera back
+    /// in step with them, as a frame change would.
+    pub fn camera_opts_changed(&mut self) {
+        self.cam_sync_last = None;
+    }
+
     /// Keep the live camera on the canvas while it is set to stay there. A
     /// no-op otherwise, and for a camera already inside.
     pub fn hold_camera_inside(&mut self) {

@@ -63,6 +63,9 @@ pub struct CameraOpts {
     /// least that takes, so no frame — keyed, tweened or dragged — shows
     /// past the canvas's edge. See [`Camera::kept_inside`].
     pub keep_inside: bool,
+    /// Curve through the keys instead of turning a corner at each: see
+    /// [`Camera::resolve_at`]. Changes nothing until there are three keys.
+    pub smooth: bool,
 }
 
 /// Which part of the camera's frame a press landed on. The same grabs, by
@@ -125,6 +128,54 @@ impl Camera {
             }
         }
         keys[last].camera
+    }
+
+    /// [`Camera::resolve`] at any time `t` in frames, not only on one — and
+    /// on a whole frame, exactly what `resolve` gives there.
+    ///
+    /// With `smooth` and three keys or more, the frame's centre runs along a
+    /// curve through the keys rather than a straight line from each to the
+    /// next: a cubic Hermite segment between each pair, its tangent at a key
+    /// the slope between that key's neighbours, so the path arrives at a
+    /// middle key already heading for the one after. Zoom and roll, and each
+    /// key's ease, are as ever. Two keys have nothing to curve round.
+    pub fn resolve_at(keys: &[CameraKey], static_cam: Camera, t: f32, smooth: bool) -> Camera {
+        if keys.is_empty() {
+            return static_cam;
+        }
+        let last = keys.len() - 1;
+        if t <= keys[0].frame as f32 {
+            return keys[0].camera;
+        }
+        if t >= keys[last].frame as f32 {
+            return keys[last].camera;
+        }
+        let i = keys
+            .windows(2)
+            .position(|w| t <= w[1].frame as f32)
+            .unwrap_or(last - 1);
+        let (a, b) = (keys[i], keys[i + 1]);
+        let span = (b.frame - a.frame).max(1) as f32;
+        let u = a.ease.apply((t - a.frame as f32) / span);
+        let mut cam = Camera::lerp(a.camera, b.camera, u);
+        if smooth && keys.len() >= 3 {
+            // Slope of the path at key `k`, in pixels a frame: between its
+            // neighbours, or along its one segment at either end.
+            let slope = |k: usize| {
+                let (p, n) = (keys[k.saturating_sub(1)], keys[(k + 1).min(last)]);
+                let frames = n.frame.saturating_sub(p.frame).max(1) as f32;
+                ((n.camera.tx - p.camera.tx) / frames, (n.camera.ty - p.camera.ty) / frames)
+            };
+            let (ma, mb) = (slope(i), slope(i + 1));
+            let (u2, u3) = (u * u, u * u * u);
+            let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+            let h10 = u3 - 2.0 * u2 + u;
+            let h01 = -2.0 * u3 + 3.0 * u2;
+            let h11 = u3 - u2;
+            cam.tx = h00 * a.camera.tx + h10 * span * ma.0 + h01 * b.camera.tx + h11 * span * mb.0;
+            cam.ty = h00 * a.camera.ty + h10 * span * ma.1 + h01 * b.camera.ty + h11 * span * mb.1;
+        }
+        cam
     }
 
     /// Fold this camera into a layer transform, producing the cell → *frame*
@@ -528,6 +579,135 @@ mod tests {
         let now = corner(&after);
         approx(now.0, to.0);
         approx(now.1, to.1);
+    }
+
+    fn key(frame: usize, tx: f32, ty: f32, ease: Ease) -> CameraKey {
+        CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ty,
+                ..Default::default()
+            },
+            ease,
+        }
+    }
+
+    /// The straight path at a time between frames is, on every whole frame,
+    /// bit for bit what `resolve` has always given there.
+    #[test]
+    fn resolving_at_a_whole_frame_is_resolve() {
+        let mut seed = 0x2545_f491u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for _ in 0..200 {
+            let n = next() % 6;
+            let mut frame = 0usize;
+            let mut keys = Vec::new();
+            for _ in 0..n {
+                frame += 1 + (next() % 9) as usize;
+                keys.push(CameraKey {
+                    frame,
+                    camera: Camera {
+                        tx: (next() % 2000) as f32 * 0.37 - 300.0,
+                        ty: (next() % 2000) as f32 * 0.11 - 90.0,
+                        zoom: 0.2 + (next() % 500) as f32 * 0.013,
+                        rot: (next() % 628) as f32 * 0.01 - 3.14,
+                    },
+                    ease: Ease::ALL[(next() % 4) as usize],
+                });
+            }
+            let still = Camera {
+                tx: 3.0,
+                ty: -4.0,
+                zoom: 1.5,
+                rot: 0.25,
+            };
+            for f in 0..frame + 4 {
+                assert_eq!(
+                    Camera::resolve_at(&keys, still, f as f32, false),
+                    Camera::resolve(&keys, still, f),
+                    "frame {f} of {keys:?}"
+                );
+            }
+        }
+    }
+
+    /// Between frames the straight path is the straight line it is on them.
+    #[test]
+    fn resolving_between_frames_follows_the_segment() {
+        let keys = [key(0, 0.0, 0.0, Ease::Linear), key(10, 100.0, -50.0, Ease::Linear)];
+        let cam = Camera::resolve_at(&keys, Camera::default(), 2.5, false);
+        approx(cam.tx, 25.0);
+        approx(cam.ty, -12.5);
+        approx(Camera::resolve_at(&keys, Camera::default(), 99.0, false).tx, 100.0);
+        approx(Camera::resolve_at(&keys, Camera::default(), -3.0, false).tx, 0.0);
+    }
+
+    /// Right, then down: three keys with a square corner on the middle one.
+    fn corner() -> [CameraKey; 3] {
+        [
+            key(0, 0.0, 0.0, Ease::Linear),
+            key(10, 100.0, 0.0, Ease::Linear),
+            key(20, 100.0, 100.0, Ease::Linear),
+        ]
+    }
+
+    /// The smooth path still goes exactly through every key.
+    #[test]
+    fn a_smooth_path_passes_through_its_keys() {
+        let keys = corner();
+        for k in keys {
+            let cam = Camera::resolve_at(&keys, Camera::default(), k.frame as f32, true);
+            assert_eq!((cam.tx, cam.ty), (k.camera.tx, k.camera.ty), "key on {}", k.frame);
+        }
+    }
+
+    /// The straight path turns the corner on the middle key in one frame; the
+    /// smooth one is already turning as it arrives, and carries on the same
+    /// way as it leaves.
+    #[test]
+    fn a_smooth_path_rounds_the_corner_a_straight_one_turns() {
+        let keys = corner();
+        let at = |t: f32, smooth| {
+            let c = Camera::resolve_at(&keys, Camera::default(), t, smooth);
+            (c.tx, c.ty)
+        };
+        // Heading just before and just after the middle key.
+        let heading = |smooth| {
+            let (a, k, b) = (at(9.9, smooth), at(10.0, smooth), at(10.1, smooth));
+            ((k.1 - a.1).atan2(k.0 - a.0), (b.1 - k.1).atan2(b.0 - k.0))
+        };
+        let (into, out_of) = heading(false);
+        approx(into, 0.0);
+        approx(out_of, std::f32::consts::FRAC_PI_2);
+        let (into, out_of) = heading(true);
+        assert!((into - out_of).abs() < 0.05, "{into} then {out_of}");
+        assert!((into - std::f32::consts::FRAC_PI_4).abs() < 0.05, "diagonally through it: {into}");
+
+        // It swings wide to do it: off the straight line on the way in.
+        assert_eq!(at(5.0, false).1, 0.0);
+        approx(at(5.0, true).0, 56.25);
+        approx(at(5.0, true).1, -6.25);
+    }
+
+    /// Two keys have nothing to curve round: smooth or not, the same camera,
+    /// to the bit. Nor does a camera with no keys, or a time outside them.
+    #[test]
+    fn smoothing_changes_nothing_with_fewer_than_three_keys() {
+        let keys = [key(3, -40.0, 12.0, Ease::Both), key(17, 260.0, -75.0, Ease::In)];
+        let still = Camera::default();
+        for i in 0..=80 {
+            let t = i as f32 * 0.25;
+            assert_eq!(Camera::resolve_at(&keys, still, t, true), Camera::resolve_at(&keys, still, t, false));
+        }
+        assert_eq!(Camera::resolve_at(&[], still, 5.0, true), still);
+        let three = corner();
+        assert_eq!(Camera::resolve_at(&three, still, 40.0, true), three[2].camera);
     }
 
     /// Keys hold flat outside their range and ease within a segment.

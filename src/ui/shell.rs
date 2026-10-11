@@ -2562,15 +2562,20 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
             }
         }
     });
-    ui.checkbox(
-        &mut state.project.camera_opts.keep_inside,
-        "Keep inside canvas",
-    )
-    .on_hover_text(
-        "Push in and move the camera by the least that keeps its whole frame on the canvas, \
-         on every frame, so an export never shows past the edge. Kept until the project is \
-         closed.",
-    );
+    if ui
+        .checkbox(
+            &mut state.project.camera_opts.keep_inside,
+            "Keep inside canvas",
+        )
+        .on_hover_text(
+            "Push in and move the camera by the least that keeps its whole frame on the canvas, \
+             on every frame, so an export never shows past the edge. Kept until the project is \
+             closed.",
+        )
+        .changed()
+    {
+        state.camera_opts_changed();
+    }
 
     let cf = state.project.current_frame;
     let nkeys = state.project.camera_keys.len();
@@ -2633,6 +2638,19 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
             state.reset_camera();
         }
     });
+    if ui
+        .checkbox(
+            &mut state.project.camera_opts.smooth,
+            "Smooth path through keys",
+        )
+        .on_hover_text(
+            "With three keys or more, the camera curves through the middle ones instead of \
+             turning a corner at each. Kept until the project is closed.",
+        )
+        .changed()
+    {
+        state.camera_opts_changed();
+    }
 
     ui.add_space(6.0);
     ui.separator();
