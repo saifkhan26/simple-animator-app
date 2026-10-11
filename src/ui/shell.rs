@@ -5544,7 +5544,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         for line in camera_overlay_lines(cam_corners) {
             // Two-tone, like the frame: readable over ink and over paper.
             painter.line_segment(line, Stroke::new(2.0, Color32::from_black_alpha(70)));
-            painter.line_segment(line, Stroke::new(1.0, Color32::from_white_alpha(150)));
+            painter.line_segment(line, Stroke::new(1.0, theme::white_alpha(150)));
         }
     }
 

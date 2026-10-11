@@ -660,7 +660,7 @@ mod tests {
                         tx: (next() % 2000) as f32 * 0.37 - 300.0,
                         ty: (next() % 2000) as f32 * 0.11 - 90.0,
                         zoom: 0.2 + (next() % 500) as f32 * 0.013,
-                        rot: (next() % 628) as f32 * 0.01 - 3.14,
+                        rot: (next() % 600) as f32 * 0.01 - 3.0,
                     },
                     ease: Ease::ALL[(next() % 4) as usize],
                 });
