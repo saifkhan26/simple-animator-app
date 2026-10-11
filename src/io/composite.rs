@@ -1,13 +1,15 @@
 //! CPU composite — used for PNG / GIF export where we need flat pixels for a
 //! given frame. Onion skins and reference layers are excluded from export.
 
+use crate::doc::camera::Camera;
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::project::Project;
 use crate::doc::transform::Transform;
 
 /// Composite all visible non-reference layers of `frame` into a fresh
-/// RGBA8 unmultiplied buffer sized to the output frame, applying each layer's
-/// transform as seen through the camera.
+/// RGBA8 unmultiplied buffer sized to the camera's frame
+/// ([`Project::output_size`]), applying each layer's transform as seen
+/// through the camera.
 ///
 /// The camera is folded into each layer transform rather than applied as a
 /// second pass: both are similarity transforms, so the composition is just
@@ -17,19 +19,37 @@ use crate::doc::transform::Transform;
 /// A clipped layer composites its drawing cut to its base; see
 /// [`crate::doc::clip`]. Everything unclipped goes straight from its cell.
 pub fn flatten_frame(project: &Project, frame: usize) -> Canvas {
-    flatten(project, frame, true)
+    flatten(project, frame, Some(project.resolve_camera(frame)))
 }
 
-/// [`flatten_frame`], but in document space: the frame rect as the document
+/// `frame` as an export writes it: through `cam` when the export gives each
+/// of its frames a camera — a move stretched over loops shows a frame's
+/// drawings through the camera of another time — and otherwise, as
+/// [`flatten_frame`], through the camera keyed on `frame`.
+pub fn flatten_through(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas {
+    match cam {
+        Some(cam) => flatten(project, frame, Some(cam)),
+        None => flatten_frame(project, frame),
+    }
+}
+
+/// [`flatten_frame`], but in document space: the canvas rect as the document
 /// has it, no camera.
 pub fn flatten_doc(project: &Project, frame: usize) -> Canvas {
-    flatten(project, frame, false)
+    flatten(project, frame, None)
 }
 
-fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
-    let mut out = Canvas::new(project.width, project.height);
-    let (pw, ph) = (project.width, project.height);
-    let cam = project.resolve_camera(frame);
+/// `frame`'s drawings through `cam`, or with none in document space.
+fn flatten(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas {
+    let through_camera = cam.is_some();
+    // The folded transform is about the centre of what it draws into, so a
+    // camera frame of another size needs nothing more than its own size here.
+    let (pw, ph) = if through_camera {
+        project.output_size()
+    } else {
+        (project.width, project.height)
+    };
+    let mut out = Canvas::new(pw, ph);
     let draw = |dst: &mut Canvas, li: usize| {
         let layer = &project.layers[li];
         if !project.shows(li) || layer.reference || layer.is_group() {
@@ -39,8 +59,13 @@ fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
             return;
         };
         let xform = layer.resolve_transform(frame);
-        let xform = if through_camera { cam.apply(&xform) } else { xform };
-        composite_layer(dst, &src, &xform, layer.opacity, pw, ph);
+        let xform = cam.map_or(xform, |cam| cam.apply(&xform));
+        if through_camera && xform.scale.abs() < AVERAGE_BELOW {
+            let (small, xform) = shrunk_for(&src, &xform);
+            composite_layer(dst, &small, &xform, layer.opacity, pw, ph);
+        } else {
+            composite_layer(dst, &src, &xform, layer.opacity, pw, ph);
+        }
     };
     for (li, layer) in project.layers.iter().enumerate() {
         // A group's layers are drawn at its header, which sits directly
@@ -376,6 +401,92 @@ mod tests {
     }
 }
 
+/// The scale under which an exported layer is shrunk by averaging before it
+/// is sampled. A bilinear sample reads the two source pixels either side of
+/// it, so down to a half every source pixel still reaches the frame; any
+/// smaller and whole rows and columns fall between samples — a pencil line a
+/// pixel wide comes and goes as the camera drifts over it.
+const AVERAGE_BELOW: f32 = 0.5;
+
+/// `src` shrunk for a layer drawn at under half its size — a camera pulled
+/// well back over a big canvas — and the transform that draws the shrunken
+/// cell just where `xform` draws `src`.
+///
+/// It is halved as many times as leave it drawn at between half and full
+/// size, where a bilinear sample misses nothing: each pixel then is the
+/// average of the block it stands for, so a thin line thins out instead of
+/// coming and going. One pass over the drawing, after which the layer costs
+/// what any other does.
+///
+/// Export only. On screen, and in document space (what a fill reads), layers
+/// are sampled as they always were.
+fn shrunk_for(src: &Canvas, xform: &Transform) -> (Canvas, Transform) {
+    let scale = xform.scale.abs().max(1e-6);
+    let halvings = ((1.0 / scale).log2().floor() as u32).clamp(1, 7);
+    let k = 1u32 << halvings;
+    let small = shrunk(src, k);
+    // The shrunken cell stands for `src` padded out to whole blocks, and a
+    // cell is placed by its middle — which the padding moved.
+    let dx = (small.width * k - src.width) as f32 * 0.5;
+    let dy = (small.height * k - src.height) as f32 * 0.5;
+    let (s, c) = xform.rot.sin_cos();
+    let xform = Transform {
+        tx: xform.tx + (dx * c - dy * s) * xform.scale,
+        ty: xform.ty + (dx * s + dy * c) * xform.scale,
+        scale: xform.scale * k as f32,
+        rot: xform.rot,
+    };
+    (small, xform)
+}
+
+/// `src` at one `k`th of its size: each pixel the average of a `k`×`k` block
+/// of it, the last column and row padded out with clear pixels. Averaged
+/// premultiplied, so a clear pixel thins the paint beside it without
+/// darkening it.
+fn shrunk(src: &Canvas, k: u32) -> Canvas {
+    let (w, h) = (src.width.div_ceil(k).max(1), src.height.div_ceil(k).max(1));
+    let mut out = Canvas::new(w, h);
+    let px = out.pixels_mut();
+    let area = (k * k) as f32;
+    // Colour times alpha, and alpha, summed over each block of one row of
+    // blocks. `k` is at most 128, so the sums fit.
+    let mut row = vec![[0u32; 4]; w as usize];
+    for by in 0..h {
+        let mut any = false;
+        for y in by * k..((by + 1) * k).min(src.height) {
+            // Over what the source holds: a packed one skips its margins.
+            let (x0, span) = src.row_span(y);
+            for (i, s) in span.chunks_exact(4).enumerate() {
+                let a = s[3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let sum = &mut row[((x0 + i as u32) / k) as usize];
+                sum[0] += s[0] as u32 * a;
+                sum[1] += s[1] as u32 * a;
+                sum[2] += s[2] as u32 * a;
+                sum[3] += a;
+                any = true;
+            }
+        }
+        if !any {
+            continue;
+        }
+        let at = by as usize * w as usize * 4;
+        for (bx, sum) in row.iter_mut().enumerate() {
+            if sum[3] > 0 {
+                let d = &mut px[at + bx * 4..at + bx * 4 + 4];
+                for c in 0..3 {
+                    d[c] = (sum[c] as f32 / sum[3] as f32).round() as u8;
+                }
+                d[3] = (sum[3] as f32 / area).round().min(255.0) as u8;
+                *sum = [0; 4];
+            }
+        }
+    }
+    out
+}
+
 /// Bilinear RGBA sample at floating `(x, y)` in source pixel space, clamped to
 /// edges.
 pub(crate) fn sample_bilinear(src: &Canvas, x: f32, y: f32) -> [u8; 4] {
@@ -451,5 +562,425 @@ fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, rect: DirtyRe
             }
             d[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
         }
+    }
+}
+
+/// Exports pinned before the camera got its own size, a smooth path and a move
+/// stretched over loops. With those options left at their defaults every byte
+/// here stays what it was, so these hashes are not to be updated alongside a
+/// camera change: one that moves them changed what existing projects export.
+///
+/// The hashes are of float maths, so a toolchain that rounds `sin`/`powf`
+/// differently could move them too. Check that by running them on the
+/// commit before the bump.
+#[cfg(test)]
+pub(crate) mod pins {
+    use super::*;
+    use crate::doc::camera::{Camera, CameraKey, Ease};
+    use crate::doc::transform::{Transform, TransformKey};
+
+    /// FNV-1a, 64 bit.
+    pub(crate) fn fnv(bytes: &[u8]) -> u64 {
+        bytes
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
+    }
+
+    /// Speckle a cell: clear, half and full alpha, in colours that depend on
+    /// `seed`, so every layer and drawing is told apart.
+    fn speckle(c: &mut Canvas, seed: u32) {
+        let (w, h) = (c.width, c.height);
+        let px = c.pixels_mut();
+        for y in 0..h {
+            for x in 0..w {
+                let mut v = (x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ seed.wrapping_mul(83_492_791))
+                    .wrapping_mul(2_654_435_761);
+                v ^= v >> 15;
+                let a = match v % 4 {
+                    0 => 0,
+                    1 => 128,
+                    _ => 255,
+                };
+                let i = ((y * w + x) * 4) as usize;
+                let rgb = if a == 0 { [0; 3] } else { [(v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8] };
+                px[i..i + 3].copy_from_slice(&rgb);
+                px[i + 3] = a;
+            }
+        }
+    }
+
+    /// Sixteen frames of everything an export goes through: a background with
+    /// two drawings, a layer with a keyed pose, a half-opaque group of two, a
+    /// clipped layer with an oversized cell on top, and a camera keyed through
+    /// a pan, a push-in, a pull-out and a roll with every ease.
+    pub(crate) fn scene() -> Project {
+        const FRAMES: usize = 16;
+        let mut p = Project::new(24, 16, 12.0);
+        p.ensure_frame_count(FRAMES);
+        for _ in 0..4 {
+            p.add_layer();
+        }
+        p.layers[4].cell_w = 32;
+        p.layers[4].cell_h = 24;
+        let draw = |p: &mut Project, layer: usize, frame: usize, seed: u32| {
+            let id = p.alloc_cell_for(layer);
+            speckle(p.cell_mut(id).unwrap(), seed);
+            p.layers[layer].set_key(frame, id);
+        };
+        draw(&mut p, 0, 0, 1);
+        draw(&mut p, 0, 8, 2);
+        draw(&mut p, 1, 0, 3);
+        draw(&mut p, 2, 0, 4);
+        draw(&mut p, 3, 0, 5);
+        draw(&mut p, 4, 0, 6);
+        p.layers[1].transform_keys = vec![
+            TransformKey {
+                frame: 0,
+                transform: Transform { tx: -3.0, ty: 1.0, scale: 0.75, rot: 0.3 },
+                ease: Ease::In,
+            },
+            TransformKey {
+                frame: 15,
+                transform: Transform { tx: 5.0, ty: -2.0, scale: 1.2, rot: -0.4 },
+                ease: Ease::Linear,
+            },
+        ];
+        p.layers[3].transform.tx = 2.0;
+        p.layers[4].opacity = 0.8;
+        let g = p.group_layers(&[2, 3]).unwrap();
+        p.layers[g].opacity = 0.5;
+        let top = p.layers.len() - 1;
+        p.layers[top].clip = true;
+        let key = |frame, tx, ty, zoom, rot, ease| CameraKey {
+            frame,
+            camera: Camera { tx, ty, zoom, rot },
+            ease,
+        };
+        p.camera_keys = vec![
+            key(0, 0.0, 0.0, 1.0, 0.0, Ease::Both),
+            key(5, 4.0, -2.0, 1.5, 0.2, Ease::In),
+            key(10, -3.0, 3.0, 0.6, -0.15, Ease::Out),
+            key(15, 0.0, 0.0, 1.0, 0.0, Ease::Linear),
+        ];
+        p.current_frame = 0;
+        p.current_layer = 0;
+        p
+    }
+
+    fn hashes(p: &Project, frames: &[usize], flat: fn(&Project, usize) -> Canvas) -> Vec<u64> {
+        frames.iter().map(|&f| fnv(&flat(p, f).pixels())).collect()
+    }
+
+    #[test]
+    fn frames_through_a_keyed_camera_are_what_they_were() {
+        let got = hashes(&scene(), &[0, 2, 5, 7, 10, 13, 15], flatten_frame);
+        let was = [
+            0xac89a6e677e37180,
+            0xc08667107a1efe16,
+            0x3b35a229f4d08191,
+            0xa5015a9d50da8e8f,
+            0x87f16f4ae1ad8156,
+            0xc075d4ab17ea6e6c,
+            0xd6d6779d0a6dd757,
+        ];
+        assert_eq!(got, was, "{got:#x?}");
+    }
+
+    #[test]
+    fn frames_through_a_still_camera_are_what_they_were() {
+        let mut p = scene();
+        p.camera_keys.clear();
+        p.camera = Camera { tx: 2.5, ty: -1.5, zoom: 1.25, rot: 0.1 };
+        let moved = hashes(&p, &[0, 9], flatten_frame);
+        // At rest the frame is the canvas: the 1:1 path.
+        p.camera = Camera::default();
+        let rest = hashes(&p, &[0, 9], flatten_frame);
+        assert_eq!(moved, [0xccedc6e9a8f9137c, 0x4de5a45f31f3a90b], "{moved:#x?}");
+        assert_eq!(rest, [0xac89a6e677e37180, 0x03c2b89450323cd8], "{rest:#x?}");
+    }
+
+    #[test]
+    fn frames_in_document_space_are_what_they_were() {
+        let got = hashes(&scene(), &[0, 8, 15], flatten_doc);
+        let was = [0xac89a6e677e37180, 0x202c1034061b5d09, 0xd6d6779d0a6dd757];
+        assert_eq!(got, was, "{got:#x?}");
+    }
+}
+
+#[cfg(test)]
+mod camera_size_tests {
+    use super::*;
+    use crate::doc::camera::Camera;
+
+    /// `[x0, x0 + w) × [y0, y0 + h)` of `c`, as its own pixels.
+    fn crop(c: &Canvas, x0: u32, y0: u32, w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                out.extend_from_slice(&c.px(x, y));
+            }
+        }
+        out
+    }
+
+    /// The pinned scene on its 24×16 canvas, with the camera at rest.
+    fn scene() -> Project {
+        let mut p = pins::scene();
+        p.camera_keys.clear();
+        p.camera = Camera::default();
+        p
+    }
+
+    #[test]
+    fn a_smaller_frame_is_a_window_onto_the_canvas() {
+        let mut p = scene();
+        let whole = flatten_frame(&p, 3);
+        p.camera_opts.size = Some((12, 8));
+        let window = flatten_frame(&p, 3);
+        assert_eq!((window.width, window.height), (12, 8));
+        // Same pixels at the same size: the middle of the canvas, 1:1 —
+        // group, clipped layer and turned layer included.
+        assert!(window.pixels()[..] == crop(&whole, 6, 4, 12, 8)[..]);
+    }
+
+    #[test]
+    fn panning_moves_the_window_across_the_canvas() {
+        let mut p = scene();
+        let whole = flatten_frame(&p, 3);
+        p.camera_opts.size = Some((12, 8));
+        p.camera = Camera {
+            tx: 6.0,
+            ty: -4.0,
+            ..Default::default()
+        };
+        assert!(flatten_frame(&p, 3).pixels()[..] == crop(&whole, 12, 0, 12, 8)[..]);
+    }
+
+    #[test]
+    fn a_portrait_frame_stands_on_end() {
+        let mut p = scene();
+        let whole = flatten_frame(&p, 0);
+        p.camera_opts.size = Some((8, 12));
+        let tall = flatten_frame(&p, 0);
+        assert_eq!((tall.width, tall.height), (8, 12));
+        assert!(tall.pixels()[..] == crop(&whole, 8, 2, 8, 12)[..]);
+    }
+
+    #[test]
+    fn a_frame_bigger_than_the_canvas_shows_nothing_past_its_edge() {
+        let mut p = Project::new(4, 2, 12.0);
+        let id = p.layers[0].resolve(0).unwrap();
+        p.cell_mut(id).unwrap().pixels_mut().fill(255);
+        p.camera_opts.size = Some((8, 4));
+        let out = flatten_frame(&p, 0);
+        assert_eq!((out.width, out.height), (8, 4));
+        for y in 0..4 {
+            for x in 0..8 {
+                let inside = (2..6).contains(&x) && (1..3).contains(&y);
+                assert_eq!(out.px(x, y)[3], if inside { 255 } else { 0 }, "({x}, {y})");
+            }
+        }
+    }
+
+    /// The fill tool's source is the canvas, whatever the camera frames.
+    #[test]
+    fn document_space_is_the_canvas_whatever_the_camera_s_size() {
+        let mut p = scene();
+        let before = flatten_doc(&p, 3);
+        p.camera_opts.size = Some((12, 8));
+        let after = flatten_doc(&p, 3);
+        assert_eq!((after.width, after.height), (24, 16));
+        assert!(after.pixels() == before.pixels());
+    }
+}
+
+#[cfg(test)]
+mod downscale_tests {
+    use super::*;
+    use crate::doc::camera::Camera;
+
+    /// A 64×64 canvas seen whole through a 16×16 frame: a camera pulled back
+    /// to a quarter, four canvas pixels to each exported one.
+    fn pulled_back() -> Project {
+        let mut p = Project::new(64, 64, 12.0);
+        p.camera_opts.size = Some((16, 16));
+        p.camera.zoom = 0.25;
+        p
+    }
+
+    fn column(p: &mut Project, x: u32, rgba: [u8; 4]) {
+        let id = p.layers[0].resolve(0).unwrap();
+        let c = p.cell_mut(id).unwrap();
+        for y in 0..64u32 {
+            let i = ((y * 64 + x) * 4) as usize;
+            c.pixels_mut()[i..i + 4].copy_from_slice(&rgba);
+        }
+    }
+
+    /// The point of it. A line one pixel wide used to show or vanish by where
+    /// it fell among the samples; now it is a quarter of the exported pixel
+    /// it lies in, wherever in it that is.
+    #[test]
+    fn a_thin_line_is_never_skipped() {
+        for x in 28..32 {
+            let mut p = pulled_back();
+            column(&mut p, x, [0, 0, 0, 255]);
+            let out = flatten_frame(&p, 0);
+            for y in 0..16 {
+                assert_eq!(out.px(7, y)[3], 64, "line on {x}, row {y}");
+                assert_eq!(out.px(6, y)[3], 0);
+                assert_eq!(out.px(8, y)[3], 0);
+            }
+        }
+    }
+
+    /// Averaged premultiplied: a red line among clear pixels is fainter, not
+    /// darker.
+    #[test]
+    fn thinning_a_line_keeps_its_colour() {
+        let mut p = pulled_back();
+        column(&mut p, 29, [255, 0, 0, 255]);
+        assert_eq!(flatten_frame(&p, 0).px(7, 3), [255, 0, 0, 64]);
+    }
+
+    #[test]
+    fn solid_paint_stays_solid() {
+        let mut p = pulled_back();
+        let id = p.layers[0].resolve(0).unwrap();
+        for px in p.cell_mut(id).unwrap().pixels_mut().chunks_exact_mut(4) {
+            px.copy_from_slice(&[10, 200, 90, 255]);
+        }
+        let out = flatten_frame(&p, 0);
+        assert!(out.pixels().chunks_exact(4).all(|px| px == [10, 200, 90, 255]));
+    }
+
+    /// What `flatten_frame` gave before any of this: every layer through
+    /// [`composite_layer`].
+    fn sampled(p: &Project) -> Canvas {
+        let (w, h) = p.output_size();
+        let mut out = Canvas::new(w, h);
+        let id = p.layers[0].resolve(0).unwrap();
+        let xform = p.resolve_camera(0).apply(&p.layers[0].resolve_transform(0));
+        composite_layer(&mut out, p.cell(id).unwrap(), &xform, p.layers[0].opacity, w, h);
+        out
+    }
+
+    /// Down to a half, nothing is averaged: those frames are the bytes they
+    /// were. Only past it does the export change.
+    #[test]
+    fn down_to_a_half_frames_are_sampled_as_before() {
+        for zoom in [1.0, 0.75, 0.5] {
+            let mut p = pulled_back();
+            p.camera.zoom = zoom;
+            column(&mut p, 29, [255, 0, 0, 255]);
+            column(&mut p, 40, [0, 0, 255, 128]);
+            assert!(flatten_frame(&p, 0).pixels() == sampled(&p).pixels(), "zoom {zoom}");
+        }
+        let mut p = pulled_back();
+        column(&mut p, 28, [255, 0, 0, 255]);
+        assert!(flatten_frame(&p, 0).pixels() != sampled(&p).pixels(), "a quarter is averaged");
+    }
+
+    /// A layer shrunk on the canvas is averaged in an export too — it is the
+    /// size it is drawn at that counts, camera and layer together.
+    #[test]
+    fn a_shrunken_layer_is_averaged_through_a_resting_camera() {
+        let mut p = Project::new(64, 64, 12.0);
+        p.layers[0].transform.scale = 0.25;
+        column(&mut p, 28, [0, 0, 0, 255]);
+        // Its 64 columns are the middle 16 of the frame; column 28 is in the
+        // eighth of them.
+        assert_eq!(flatten_frame(&p, 0).px(24 + 7, 30)[3], 64);
+    }
+
+    /// A cell that isn't a whole number of blocks is padded to shrink it —
+    /// and still drawn where it was: its paint lands in the exported pixels
+    /// it covers, not half a block over.
+    #[test]
+    fn an_odd_sized_cell_is_shrunk_in_place() {
+        let mut p = pulled_back();
+        // 58×58, centred on the 64×64 canvas: canvas columns 3..61.
+        p.expand_layer_canvas(0, 58, 58);
+        let id = p.layers[0].resolve(0).unwrap();
+        let c = p.cell_mut(id).unwrap();
+        // Its column 25 is canvas column 28, the first of exported column 7.
+        for y in 0..58usize {
+            let i = (y * 58 + 25) * 4;
+            c.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+        }
+        let out = flatten_frame(&p, 0);
+        // Blocks of the cell straddle the exported pixels by a pixel, so the
+        // line's quarter is shared between columns 6 and 7 — all of it there,
+        // none of it further off.
+        let (l, r) = (out.px(6, 8)[3] as u32, out.px(7, 8)[3] as u32);
+        assert!((l + r).abs_diff(64) <= 2, "{l} + {r}");
+        assert!(r > l, "mostly where it belongs: {l} | {r}");
+        assert_eq!(out.px(5, 8)[3], 0);
+        assert_eq!(out.px(8, 8)[3], 0);
+    }
+
+    #[test]
+    fn shrinking_averages_each_block() {
+        let mut c = Canvas::new(5, 2);
+        // One opaque red pixel in the first 2×2 block; the fifth column is a
+        // block of its own, half off the edge.
+        c.pixels_mut()[0..4].copy_from_slice(&[200, 0, 0, 255]);
+        c.pixels_mut()[4 * 4..4 * 4 + 4].copy_from_slice(&[0, 0, 200, 255]);
+        c.pixels_mut()[(5 + 4) * 4..(5 + 4) * 4 + 4].copy_from_slice(&[0, 0, 200, 255]);
+        let s = shrunk(&c, 2);
+        assert_eq!((s.width, s.height), (3, 1));
+        assert_eq!(s.px(0, 0), [200, 0, 0, 64]);
+        assert_eq!(s.px(1, 0), [0, 0, 0, 0]);
+        assert_eq!(s.px(2, 0), [0, 0, 200, 128], "two of the four it stands for");
+    }
+
+    /// Document space — what the fill tool reads its boundaries from — is
+    /// not an export, and is sampled as it always was.
+    #[test]
+    fn document_space_is_never_averaged() {
+        let mut p = Project::new(64, 64, 12.0);
+        p.layers[0].transform.scale = 0.25;
+        column(&mut p, 28, [0, 0, 0, 255]);
+        column(&mut p, 30, [0, 0, 0, 255]);
+        let mut want = Canvas::new(64, 64);
+        let id = p.layers[0].resolve(0).unwrap();
+        composite_layer(&mut want, p.cell(id).unwrap(), &p.layers[0].transform, 1.0, 64, 64);
+        assert!(flatten_doc(&p, 0).pixels() == want.pixels());
+    }
+
+    /// What averaging costs, and that frames it doesn't touch cost what they
+    /// did. Not a pass/fail test — run it for the numbers:
+    /// `cargo test --release perf_export_downscale -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn perf_export_downscale() {
+        use std::time::Instant;
+        let mut p = Project::new(7680, 4320, 24.0);
+        let id = p.layers[0].resolve(0).unwrap();
+        let c = p.cell_mut(id).unwrap();
+        // A few strokes' worth of paint across the canvas.
+        for y in (0..4320usize).step_by(40) {
+            for x in 0..7680usize {
+                let i = (y * 7680 + x) * 4;
+                c.pixels_mut()[i..i + 4].copy_from_slice(&[20, 20, 20, 255]);
+            }
+        }
+        p.camera_opts.size = Some((1920, 1080));
+        p.camera = Camera::default();
+        let time = |label: &str, p: &Project, f: fn(&Project) -> Canvas| {
+            f(p);
+            let start = Instant::now();
+            for _ in 0..3 {
+                std::hint::black_box(f(p));
+            }
+            eprintln!("{label:<52} {:>8.1} ms", start.elapsed().as_secs_f64() * 1e3 / 3.0);
+        };
+        time("1080p window of 8K, zoom 1 (sampled, as before)", &p, |p| flatten_frame(p, 0));
+        time("  the same through composite_layer directly", &p, sampled);
+        p.camera.zoom = 0.5;
+        time("zoom 0.5 (sampled, as before)", &p, |p| flatten_frame(p, 0));
+        p.camera.zoom = 0.25;
+        time("zoom 0.25: whole 8K in 1080p (shrunk, then sampled)", &p, |p| flatten_frame(p, 0));
+        time("  what it cost sampled", &p, sampled);
     }
 }

@@ -627,12 +627,45 @@ fn corner_ui(state: &mut AppState, ui: &mut egui::Ui, corner: Rect, id: Id) {
     }
 }
 
+/// Height of the strip along the ruler's bottom edge where a camera key's
+/// dot is picked up, in points. The dots sit 3 up from the edge.
+const KEY_GRAB_H: f32 = 8.0;
+
 /// Frame numbers, camera keys, a loop range that isn't the whole timeline,
 /// and the playhead as an accent pill carrying its frame number. Click or drag
-/// to scrub.
+/// to scrub — except a drag that starts on a camera key's dot, which takes
+/// the key along the timeline instead (Alt leaves a copy behind).
 fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: Id) {
     let resp = ui.interact(ruler, id.with("ruler"), Sense::click_and_drag());
-    if resp.clicked() || resp.dragged() {
+    // The camera key whose dot is under `p`, if one is.
+    let key_under = |state: &AppState, p: Pos2| -> Option<usize> {
+        let f = g.frame_at(p.x);
+        let on_strip = p.y >= ruler.max.y - KEY_GRAB_H && p.y <= ruler.max.y;
+        (on_strip && f >= 0 && (f as usize) < g.frame_count && state.project.has_camera_key(f as usize))
+            .then_some(f as usize)
+    };
+    if resp.drag_started() {
+        let pressed = ui.input(|i| i.pointer.press_origin());
+        state.cam_key_drag = pressed
+            .and_then(|p| key_under(state, p))
+            .map(|from| crate::app::CamKeyDrag { from, to: from });
+    }
+    let copy_key = ui.input(|i| i.modifiers.alt);
+    if let Some(mut d) = state.cam_key_drag {
+        if resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                d.to = g.frame_on_sheet(p.x);
+                state.cam_key_drag = Some(d);
+                autoscroll(state, ui.ctx(), ruler, p, false);
+            }
+        } else {
+            // Let go — or the drag ended somewhere this never heard of.
+            state.cam_key_drag = None;
+            if resp.drag_stopped() {
+                state.move_camera_key(d.from, d.to, copy_key);
+            }
+        }
+    } else if resp.clicked() || resp.dragged() {
         if let Some(p) = resp.interact_pointer_pos() {
             state.project.goto(g.frame_on_sheet(p.x));
             if resp.dragged() {
@@ -640,6 +673,12 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
             }
         }
     }
+    let key_drag = state.cam_key_drag;
+    // A dot that can be picked up says so by growing under the pointer.
+    let hot_key = match key_drag {
+        Some(_) => None,
+        None => resp.hover_pos().and_then(|p| key_under(state, p)),
+    };
 
     let painter = ui.painter_at(ruler);
     let fc = g.frame_count;
@@ -703,8 +742,18 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
     for k in &state.project.camera_keys {
         if k.frame < fc {
             let c = pos2(g.x(k.frame as f32 + 0.5), ruler.max.y - 3.0);
-            painter.circle_filled(c, 1.8, KEY_CAMERA);
+            // The key being carried off is faded where it was — unless a
+            // copy is being made, when it stays.
+            let lifted = !copy_key && key_drag.is_some_and(|d| d.from == k.frame && d.to != d.from);
+            let color = if lifted { KEY_CAMERA.gamma_multiply(0.35) } else { KEY_CAMERA };
+            let r = if hot_key == Some(k.frame) { 3.0 } else { 1.8 };
+            painter.circle_filled(c, r, color);
         }
+    }
+    if let Some(d) = key_drag {
+        // Where it lands if let go now.
+        let c = pos2(g.x(d.to as f32 + 0.5), ruler.max.y - 3.0);
+        painter.circle_filled(c, 3.0, KEY_CAMERA);
     }
     // The active grid's keys, in its own colour, beside the camera's — while
     // grids are on show. Diamonds, as the grids' own key marks are.
@@ -1597,5 +1646,155 @@ mod tests {
         }
         step(&mut state, vec![button(to, false)]);
         assert_eq!(row(&state.project, 0), vec![2, 3, 1], "it moved");
+    }
+}
+
+#[cfg(test)]
+mod camera_key_drag_tests {
+    use super::*;
+    use crate::doc::camera::{Camera, CameraKey, Ease};
+    use crate::doc::project::Project;
+
+    /// Twelve frames, camera keys on 2 (ease in) and 8.
+    fn keyed() -> AppState {
+        let mut state = AppState::for_test();
+        let mut p = Project::new(4, 4, 12.0);
+        p.ensure_frame_count(12);
+        let key = |frame, tx, ease| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ..Default::default()
+            },
+            ease,
+        };
+        p.camera_keys = vec![key(2, 20.0, Ease::In), key(8, 80.0, Ease::Linear)];
+        state.project = p;
+        state
+    }
+
+    fn keys(state: &AppState) -> Vec<(usize, f32)> {
+        state.project.camera_keys.iter().map(|k| (k.frame, k.camera.tx)).collect()
+    }
+
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 300.0))),
+            events,
+            modifiers,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| show(state, ui));
+        });
+    }
+
+    /// The dot of a key on `frame`, at the default zoom with no scroll.
+    fn dot(frame: usize) -> Pos2 {
+        pos2(HEADER_W + (frame as f32 + 0.5) * DEFAULT_FRAME_W, RULER_H - 3.0)
+    }
+
+    /// The same frame's number, up in the ruler clear of the dots.
+    fn number(frame: usize) -> Pos2 {
+        pos2(dot(frame).x, 5.0)
+    }
+
+    fn button(pos: Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        }
+    }
+
+    fn drag(state: &mut AppState, from: Pos2, to: Pos2, modifiers: egui::Modifiers) {
+        let ctx = egui::Context::default();
+        frame(&ctx, state, vec![], modifiers);
+        frame(&ctx, state, vec![egui::Event::PointerMoved(from), button(from, true, modifiers)], modifiers);
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 4.0);
+            frame(&ctx, state, vec![egui::Event::PointerMoved(p)], modifiers);
+        }
+        frame(&ctx, state, vec![button(to, false, modifiers)], modifiers);
+        frame(&ctx, state, vec![], modifiers);
+    }
+
+    #[test]
+    fn dragging_a_key_s_dot_retimes_the_key_and_leaves_the_playhead() {
+        let mut state = keyed();
+        drag(&mut state, dot(2), dot(5), egui::Modifiers::NONE);
+        assert_eq!(keys(&state), [(5, 20.0), (8, 80.0)]);
+        assert_eq!(state.project.camera_keys[0].ease, Ease::In);
+        assert_eq!(state.project.current_frame, 0, "a key drag is not a scrub");
+        assert!(state.cam_key_drag.is_none());
+        assert_eq!(state.history.undo_len(), 1);
+        state.undo();
+        assert_eq!(keys(&state), [(2, 20.0), (8, 80.0)]);
+    }
+
+    #[test]
+    fn alt_dragging_leaves_a_copy_behind() {
+        let mut state = keyed();
+        drag(&mut state, dot(8), dot(10), egui::Modifiers::ALT);
+        assert_eq!(keys(&state), [(2, 20.0), (8, 80.0), (10, 80.0)]);
+    }
+
+    #[test]
+    fn a_key_dropped_on_another_takes_its_place() {
+        let mut state = keyed();
+        drag(&mut state, dot(2), dot(8), egui::Modifiers::NONE);
+        assert_eq!(keys(&state), [(8, 20.0)]);
+    }
+
+    /// The pins for the ruler as it was: everything that isn't a drag from
+    /// a dot still scrubs, and moves no key.
+    #[test]
+    fn a_drag_from_anywhere_else_on_the_ruler_still_scrubs() {
+        // From the same frame, but up among the numbers.
+        let mut state = keyed();
+        drag(&mut state, number(2), number(6), egui::Modifiers::NONE);
+        assert_eq!(state.project.current_frame, 6);
+        assert_eq!(keys(&state), [(2, 20.0), (8, 80.0)]);
+        assert_eq!(state.history.undo_len(), 0);
+
+        // From the dots' strip, on a frame with no key.
+        let mut state = keyed();
+        drag(&mut state, dot(4), dot(9), egui::Modifiers::NONE);
+        assert_eq!(state.project.current_frame, 9);
+        assert_eq!(keys(&state), [(2, 20.0), (8, 80.0)]);
+    }
+
+    #[test]
+    fn a_click_on_a_dot_still_goes_to_its_frame() {
+        let mut state = keyed();
+        let ctx = egui::Context::default();
+        let none = egui::Modifiers::NONE;
+        frame(&ctx, &mut state, vec![], none);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(dot(8)), button(dot(8), true, none)], none);
+        frame(&ctx, &mut state, vec![button(dot(8), false, none)], none);
+        frame(&ctx, &mut state, vec![], none);
+        assert_eq!(state.project.current_frame, 8);
+        assert_eq!(keys(&state), [(2, 20.0), (8, 80.0)]);
+        assert_eq!(state.history.undo_len(), 0);
+    }
+
+    #[test]
+    fn a_key_dragged_back_to_where_it_was_changes_nothing() {
+        let mut state = keyed();
+        let ctx = egui::Context::default();
+        let none = egui::Modifiers::NONE;
+        frame(&ctx, &mut state, vec![], none);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(dot(2)), button(dot(2), true, none)], none);
+        for f in [4, 6, 4, 2] {
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(dot(f))], none);
+        }
+        assert_eq!(state.cam_key_drag.map(|d| (d.from, d.to)), Some((2, 2)));
+        frame(&ctx, &mut state, vec![button(dot(2), false, none)], none);
+        frame(&ctx, &mut state, vec![], none);
+        assert_eq!(keys(&state), [(2, 20.0), (8, 80.0)]);
+        assert_eq!(state.history.undo_len(), 0);
     }
 }

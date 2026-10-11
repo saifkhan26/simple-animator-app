@@ -185,6 +185,7 @@ impl From<ProjectV2> for Project {
             loop_end: p.loop_end,
             camera: Camera::default(),
             camera_keys: Vec::new(),
+            camera_opts: Default::default(),
         }
     }
 }
@@ -258,6 +259,7 @@ impl From<ProjectV4> for Project {
             loop_end: p.loop_end,
             camera: p.camera,
             camera_keys: p.camera_keys,
+            camera_opts: Default::default(),
         }
     }
 }
@@ -277,6 +279,7 @@ impl From<ProjectV3> for Project {
             loop_end: p.loop_end,
             camera: Camera::default(),
             camera_keys: Vec::new(),
+            camera_opts: Default::default(),
         }
     }
 }
@@ -364,6 +367,7 @@ impl From<ProjectV6> for Project {
             loop_end: p.loop_end,
             camera: p.camera,
             camera_keys: p.camera_keys,
+            camera_opts: Default::default(),
         }
     }
 }
@@ -451,6 +455,7 @@ impl From<ProjectV7> for Project {
             loop_end: p.loop_end,
             camera: p.camera,
             camera_keys: p.camera_keys,
+            camera_opts: Default::default(),
         }
     }
 }

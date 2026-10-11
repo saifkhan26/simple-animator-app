@@ -23,7 +23,7 @@ use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
 use crate::brush_library::BrushLibrary;
 use crate::color::{Harmony, HarmonySet};
-use crate::doc::camera::{Camera, Ease};
+use crate::doc::camera::{CamGrab, Camera, Ease};
 use crate::doc::canvas::{par_rows, Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
 use crate::doc::orient::Orient;
@@ -298,6 +298,40 @@ pub enum NavKind {
 /// The canvas backdrop colour before the artist picks one.
 const DEFAULT_BG_COLOR: [f32; 3] = [0.12, 0.12, 0.13];
 
+/// The longest side a camera frame may have — a canvas's limit too.
+const MAX_CAMERA_SIDE: u32 = 16384;
+
+/// The camera's frame held by one of its handles: what was grabbed, where,
+/// and the camera as it was — every step of the drag is solved from that,
+/// so nothing drifts.
+#[derive(Clone, Copy, Debug)]
+pub struct CamDrag {
+    pub grab: CamGrab,
+    pub from: (f32, f32),
+    pub start: Camera,
+}
+
+/// A camera key picked up off the timeline ruler: the frame it is keyed on,
+/// and the frame the drag has reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CamKeyDrag {
+    pub from: usize,
+    pub to: usize,
+}
+
+/// A one-click way to frame the canvas with the camera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraFraming {
+    /// Centred, pulled out until the whole canvas is in the frame.
+    Fit,
+    /// Centred, as wide as the frame goes while showing nothing but canvas.
+    Fill,
+    /// One canvas pixel per exported pixel, where the camera stands.
+    OneToOne,
+    /// Back over the middle of the canvas, zoom as it is.
+    Centre,
+}
+
 /// Storage key for [`UiPrefs`].
 const UI_PREFS_KEY: &str = "ui_prefs";
 
@@ -380,6 +414,9 @@ struct UiPrefs {
     /// The Color panel's harmony scheme. Only the scheme persists: the set
     /// is rebuilt around the brush colour each launch.
     harmony: Harmony,
+    /// The camera frame size last set. The size itself lasts only for the
+    /// session, so this is what brings it back with one click the next time.
+    last_camera_size: Option<(u32, u32)>,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -475,6 +512,7 @@ impl Default for UiPrefs {
             bg_opacity: 1.0,
             show_checker: false,
             harmony: Harmony::default(),
+            last_camera_size: None,
         }
     }
 }
@@ -1283,6 +1321,14 @@ pub struct AppState {
     /// Timeline snapshot captured at the start of a camera drag, so the whole
     /// drag lands as one undo entry.
     camera_drag_before: Option<undo::TimelineState>,
+    /// The camera's frame, while a handle of it is being dragged.
+    pub cam_drag: Option<CamDrag>,
+    /// A camera key, while it is being dragged along the timeline ruler.
+    pub cam_key_drag: Option<CamKeyDrag>,
+    /// Where the camera is, as a time in frames, while a move stretched over
+    /// loops is playing — it has its own place then, apart from the frame
+    /// showing. `None` the rest of the time. See `follow_stretched_camera`.
+    shot_cam: Option<f32>,
     /// Last frame the camera edit buffer was synced for.
     cam_sync_last: Option<usize>,
     /// Lock the editor viewport to the camera, so what you see is the shot.
@@ -1291,6 +1337,12 @@ pub struct AppState {
     pub show_camera_guide: bool,
     /// Dim everything the camera can't see.
     pub dim_outside_camera: bool,
+    /// Draw thirds and the safe areas inside the camera's frame. A
+    /// composition aid for the moment: off each launch.
+    pub camera_overlay: bool,
+    /// The camera frame size last set, kept between runs — the size itself
+    /// is not. See [`AppState::set_camera_size`].
+    pub last_camera_size: Option<(u32, u32)>,
     /// Outline the active layer's cell bounds, so it's visible where a layer's
     /// drawable buffer ends (strokes past it are silently clipped).
     pub show_layer_bounds: bool,
@@ -1553,10 +1605,15 @@ impl AppState {
             camera_edit: false,
             nav_to_camera: false,
             camera_drag_before: None,
+            cam_drag: None,
+            cam_key_drag: None,
+            shot_cam: None,
             cam_sync_last: None,
             camera_look_through: false,
             show_camera_guide: prefs.show_camera_guide,
             dim_outside_camera: prefs.dim_outside_camera,
+            camera_overlay: false,
+            last_camera_size: prefs.last_camera_size,
             show_layer_bounds: prefs.show_layer_bounds,
             expand_cfg: None,
             prev_layer: None,
@@ -1658,6 +1715,9 @@ impl AppState {
         self.camera_edit = false;
         self.nav_to_camera = false;
         self.camera_drag_before = None;
+        self.cam_drag = None;
+        self.cam_key_drag = None;
+        self.shot_cam = None;
         self.cam_sync_last = None;
         self.camera_look_through = false;
         self.expand_cfg = None;
@@ -2570,23 +2630,24 @@ impl AppState {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let order = crate::io::frame_order::frame_order(
-            range.0,
-            range.1,
-            self.export_cfg.playback(kind),
-            self.project.fps,
-        );
+        let (order, cams) = self.export_order(kind, range);
         let project = self.project.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let res = match kind {
                 ExportKind::PngSequence => {
-                    crate::io::png_seq::export_to(&project, &path, &order)
+                    crate::io::png_seq::export_to(&project, &path, &order, cams.as_deref())
                 }
-                ExportKind::Gif => crate::io::gif_export::export_to(&project, &path, &order),
-                ExportKind::Mp4 => {
-                    crate::io::mp4_export::export_to(&project, &path, &settings, &order)
+                ExportKind::Gif => {
+                    crate::io::gif_export::export_to(&project, &path, &order, cams.as_deref())
                 }
+                ExportKind::Mp4 => crate::io::mp4_export::export_to(
+                    &project,
+                    &path,
+                    &settings,
+                    &order,
+                    cams.as_deref(),
+                ),
                 ExportKind::SpriteSheet => {
                     crate::io::sprite_sheet::export_to(&project, &path, range, &sheet)
                 }
@@ -2905,12 +2966,86 @@ impl AppState {
         }
     }
 
+    /// Step playback to the clock's `now`. Returns whether what is on screen
+    /// moved on.
+    ///
+    /// A camera move stretched over loops keeps its own count of where it
+    /// is; otherwise the frames and the camera run together, as ever.
+    fn advance_playback(&mut self, now: f64) -> bool {
+        let stretched = self.project.camera_loops() > 1;
+        let moved = if stretched {
+            self.playback
+                .tick_shot(&mut self.project, now, self.loop_timeline)
+        } else {
+            self.playback
+                .tick(&mut self.project, now, self.loop_timeline)
+        };
+        self.follow_stretched_camera(stretched);
+        moved
+    }
+
+    /// While a camera move stretched over loops plays, note where it has got
+    /// to, for `sync_camera_buffer` to show. When it stops, put the playhead
+    /// on the frame the camera had reached: the camera stays where it was,
+    /// and the timeline is back to saying where in its move that is.
+    fn follow_stretched_camera(&mut self, stretched: bool) {
+        if stretched && self.playback.playing {
+            self.shot_cam = Some(self.playback.shot_cam_time(&self.project));
+        } else if let Some(t) = self.shot_cam.take() {
+            self.project.goto(t.round().max(0.0) as usize);
+            self.cam_sync_last = None;
+        }
+    }
+
+    /// Whether an export of `kind` has the camera's move outlast the
+    /// drawings. A sprite sheet is its frames side by side: never.
+    fn camera_stretched(&self, kind: ExportKind) -> bool {
+        kind != ExportKind::SpriteSheet && self.project.camera_loops() > 1
+    }
+
+    /// What the export dialog's settings add up to for `kind`.
+    pub fn export_info(&self, kind: ExportKind) -> crate::io::frame_order::OrderInfo {
+        use crate::io::frame_order;
+        let (start, end) = (self.export_cfg.start, self.export_cfg.end);
+        let pb = self.export_cfg.playback(kind);
+        let p = &self.project;
+        if self.camera_stretched(kind) {
+            let fill = p.camera_opts.fill;
+            frame_order::shot_info(start, end, p.camera_loops(), fill, pb.loop_secs, p.fps)
+        } else {
+            frame_order::info(start, end, pb, p.fps)
+        }
+    }
+
+    /// The timeline frame each frame of an export of `kind` over `range`
+    /// shows, and — when the camera's move is stretched over loops — the
+    /// camera each is seen through.
+    fn export_order(&self, kind: ExportKind, range: (usize, usize)) -> (Vec<usize>, Option<Vec<Camera>>) {
+        use crate::io::frame_order;
+        let pb = self.export_cfg.playback(kind);
+        let p = &self.project;
+        if !self.camera_stretched(kind) {
+            return (frame_order::frame_order(range.0, range.1, pb, p.fps), None);
+        }
+        let fill = p.camera_opts.fill;
+        let shot = frame_order::shot(range.0, range.1, p.camera_loops(), fill, pb.loop_secs, p.fps);
+        let cams = shot.cam_times.iter().map(|&t| p.resolve_camera_at(t)).collect();
+        (shot.frames, Some(cams))
+    }
+
     /// Keep the camera edit buffer in sync with its keyed value as the frame
     /// cursor moves. Same contract as `sync_active_transform_buffer`: only on
     /// an actual frame change, never mid-drag, and never when there are no keys
     /// (then the buffer *is* the value).
     fn sync_camera_buffer(&mut self) {
         if self.nav_to_camera {
+            return;
+        }
+        // A move stretched over loops is playing: the camera is where the
+        // move has got to, between the keys of some other frame.
+        if let Some(t) = self.shot_cam {
+            self.project.camera = self.project.resolve_camera_at(t);
+            self.cam_sync_last = None;
             return;
         }
         let f = self.project.current_frame;
@@ -2940,27 +3075,147 @@ impl AppState {
         }
     }
 
+    /// The camera the view is locked to while looking through it: the live
+    /// one — or, while its frame is being dragged, the one the drag began
+    /// from. A view that followed a frame that follows the cursor would run
+    /// away from it; this way the view holds still and catches up on release.
+    pub fn look_through_camera(&self) -> Camera {
+        match self.cam_drag {
+            Some(d) => d.start,
+            None => self.display_camera(self.project.current_frame),
+        }
+    }
+
+    /// A press at document point `p` while editing the camera: take hold of
+    /// its frame — inside to move it, a corner to zoom, just outside a corner
+    /// to roll. `false`, with nothing changed, when camera edit mode is off
+    /// or the press missed the frame; the active tool gets it then.
+    pub fn camera_frame_down(&mut self, p: (f32, f32)) -> bool {
+        if !self.camera_edit || self.playback.playing {
+            return false;
+        }
+        let cam = self.project.camera;
+        let tol = crate::tools::selection::HANDLE_PX / self.view_scale.max(1e-6);
+        let Some(grab) = cam.grab_at(p, self.canvas_size(), self.camera_frame_size(), tol) else {
+            return false;
+        };
+        self.begin_camera_drag();
+        self.cam_drag = Some(CamDrag {
+            grab,
+            from: p,
+            start: cam,
+        });
+        true
+    }
+
+    /// The held frame's drag has reached document point `p`.
+    pub fn camera_frame_move(&mut self, p: (f32, f32)) {
+        let Some(d) = self.cam_drag else {
+            return;
+        };
+        self.project.camera = d.start.dragged(d.grab, d.from, p, self.canvas_size());
+        self.hold_camera_inside();
+    }
+
+    /// Let go of the camera's frame: one undo step for the whole drag, and
+    /// none for a press that moved nothing.
+    pub fn camera_frame_up(&mut self) {
+        let Some(d) = self.cam_drag.take() else {
+            return;
+        };
+        if self.project.camera == d.start {
+            self.camera_drag_before = None;
+        } else {
+            self.commit_camera_drag();
+        }
+    }
+
+    fn canvas_size(&self) -> (f32, f32) {
+        (self.project.width as f32, self.project.height as f32)
+    }
+
+    fn camera_frame_size(&self) -> (f32, f32) {
+        let (w, h) = self.project.output_size();
+        (w as f32, h as f32)
+    }
+
     /// Move the camera by a document-space delta. The guide rect follows the
     /// cursor, so dragging right shows what is to the right.
     pub fn apply_camera_pan(&mut self, dx: f32, dy: f32) {
         self.project.camera.tx += dx;
         self.project.camera.ty += dy;
+        self.hold_camera_inside();
     }
 
     /// Push the camera in/out by `factor` (multiplicative).
     pub fn apply_camera_zoom(&mut self, factor: f32) {
-        self.project.camera.zoom = (self.project.camera.zoom * factor).clamp(0.05, 64.0);
+        self.project.camera.zoom =
+            (self.project.camera.zoom * factor).clamp(Camera::ZOOM_MIN, Camera::ZOOM_MAX);
+        self.hold_camera_inside();
     }
 
     /// Roll the camera by `d` radians.
     pub fn apply_camera_rotate(&mut self, d: f32) {
         self.project.camera.rot += d;
+        self.hold_camera_inside();
     }
 
     /// Reset the camera to identity — frame rect back on the document rect.
     /// Undoable.
     pub fn reset_camera(&mut self) {
         self.structural_edit(false, |p| p.camera = Camera::default());
+    }
+
+    /// Give the camera a frame of its own size — or, with `None` or the
+    /// canvas's size, hand it back the canvas's. Zoom and keys are left
+    /// alone, so what it frames keeps its scale and the frame takes in more
+    /// or less of the canvas.
+    ///
+    /// A setting for the session rather than an edit: not on the undo stack,
+    /// so undoing a stroke never changes what the export comes out at.
+    pub fn set_camera_size(&mut self, size: Option<(u32, u32)>) {
+        let canvas = (self.project.width, self.project.height);
+        self.project.camera_opts.size = size
+            .map(|(w, h)| (w.clamp(1, MAX_CAMERA_SIDE), h.clamp(1, MAX_CAMERA_SIDE)))
+            .filter(|&s| s != canvas);
+        if let Some(own) = self.project.camera_opts.size {
+            self.last_camera_size = Some(own);
+        }
+        self.hold_camera_inside();
+    }
+
+    /// One of the camera's session options changed what the keys resolve to
+    /// — the smooth path, the hold on the canvas: bring the live camera back
+    /// in step with them, as a frame change would.
+    pub fn camera_opts_changed(&mut self) {
+        self.cam_sync_last = None;
+    }
+
+    /// Keep the live camera on the canvas while it is set to stay there. A
+    /// no-op otherwise, and for a camera already inside.
+    pub fn hold_camera_inside(&mut self) {
+        self.project.camera = self.project.held_inside(self.project.camera);
+    }
+
+    /// Frame the canvas with the live camera. Undoable, like the reset.
+    pub fn frame_camera(&mut self, how: CameraFraming) {
+        self.structural_edit(false, |p| {
+            let canvas = (p.width as f32, p.height as f32);
+            let (ow, oh) = p.output_size();
+            let out = (ow as f32, oh as f32);
+            let mut cam = p.camera;
+            match how {
+                CameraFraming::Fit => cam.zoom = cam.fit_zoom(canvas, out),
+                CameraFraming::Fill => cam.zoom = cam.fill_zoom(canvas, out),
+                CameraFraming::OneToOne => cam.zoom = 1.0,
+                CameraFraming::Centre => {}
+            }
+            if how != CameraFraming::OneToOne {
+                (cam.tx, cam.ty) = (0.0, 0.0);
+            }
+            cam.zoom = cam.zoom.clamp(Camera::ZOOM_MIN, Camera::ZOOM_MAX);
+            p.camera = p.held_inside(cam);
+        });
     }
 
     /// Add (or replace) a camera key at the current frame from the live camera.
@@ -2983,6 +3238,19 @@ impl AppState {
             p.delete_camera_key(f);
             // Keep the live buffer consistent with the new resolved value.
             p.camera = p.resolve_camera(f);
+        });
+    }
+
+    /// Move the camera key on `from` to `to`, or copy it there. Undoable.
+    /// See [`Project::move_camera_key`].
+    pub fn move_camera_key(&mut self, from: usize, to: usize, copy: bool) {
+        if from == to || !self.project.has_camera_key(from) {
+            return;
+        }
+        self.structural_edit(false, |p| {
+            p.move_camera_key(from, to, copy);
+            // Keep the live buffer on what the keys now say for this frame.
+            p.camera = p.resolve_camera(p.current_frame);
         });
     }
 
@@ -5516,6 +5784,9 @@ impl AppState {
         self.cam_sync_last = None;
         self.nav_to_camera = false;
         self.camera_drag_before = None;
+        self.cam_drag = None;
+        self.cam_key_drag = None;
+        self.shot_cam = None;
     }
 
     pub fn undo(&mut self) {
@@ -5779,6 +6050,7 @@ impl eframe::App for AppState {
                 bg_opacity: self.bg_opacity,
                 show_checker: self.show_checker,
                 harmony: self.harmony.scheme,
+                last_camera_size: self.last_camera_size,
             },
         );
     }
@@ -5871,10 +6143,7 @@ impl eframe::App for AppState {
         let tab_focus = self.handle_keys(ctx);
 
         let now = ctx.input(|i| i.time);
-        if self
-            .playback
-            .tick(&mut self.project, now, self.loop_timeline)
-        {
+        if self.advance_playback(now) {
             ctx.request_repaint();
         }
         if self.playback.playing {
@@ -5888,6 +6157,9 @@ impl eframe::App for AppState {
         self.sync_selection();
         self.sync_liquify();
         self.sync_camera_buffer();
+        // However the live camera was just moved — a drag, the panel's
+        // fields, a new frame size.
+        self.hold_camera_inside();
         // After the camera and layer buffers, which grids may follow.
         self.sync_grid_buffers();
 
@@ -8456,7 +8728,7 @@ mod tests {
     /// `eframe::Storage` in memory, so prefs go through the same RON
     /// serialisation the app's `ui.ron` does.
     #[derive(Default)]
-    struct MemStorage(HashMap<String, String>);
+    pub(super) struct MemStorage(HashMap<String, String>);
 
     impl eframe::Storage for MemStorage {
         fn get_string(&self, key: &str) -> Option<String> {
@@ -9277,5 +9549,324 @@ mod tests {
                 .map_or((cx, cy), |r| ((r.min_x + r.max_x) as f32 / 2.0, (r.min_y + r.max_y) as f32 / 2.0));
             probe_stroke(&mut st, &ctx, "old drawing, 600 px", (mid.0 - 300.0, mid.1), (mid.0 + 300.0, mid.1 + 100.0));
         }
+    }
+}
+
+#[cfg(test)]
+mod camera_rig_tests {
+    use super::*;
+    use crate::doc::camera::Fill;
+
+    #[test]
+    fn a_camera_the_size_of_the_canvas_has_no_size_of_its_own() {
+        let mut st = AppState::for_test();
+        let canvas = (st.project.width, st.project.height);
+        assert_eq!(st.project.output_size(), canvas);
+        st.set_camera_size(Some((640, 360)));
+        assert_eq!(st.project.output_size(), (640, 360));
+        st.set_camera_size(Some(canvas));
+        assert_eq!(st.project.camera_opts.size, None);
+        st.set_camera_size(Some((0, 99_999)));
+        assert_eq!(st.project.output_size(), (1, MAX_CAMERA_SIDE));
+        st.set_camera_size(None);
+        assert_eq!(st.project.output_size(), canvas);
+    }
+
+    /// Changing the size is not a camera move: zoom and keys stay as they
+    /// were, so the frame shows the same pixels at the same scale.
+    #[test]
+    fn a_new_size_leaves_zoom_and_keys_alone() {
+        let mut st = AppState::for_test();
+        st.project.camera.zoom = 1.5;
+        st.add_camera_key();
+        let (cam, keys) = (st.project.camera, st.project.camera_keys.len());
+        st.set_camera_size(Some((640, 360)));
+        assert_eq!(st.project.camera, cam);
+        assert_eq!(st.project.camera_keys.len(), keys);
+    }
+
+    #[test]
+    fn undo_never_changes_the_camera_s_size() {
+        let mut st = AppState::for_test();
+        st.set_camera_size(Some((640, 360)));
+        st.add_camera_key();
+        st.set_camera_size(Some((320, 180)));
+        st.undo();
+        assert!(st.project.camera_keys.is_empty(), "the key went");
+        assert_eq!(st.project.output_size(), (320, 180), "the size stayed");
+        st.redo();
+        assert_eq!(st.project.output_size(), (320, 180));
+    }
+
+    /// The size itself is the session's, but the last one set is kept
+    /// between runs — and an older prefs blob without it still loads.
+    #[test]
+    fn the_last_camera_size_is_kept_between_runs() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.set_camera_size(Some((640, 360)));
+        st.set_camera_size(None);
+        assert_eq!(st.last_camera_size, Some((640, 360)), "handing it back keeps the memory");
+        let mut storage = tests::MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        assert_eq!(prefs.last_camera_size, Some((640, 360)));
+        let next = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(next.last_camera_size, Some((640, 360)));
+        assert_eq!(next.project.camera_opts.size, None, "the size is not");
+        assert_eq!(UiPrefs::default().last_camera_size, None);
+    }
+
+    /// A 1280×720 canvas with a 640×360 frame in the middle of it: x
+    /// 320..960, y 180..540, the centre at (640, 360).
+    fn framed() -> AppState {
+        let mut st = AppState::for_test();
+        st.load_project(Project::new(1280, 720, 24.0), None);
+        st.set_camera_size(Some((640, 360)));
+        st.view_scale = 1.0;
+        st.camera_edit = true;
+        st
+    }
+
+    #[test]
+    fn dragging_inside_the_frame_moves_the_camera_in_one_undo_step() {
+        let mut st = framed();
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((650.0, 320.0));
+        st.camera_frame_move((700.0, 280.0));
+        st.camera_frame_up();
+        let cam = st.project.camera;
+        assert_eq!((cam.tx, cam.ty, cam.zoom, cam.rot), (100.0, -20.0, 1.0, 0.0));
+        assert_eq!(st.history.undo_len(), 1);
+        st.undo();
+        assert!(st.project.camera.is_identity());
+    }
+
+    #[test]
+    fn dragging_a_corner_zooms_and_past_a_corner_rolls() {
+        let mut st = framed();
+        // The corner at (960, 540) pulled out to twice as far from the centre.
+        assert!(st.camera_frame_down((960.0, 540.0)));
+        st.camera_frame_move((1280.0, 720.0));
+        st.camera_frame_up();
+        assert!((st.project.camera.zoom - 0.5).abs() < 1e-5);
+        assert_eq!((st.project.camera.tx, st.project.camera.rot), (0.0, 0.0));
+
+        // The frame is the whole canvas now; just past its corner rolls it.
+        assert!(st.camera_frame_down((1288.0, 728.0)));
+        st.camera_frame_move((1288.0, 728.0));
+        assert_eq!(st.cam_drag.map(|d| d.grab), Some(CamGrab::Roll));
+        st.camera_frame_move((640.0 - 368.0, 360.0 + 648.0));
+        st.camera_frame_up();
+        assert!((st.project.camera.rot - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        assert_eq!(st.history.undo_len(), 2);
+    }
+
+    /// Off the frame, and always with camera edit off, the press is the
+    /// tool's — nothing is grabbed and nothing lands on the undo stack.
+    #[test]
+    fn a_press_off_the_frame_or_outside_edit_mode_is_left_to_the_tool() {
+        let mut st = framed();
+        assert!(!st.camera_frame_down((100.0, 100.0)));
+        st.camera_edit = false;
+        assert!(!st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((700.0, 300.0));
+        st.camera_frame_up();
+        assert!(st.project.camera.is_identity());
+        assert!(st.cam_drag.is_none());
+        assert_eq!(st.history.undo_len(), 0);
+    }
+
+    #[test]
+    fn a_click_on_the_frame_that_moves_nothing_is_no_undo_step() {
+        let mut st = framed();
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_up();
+        assert_eq!(st.history.undo_len(), 0);
+        assert!(st.cam_drag.is_none());
+    }
+
+    #[test]
+    fn a_dragged_frame_is_held_on_the_canvas_when_asked() {
+        let mut st = framed();
+        st.project.camera_opts.keep_inside = true;
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((5000.0, 300.0));
+        st.camera_frame_up();
+        assert_eq!(st.project.camera.tx, 320.0, "half the canvas less half the frame");
+    }
+
+    /// Looking through the camera, the view stays where it was while the
+    /// frame is dragged — following it would move the ground under the
+    /// cursor — and catches up when it is let go.
+    #[test]
+    fn the_view_holds_still_under_a_dragged_frame() {
+        let mut st = framed();
+        st.camera_look_through = true;
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((700.0, 300.0));
+        assert_eq!(st.project.camera.tx, 100.0);
+        assert!(st.look_through_camera().is_identity());
+        st.camera_frame_up();
+        assert_eq!(st.look_through_camera().tx, 100.0);
+    }
+
+    /// Five frames at 10 fps, the camera keyed from 0 on the first to 40 on
+    /// the last.
+    fn panning() -> AppState {
+        use crate::doc::camera::CameraKey;
+        let mut p = Project::new(64, 64, 10.0);
+        p.ensure_frame_count(5);
+        let key = |frame, tx| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ..Default::default()
+            },
+            ease: Ease::Linear,
+        };
+        p.camera_keys = vec![key(0, 0.0), key(4, 40.0)];
+        let mut st = AppState::for_test();
+        st.load_project(p, None);
+        st.loop_timeline = true;
+        st
+    }
+
+    /// Play `steps` frames of the app's clock from where it stands, as
+    /// `update` does: the drawing and the camera showing after each.
+    fn play(st: &mut AppState, steps: usize) -> (Vec<usize>, Vec<f32>) {
+        if !st.playback.playing {
+            st.playback.toggle(0.0);
+        }
+        let (mut frames, mut cams) = (Vec::new(), Vec::new());
+        let t0 = st.playback.last_advance_t;
+        for i in 1..=steps {
+            st.advance_playback(t0 + (i as f64 + 0.25) / st.project.fps as f64);
+            st.sync_camera_buffer();
+            frames.push(st.project.current_frame);
+            cams.push(st.display_camera(st.project.current_frame).tx);
+        }
+        (frames, cams)
+    }
+
+    /// The pin: with the move left at one loop, playback is the frames with
+    /// the camera keyed on each, round and round.
+    #[test]
+    fn at_one_loop_the_camera_plays_in_step_with_the_frames() {
+        let mut st = panning();
+        let (frames, cams) = play(&mut st, 7);
+        assert_eq!(frames, [1, 2, 3, 4, 0, 1, 2]);
+        assert_eq!(cams, [10.0, 20.0, 30.0, 40.0, 0.0, 10.0, 20.0]);
+        assert!(st.shot_cam.is_none());
+    }
+
+    #[test]
+    fn over_three_loops_the_drawings_repeat_under_one_move() {
+        let mut st = panning();
+        st.project.camera_opts.loops = 3;
+        let (frames, cams) = play(&mut st, 14);
+        assert_eq!(frames, [1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
+        assert!(cams.windows(2).all(|w| w[1] > w[0]), "one way, all the way: {cams:?}");
+        assert!((cams[13] - 40.0).abs() < 1e-3);
+        // ...and round again, camera and all.
+        let (frames, cams) = play(&mut st, 2);
+        assert_eq!(frames, [0, 1]);
+        assert!(cams[0].abs() < 1e-3, "{cams:?}");
+    }
+
+    /// Stopping leaves the camera where it had got to and puts the playhead
+    /// on that place in the move: paused, the timeline is the camera's again.
+    #[test]
+    fn pausing_a_stretched_move_parks_the_playhead_where_the_camera_is() {
+        let mut st = panning();
+        st.project.camera_opts.loops = 3;
+        let (frames, cams) = play(&mut st, 7);
+        assert_eq!(frames[6], 2, "the third drawing, second time round");
+        assert!((cams[6] - 20.0).abs() < 1e-3, "halfway through the move");
+        st.playback.stop();
+        st.advance_playback(99.0);
+        st.sync_camera_buffer();
+        assert_eq!(st.project.current_frame, 2, "halfway along the timeline");
+        assert!(st.shot_cam.is_none());
+        assert_eq!(st.project.camera.tx, 20.0, "and the camera has not moved");
+
+        // A pause a little further on parks on the nearest frame of the move.
+        let (_, cams) = play(&mut st, 2);
+        assert!((cams[1] - 9.0 * 40.0 / 14.0).abs() < 1e-3, "{cams:?}");
+        st.playback.stop();
+        st.advance_playback(199.0);
+        st.sync_camera_buffer();
+        assert_eq!(st.project.current_frame, 3);
+        assert_eq!(st.project.camera.tx, 30.0);
+    }
+
+    /// A still camera has no move to stretch: it plays as it always did.
+    #[test]
+    fn a_camera_with_no_move_is_never_stretched() {
+        let mut st = panning();
+        st.project.camera_opts.loops = 3;
+        st.project.camera_keys.truncate(1);
+        assert_eq!(st.project.camera_loops(), 1);
+        let (frames, _) = play(&mut st, 6);
+        assert_eq!(frames, [1, 2, 3, 4, 0, 1]);
+        assert!(st.shot_cam.is_none());
+    }
+
+    #[test]
+    fn an_export_of_a_stretched_move_gives_each_frame_its_camera() {
+        let mut st = panning();
+        st.export_cfg.start = 0;
+        st.export_cfg.end = 4;
+
+        // One loop: the plain order, each frame through its own key time.
+        let (order, cams) = st.export_order(ExportKind::Mp4, (0, 4));
+        assert_eq!(order, [0, 1, 2, 3, 4]);
+        assert!(cams.is_none());
+        assert_eq!(st.export_info(ExportKind::Mp4).frames, 5);
+
+        st.project.camera_opts.loops = 3;
+        let (order, cams) = st.export_order(ExportKind::Mp4, (0, 4));
+        let cams = cams.expect("a camera a frame");
+        assert_eq!(order, [0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
+        assert_eq!(cams.len(), 15);
+        assert_eq!((cams[0].tx, cams[14].tx), (0.0, 40.0));
+        assert!(cams.windows(2).all(|w| w[1].tx > w[0].tx));
+        let info = st.export_info(ExportKind::Mp4);
+        assert_eq!((info.frames, info.secs), (15, 1.5));
+
+        // The dialog's own ping-pong gives way to the camera's fill.
+        st.export_cfg.ping_pong = true;
+        assert_eq!(st.export_order(ExportKind::Gif, (0, 4)).0.len(), 15);
+        st.project.camera_opts.fill = Fill::PingPong;
+        let (order, cams) = st.export_order(ExportKind::Gif, (0, 4));
+        assert_eq!(order[..9], [0, 1, 2, 3, 4, 3, 2, 1, 0]);
+        assert_eq!(cams.unwrap().len(), 24);
+
+        // A sheet is its frames side by side, each through its own camera.
+        assert!(st.export_order(ExportKind::SpriteSheet, (0, 4)).1.is_none());
+        assert_eq!(st.export_info(ExportKind::SpriteSheet).frames, 5);
+    }
+
+    /// The held camera and the smooth path reach a stretched move's frames
+    /// too: every camera of the export is on the canvas.
+    #[test]
+    fn a_stretched_export_keeps_the_camera_s_other_options() {
+        let mut st = panning();
+        st.set_camera_size(Some((32, 32)));
+        st.project.camera_opts.loops = 2;
+        st.project.camera_opts.keep_inside = true;
+        let (_, cams) = st.export_order(ExportKind::PngSequence, (0, 4));
+        let cams = cams.unwrap();
+        // A 32-wide frame on a 64-wide canvas has 16 either side.
+        assert!(cams.iter().all(|c| c.tx <= 16.0), "{cams:?}");
+        assert_eq!(cams[9].tx, 16.0);
+    }
+
+    #[test]
+    fn opening_a_project_starts_the_camera_on_its_canvas() {
+        let mut st = AppState::for_test();
+        st.set_camera_size(Some((640, 360)));
+        st.load_project(Project::new(1280, 720, 24.0), None);
+        assert_eq!(st.project.output_size(), (1280, 720));
     }
 }

@@ -12,17 +12,19 @@ use anyhow::{Context, Result};
 use color_quant::NeuQuant;
 use gif::{Encoder, Frame, Repeat};
 
+use crate::doc::camera::Camera;
 use crate::doc::project::Project;
 use crate::io::{composite, frame_order};
 
 const NQ_SAMPLE_FACTOR: i32 = 10; // 1..=30; 10 = quality/speed sweet spot.
 
 /// Write the timeline frames in `order` (see [`crate::io::frame_order`]) as
-/// one GIF that repeats forever.
-pub fn export_to(project: &Project, path: &PathBuf, order: &[usize]) -> Result<()> {
+/// one GIF that repeats forever. `cams`, when the camera's move is stretched
+/// over loops, is the camera each of them is seen through.
+pub fn export_to(project: &Project, path: &PathBuf, order: &[usize], cams: Option<&[Camera]>) -> Result<()> {
     let file = File::create(path).with_context(|| format!("creating {path:?}"))?;
-    let w = project.width as u16;
-    let h = project.height as u16;
+    let (w, h) = project.output_size();
+    let (w, h) = (w as u16, h as u16);
     let mut encoder = Encoder::new(file, w, h, &[]).context("gif Encoder init")?;
     encoder.set_repeat(Repeat::Infinite)?;
 
@@ -32,17 +34,23 @@ pub fn export_to(project: &Project, path: &PathBuf, order: &[usize]) -> Result<(
     // keep it until its last use.
     let mut left = frame_order::uses(order);
     let mut kept: HashMap<usize, Frame<'static>> = HashMap::new();
-    for &f in order {
+    for (i, &f) in order.iter().enumerate() {
         let remaining = left.get_mut(&f).map_or(0, |n| {
             *n -= 1;
             *n
         });
-        let frame = match kept.remove(&f) {
+        // Under a camera of its own a frame is its own picture: none is kept
+        // for the next time its drawings show.
+        let reuse = cams.is_none();
+        let frame = match kept.remove(&f).filter(|_| reuse) {
             Some(frame) => frame,
-            None => encode_frame(&composite::flatten_frame(project, f).pixels(), w, h, delay),
+            None => {
+                let flat = composite::flatten_through(project, f, cams.map(|c| c[i]));
+                encode_frame(&flat.pixels(), w, h, delay)
+            }
         };
         encoder.write_frame(&frame).context("write_frame")?;
-        if remaining > 0 {
+        if remaining > 0 && reuse {
             kept.insert(f, frame);
         }
     }
@@ -81,4 +89,27 @@ fn encode_frame(rgba: &[u8], w: u16, h: u16, delay_cs: u16) -> Frame<'static> {
         frame.dispose = gif::DisposalMethod::Background;
     }
     frame
+}
+
+#[cfg(test)]
+mod camera_size_tests {
+    use super::*;
+
+    /// The logical screen size a GIF's header declares.
+    fn size(path: &PathBuf) -> (u16, u16) {
+        let b = std::fs::read(path).unwrap();
+        (u16::from_le_bytes([b[6], b[7]]), u16::from_le_bytes([b[8], b[9]]))
+    }
+
+    #[test]
+    fn a_gif_is_the_camera_s_size() {
+        let mut p = Project::new(8, 6, 12.0);
+        let path = std::env::temp_dir().join(format!("animator-gif-cam-{}.gif", std::process::id()));
+        export_to(&p, &path, &[0], None).unwrap();
+        assert_eq!(size(&path), (8, 6), "the canvas's, with none of its own");
+        p.camera_opts.size = Some((4, 2));
+        export_to(&p, &path, &[0], None).unwrap();
+        assert_eq!(size(&path), (4, 2));
+        let _ = std::fs::remove_file(&path);
+    }
 }

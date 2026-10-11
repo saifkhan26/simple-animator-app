@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use crate::doc::camera::Fill;
+
 /// How an export plays its frame range.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Playback {
@@ -68,6 +70,79 @@ pub fn frame_order(start: usize, end: usize, pb: Playback, fps: f32) -> Vec<usiz
         out.extend_from_slice(&c);
     }
     out
+}
+
+/// Frames in one cycle of `fill` over a range `pass` frames long.
+fn fill_cycle(pass: usize, fill: Fill) -> usize {
+    match fill {
+        // Forward then back, the ends not doubled — as `cycle` has it.
+        Fill::PingPong if pass >= 3 => 2 * pass - 2,
+        _ => pass,
+    }
+}
+
+/// How long a camera move spanning `loops` passes of `start..=end` lasts, in
+/// frames: that many cycles of the drawings.
+pub fn shot_len(start: usize, end: usize, loops: u32, fill: Fill) -> usize {
+    let pass = start.abs_diff(end) + 1;
+    fill_cycle(pass, fill) * loops.max(1) as usize
+}
+
+/// The timeline frame whose drawings frame `i` of such a move shows.
+pub fn shot_frame(start: usize, end: usize, fill: Fill, i: usize) -> usize {
+    let (a, b) = (start.min(end), start.max(end));
+    let pass = b - a + 1;
+    match fill {
+        Fill::Loop => a + i % pass,
+        Fill::PingPong => {
+            let cycle = fill_cycle(pass, fill);
+            let k = i % cycle;
+            a + if k < pass { k } else { cycle - k }
+        }
+        Fill::Hold => a + i.min(pass - 1),
+    }
+}
+
+/// Where the camera is on frame `i` of a move `len` frames long, as a time
+/// in timeline frames: on `start` for the first, on `end` for the last and
+/// evenly between. The keys stay where they are on the timeline — the move
+/// through them is what is stretched.
+pub fn shot_cam_time(start: usize, end: usize, len: usize, i: usize) -> f32 {
+    let (a, b) = (start.min(end) as f64, start.max(end) as f64);
+    if len < 2 {
+        return a as f32;
+    }
+    (a + (b - a) * i.min(len - 1) as f64 / (len - 1) as f64) as f32
+}
+
+/// An export whose camera move spans several passes of the drawings: which
+/// timeline frame each written frame shows, and the camera time it is seen
+/// at. *Loop to* repeats the whole move, camera and all.
+pub struct Shot {
+    pub frames: Vec<usize>,
+    pub cam_times: Vec<f32>,
+}
+
+/// What [`shot`] adds up to, for the export dialog's summary: a cycle here
+/// is the whole move.
+pub fn shot_info(start: usize, end: usize, loops: u32, fill: Fill, loop_secs: Option<f32>, fps: f32) -> OrderInfo {
+    let cycle = shot_len(start, end, loops, fill);
+    let loops = self::loops(cycle, Playback { ping_pong: false, loop_secs }, fps);
+    let frames = cycle * loops;
+    OrderInfo { cycle, loops, frames, secs: frames as f32 / fps.max(1.0) }
+}
+
+pub fn shot(start: usize, end: usize, loops: u32, fill: Fill, loop_secs: Option<f32>, fps: f32) -> Shot {
+    let info = shot_info(start, end, loops, fill, loop_secs, fps);
+    let mut frames = Vec::with_capacity(info.frames);
+    let mut cam_times = Vec::with_capacity(info.frames);
+    for _ in 0..info.loops {
+        for i in 0..info.cycle {
+            frames.push(shot_frame(start, end, fill, i));
+            cam_times.push(shot_cam_time(start, end, info.cycle, i));
+        }
+    }
+    Shot { frames, cam_times }
 }
 
 /// How many times each timeline frame appears in `order` — what an exporter
@@ -139,5 +214,81 @@ mod tests {
     fn uses_counts_repeats() {
         let u = uses(&frame_order(0, 2, pb(true, None), 24.0));
         assert_eq!((u[&0], u[&1], u[&2]), (1, 2, 1));
+    }
+}
+
+#[cfg(test)]
+mod shot_tests {
+    use super::*;
+
+    fn frames(start: usize, end: usize, loops: u32, fill: Fill) -> Vec<usize> {
+        shot(start, end, loops, fill, None, 24.0).frames
+    }
+
+    /// One loop is the range once — the order a plain export has always had.
+    #[test]
+    fn one_loop_is_the_plain_order() {
+        let plain = Playback::default();
+        assert_eq!(frames(3, 6, 1, Fill::Loop), frame_order(3, 6, plain, 24.0));
+        assert_eq!(frames(3, 6, 1, Fill::Hold), frame_order(3, 6, plain, 24.0));
+        let there_and_back = Playback { ping_pong: true, loop_secs: None };
+        assert_eq!(frames(0, 4, 1, Fill::PingPong), frame_order(0, 4, there_and_back, 24.0));
+        assert_eq!(frames(0, 1, 1, Fill::PingPong), frame_order(0, 1, there_and_back, 24.0));
+    }
+
+    #[test]
+    fn the_drawings_come_round_as_the_fill_has_them() {
+        assert_eq!(frames(2, 4, 3, Fill::Loop), [2, 3, 4, 2, 3, 4, 2, 3, 4]);
+        assert_eq!(frames(2, 4, 2, Fill::PingPong), [2, 3, 4, 3, 2, 3, 4, 3]);
+        assert_eq!(frames(2, 4, 3, Fill::Hold), [2, 3, 4, 4, 4, 4, 4, 4, 4]);
+        assert_eq!(frames(4, 2, 2, Fill::Loop), [2, 3, 4, 2, 3, 4], "either way round");
+        assert_eq!(frames(5, 5, 3, Fill::PingPong), [5, 5, 5]);
+    }
+
+    /// The whole move, once: the first frame on the first key's frame, the
+    /// last on the last, however many passes it takes.
+    #[test]
+    fn the_camera_makes_its_move_once_over_all_the_passes() {
+        let s = shot(0, 99, 3, Fill::Loop, None, 24.0);
+        assert_eq!(s.frames.len(), 300);
+        assert_eq!(s.cam_times[0], 0.0);
+        assert_eq!(s.cam_times[299], 99.0);
+        assert!(s.cam_times.windows(2).all(|w| w[1] > w[0]), "never back, never still");
+        // Halfway through the export is halfway along the timeline.
+        assert!((s.cam_times[150] - 49.67).abs() < 0.01, "{}", s.cam_times[150]);
+        assert_eq!((s.frames[150], s.frames[299]), (50, 99));
+    }
+
+    /// With one loop the camera is on each frame's own time: the frames and
+    /// the camera run together, as they do without any of this.
+    #[test]
+    fn with_one_loop_the_camera_keeps_time_with_the_frames() {
+        let s = shot(4, 9, 1, Fill::Loop, None, 24.0);
+        for (f, t) in s.frames.iter().zip(&s.cam_times) {
+            assert_eq!(*f as f32, *t);
+        }
+    }
+
+    /// *Loop to* repeats the whole move: the camera goes back to its start
+    /// with the drawings.
+    #[test]
+    fn loop_to_repeats_the_whole_move() {
+        // Three passes of 4 frames = 12; a second and a half at 12 fps is 18,
+        // rounded up to two whole moves.
+        let s = shot(0, 3, 3, Fill::Loop, Some(1.5), 12.0);
+        let info = shot_info(0, 3, 3, Fill::Loop, Some(1.5), 12.0);
+        assert_eq!((info.cycle, info.loops, info.frames, info.secs), (12, 2, 24, 2.0));
+        assert_eq!(s.frames.len(), 24);
+        assert_eq!(s.cam_times[11], 3.0);
+        assert_eq!(s.cam_times[12], 0.0);
+        assert_eq!(s.frames[12..16], [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_shot_s_length_is_its_cycles() {
+        assert_eq!(shot_len(0, 99, 3, Fill::Loop), 300);
+        assert_eq!(shot_len(0, 99, 3, Fill::Hold), 300);
+        assert_eq!(shot_len(0, 99, 3, Fill::PingPong), 3 * 198);
+        assert_eq!(shot_len(0, 99, 0, Fill::Loop), 100, "never fewer than one");
     }
 }

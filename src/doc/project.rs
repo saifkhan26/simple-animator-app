@@ -9,14 +9,16 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::doc::camera::{Camera, CameraKey};
+use crate::doc::camera::{Camera, CameraKey, CameraOpts};
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer, TrackSample};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Project {
-    /// Output resolution, and the size of the camera's frame rect. Layers may
-    /// sit outside it — see `crate::doc::camera`.
+    /// Canvas size: the document rect, and the size of a layer's cells unless
+    /// it has its own. The camera's frame is this size too unless it is given
+    /// one — see [`Project::output_size`]. Layers may sit outside it — see
+    /// `crate::doc::camera`.
     pub width: u32,
     pub height: u32,
     pub fps: f32,
@@ -42,6 +44,10 @@ pub struct Project {
     /// Sorted camera keyframes. Empty = static `camera`.
     #[serde(default)]
     pub camera_keys: Vec<CameraKey>,
+    /// Session-only, like `Layer::lines_from`: skipped, so the `.anim` layout
+    /// is what it was and a load brings back the defaults.
+    #[serde(skip)]
+    pub camera_opts: CameraOpts,
 }
 
 impl Project {
@@ -63,12 +69,56 @@ impl Project {
             loop_end: 1,
             camera: Camera::default(),
             camera_keys: Vec::new(),
+            camera_opts: CameraOpts::default(),
         }
+    }
+
+    /// Size of the camera's frame, and so of every exported frame: its own,
+    /// or the canvas's.
+    pub fn output_size(&self) -> (u32, u32) {
+        self.camera_opts.size.unwrap_or((self.width, self.height))
     }
 
     /// The camera showing on `frame`.
     pub fn resolve_camera(&self, frame: usize) -> Camera {
-        Camera::resolve(&self.camera_keys, self.camera, frame)
+        let cam = if self.camera_opts.smooth {
+            Camera::resolve_at(&self.camera_keys, self.camera, frame as f32, true)
+        } else {
+            Camera::resolve(&self.camera_keys, self.camera, frame)
+        };
+        self.held_inside(cam)
+    }
+
+    /// The camera at time `t`, in frames — between two of them, when its
+    /// move is stretched over loops. On a whole frame, what
+    /// [`Project::resolve_camera`] gives there.
+    pub fn resolve_camera_at(&self, t: f32) -> Camera {
+        self.held_inside(Camera::resolve_at(
+            &self.camera_keys,
+            self.camera,
+            t,
+            self.camera_opts.smooth,
+        ))
+    }
+
+    /// How many passes of the animation the camera's move lasts: more than
+    /// one only when it is set to and there is a move — two keys — to stretch.
+    pub fn camera_loops(&self) -> u32 {
+        if self.camera_keys.len() < 2 {
+            1
+        } else {
+            self.camera_opts.loops.max(1)
+        }
+    }
+
+    /// `cam` as the camera's session options have it: held on the canvas
+    /// when it is set to stay there, and otherwise just `cam`.
+    pub fn held_inside(&self, cam: Camera) -> Camera {
+        if !self.camera_opts.keep_inside {
+            return cam;
+        }
+        let (ow, oh) = self.output_size();
+        cam.kept_inside((self.width as f32, self.height as f32), (ow as f32, oh as f32))
     }
 
     pub fn has_camera_key(&self, frame: usize) -> bool {
@@ -93,6 +143,23 @@ impl Project {
 
     pub fn delete_camera_key(&mut self, frame: usize) {
         self.camera_keys.retain(|k| k.frame != frame);
+    }
+
+    /// Move the camera key on `from` to `to` — or, with `copy`, leave it and
+    /// put a copy there. It keeps its ease and takes the place of any key
+    /// already on `to`. `false`, with nothing changed, when there is no key on
+    /// `from` or it isn't going anywhere.
+    pub fn move_camera_key(&mut self, from: usize, to: usize, copy: bool) -> bool {
+        if from == to {
+            return false;
+        }
+        let Some(key) = self.camera_keys.iter().find(|k| k.frame == from).copied() else {
+            return false;
+        };
+        self.camera_keys.retain(|k| k.frame != to && (copy || k.frame != from));
+        self.camera_keys.push(CameraKey { frame: to, ..key });
+        self.camera_keys.sort_by_key(|k| k.frame);
+        true
     }
 
     pub fn cell(&self, id: CellId) -> Option<&Canvas> {
@@ -1263,6 +1330,96 @@ mod tests {
         p.goto(0);
         p.step(-5, false);
         assert_eq!(p.current_frame, 0, "so is the first, however big the step");
+    }
+
+    #[test]
+    fn a_camera_key_moves_with_its_ease_and_takes_the_place_of_one_it_lands_on() {
+        use crate::doc::camera::{CameraKey, Ease};
+        let mut p = Project::new(8, 8, 12.0);
+        p.ensure_frame_count(12);
+        let key = |frame, tx, ease| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ..Default::default()
+            },
+            ease,
+        };
+        p.camera_keys = vec![key(2, 20.0, Ease::In), key(6, 60.0, Ease::Out), key(9, 90.0, Ease::Both)];
+        let frames = |p: &Project| p.camera_keys.iter().map(|k| (k.frame, k.camera.tx)).collect::<Vec<_>>();
+
+        // Past another key: the keys stay in frame order.
+        assert!(p.move_camera_key(2, 8, false));
+        assert_eq!(frames(&p), [(6, 60.0), (8, 20.0), (9, 90.0)]);
+        assert_eq!(p.camera_keys[1].ease, Ease::In, "its ease came along");
+
+        // Onto another key: it takes its place.
+        assert!(p.move_camera_key(8, 9, false));
+        assert_eq!(frames(&p), [(6, 60.0), (9, 20.0)]);
+
+        // A copy leaves the original.
+        assert!(p.move_camera_key(6, 1, true));
+        assert_eq!(frames(&p), [(1, 60.0), (6, 60.0), (9, 20.0)]);
+        assert_eq!(p.camera_keys[0].ease, Ease::Out);
+
+        // Nothing to move, or nowhere to go.
+        let before = frames(&p);
+        assert!(!p.move_camera_key(4, 5, false));
+        assert!(!p.move_camera_key(6, 6, false));
+        assert_eq!(frames(&p), before);
+    }
+
+    /// The smooth path is an option of the session: off, every frame is what
+    /// the keys have always given; on, the frames between three keys curve.
+    #[test]
+    fn the_smooth_path_is_only_taken_when_asked_for() {
+        use crate::doc::camera::{CameraKey, Ease};
+        let mut p = Project::new(400, 200, 12.0);
+        p.ensure_frame_count(21);
+        let key = |frame, tx, ty| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ty,
+                ..Default::default()
+            },
+            ease: Ease::Linear,
+        };
+        p.camera_keys = vec![key(0, 0.0, 0.0), key(10, 100.0, 0.0), key(20, 100.0, 100.0)];
+        let straight: Vec<Camera> = (0..21).map(|f| p.resolve_camera(f)).collect();
+        for (f, cam) in straight.iter().enumerate() {
+            assert_eq!(*cam, Camera::resolve(&p.camera_keys, p.camera, f));
+        }
+        p.camera_opts.smooth = true;
+        assert_eq!(p.resolve_camera(10), straight[10], "keys are where they were");
+        assert_ne!(p.resolve_camera(5), straight[5]);
+        assert!(p.resolve_camera(5).ty < 0.0, "swinging wide of the corner");
+    }
+
+    /// With the camera held on the canvas, a key that left it — and every
+    /// frame tweened towards one — comes back inside; with it off, they are
+    /// exactly what the keys say.
+    #[test]
+    fn a_held_camera_stays_on_the_canvas_on_every_frame() {
+        use crate::doc::camera::{CameraKey, Ease};
+        let mut p = Project::new(400, 200, 12.0);
+        p.ensure_frame_count(11);
+        p.camera_opts.size = Some((100, 50));
+        let key = |frame, tx| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                ..Default::default()
+            },
+            ease: Ease::Linear,
+        };
+        p.camera_keys = vec![key(0, 0.0), key(10, 300.0)];
+        assert_eq!(p.resolve_camera(10).tx, 300.0);
+        assert_eq!(p.resolve_camera(5).tx, 150.0);
+        p.camera_opts.keep_inside = true;
+        assert_eq!(p.resolve_camera(10).tx, 150.0, "half the canvas less half the frame");
+        assert_eq!(p.resolve_camera(8).tx, 150.0);
+        assert_eq!(p.resolve_camera(2).tx, 60.0, "frames already inside are as keyed");
     }
 
     /// A symmetric grow leaves the old pixels centered, which is what keeps a
