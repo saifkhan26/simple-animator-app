@@ -2537,9 +2537,17 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     );
     ui.add_space(6.0);
 
-    theme::section_header(ui, ic::FRAME_CORNERS, "Resolution");
-    camera_size_ui(state, ui);
-    ui.add_space(6.0);
+    // Folded away like the Layers panel's extras, with what is set said in
+    // the header: the panel is tall enough, and the size is set and left.
+    let (ow, oh) = state.project.output_size();
+    egui::CollapsingHeader::new(theme::icon_text(
+        ic::FRAME_CORNERS,
+        &format!("Resolution · {ow}×{oh}"),
+    ))
+    .id_salt("camera_resolution")
+    .default_open(true)
+    .show(ui, |ui| camera_size_ui(state, ui));
+    ui.add_space(4.0);
     ui.separator();
 
     ui.checkbox(&mut state.camera_edit, "Camera edit mode");
@@ -2692,10 +2700,17 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
         state.camera_opts_changed();
     }
 
-    ui.add_space(6.0);
-    ui.separator();
-    theme::section_header(ui, ic::REPEAT, "Over loops");
-    camera_loops_ui(state, ui);
+    ui.add_space(4.0);
+    let loops = state.project.camera_opts.loops;
+    let over_loops = if loops > 1 {
+        format!("Over loops · {loops}×")
+    } else {
+        "Over loops".to_string()
+    };
+    egui::CollapsingHeader::new(theme::icon_text(ic::REPEAT, &over_loops))
+        .id_salt("camera_loops")
+        .default_open(false)
+        .show(ui, |ui| camera_loops_ui(state, ui));
 
     ui.add_space(6.0);
     ui.separator();
@@ -10542,6 +10557,10 @@ mod camera_panel_tests {
         assert_eq!(state.project.output_size(), (3840, 2160));
         click(&ctx, &mut state, "Full HD");
         assert_eq!(state.project.output_size(), (1920, 1080));
+        assert!(
+            frame(&ctx, &mut state, vec![]).iter().any(|(t, _)| t.ends_with("Resolution · 1920×1080")),
+            "the header says what is set",
+        );
         assert_eq!((state.project.width, state.project.height), (3840, 2160), "the canvas is as it was");
         assert!(state.project.camera.is_identity(), "and the camera has not moved");
     }
@@ -10673,10 +10692,17 @@ mod camera_panel_tests {
         let says = |ctx: &egui::Context, state: &mut AppState, what: &str| {
             frame(ctx, state, vec![]).iter().any(|(t, _)| t.contains(what))
         };
+        assert!(!says(&ctx, &mut state, "More than 1"), "folded away until asked for");
+        click(&ctx, &mut state, "Over loops");
+        // The fold opens over a few frames.
+        for _ in 0..30 {
+            frame(&ctx, &mut state, vec![]);
+        }
         assert!(says(&ctx, &mut state, "More than 1"));
 
         state.project.camera_opts.loops = 3;
         assert!(says(&ctx, &mut state, "Needs two camera keys"));
+        assert!(says(&ctx, &mut state, "Over loops · 3×"), "the header says what is set");
 
         two_keys(&mut state);
         assert!(says(&ctx, &mut state, "plays once over 300 frames (12.5s)"));
