@@ -50,10 +50,35 @@ pub struct CameraKey {
     pub ease: Ease,
 }
 
+/// What the drawings do while a camera move that spans several passes of
+/// them is still going — see [`CameraOpts::loops`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fill {
+    /// Start again from the first frame each pass: a cycle.
+    #[default]
+    Loop,
+    /// Forward, then back, then forward again.
+    PingPong,
+    /// Play once and stay on the last frame.
+    Hold,
+}
+
+impl Fill {
+    pub const ALL: [Fill; 3] = [Fill::Loop, Fill::PingPong, Fill::Hold];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Fill::Loop => "Loop",
+            Fill::PingPong => "Ping-pong",
+            Fill::Hold => "Hold last frame",
+        }
+    }
+}
+
 /// Camera settings that last for the session. Not written to `.anim`, so a
 /// project always opens with the defaults — and the defaults are the camera
 /// as it has always been.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraOpts {
     /// Size of the camera's frame, which is the size of every exported
     /// frame. `None` = the canvas size, the frame a resting camera has always
@@ -66,6 +91,25 @@ pub struct CameraOpts {
     /// Curve through the keys instead of turning a corner at each: see
     /// [`Camera::resolve_at`]. Changes nothing until there are three keys.
     pub smooth: bool,
+    /// How many passes of the animation the camera's move lasts. `1` = the
+    /// two run together, frame for frame. More, and the move keyed along the
+    /// timeline is stretched over that many passes of it: the drawings come
+    /// round again (as `fill` has them) under one unbroken move, in playback
+    /// and in exports. See `crate::io::frame_order::Shot`.
+    pub loops: u32,
+    pub fill: Fill,
+}
+
+impl Default for CameraOpts {
+    fn default() -> Self {
+        Self {
+            size: None,
+            keep_inside: false,
+            smooth: false,
+            loops: 1,
+            fill: Fill::Loop,
+        }
+    }
 }
 
 /// Which part of the camera's frame a press landed on. The same grabs, by

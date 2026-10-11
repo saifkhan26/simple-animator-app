@@ -6,12 +6,13 @@ use egui_phosphor::regular as ic;
 
 use crate::app::{AppState, CameraFraming, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
 use crate::color::{fmt_rgb, parse_color};
-use crate::doc::camera::Ease;
+use crate::doc::camera::{Ease, Fill};
 use crate::doc::canvas::DirtyRect;
 use crate::doc::layer::CellId;
 use crate::input::button_drag::{self, ButtonDrag};
 use crate::input::shortcuts::{Action, Clash};
 use crate::input::tablet::PenPacket;
+use crate::io::frame_order::shot_len;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, PIN_TINTS};
 use crate::tools::fill;
@@ -2485,6 +2486,45 @@ fn camera_size_ui(state: &mut AppState, ui: &mut egui::Ui) {
     ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(10.5));
 }
 
+/// How many passes of the animation the camera's move lasts, and what the
+/// drawings do meanwhile: a short cycle under one long pan.
+fn camera_loops_ui(state: &mut AppState, ui: &mut egui::Ui) {
+    let opts = &mut state.project.camera_opts;
+    ui.horizontal(|ui| {
+        ui.label("Move spans");
+        ui.add(egui::DragValue::new(&mut opts.loops).range(1..=999).speed(0.1));
+        ui.label(if opts.loops == 1 { "loop" } else { "loops" });
+        ui.add_enabled_ui(opts.loops > 1, |ui| {
+            egui::ComboBox::from_id_salt("cam_fill")
+                .selected_text(opts.fill.label())
+                .show_ui(ui, |ui| {
+                    for fill in Fill::ALL {
+                        ui.selectable_value(&mut opts.fill, fill, fill.label());
+                    }
+                });
+        });
+    });
+    let p = &state.project;
+    let note = if p.camera_opts.loops <= 1 {
+        "More than 1, and the animation comes round again under one long camera move.".to_string()
+    } else if p.camera_loops() == 1 {
+        "Needs two camera keys — a move to stretch.".to_string()
+    } else {
+        // What plays: the loop range.
+        let last = p.frame_count.saturating_sub(1);
+        let lo = p.loop_start.min(last);
+        let hi = p.loop_end.saturating_sub(1).min(last).max(lo);
+        let len = shot_len(lo, hi, p.camera_loops(), p.camera_opts.fill);
+        format!(
+            "The move keyed along the timeline plays once over {len} frames ({:.1}s) while the \
+             drawings repeat — in playback and in exports. Keys stay where they are: halfway \
+             along the timeline is halfway through the move. Kept until the project is closed.",
+            len as f32 / p.fps.max(1.0)
+        )
+    };
+    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(10.5));
+}
+
 /// Camera panel — what the export sees, and how that moves over time.
 fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     ui.label(
@@ -2651,6 +2691,11 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
         state.camera_opts_changed();
     }
+
+    ui.add_space(6.0);
+    ui.separator();
+    theme::section_header(ui, ic::REPEAT, "Over loops");
+    camera_loops_ui(state, ui);
 
     ui.add_space(6.0);
     ui.separator();
@@ -7446,7 +7491,27 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
             if kind != ExportKind::SpriteSheet {
                 ui.add_space(6.0);
                 theme::section_header(ui, ic::REPEAT, "Playback");
-                ui.checkbox(&mut state.export_cfg.ping_pong, "Ping-pong (forward, then back)");
+                // A camera move stretched over loops says what the drawings
+                // do under it; the tick here would be a second opinion.
+                let stretched = state.project.camera_loops() > 1;
+                if stretched {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "The camera's move spans {} loops ({}) — set in the Camera panel.",
+                            state.project.camera_loops(),
+                            state.project.camera_opts.fill.label()
+                        ))
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                    );
+                }
+                ui.add_enabled(
+                    !stretched,
+                    egui::Checkbox::new(
+                        &mut state.export_cfg.ping_pong,
+                        "Ping-pong (forward, then back)",
+                    ),
+                );
                 // A GIF repeats forever by itself; only files with an end
                 // need a length.
                 if matches!(kind, ExportKind::Mp4 | ExportKind::PngSequence) {
@@ -7468,12 +7533,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                     );
                 }
             }
-            let order = crate::io::frame_order::info(
-                state.export_cfg.start,
-                state.export_cfg.end,
-                state.export_cfg.playback(kind),
-                state.project.fps,
-            );
+            let order = state.export_info(kind);
 
             match kind {
                 ExportKind::Mp4 => {
@@ -10593,6 +10653,82 @@ mod camera_panel_tests {
         assert_eq!(lines[0], [pos2(200.0, 50.0), pos2(200.0, 200.0)]);
         // Title-safe: a tenth in from each edge.
         assert_eq!(lines[8][0], pos2(130.0, 65.0));
+    }
+
+    fn two_keys(state: &mut AppState) {
+        state.project.ensure_frame_count(100);
+        state.project.loop_end = 100;
+        state.add_camera_key();
+        state.project.goto(99);
+        state.project.camera.tx = 500.0;
+        state.add_camera_key();
+        state.project.goto(0);
+    }
+
+    /// The Over loops section says what the setting will do — or why it
+    /// will do nothing yet.
+    #[test]
+    fn the_loops_section_says_how_long_the_move_will_run() {
+        let (ctx, mut state) = setup();
+        let says = |ctx: &egui::Context, state: &mut AppState, what: &str| {
+            frame(ctx, state, vec![]).iter().any(|(t, _)| t.contains(what))
+        };
+        assert!(says(&ctx, &mut state, "More than 1"));
+
+        state.project.camera_opts.loops = 3;
+        assert!(says(&ctx, &mut state, "Needs two camera keys"));
+
+        two_keys(&mut state);
+        assert!(says(&ctx, &mut state, "plays once over 300 frames (12.5s)"));
+        state.project.camera_opts.fill = Fill::PingPong;
+        assert!(says(&ctx, &mut state, "plays once over 594 frames"));
+    }
+
+    #[test]
+    fn the_smooth_path_tick_sets_the_session_option() {
+        let (ctx, mut state) = setup();
+        click(&ctx, &mut state, "Smooth path through keys");
+        assert!(state.project.camera_opts.smooth);
+        click(&ctx, &mut state, "Smooth path through keys");
+        assert!(!state.project.camera_opts.smooth);
+    }
+
+    /// The export dialog counts a stretched move's frames, and hands its own
+    /// ping-pong over to the camera's fill.
+    #[test]
+    fn the_export_dialog_counts_a_stretched_move() {
+        let (ctx, mut state) = setup();
+        two_keys(&mut state);
+        open_export(&mut state, ExportKind::Mp4);
+        let texts = |ctx: &egui::Context, state: &mut AppState| {
+            fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                    _ => {}
+                }
+            }
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 900.0))),
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            for _ in 0..2 {
+                out.clear();
+                for s in &ctx.run(raw.clone(), |ctx| export_dialog(state, ctx)).shapes {
+                    walk(&s.shape, &mut out);
+                }
+            }
+            out
+        };
+        let t = texts(&ctx, &mut state);
+        assert!(t.iter().any(|s| s == "100 frames - 4.2s at 24 fps"), "{t:?}");
+        assert!(!t.iter().any(|s| s.contains("camera's move spans")));
+
+        state.project.camera_opts.loops = 3;
+        let t = texts(&ctx, &mut state);
+        assert!(t.iter().any(|s| s == "300 frames - 12.5s at 24 fps"), "{t:?}");
+        assert!(t.iter().any(|s| s.contains("The camera's move spans 3 loops (Loop)")), "{t:?}");
     }
 
     #[test]

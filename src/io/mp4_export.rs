@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::doc::camera::Camera;
 use crate::doc::project::Project;
 use crate::io::{composite, frame_order};
 
@@ -45,12 +46,14 @@ const REUSE_BUDGET: usize = 1 << 30;
 
 /// Encode the timeline frames in `order` (see [`crate::io::frame_order`]) to an
 /// MP4 at `path`. Blocking — run on a worker thread (see
-/// `AppState::start_export`).
+/// `AppState::start_export`). `cams`, when the camera's move is stretched over
+/// loops, is the camera each of them is seen through.
 pub fn export_to(
     project: &Project,
     path: &Path,
     settings: &Mp4Settings,
     order: &[usize],
+    cams: Option<&[Camera]>,
 ) -> Result<()> {
     let (w, h) = project.output_size();
     // Even dimensions are required by yuv420p; pad odd sizes up by a pixel.
@@ -98,17 +101,20 @@ pub fn export_to(
         // and kept until its last use.
         let mut left = frame_order::uses(order);
         let mut kept: HashMap<usize, Vec<u8>> = HashMap::new();
-        for &f in order {
+        // Under a camera of its own a frame is its own picture: none is kept
+        // for the next time its drawings show.
+        let reuse = cams.is_none();
+        for (i, &f) in order.iter().enumerate() {
             let remaining = left.get_mut(&f).map_or(0, |n| {
                 *n -= 1;
                 *n
             });
-            let res = match kept.get(&f) {
+            let res = match kept.get(&f).filter(|_| reuse) {
                 Some(buf) => stdin.write_all(buf),
                 None => {
-                    let flat = composite::flatten_frame(project, f);
+                    let flat = composite::flatten_through(project, f, cams.map(|c| c[i]));
                     rgba_over_black(&flat.pixels(), &mut rgb);
-                    if remaining > 0 && (kept.len() + 1) * frame_bytes <= REUSE_BUDGET {
+                    if reuse && remaining > 0 && (kept.len() + 1) * frame_bytes <= REUSE_BUDGET {
                         kept.insert(f, rgb.clone());
                     }
                     stdin.write_all(&rgb)
@@ -184,7 +190,7 @@ mod tests {
         for (name, ping_pong) in [("loop", false), ("pingpong", true)] {
             let pb = Playback { ping_pong, loop_secs: Some(10.0) };
             let order = frame_order(0, 20, pb, 24.0);
-            export_to(&p, &dir.join(format!("{name}.mp4")), &settings, &order).unwrap();
+            export_to(&p, &dir.join(format!("{name}.mp4")), &settings, &order, None).unwrap();
         }
     }
 }

@@ -1,6 +1,7 @@
 //! CPU composite — used for PNG / GIF export where we need flat pixels for a
 //! given frame. Onion skins and reference layers are excluded from export.
 
+use crate::doc::camera::Camera;
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::project::Project;
 use crate::doc::transform::Transform;
@@ -18,16 +19,29 @@ use crate::doc::transform::Transform;
 /// A clipped layer composites its drawing cut to its base; see
 /// [`crate::doc::clip`]. Everything unclipped goes straight from its cell.
 pub fn flatten_frame(project: &Project, frame: usize) -> Canvas {
-    flatten(project, frame, true)
+    flatten(project, frame, Some(project.resolve_camera(frame)))
+}
+
+/// `frame` as an export writes it: through `cam` when the export gives each
+/// of its frames a camera — a move stretched over loops shows a frame's
+/// drawings through the camera of another time — and otherwise, as
+/// [`flatten_frame`], through the camera keyed on `frame`.
+pub fn flatten_through(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas {
+    match cam {
+        Some(cam) => flatten(project, frame, Some(cam)),
+        None => flatten_frame(project, frame),
+    }
 }
 
 /// [`flatten_frame`], but in document space: the canvas rect as the document
 /// has it, no camera.
 pub fn flatten_doc(project: &Project, frame: usize) -> Canvas {
-    flatten(project, frame, false)
+    flatten(project, frame, None)
 }
 
-fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
+/// `frame`'s drawings through `cam`, or with none in document space.
+fn flatten(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas {
+    let through_camera = cam.is_some();
     // The folded transform is about the centre of what it draws into, so a
     // camera frame of another size needs nothing more than its own size here.
     let (pw, ph) = if through_camera {
@@ -36,7 +50,6 @@ fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
         (project.width, project.height)
     };
     let mut out = Canvas::new(pw, ph);
-    let cam = project.resolve_camera(frame);
     let draw = |dst: &mut Canvas, li: usize| {
         let layer = &project.layers[li];
         if !project.shows(li) || layer.reference || layer.is_group() {
@@ -46,7 +59,7 @@ fn flatten(project: &Project, frame: usize, through_camera: bool) -> Canvas {
             return;
         };
         let xform = layer.resolve_transform(frame);
-        let xform = if through_camera { cam.apply(&xform) } else { xform };
+        let xform = cam.map_or(xform, |cam| cam.apply(&xform));
         if through_camera && xform.scale.abs() < AVERAGE_BELOW {
             let (small, xform) = shrunk_for(&src, &xform);
             composite_layer(dst, &small, &xform, layer.opacity, pw, ph);

@@ -89,6 +89,28 @@ impl Project {
         self.held_inside(cam)
     }
 
+    /// The camera at time `t`, in frames — between two of them, when its
+    /// move is stretched over loops. On a whole frame, what
+    /// [`Project::resolve_camera`] gives there.
+    pub fn resolve_camera_at(&self, t: f32) -> Camera {
+        self.held_inside(Camera::resolve_at(
+            &self.camera_keys,
+            self.camera,
+            t,
+            self.camera_opts.smooth,
+        ))
+    }
+
+    /// How many passes of the animation the camera's move lasts: more than
+    /// one only when it is set to and there is a move — two keys — to stretch.
+    pub fn camera_loops(&self) -> u32 {
+        if self.camera_keys.len() < 2 {
+            1
+        } else {
+            self.camera_opts.loops.max(1)
+        }
+    }
+
     /// `cam` as the camera's session options have it: held on the canvas
     /// when it is set to stay there, and otherwise just `cam`.
     pub fn held_inside(&self, cam: Camera) -> Camera {
