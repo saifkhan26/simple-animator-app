@@ -7076,6 +7076,14 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             }
             ui.close_menu();
         }
+        if ui
+            .button(theme::icon_text(ic::COPY, "Copy frame to clipboard"))
+            .on_hover_text("The current frame as Save PNG writes it, to paste into another app")
+            .clicked()
+        {
+            state.copy_frame();
+            ui.close_menu();
+        }
         for (icon, label, kind) in [
             (ic::IMAGES, "Export PNG sequence…", ExportKind::PngSequence),
             (ic::FILM_REEL, "Export animated GIF…", ExportKind::Gif),
@@ -7807,7 +7815,7 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
             });
         return;
     }
-    let Some((name, deadline)) = state.save_toast.clone() else {
+    let Some((msg, deadline)) = state.save_toast.clone() else {
         return;
     };
     let now = std::time::Instant::now();
@@ -7836,7 +7844,7 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
                                 .size(15.0),
                         );
                         ui.label(
-                            egui::RichText::new(format!("Saved  {name}")).color(fade(theme::TEXT)),
+                            egui::RichText::new(msg).color(fade(theme::TEXT)),
                         );
                     });
                 });

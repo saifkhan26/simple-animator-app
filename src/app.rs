@@ -936,8 +936,9 @@ pub struct AppState {
     /// File this project was last saved to or loaded from. `None` = never
     /// saved, so Save has to ask for a destination.
     pub project_path: Option<PathBuf>,
-    /// Transient "saved" confirmation and the instant it expires. A silent
-    /// overwrite is otherwise indistinguishable from a save that never ran.
+    /// Transient confirmation — a save, an export, a frame copied — as the
+    /// line it shows, and the instant it expires. A silent overwrite is
+    /// otherwise indistinguishable from a save that never ran.
     pub save_toast: Option<(String, Instant)>,
     /// Failed write, shown as a modal until dismissed. Never merely logged — a
     /// silent save that silently failed is how work gets lost.
@@ -2541,6 +2542,22 @@ impl AppState {
             p.cells.push(canvas.into());
             p.layers[idx].set_key(0, id);
         });
+    }
+
+    /// File → Copy frame to clipboard: the current frame as Save PNG writes it,
+    /// on the system clipboard for another app to paste.
+    pub fn copy_frame(&mut self) {
+        let frame = self.project.current_frame;
+        let flat = crate::io::composite::flatten_frame(&self.project, frame);
+        match crate::io::png_save::copy_to_clipboard(&flat) {
+            Ok(()) => {
+                self.save_toast = Some((format!("Copied frame {}", frame + 1), Instant::now() + Self::TOAST_TTL));
+            }
+            Err(e) => {
+                log::error!("Copy frame failed: {e:#}");
+                self.krita_notice(format!("Couldn't copy the frame: {e:#}"), true);
+            }
+        }
     }
 
     /// File → Import video…: pick a file, then probe its frame count / fps on a
@@ -5701,7 +5718,7 @@ impl AppState {
             Ok(Ok(())) => {
                 self.grids_saved_as(&job.path);
                 self.project_path = Some(job.path);
-                self.save_toast = Some((job.name, Instant::now() + Self::TOAST_TTL));
+                self.save_toast = Some((format!("Saved  {}", job.name), Instant::now() + Self::TOAST_TTL));
                 self.save_error = None;
             }
             Ok(Err(e)) => {
