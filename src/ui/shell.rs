@@ -665,7 +665,7 @@ fn wheel_map(state: &mut AppState, ctx: &egui::Context) {
         return;
     };
     let over_canvas = layer.order == egui::Order::Background;
-    let over_timeline = layer.id == egui::Id::new(panel_key(PanelId::Timeline));
+    let over_timeline = layer.id == panel_area(state, PanelId::Timeline);
     if !(over_canvas || over_timeline || layer.id == egui::Id::new("mini_timeline")) {
         return;
     }
@@ -829,9 +829,15 @@ fn panel_window(
     open: bool,
     resized: Option<Rect>,
 ) {
+    if !state.panel_shown(id) {
+        return;
+    }
     let (icon, title) = panel_meta(id);
+    let area = panel_area(state, id);
+    let mut shown = true;
     let mut window = egui::Window::new(theme::icon_text(icon, title))
-        .id(egui::Id::new(panel_key(id)))
+        .id(area)
+        .open(&mut shown)
         .default_pos(default_pos)
         .default_width(width)
         .default_open(open)
@@ -839,7 +845,7 @@ fn panel_window(
         .collapsible(true)
         .frame(floating_frame());
     if let Some(old) = resized {
-        if let Some(pos) = resticked_pos(ctx, panel_key(id), old, ctx.screen_rect()) {
+        if let Some(pos) = resticked_pos(ctx, area, old, ctx.screen_rect()) {
             window = window.current_pos(pos);
         }
     }
@@ -854,6 +860,19 @@ fn panel_window(
         drag_by_title_only(ui);
         panel_content(state, ctx, ui, id)
     });
+    if !shown {
+        state.set_panel_shown(id, false);
+    }
+}
+
+/// The egui id a panel's window is kept under: its key, plus the layout
+/// generation once Reset panel layout has been used.
+fn panel_area(state: &AppState, id: PanelId) -> egui::Id {
+    let key = egui::Id::new(panel_key(id));
+    match state.panel_layout_gen {
+        0 => key,
+        g => key.with(g),
+    }
 }
 
 /// Make a window move by its title bar only.
@@ -893,8 +912,8 @@ pub(crate) fn drag_by_title_only(ui: &mut egui::Ui) {
 /// Each axis is handled independently and keeps the panel's gap from whichever
 /// edge it was nearest — a right-hand panel tracks the right edge, a bottom one
 /// tracks the bottom. `None` means leave it alone.
-fn resticked_pos(ctx: &egui::Context, key: &str, old: Rect, new: Rect) -> Option<[f32; 2]> {
-    let st = egui::AreaState::load(ctx, egui::Id::new(key))?;
+fn resticked_pos(ctx: &egui::Context, area: egui::Id, old: Rect, new: Rect) -> Option<[f32; 2]> {
+    let st = egui::AreaState::load(ctx, area)?;
     // `size` is `None` until the area has been laid out once (and it is
     // deliberately not persisted by egui). Without it `rect()` reports a
     // zero-sized box and every gap below would be nonsense.
@@ -7235,6 +7254,24 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     });
+    ui.menu_button(theme::icon_text(ic::SQUARES_FOUR, "Panels"), |ui| {
+        for id in PanelId::ALL {
+            let (icon, title) = panel_meta(id);
+            let mut shown = state.panel_shown(id);
+            if ui.checkbox(&mut shown, theme::icon_text(icon, title)).changed() {
+                state.set_panel_shown(id, shown);
+            }
+        }
+        ui.separator();
+        if ui
+            .button(theme::icon_text(ic::ARROW_COUNTER_CLOCKWISE, "Reset panel layout"))
+            .on_hover_text("Every panel shown, back where it first opened and at its first size")
+            .clicked()
+        {
+            state.reset_panel_layout();
+            ui.close_menu();
+        }
+    });
 }
 
 /// How tall the saved-preset list may grow before it scrolls, in points —
@@ -11148,6 +11185,54 @@ mod window_layout_tests {
         let back = window(&ctx, id);
         assert!((back.width() - before.width()).abs() < 2.0, "{before:?} → {back:?}");
         assert!((back.height() - before.height()).abs() < 1.0, "{before:?} → {back:?}");
+    }
+
+    /// The middle of the × egui paints at the right of a window's title bar.
+    fn close_x(shapes: &Shapes, win: Rect) -> Pos2 {
+        fn walk(shape: &egui::Shape, out: &mut Vec<Pos2>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::LineSegment { points: [a, b], .. } => out.push(pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)),
+                _ => {}
+            }
+        }
+        let mut mids = Vec::new();
+        for s in shapes {
+            walk(&s.shape, &mut mids);
+        }
+        mids.into_iter()
+            .filter(|c| win.contains(*c) && c.y < win.min.y + 36.0)
+            .max_by(|a, b| a.x.total_cmp(&b.x))
+            .expect("a close × in the title bar")
+    }
+
+    #[test]
+    fn a_panel_closes_from_its_title_bar_and_the_reset_brings_it_back_fresh() {
+        let (ctx, mut state) = setup();
+        state.show_panels = true;
+        let titled = |shapes: &Shapes| texts(shapes).iter().any(|(t, _)| t.ends_with(" Layers"));
+        let shapes = settle(&ctx, &mut |ctx| draw(&mut state, ctx));
+        assert!(titled(&shapes));
+        let area = panel_area(&state, PanelId::Layers);
+        let at = close_x(&shapes, window(&ctx, area));
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&ctx, vec![egui::Event::PointerMoved(at), button(true)], &mut |ctx| draw(&mut state, ctx));
+        run(&ctx, vec![button(false)], &mut |ctx| draw(&mut state, ctx));
+        assert!(!state.panel_shown(PanelId::Layers), "the × hides it");
+        let shapes = settle(&ctx, &mut |ctx| draw(&mut state, ctx));
+        assert!(!titled(&shapes), "and nothing of it is drawn");
+
+        state.reset_panel_layout();
+        assert!(state.panel_shown(PanelId::Layers));
+        assert_ne!(panel_area(&state, PanelId::Layers), area, "a fresh window, at its first spot");
+        let shapes = settle(&ctx, &mut |ctx| draw(&mut state, ctx));
+        assert!(titled(&shapes));
+        assert!(egui::AreaState::load(&ctx, panel_area(&state, PanelId::Layers)).is_some());
     }
 
     #[test]

@@ -417,6 +417,11 @@ struct UiPrefs {
     /// The camera frame size last set. The size itself lasts only for the
     /// session, so this is what brings it back with one click the next time.
     last_camera_size: Option<(u32, u32)>,
+    /// Panels closed from the Panels menu or their title bar. Part of the
+    /// workspace layout, like where each panel sits.
+    hidden_panels: Vec<PanelId>,
+    /// Bumped by Reset panel layout; see [`AppState::panel_layout_gen`].
+    panel_layout_gen: u32,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -513,6 +518,8 @@ impl Default for UiPrefs {
             show_checker: false,
             harmony: Harmony::default(),
             last_camera_size: None,
+            hidden_panels: Vec::new(),
+            panel_layout_gen: 0,
         }
     }
 }
@@ -834,7 +841,8 @@ fn evictions(entries: &[TexEntry], budget: usize, now: u64, playing: bool) -> Ve
 }
 
 /// The tool panels (each rendered as a floating window).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PanelId {
     Tools,
     Brush,
@@ -844,6 +852,21 @@ pub enum PanelId {
     Timeline,
     Camera,
     Color,
+}
+
+impl PanelId {
+    /// Every panel, in the order the Panels menu lists them: the left
+    /// column, the right column, then the timeline along the bottom.
+    pub const ALL: [PanelId; 8] = [
+        PanelId::Tools,
+        PanelId::Brush,
+        PanelId::Color,
+        PanelId::Layers,
+        PanelId::Onion,
+        PanelId::Camera,
+        PanelId::Xsheet,
+        PanelId::Timeline,
+    ];
 }
 
 impl Default for NewProjectConfig {
@@ -1282,6 +1305,13 @@ pub struct AppState {
     pub show_grid_settings: bool,
     /// Master visibility of all floating panel windows. Tab toggles it.
     pub show_panels: bool,
+    /// Panels closed one at a time, from the Panels menu or the × in their
+    /// title bar. `show_panels` still hides the rest all at once.
+    pub hidden_panels: Vec<PanelId>,
+    /// Which generation of panel windows egui is keeping positions and sizes
+    /// for. Reset panel layout moves to a new one, so every panel opens as if
+    /// for the first time; 0 is the ids panels have always had.
+    pub panel_layout_gen: u32,
     /// Minimal timeline bar shown when `show_panels` is false. Has its own
     /// toggle shortcut so the user can hide it too.
     pub show_mini_timeline: bool,
@@ -1591,6 +1621,8 @@ impl AppState {
             show_brush_settings: false,
             show_grid_settings: false,
             show_panels: prefs.show_panels,
+            hidden_panels: prefs.hidden_panels,
+            panel_layout_gen: prefs.panel_layout_gen,
             show_mini_timeline: prefs.show_mini_timeline,
             show_new_project: false,
             new_project_cfg: NewProjectConfig::default(),
@@ -3175,6 +3207,25 @@ impl AppState {
     pub fn apply_camera_rotate(&mut self, d: f32) {
         self.project.camera.rot += d;
         self.hold_camera_inside();
+    }
+
+    pub fn panel_shown(&self, id: PanelId) -> bool {
+        !self.hidden_panels.contains(&id)
+    }
+
+    pub fn set_panel_shown(&mut self, id: PanelId, shown: bool) {
+        self.hidden_panels.retain(|&p| p != id);
+        if !shown {
+            self.hidden_panels.push(id);
+        }
+    }
+
+    /// Every panel shown again, back where it first opened and at its first
+    /// size. egui keeps those per window id, so the panels move to new ids
+    /// rather than having each piece of egui state cleared.
+    pub fn reset_panel_layout(&mut self) {
+        self.hidden_panels.clear();
+        self.panel_layout_gen = self.panel_layout_gen.wrapping_add(1).max(1);
     }
 
     /// Reset the camera to identity — frame rect back on the document rect.
@@ -6078,6 +6129,8 @@ impl eframe::App for AppState {
                 show_checker: self.show_checker,
                 harmony: self.harmony.scheme,
                 last_camera_size: self.last_camera_size,
+                hidden_panels: self.hidden_panels.clone(),
+                panel_layout_gen: self.panel_layout_gen,
             },
         );
     }
@@ -8832,6 +8885,7 @@ mod tests {
         assert_eq!(prefs.palette, want.palette);
         assert_eq!(prefs.krita_path, want.krita_path);
         assert_eq!(prefs.bg_color, want.bg_color);
+        assert!(prefs.hidden_panels.is_empty() && prefs.panel_layout_gen == 0, "every panel where it was");
         let brushes = restore_tool_brushes(prefs.tool_brushes);
         assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
         assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
@@ -8851,6 +8905,24 @@ mod tests {
         let pencil = &restore_tool_brushes(prefs.tool_brushes)[ActiveTool::Pencil.idx()];
         assert_eq!(pencil.mode, crate::tools::BrushMode::Krita);
         assert_eq!(pencil.radius, 33.0);
+    }
+
+    #[test]
+    fn hidden_panels_and_the_layout_reset_outlast_a_restart() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.set_panel_shown(PanelId::Brush, false);
+        st.reset_panel_layout();
+        assert!(st.panel_shown(PanelId::Brush), "a reset shows every panel");
+        st.set_panel_shown(PanelId::Onion, false);
+        st.set_panel_shown(PanelId::Xsheet, false);
+        st.set_panel_shown(PanelId::Xsheet, true);
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let back = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(back.hidden_panels, vec![PanelId::Onion]);
+        assert_eq!(back.panel_layout_gen, 1);
     }
 
     /// Picking a colour off the screen changes the colour and nothing else.
