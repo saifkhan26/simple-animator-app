@@ -54,16 +54,16 @@ pub fn range_slider(
     // Full track.
     painter.line_segment(
         [egui::pos2(x0, cy), egui::pos2(x1, cy)],
-        Stroke::new(3.0, theme::STROKE_THIN),
+        Stroke::new(3.0, theme::stroke_thin()),
     );
     // Selected segment.
     painter.line_segment(
         [egui::pos2(sx, cy), egui::pos2(ex, cy)],
-        Stroke::new(3.0, theme::ACCENT),
+        Stroke::new(3.0, theme::accent()),
     );
     // Knobs on top.
     for x in [sx, ex] {
-        painter.circle_filled(egui::pos2(x, cy), knob_r, theme::ACCENT);
+        painter.circle_filled(egui::pos2(x, cy), knob_r, theme::accent());
         painter.circle_stroke(egui::pos2(x, cy), knob_r, Stroke::new(1.5, Color32::WHITE));
     }
 

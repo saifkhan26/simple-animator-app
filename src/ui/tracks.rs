@@ -20,7 +20,7 @@ use crate::app::AppState;
 use crate::doc::layer::CellId;
 use crate::doc::project::{layer_retime, ripple_move, Block, CellReq};
 use crate::input::shortcuts::{Action, WheelAction};
-use crate::ui::shell::{combo_text, DIAG_BAD, KEY_CAMERA, KEY_LAYER};
+use crate::ui::shell::combo_text;
 use crate::ui::theme;
 
 /// Frame column width a fresh install starts at, in points.
@@ -50,20 +50,15 @@ const HEADER_RECT_KEY: &str = "tracks_header_rect";
 
 // The tracks sit in an inset well, a step below the panel the way the app's
 // inputs sit on theirs: the theme's own surfaces and its one accent, nothing
-// new.
-const WELL: Color32 = Color32::from_rgb(19, 21, 25);
+// new (`theme::well`, `row_line`, `bar`).
 const WELL_ROUNDING: f32 = 6.0;
-/// Hairline between rows — quieter than the well's own edges.
-const ROW_LINE: Color32 = Color32::from_rgb(30, 33, 39);
-const BAR: Color32 = Color32::from_rgb(50, 55, 67);
-const BAR_HOVER: Color32 = Color32::from_rgb(63, 69, 85);
 const BAR_ROUNDING: f32 = 4.0;
 /// Thickness of the scroll thumbs along the bottom and right edges.
 const THUMB: f32 = 4.0;
 
 /// The active layer's row, lifted just enough to find.
 fn active_tint() -> Color32 {
-    theme::ACCENT.gamma_multiply(0.07)
+    theme::accent().gamma_multiply(0.07)
 }
 
 /// A drag in progress in the tracks.
@@ -274,7 +269,7 @@ pub fn show(state: &mut AppState, ui: &mut egui::Ui) {
     let avail = ui.available_size();
     let size = vec2(avail.x.max(HEADER_W + 80.0), avail.y.max(RULER_H + ROW_H));
     let (outer, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_filled(outer, WELL_ROUNDING, WELL);
+    ui.painter().rect_filled(outer, WELL_ROUNDING, theme::well());
     let corner = Rect::from_min_size(outer.min, vec2(HEADER_W, RULER_H));
     let ruler = Rect::from_min_max(pos2(corner.max.x, outer.min.y), pos2(outer.max.x, corner.max.y));
     let header = Rect::from_min_max(pos2(outer.min.x, corner.max.y), pos2(corner.max.x, outer.max.y));
@@ -589,7 +584,7 @@ fn corner_ui(state: &mut AppState, ui: &mut egui::Ui, corner: Rect, id: Id) {
         egui::Align2::LEFT_CENTER,
         "Layers",
         egui::FontId::proportional(10.5),
-        theme::TEXT_MUTED,
+        theme::text_muted(),
     );
     let size = vec2(18.0, 16.0);
     let plus = Rect::from_min_size(
@@ -611,9 +606,9 @@ fn corner_ui(state: &mut AppState, ui: &mut egui::Ui, corner: Rect, id: Id) {
     ] {
         let r = ui.interact(rect, id.with(glyph), Sense::click()).on_hover_text(tip);
         if r.hovered() {
-            painter.rect_filled(rect, 4.0, theme::BG_HOVER);
+            painter.rect_filled(rect, 4.0, theme::bg_hover());
         }
-        let color = if r.hovered() { theme::TEXT } else { theme::TEXT_MUTED };
+        let color = if r.hovered() { theme::text() } else { theme::text_muted() };
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -688,7 +683,7 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
     let pill_text = painter.layout_no_wrap(
         format!("{cur}"),
         egui::FontId::proportional(10.5),
-        theme::ACCENT_TEXT,
+        theme::accent_text(),
     );
     let pill_h = RULER_H - 6.0;
     let pill = Rect::from_center_size(
@@ -710,7 +705,7 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
             painter.vline(
                 x,
                 (ruler.max.y - tick)..=ruler.max.y,
-                Stroke::new(1.0, theme::STROKE_THIN),
+                Stroke::new(1.0, theme::stroke_thin()),
             );
         }
         if f % step != 0 || f == cur {
@@ -719,7 +714,7 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
         let label = painter.layout_no_wrap(
             format!("{f}"),
             egui::FontId::proportional(10.0),
-            theme::TEXT_MUTED,
+            theme::text_muted(),
         );
         let at = pos2(
             g.x(f as f32 + 0.5) - label.size().x / 2.0,
@@ -727,7 +722,7 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
         );
         let rect = Rect::from_min_size(at, label.size());
         if !rect.expand(2.0).intersects(pill) {
-            painter.galley(at, label, theme::TEXT_MUTED);
+            painter.galley(at, label, theme::text_muted());
         }
     }
 
@@ -737,7 +732,7 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
             pos2(g.x(lo as f32), ruler.max.y - 3.0),
             pos2(g.x(hi as f32), ruler.max.y - 1.0),
         );
-        painter.rect_filled(r, 1.0, theme::ACCENT.gamma_multiply(0.45));
+        painter.rect_filled(r, 1.0, theme::accent().gamma_multiply(0.45));
     }
     for k in &state.project.camera_keys {
         if k.frame < fc {
@@ -745,7 +740,7 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
             // The key being carried off is faded where it was — unless a
             // copy is being made, when it stays.
             let lifted = !copy_key && key_drag.is_some_and(|d| d.from == k.frame && d.to != d.from);
-            let color = if lifted { KEY_CAMERA.gamma_multiply(0.35) } else { KEY_CAMERA };
+            let color = if lifted { theme::key_camera().gamma_multiply(0.35) } else { theme::key_camera() };
             let r = if hot_key == Some(k.frame) { 3.0 } else { 1.8 };
             painter.circle_filled(c, r, color);
         }
@@ -753,7 +748,7 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
     if let Some(d) = key_drag {
         // Where it lands if let go now.
         let c = pos2(g.x(d.to as f32 + 0.5), ruler.max.y - 3.0);
-        painter.circle_filled(c, 3.0, KEY_CAMERA);
+        painter.circle_filled(c, 3.0, theme::key_camera());
     }
     // The active grid's keys, in its own colour, beside the camera's — while
     // grids are on show. Diamonds, as the grids' own key marks are.
@@ -784,8 +779,8 @@ fn ruler_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, ruler: Rect, id: I
         painter.rect_filled(shade, rounding, Color32::from_black_alpha(40));
     }
 
-    painter.rect_filled(pill, pill_h / 2.0, theme::ACCENT);
-    painter.galley(pill.center() - pill_text.size() / 2.0, pill_text, theme::ACCENT_TEXT);
+    painter.rect_filled(pill, pill_h / 2.0, theme::accent());
+    painter.galley(pill.center() - pill_text.size() / 2.0, pill_text, theme::accent_text());
 }
 
 /// One row per layer: visibility, lock and name, the active layer marked by
@@ -807,9 +802,9 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
                 pos2(row.min.x + 3.0, row.min.y + 5.0),
                 vec2(2.5, ROW_H - 10.0),
             );
-            painter.rect_filled(edge, 1.25, theme::ACCENT);
+            painter.rect_filled(edge, 1.25, theme::accent());
         }
-        painter.hline(row.x_range(), row.max.y, Stroke::new(1.0, ROW_LINE));
+        painter.hline(row.x_range(), row.max.y, Stroke::new(1.0, theme::row_line()));
 
         let eye = Rect::from_center_size(pos2(row.min.x + 20.0, row.center().y), vec2(20.0, 20.0));
         let lock = eye.translate(vec2(21.0, 0.0));
@@ -846,12 +841,12 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
         // out, since that's the one that explains why a layer won't draw.
         let icon = |rect: Rect, glyph: &str, loud: bool, hovered: bool| {
             if hovered {
-                painter.rect_filled(rect, 4.0, theme::BG_HOVER);
+                painter.rect_filled(rect, 4.0, theme::bg_hover());
             }
             let color = if hovered || loud {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_MUTED.gamma_multiply(0.6)
+                theme::text_muted().gamma_multiply(0.6)
             };
             painter.text(
                 rect.center(),
@@ -888,9 +883,9 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
         }
         if let Some(r) = hit(name, "name") {
             let color = if active || r.hovered() || is_group {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             };
             let color = if !visible || reference {
                 color.gamma_multiply(0.6)
@@ -923,7 +918,7 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
 /// hairlines under the ruler and beside the names.
 fn well_lines(ui: &egui::Ui, outer: Rect, header: Rect, ruler: Rect) {
     let painter = ui.painter();
-    let line = Stroke::new(1.0, theme::STROKE_THIN);
+    let line = Stroke::new(1.0, theme::stroke_thin());
     painter.hline((outer.min.x + 1.0)..=(outer.max.x - 1.0), ruler.max.y, line);
     painter.vline(header.max.x, (outer.min.y + 1.0)..=(outer.max.y - 1.0), line);
     painter.rect_stroke(outer, WELL_ROUNDING, line);
@@ -981,7 +976,7 @@ fn scrollbars(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, id: Id) {
             0.3
         };
         ui.painter()
-            .rect_filled(thumb, THUMB / 2.0, theme::TEXT_MUTED.gamma_multiply(alpha));
+            .rect_filled(thumb, THUMB / 2.0, theme::text_muted().gamma_multiply(alpha));
     }
 }
 
@@ -1014,7 +1009,7 @@ fn paint(
         if layer == cur_layer {
             painter.rect_filled(row, 0.0, active_tint());
         }
-        painter.hline(row.x_range(), row.max.y, Stroke::new(1.0, ROW_LINE));
+        painter.hline(row.x_range(), row.max.y, Stroke::new(1.0, theme::row_line()));
     }
 
     // Past the end of the timeline: shaded, with a hairline where it stops.
@@ -1026,7 +1021,7 @@ fn paint(
             ..Default::default()
         };
         painter.rect_filled(shade, rounding, Color32::from_black_alpha(40));
-        painter.vline(end_x, g.tracks.y_range(), Stroke::new(1.0, theme::STROKE_THIN));
+        painter.vline(end_x, g.tracks.y_range(), Stroke::new(1.0, theme::stroke_thin()));
     }
 
     // The playhead's column, under the bars.
@@ -1035,7 +1030,7 @@ fn paint(
         pos2(g.x(cur as f32), g.tracks.min.y),
         pos2(g.x(cur as f32 + 1.0), g.tracks.max.y),
     );
-    painter.rect_filled(column, 0.0, theme::ACCENT.gamma_multiply(0.08));
+    painter.rect_filled(column, 0.0, theme::accent().gamma_multiply(0.08));
 
     // A move previews its whole result on a copy of the layers: gaps closing,
     // drawings sliding along, the timeline growing into the slack.
@@ -1118,16 +1113,16 @@ fn paint(
         let dim = if moving && selected { 0.4 } else { 1.0 };
         let (fill, stroke) = match (selected, blank) {
             (true, _) => (
-                if hovered { theme::ACCENT_HOVER } else { theme::ACCENT }.gamma_multiply(dim),
+                if hovered { theme::accent_hover() } else { theme::accent() }.gamma_multiply(dim),
                 Stroke::NONE,
             ),
             (false, false) => (
-                if hovered { BAR_HOVER } else { BAR }.gamma_multiply(dim),
+                if hovered { theme::bar_hover() } else { theme::bar() }.gamma_multiply(dim),
                 Stroke::NONE,
             ),
             (false, true) => (
-                theme::white_alpha(if hovered { 14 } else { 6 }),
-                Stroke::new(1.0, theme::TEXT_MUTED.gamma_multiply(0.35 * dim)),
+                theme::tint(if hovered { 14 } else { 6 }),
+                Stroke::new(1.0, theme::text_muted().gamma_multiply(0.35 * dim)),
             ),
         };
         painter.rect(rect, BAR_ROUNDING, fill, stroke);
@@ -1140,9 +1135,9 @@ fn paint(
             rect.center()
         };
         let ink = if selected {
-            theme::ACCENT_TEXT
+            theme::accent_text()
         } else {
-            theme::TEXT.gamma_multiply(0.9 * dim)
+            theme::text().gamma_multiply(0.9 * dim)
         };
         if blank {
             painter.circle_stroke(dot, r, Stroke::new(1.0, ink.gamma_multiply(0.8)));
@@ -1155,9 +1150,9 @@ fn paint(
         let open = b.end >= fc && !b.preview;
         if rect.width() >= 36.0 && !open {
             let color = if selected {
-                theme::ACCENT_TEXT.gamma_multiply(0.85)
+                theme::accent_text().gamma_multiply(0.85)
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             };
             painter.text(
                 pos2(rect.max.x - 5.0, rect.center().y),
@@ -1173,7 +1168,7 @@ fn paint(
             painter.vline(
                 rect.max.x - 2.5,
                 (rect.min.y + 3.0)..=(rect.max.y - 3.0),
-                Stroke::new(1.5, if selected { theme::ACCENT_TEXT } else { theme::TEXT }),
+                Stroke::new(1.5, if selected { theme::accent_text() } else { theme::text() }),
             );
         }
     }
@@ -1192,7 +1187,7 @@ fn paint(
         for f in 0..fc {
             if kids.clone().any(|c| state.project.layers[c].is_key(f)) {
                 let x = g.x(f as f32 + 0.5);
-                painter.vline(x, (row.center().y - 4.0)..=(row.center().y + 4.0), Stroke::new(2.0, theme::TEXT_MUTED));
+                painter.vline(x, (row.center().y - 4.0)..=(row.center().y + 4.0), Stroke::new(2.0, theme::text_muted()));
             }
         }
     }
@@ -1212,7 +1207,7 @@ fn paint(
                 painter.vline(
                     x,
                     (row.min.y + 1.0)..=(row.min.y + BAR_INSET + 5.0),
-                    Stroke::new(1.5, theme::TEXT_MUTED),
+                    Stroke::new(1.5, theme::text_muted()),
                 );
             }
         }
@@ -1237,7 +1232,7 @@ fn paint(
                     pos2(c.x, c.y + r),
                     pos2(c.x - r, c.y),
                 ],
-                KEY_LAYER,
+                theme::key_layer(),
                 Stroke::NONE,
             ));
         }
@@ -1255,8 +1250,8 @@ fn paint(
             painter.rect(
                 rect,
                 BAR_ROUNDING + 1.0,
-                theme::ACCENT.gamma_multiply(0.15),
-                Stroke::new(1.5, theme::ACCENT),
+                theme::accent().gamma_multiply(0.15),
+                Stroke::new(1.5, theme::accent()),
             );
         }
     } else if let Some(Target::Body {
@@ -1270,14 +1265,14 @@ fn paint(
         painter.rect(
             rect,
             BAR_ROUNDING + 1.0,
-            DIAG_BAD.gamma_multiply(0.15),
-            Stroke::new(1.5, DIAG_BAD),
+            theme::warn().gamma_multiply(0.15),
+            Stroke::new(1.5, theme::warn()),
         );
     }
 
     // The playhead itself, over everything.
     let x = g.x(cur as f32 + 0.5);
-    painter.vline(x, g.tracks.y_range(), Stroke::new(1.0, theme::ACCENT));
+    painter.vline(x, g.tracks.y_range(), Stroke::new(1.0, theme::accent()));
 }
 
 fn drag_label(state: &AppState, t: Target, copy: bool) -> Option<String> {
@@ -1316,7 +1311,7 @@ fn drag_label(state: &AppState, t: Target, copy: bool) -> Option<String> {
 /// under the pointer for even a frame would take the press meant for a bar.
 fn pointer_label(ctx: &egui::Context, id: Id, p: Pos2, text: String) {
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, id.with("pointer_label")));
-    let galley = painter.layout(text, egui::FontId::proportional(11.0), theme::TEXT, 360.0);
+    let galley = painter.layout(text, egui::FontId::proportional(11.0), theme::text(), 360.0);
     let pad = vec2(6.0, 4.0);
     let size = galley.size() + pad * 2.0;
     let screen = ctx.screen_rect();
@@ -1328,8 +1323,8 @@ fn pointer_label(ctx: &egui::Context, id: Id, p: Pos2, text: String) {
     }
     min.x = min.x.min(screen.max.x - size.x);
     let rect = Rect::from_min_size(min, size);
-    painter.rect(rect, 4.0, theme::BG_PANEL, Stroke::new(1.0, theme::STROKE_THIN));
-    painter.galley(rect.min + pad, galley, theme::TEXT);
+    painter.rect(rect, 4.0, theme::bg_panel(), Stroke::new(1.0, theme::stroke_thin()));
+    painter.galley(rect.min + pad, galley, theme::text());
 }
 
 fn hover_text(state: &AppState, b: Block) -> String {

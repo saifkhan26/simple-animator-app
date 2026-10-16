@@ -1037,7 +1037,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                     Some(name) => format!("Lines from: {name}"),
                     None => "Lines from: this layer — set it in the Layers panel".to_string(),
                 };
-                ui.label(egui::RichText::new(hint).color(theme::TEXT_MUTED).size(11.0));
+                ui.label(egui::RichText::new(hint).color(theme::text_muted()).size(11.0));
             } else if state.tool == ActiveTool::Shape {
                 ui.horizontal(|ui| {
                     shape_kind_toggle(ui, state, ShapeKind::Line, ic::LINE_SEGMENT, "Line");
@@ -1050,7 +1050,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                         egui::RichText::new(format!(
                             "On perspective grid {n} — Shift once dragging: square / circle"
                         ))
-                        .color(theme::TEXT_MUTED)
+                        .color(theme::text_muted())
                         .size(11.0),
                     );
                 }
@@ -1066,7 +1066,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                     egui::RichText::new(
                         "Click the same feature on each frame — the view advances a frame per point. Re-click a frame to fix a miss.",
                     )
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .size(11.0),
                 );
                 let two_before = state.tracker_two_points;
@@ -1084,14 +1084,14 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 if state.tracker_pending_b == Some(state.project.current_frame) {
                     ui.label(
                         egui::RichText::new("Now click point B…")
-                            .color(theme::ACCENT)
+                            .color(theme::accent())
                             .size(11.0),
                     );
                 }
                 let count = state.tracked_point_count();
                 ui.label(
                     egui::RichText::new(format!("Tracked frames: {count}"))
-                        .color(theme::TEXT_MUTED)
+                        .color(theme::text_muted())
                         .size(11.0),
                 );
                 ui.horizontal(|ui| {
@@ -1162,9 +1162,9 @@ fn swatch_strip(state: &mut AppState, ui: &mut egui::Ui) {
             // The active colour is called out with an accent ring, so a palette
             // of near-identical greys still tells you where you are.
             let stroke = if rgb == cur {
-                Stroke::new(2.0, theme::ACCENT)
+                Stroke::new(2.0, theme::accent())
             } else {
-                Stroke::new(1.0, theme::STROKE_THIN)
+                Stroke::new(1.0, theme::stroke_thin())
             };
             ui.painter().rect_stroke(rect, 3.0, stroke);
             if resp.clicked() {
@@ -1245,7 +1245,7 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
                     ui.checkbox(&mut state.show_checker, "Checker backdrop");
                     ui.horizontal(|ui| {
                         let rgb = state.bg_color.map(|c| (c * 255.0).round() as u8);
-                        ui.label(egui::RichText::new(fmt_rgb(rgb)).color(theme::TEXT_MUTED));
+                        ui.label(egui::RichText::new(fmt_rgb(rgb)).color(theme::text_muted()));
                         if paste_button(ui) {
                             if let Some(rgb) = clipboard_color() {
                                 state.bg_color = rgb.map(|c| c as f32 / 255.0);
@@ -1266,13 +1266,13 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
                 (_, true) => (
                     ic::PEN,
                     "Tablet active",
-                    theme::ACCENT,
+                    theme::accent(),
                     "Pen packets are arriving: pressure, tilt and sub-pixel positions are live.",
                 ),
                 (true, false) => (
                     ic::WARNING,
                     "Tablet idle",
-                    theme::TEXT_MUTED,
+                    theme::text_muted(),
                     "A tablet context is open but no packets have arrived recently. \
                      Normal while the pen is away from the tablet; if it persists \
                      while drawing, the driver is not sending Wintab data and \
@@ -1281,7 +1281,7 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
                 (false, _) => (
                     ic::CURSOR,
                     "Mouse mode",
-                    theme::TEXT_MUTED,
+                    theme::text_muted(),
                     "No tablet driver was found, so pressure is fixed and tilt reports none.",
                 ),
             };
@@ -1444,7 +1444,7 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
             )
             .on_hover_text("Playback speed");
             gap(ui);
-            ui.label(egui::RichText::new(format!("/ {count}")).color(theme::TEXT_MUTED));
+            ui.label(egui::RichText::new(format!("/ {count}")).color(theme::text_muted()));
             let field = ui
                 .add(
                     egui::DragValue::new(&mut cur)
@@ -1461,7 +1461,7 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
             if field.changed() {
                 state.project.goto(cur);
             }
-            ui.label(egui::RichText::new(ic::CLOCK).color(theme::TEXT_MUTED).size(13.0));
+            ui.label(egui::RichText::new(ic::CLOCK).color(theme::text_muted()).size(13.0));
         });
         // A right-to-left child that runs out of room keeps going left, over
         // the buttons, and adds nothing to the row's width — so the panel
@@ -1590,7 +1590,7 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new("Tilt needs a tablet — mouse input reports none.")
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
     }
 }
@@ -1601,13 +1601,13 @@ fn krita_notes(state: &AppState, ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new("Size and Opacity work as Krita's own sliders.")
             .small()
-            .color(theme::TEXT_MUTED),
+            .color(theme::text_muted()),
     );
     if !state.pen.pen_active() {
         ui.label(
             egui::RichText::new("Tilt needs a tablet — mouse input reports none.")
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
     }
 }
@@ -1615,14 +1615,10 @@ fn krita_notes(state: &AppState, ui: &mut egui::Ui) {
 /// One `key   value` line of the tablet readout.
 fn diag_row(ui: &mut egui::Ui, key: &str, value: String) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(key).color(theme::TEXT_MUTED).size(11.0));
+        ui.label(egui::RichText::new(key).color(theme::text_muted()).size(11.0));
         ui.label(egui::RichText::new(value).monospace().size(11.0));
     });
 }
-
-/// Colour for a diagnostic reading that is out of range. Local because the
-/// theme has no warning colour and one readout does not justify adding to it.
-pub(crate) const DIAG_BAD: Color32 = Color32::from_rgb(232, 138, 96);
 
 /// The screens, and where the tablet driver puts the pen on them. The usual
 /// cause of a pen that covers only part of the window is a driver work area
@@ -1634,7 +1630,7 @@ fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnosti
     let note = |ui: &mut egui::Ui, text: &str, bad: bool| {
         ui.label(
             egui::RichText::new(text)
-                .color(if bad { DIAG_BAD } else { theme::TEXT_MUTED })
+                .color(if bad { theme::warn() } else { theme::text_muted() })
                 .size(11.0),
         );
     };
@@ -1726,7 +1722,7 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
         if state.pen_record.is_some() {
             ui.label(
                 egui::RichText::new("recording — sweep the pen over the tablet, edge to edge")
-                    .color(DIAG_BAD)
+                    .color(theme::warn())
                     .size(11.0),
             );
         } else if ui
@@ -1744,10 +1740,10 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
     });
     match &state.pen_record_saved {
         Some(Ok(path)) => {
-            ui.label(egui::RichText::new(format!("saved {}", path.display())).color(theme::TEXT_MUTED).size(11.0));
+            ui.label(egui::RichText::new(format!("saved {}", path.display())).color(theme::text_muted()).size(11.0));
         }
         Some(Err(e)) => {
-            ui.label(egui::RichText::new(format!("couldn't save: {e}")).color(DIAG_BAD).size(11.0));
+            ui.label(egui::RichText::new(format!("couldn't save: {e}")).color(theme::warn()).size(11.0));
         }
         None => {}
     }
@@ -1763,7 +1759,7 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
         } else if let Some(wait) = d.retry_in {
             text.push_str(&format!(" Trying again in {:.0} s.", wait.as_secs_f32().ceil()));
         }
-        ui.label(egui::RichText::new(text).color(theme::TEXT_MUTED).size(11.0));
+        ui.label(egui::RichText::new(text).color(theme::text_muted()).size(11.0));
         return;
     }
 
@@ -1874,7 +1870,7 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
     if d.queue_overflowed {
         ui.label(
             egui::RichText::new("packet queue has overflowed")
-                .color(DIAG_BAD)
+                .color(theme::warn())
                 .size(11.0),
         );
     }
@@ -1890,7 +1886,7 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
                 egui::RichText::new(format!("pen - cursor: {dx:+.1}, {dy:+.1} pt"))
                     .monospace()
                     .size(11.0)
-                    .color(if bad { DIAG_BAD } else { theme::ACCENT }),
+                    .color(if bad { theme::warn() } else { theme::accent() }),
             )
             .on_hover_text(
                 "Move the pen around the screen with this open. Both numbers should \
@@ -2076,14 +2072,14 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 ui.label(
                     egui::RichText::new(format!("{} / {}", state.project.current_frame + 1, n))
                         .monospace()
-                        .color(theme::TEXT),
+                        .color(theme::text()),
                 );
                 ui.separator();
                 // Active tool icon + brush colour swatch.
                 ui.label(
                     egui::RichText::new(tool_icon(state.tool))
                         .size(15.0)
-                        .color(theme::TEXT),
+                        .color(theme::text()),
                 )
                 .on_hover_text(tool_name(state.tool));
                 let c = state.brush.color;
@@ -2094,7 +2090,7 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                     Color32::from_rgb(c[0], c[1], c[2]),
                 );
                 ui.painter()
-                    .rect_stroke(rect, 3.0, Stroke::new(1.0, theme::STROKE_THIN));
+                    .rect_stroke(rect, 3.0, Stroke::new(1.0, theme::stroke_thin()));
                 // Which layer the layer keys landed on — the Layers panel is
                 // hidden whenever this bar is up. Long names are cut short so
                 // the bar keeps its width.
@@ -2106,7 +2102,7 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                         l.name.clone()
                     };
                     ui.label(
-                        egui::RichText::new(format!("{} {name}", ic::STACK)).color(theme::TEXT),
+                        egui::RichText::new(format!("{} {name}", ic::STACK)).color(theme::text()),
                     )
                     .on_hover_text(format!("Active layer: {}", l.name));
                 }
@@ -2177,11 +2173,11 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
             for i in 0..n {
                 let center = egui::pos2(rect.min.x + (i as f32 + 0.5) * dot_step, cy);
                 if i == cur {
-                    painter.circle_filled(center, 4.0, theme::ACCENT);
-                    painter.circle_stroke(center, 5.5, Stroke::new(1.0, theme::ACCENT));
+                    painter.circle_filled(center, 4.0, theme::accent());
+                    painter.circle_stroke(center, 5.5, Stroke::new(1.0, theme::accent()));
                 } else {
                     let in_loop = i >= state.project.loop_start && i < state.project.loop_end;
-                    let col = if in_loop { theme::TEXT_MUTED } else { theme::BG_HOVER };
+                    let col = if in_loop { theme::text_muted() } else { theme::bg_hover() };
                     painter.circle_filled(center, 2.6, col);
                 }
                 // Keyed frames get a tick under the dot — the layer, the
@@ -2189,9 +2185,9 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
                 // frame, in the colours the full timeline uses.
                 let ty = rect.max.y - 1.5;
                 let ticks: Vec<Color32> = [
-                    (layer_keys[i], KEY_LAYER),
-                    (grid_keys[i], grid_color.unwrap_or(KEY_LAYER)),
-                    (camera_keys[i], KEY_CAMERA),
+                    (layer_keys[i], theme::key_layer()),
+                    (grid_keys[i], grid_color.unwrap_or(theme::key_layer())),
+                    (camera_keys[i], theme::key_camera()),
                 ]
                 .into_iter()
                 .filter_map(|(on, c)| on.then_some(c))
@@ -2224,12 +2220,6 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
             }
         });
 }
-
-/// Marker colour for active-layer transform keys — same blue as the layer
-/// bounds outline on the canvas.
-pub(crate) const KEY_LAYER: Color32 = Color32::from_rgb(120, 160, 220);
-/// Marker colour for camera keys — same amber as the camera-edit guide.
-pub(crate) const KEY_CAMERA: Color32 = Color32::from_rgb(255, 190, 90);
 
 /// The active grid's keyed frames and its colour, while grids are on show —
 /// the perspective tool is up, or "Show grids" is on — and it has keys.
@@ -2324,7 +2314,7 @@ fn onion_offset_chips(state: &mut AppState, ui: &mut egui::Ui) {
                 // The current frame. Painted: the UI font has no bullet glyph.
                 let (rect, resp) =
                     ui.allocate_exact_size(egui::vec2(CHIP.y * 0.5, CHIP.y), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 2.5, theme::TEXT_MUTED);
+                ui.painter().circle_filled(rect.center(), 2.5, theme::text_muted());
                 resp.on_hover_text("The current frame");
                 future(ui, onion);
             });
@@ -2363,10 +2353,10 @@ fn offset_chip(
         if luma > 150.0 { Color32::BLACK } else { Color32::WHITE }
     } else {
         painter.rect_stroke(rect, 3.0, Stroke::new(1.0, tint.gamma_multiply(0.6)));
-        theme::TEXT_MUTED
+        theme::text_muted()
     };
     if resp.hovered() {
-        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::TEXT));
+        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::text()));
     }
     painter.text(
         rect.center(),
@@ -2400,7 +2390,7 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
             "Pins on \u{201c}{}\u{201d} show while it's the active layer.",
             layer.name
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
 
@@ -2461,7 +2451,7 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
     if !state.onion.enabled && !layer.onion_pins.is_empty() {
         ui.label(
             egui::RichText::new("Onion skin is off — pins show when it's enabled.")
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(10.5),
         );
     }
@@ -2532,7 +2522,7 @@ fn camera_size_ui(state: &mut AppState, ui: &mut egui::Ui) {
             canvas.0, canvas.1
         )
     };
-    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(10.5));
+    ui.label(egui::RichText::new(note).color(theme::text_muted()).size(10.5));
 }
 
 /// How many passes of the animation the camera's move lasts, and what the
@@ -2571,7 +2561,7 @@ fn camera_loops_ui(state: &mut AppState, ui: &mut egui::Ui) {
             len as f32 / p.fps.max(1.0)
         )
     };
-    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(10.5));
+    ui.label(egui::RichText::new(note).color(theme::text_muted()).size(10.5));
 }
 
 /// Camera panel — what the export sees, and how that moves over time.
@@ -2581,7 +2571,7 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
             "The camera frames the exported video. Layers can sit outside it — park a \
              character off to the side, then key the camera to pan over.",
         )
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
     ui.add_space(6.0);
@@ -2607,7 +2597,7 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
              outside a corner rolls. Or use your canvas gesture keys: pan-key = move the \
              camera, zoom-key = push in, rotate-key = roll.",
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
     ui.add_space(4.0);
@@ -2706,7 +2696,7 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(status)
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(10.5),
         );
     });
@@ -2807,7 +2797,7 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
                  expand the layer canvas and start zoomed out.",
                 state.project.camera.zoom, ow, oh
             ))
-            .color(theme::TEXT_MUTED)
+            .color(theme::text_muted())
             .size(10.5),
         );
     }
@@ -2959,9 +2949,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
 
                         let row = Frame::none()
                             .fill(if selected {
-                                theme::ACCENT_DIM
+                                theme::accent_dim()
                             } else if picked.contains(&layer.uid) {
-                                theme::white_alpha(14)
+                                theme::tint(14)
                             } else {
                                 Color32::TRANSPARENT
                             })
@@ -2987,7 +2977,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             toggle_fold = Some(i);
                                         }
                                         let folder = if layer.collapsed { ic::FOLDER_SIMPLE } else { ic::FOLDER_OPEN };
-                                        ui.label(egui::RichText::new(folder).size(16.0).color(theme::TEXT_MUTED));
+                                        ui.label(egui::RichText::new(folder).size(16.0).color(theme::text_muted()));
                                     }
                                     // A clipped layer sits indented, an arrow
                                     // pointing down at its base.
@@ -2995,11 +2985,11 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         ui.add_space(8.0);
                                         let (tint, tip) = match bases[i] {
                                             Some(b) => (
-                                                theme::ACCENT,
+                                                theme::accent(),
                                                 format!("Clipped to {}", names[b]),
                                             ),
                                             None => (
-                                                theme::TEXT_MUTED,
+                                                theme::text_muted(),
                                                 "Clipped, but there is nothing under it to clip to"
                                                     .to_string(),
                                             ),
@@ -3032,9 +3022,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                     // Reference / light-table toggle. Not for a
                                     // group, which has no drawings to show dim.
                                     let ref_color = if layer.reference {
-                                        theme::ACCENT
+                                        theme::accent()
                                     } else {
-                                        theme::TEXT_MUTED
+                                        theme::text_muted()
                                     };
                                     if !header
                                         && ui
@@ -3104,7 +3094,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             ui.label(
                                                 egui::RichText::new(ic::CHECKERBOARD)
                                                     .size(14.0)
-                                                    .color(theme::ACCENT),
+                                                    .color(theme::accent()),
                                             )
                                             .on_hover_text(format!(
                                                 "Alpha locked ({lock_key}): painting only \
@@ -3118,7 +3108,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                                     egui::Button::new(
                                                         egui::RichText::new(format!("{} {}", ic::LINK, names[s]))
                                                             .size(11.0)
-                                                            .color(theme::ACCENT),
+                                                            .color(theme::accent()),
                                                     )
                                                     .frame(false),
                                                 )
@@ -3274,7 +3264,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new("lines from")
-                                                .color(theme::TEXT_MUTED)
+                                                .color(theme::text_muted())
                                                 .size(11.0),
                                         );
                                         let current = match layer.lines_from {
@@ -3325,7 +3315,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                 let inside = (header && !above && !headers[from.0]) || layer_in_group[i];
                                 let x = row.rect.x_range();
                                 let x = if inside { egui::Rangef::new(x.min + 14.0, x.max) } else { x };
-                                ui.painter().hline(x, y, Stroke::new(2.0, theme::ACCENT));
+                                ui.painter().hline(x, y, Stroke::new(2.0, theme::accent()));
                             }
                             if row.dnd_release_payload::<LayerDrag>().is_some() {
                                 drop = Some((from.0, i, above));
@@ -3483,7 +3473,7 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
         egui::RichText::new(format!(
             "Toggle ({toggle}), then drag with your canvas gesture keys: zoom-key = scale, pan-key = move, rotate-key = rotate the active layer.",
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
     ui.add_space(4.0);
@@ -3499,7 +3489,7 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
                 "Moves, turns and scales its {n} {what} together, about their middle. \
                  Keyed layers move on every frame — or, with auto-key, get a key here."
             ))
-            .color(theme::TEXT_MUTED)
+            .color(theme::text_muted())
             .size(11.0),
         );
         return;
@@ -3546,7 +3536,7 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
         };
         ui.label(
             egui::RichText::new(status)
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(10.5),
         );
     }
@@ -3656,13 +3646,13 @@ fn layer_canvas_section(state: &mut AppState, ui: &mut egui::Ui) {
         egui::RichText::new(format!(
             "now {cur_w}×{cur_h} · {cells} cell(s) · resize costs {mb:.0} MB"
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
     if ew == max || eh == max {
         ui.label(
             egui::RichText::new(format!("GPU limit: {max} px per side"))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(10.5),
         );
     }
@@ -3751,7 +3741,7 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                     egui::Grid::new("xsheet_grid")
                         .min_col_width(28.0)
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Fr").color(theme::TEXT_MUTED).strong());
+                            ui.label(egui::RichText::new("Fr").color(theme::text_muted()).strong());
                             for &li in &cols {
                                 let l = &state.project.layers[li];
                                 let name = if l.is_group() {
@@ -3761,7 +3751,7 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                                 } else {
                                     l.name.clone()
                                 };
-                                ui.label(egui::RichText::new(name).color(theme::TEXT_MUTED).strong());
+                                ui.label(egui::RichText::new(name).color(theme::text_muted()).strong());
                             }
                             ui.end_row();
 
@@ -3770,10 +3760,10 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                                 let active_f = f == state.project.current_frame;
                                 let lbl = if active_f {
                                     egui::RichText::new(format!("{}  {f}", ic::CARET_RIGHT))
-                                        .color(theme::ACCENT)
+                                        .color(theme::accent())
                                         .strong()
                                 } else {
-                                    egui::RichText::new(format!("{f}")).color(theme::TEXT_MUTED)
+                                    egui::RichText::new(format!("{f}")).color(theme::text_muted())
                                 };
                                 let fr_resp = ui.button(lbl);
                                 if let Some(idx) = stripe {
@@ -3941,7 +3931,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                     egui::RichText::new(
                         "Click a binding, then press a new key combo. Esc = cancel.",
                     )
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .size(11.0),
                 );
             });
@@ -3953,7 +3943,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                         ic::KEYBOARD,
                         action.label()
                     ))
-                    .color(theme::TEXT)
+                    .color(theme::text())
                     .strong(),
                 );
             }
@@ -3999,10 +3989,10 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
             });
             match &state.shortcuts_file_note {
                 Some(Ok(note)) => {
-                    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(11.0));
+                    ui.label(egui::RichText::new(note).color(theme::text_muted()).size(11.0));
                 }
                 Some(Err(e)) => {
-                    ui.label(egui::RichText::new(e).color(DIAG_BAD).size(11.0));
+                    ui.label(egui::RichText::new(e).color(theme::warn()).size(11.0));
                 }
                 None => {}
             }
@@ -4015,7 +4005,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                          them (defaults stand in): {}",
                         lines.join(", ")
                     ))
-                    .color(DIAG_BAD)
+                    .color(theme::warn())
                     .size(11.0),
                 );
             }
@@ -4036,7 +4026,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                     };
                     ui.label(
                         egui::RichText::new(theme::icon_text(ic::WARNING, &what))
-                            .color(DIAG_BAD)
+                            .color(theme::warn())
                             .strong(),
                     );
                     ui.checkbox(&mut state.shortcut_clashes_only, "Show only these");
@@ -4063,7 +4053,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                                      combo, or bare Shift / Ctrl / Alt; letting go ends the \
                                      gesture.",
                                 )
-                                .color(theme::TEXT_MUTED)
+                                .color(theme::text_muted())
                                 .size(11.0),
                             );
                         }
@@ -4104,7 +4094,7 @@ fn wheel_rows(state: &mut AppState, ui: &mut egui::Ui) {
             "Over the canvas, the Timeline and the mini timeline. Two modifiers at once do \
              nothing.",
         )
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(11.0),
     );
     egui::Grid::new("wheel_grid")
@@ -4147,7 +4137,7 @@ fn shortcut_row(
     let tint = |t: String| {
         let t = egui::RichText::new(t);
         if bad {
-            t.color(DIAG_BAD)
+            t.color(theme::warn())
         } else {
             t
         }
@@ -4205,9 +4195,9 @@ fn clash_cell(ui: &mut egui::Ui, action: Action, flags: Option<&Vec<Clash>>) {
         })
         .collect();
     let (icon, color) = if flags.iter().any(|c| c.is_conflict()) {
-        (ic::WARNING, DIAG_BAD)
+        (ic::WARNING, theme::warn())
     } else {
-        (ic::INFO, theme::TEXT_MUTED)
+        (ic::INFO, theme::text_muted())
     };
     ui.label(egui::RichText::new(icon).color(color))
         .on_hover_text(lines.join("\n"));
@@ -4222,16 +4212,11 @@ fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3]) {
 
 pub(crate) fn floating_frame() -> Frame {
     Frame::window(&egui::Style::default())
-        .fill(theme::BG_PANEL)
-        .stroke(Stroke::new(1.0, theme::STROKE_THIN))
+        .fill(theme::bg_panel())
+        .stroke(Stroke::new(1.0, theme::stroke_thin()))
         .inner_margin(Margin::same(10.0))
         .rounding(egui::Rounding::same(10.0))
-        .shadow(egui::Shadow {
-            offset: egui::vec2(0.0, 8.0),
-            blur: 28.0,
-            spread: 0.0,
-            color: Color32::from_black_alpha(120),
-        })
+        .shadow(theme::window_shadow())
 }
 
 /// Perspective tool options: the switches every grid shares, and the grid
@@ -4246,7 +4231,7 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
              the eye level or its round knobs to tilt it, just outside a corner to rotate \
              (hold Shift once dragging for 15° steps), inside to move.",
         )
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(11.0),
     );
     let show = combo_text(state, Action::TogglePerspectiveGrid);
@@ -4294,7 +4279,7 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
             .and_then(|w| cfg.index_of(w.parent))
             .map(|p| p + 1);
         Frame::none()
-            .fill(if selected { theme::ACCENT_DIM } else { Color32::TRANSPARENT })
+            .fill(if selected { theme::accent_dim() } else { Color32::TRANSPARENT })
             .rounding(egui::Rounding::same(6.0))
             .inner_margin(Margin::symmetric(6.0, 2.0))
             .show(ui, |ui| {
@@ -4635,7 +4620,7 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
                     "Stands on grid {p}'s {} edge",
                     EDGE_NAMES[link.edge as usize & 3].to_lowercase()
                 ))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
             );
             let unlink = theme::icon_button(ui, ic::LINK_BREAK, "Unlink: a free grid from here on");
@@ -4650,7 +4635,7 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
     if wall {
         ui.label(
             egui::RichText::new("A wall moves with its floor.")
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
         );
     } else {
@@ -4692,7 +4677,7 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
             0 => "No keys: the grid holds still".to_string(),
             n => format!("{n} key(s){}", if here { " — keyed on this frame" } else { "" }),
         };
-        ui.label(egui::RichText::new(status).color(theme::TEXT_MUTED).size(10.5));
+        ui.label(egui::RichText::new(status).color(theme::text_muted()).size(10.5));
         // Ease of the key on this frame: it shapes the segment running from
         // it to the next, as on camera keys.
         let mut ease = g.key_at(frame).map(|k| k.ease).unwrap_or_default();
@@ -4802,7 +4787,7 @@ fn liquify_options(state: &mut AppState, ui: &mut egui::Ui) {
              Ctrl+Z takes back a stroke; the warp lands when you press Enter or \
              change tool, frame or layer.",
         )
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(11.0),
     );
 }
@@ -4853,7 +4838,7 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
         let what = if n == 1 { "drawing" } else { "drawings" };
         ui.label(
             egui::RichText::new(format!("Applies to {n} {what} on this layer"))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
         );
     }
@@ -4931,7 +4916,7 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
              {del} erases inside it - {cut} / {copy} / {paste} move it between \
              frames and layers.",
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(11.0),
     );
 }
@@ -5190,7 +5175,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // same feature. Doc-space points map straight through the view transform.
     if state.tool == crate::tools::ActiveTool::Tracker {
         if let Some(layer) = state.project.layers.get(cur_layer) {
-            let a_col = theme::ACCENT;
+            let a_col = theme::accent();
             let b_col = Color32::from_rgb(255, 170, 60);
             let draw_marker = |p: [f32; 2], col: Color32, alpha: u8, label: &str| {
                 let col = theme::premul(col.r(), col.g(), col.b(), alpha);
@@ -5519,7 +5504,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 let close = crate::tools::selection::HANDLE_PX * 1.5;
                 if let (Some(first), Some(h)) = (pts.first().map(to_screen), hover) {
                     if pts.len() >= 3 && first.distance(h) <= close {
-                        painter.circle_stroke(first, close, Stroke::new(1.5, theme::ACCENT));
+                        painter.circle_stroke(first, close, Stroke::new(1.5, theme::accent()));
                     }
                 }
             }
@@ -6712,7 +6697,7 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
                     painter.line_segment([a, b], Stroke::new(w, col));
                 }
             }
-            painter.circle_stroke(pos, gap, Stroke::new(1.0, theme::ACCENT));
+            painter.circle_stroke(pos, gap, Stroke::new(1.0, theme::accent()));
         }
     }
 }
@@ -6963,7 +6948,7 @@ fn menu_window(state: &mut AppState, ctx: &egui::Context) {
                     egui::Align2::CENTER_CENTER,
                     ic::DOTS_SIX_VERTICAL,
                     egui::FontId::proportional(15.0),
-                    theme::TEXT_MUTED,
+                    theme::text_muted(),
                 );
                 if resp.hovered() {
                     ctx.set_cursor_icon(egui::CursorIcon::Grab);
@@ -7031,7 +7016,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.separator();
         let shortcuts = if n_conflicts > 0 {
             ui.button(
-                egui::RichText::new(theme::icon_text(ic::WARNING, "Shortcuts…")).color(DIAG_BAD),
+                egui::RichText::new(theme::icon_text(ic::WARNING, "Shortcuts…")).color(theme::warn()),
             )
             .on_hover_text("Some shortcuts clash. They are flagged in the list.")
         } else {
@@ -7047,7 +7032,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
     if n_conflicts > 0 {
         let r = edit.response.rect;
         ui.painter()
-            .circle_filled(r.right_top() + egui::vec2(-3.0, 3.0), 3.0, DIAG_BAD);
+            .circle_filled(r.right_top() + egui::vec2(-3.0, 3.0), 3.0, theme::warn());
     }
     ui.menu_button(theme::icon_text(ic::FOLDER, "File"), |ui| {
         if ui
@@ -7396,7 +7381,7 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
             if presets.is_empty() {
                 ui.label(
                     egui::RichText::new("Name the size above and save it to reuse it.")
-                        .color(theme::TEXT_MUTED)
+                        .color(theme::text_muted())
                         .size(11.0),
                 );
             }
@@ -7407,9 +7392,9 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
                     for (i, p) in presets.iter().enumerate() {
                         ui.horizontal(|ui| {
                             let star_color = if p.is_default {
-                                theme::ACCENT
+                                theme::accent()
                             } else {
-                                theme::TEXT_MUTED
+                                theme::text_muted()
                             };
                             let tip = if p.is_default {
                                 "New project opens on this preset. Click to stop."
@@ -7633,7 +7618,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                             state.project.camera_opts.fill.label()
                         ))
                         .small()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                     );
                 }
                 ui.add_enabled(
@@ -7660,7 +7645,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new("Rounds up to whole loops, so it repeats seamlessly.")
                             .small()
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
                     );
                 }
             }
@@ -7679,7 +7664,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                             "Lower = better quality, larger file. 18 is visually lossless.",
                         )
                         .small()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                     );
                     ui.add_space(6.0);
                     egui::ComboBox::from_label("Preset")
@@ -7698,7 +7683,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new("Slower preset = smaller file, longer encode.")
                             .small()
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
                     );
                 }
                 ExportKind::SpriteSheet => {
@@ -7769,7 +7754,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
             };
             ui.label(
                 egui::RichText::new(summary)
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .size(11.0),
             );
 
@@ -7832,7 +7817,7 @@ fn import_range_dialog(state: &mut AppState, ctx: &egui::Context) {
                 egui::RichText::new(format!(
                     "{total} source frames. Pick the range — frames map onto the timeline starting at frame 0.",
                 ))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
             );
             ui.add_space(8.0);
@@ -7849,7 +7834,7 @@ fn import_range_dialog(state: &mut AppState, ctx: &egui::Context) {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(format!("{count} frame(s) will be imported."))
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .size(11.0),
             );
 
@@ -7883,7 +7868,7 @@ fn preview_box(ui: &mut egui::Ui, label: &str, idx: usize, tex: &Option<egui::Te
     ui.vertical(|ui| {
         ui.label(
             egui::RichText::new(format!("{label}: frame {idx}"))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
         );
         let target_w = 170.0;
@@ -7913,11 +7898,11 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
             .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
-                    .fill(theme::BG_PANEL)
+                    .fill(theme::bg_panel())
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(14.0));
-                            ui.label(egui::RichText::new("Saving…").color(theme::TEXT));
+                            ui.label(egui::RichText::new("Saving…").color(theme::text()));
                         });
                     });
             });
@@ -7943,16 +7928,16 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
-                .fill(fade(theme::BG_PANEL))
+                .fill(fade(theme::bg_panel()))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(ic::CHECK_CIRCLE)
-                                .color(fade(theme::ACCENT))
+                                .color(fade(theme::accent()))
                                 .size(15.0),
                         );
                         ui.label(
-                            egui::RichText::new(msg).color(fade(theme::TEXT)),
+                            egui::RichText::new(msg).color(fade(theme::text())),
                         );
                     });
                 });
@@ -8006,7 +7991,7 @@ fn krita_toast(state: &mut AppState, ctx: &egui::Context) {
     let (icon, tint) = if warn {
         (ic::WARNING, Color32::from_rgb(232, 176, 72))
     } else {
-        (ic::PAINT_BRUSH, theme::ACCENT)
+        (ic::PAINT_BRUSH, theme::accent())
     };
     egui::Area::new(egui::Id::new("krita_toast"))
         .order(egui::Order::Foreground)
@@ -8014,13 +7999,13 @@ fn krita_toast(state: &mut AppState, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -64.0))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
-                .fill(fade(theme::BG_PANEL))
+                .fill(fade(theme::bg_panel()))
                 .show(ui, |ui| {
                     ui.set_max_width(520.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(icon).color(fade(tint)).size(15.0));
                         ui.add(
-                            egui::Label::new(egui::RichText::new(msg).color(fade(theme::TEXT))).wrap(),
+                            egui::Label::new(egui::RichText::new(msg).color(fade(theme::text()))).wrap(),
                         );
                     });
                 });
@@ -8043,7 +8028,7 @@ fn save_error_dialog(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             ui.set_max_width(420.0);
-            ui.label(egui::RichText::new(&msg).color(theme::TEXT));
+            ui.label(egui::RichText::new(&msg).color(theme::text()));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.button("Save As…").clicked() {
@@ -8070,12 +8055,12 @@ fn busy_overlay(ctx: &egui::Context, label: &str) {
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
-                .fill(theme::BG_PANEL)
+                .fill(theme::bg_panel())
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new());
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new(label).color(theme::TEXT));
+                        ui.label(egui::RichText::new(label).color(theme::text()));
                     });
                 });
         });
@@ -10065,7 +10050,7 @@ mod shortcut_clash_tests {
     fn edit_dot(shapes: &[egui::Shape]) -> bool {
         shapes
             .iter()
-            .any(|s| matches!(s, egui::Shape::Circle(c) if c.fill == DIAG_BAD && c.radius == 3.0))
+            .any(|s| matches!(s, egui::Shape::Circle(c) if c.fill == theme::warn() && c.radius == 3.0))
     }
 
     /// Settings open on the defaults, minus their known F clashes. The test
@@ -11140,7 +11125,7 @@ mod window_layout_tests {
         drag_right_edge(&ctx, id, left + 420.0, &mut show);
         let shapes = settle(&ctx, &mut show);
         let panel = window(&ctx, id);
-        let rows = fills(&shapes, theme::ACCENT_DIM);
+        let rows = fills(&shapes, theme::accent_dim());
         let row = rows.first().expect("the selected row is filled");
         assert!(row.max.x > panel.max.x - 14.0, "row {row:?} stops short of {panel:?}");
         assert!((panel.width() - 420.0).abs() < 2.0, "{panel:?}");

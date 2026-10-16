@@ -118,7 +118,7 @@ fn body(imp: &mut KritaImport, ui: &mut egui::Ui, shortfall: f32, act: &mut Opti
         ui.label(
             RichText::new("If Krita keeps them somewhere else, add its .kpp or .bundle files.")
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
     } else if imp.scanning() {
         ui.horizontal(|ui| {
@@ -126,7 +126,7 @@ fn body(imp: &mut KritaImport, ui: &mut egui::Ui, shortfall: f32, act: &mut Opti
             ui.label(format!("Reading Krita's brushes… {found} found"));
         });
     } else {
-        ui.label(RichText::new(format!("{found} presets found, {paints} of them paint here.")).color(theme::TEXT_MUTED));
+        ui.label(RichText::new(format!("{found} presets found, {paints} of them paint here.")).color(theme::text_muted()));
     }
     ui.horizontal(|ui| {
         ui.label(theme::icon_text(ic::MAGNIFYING_GLASS, ""));
@@ -142,7 +142,7 @@ fn body(imp: &mut KritaImport, ui: &mut egui::Ui, shortfall: f32, act: &mut Opti
         *act = Some(Do::AddFiles);
     }
     if let Some(n) = &imp.notice {
-        ui.label(RichText::new(n).color(theme::ACCENT));
+        ui.label(RichText::new(n).color(theme::accent()));
     }
     ui.separator();
     egui::ScrollArea::vertical()
@@ -189,11 +189,11 @@ fn row(ui: &mut egui::Ui, c: &Candidate, thumb: Option<&egui::TextureHandle>, i:
             let tint = if ok { egui::Color32::WHITE } else { theme::white_alpha(70) };
             p.image(t.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
         }
-        let name = RichText::new(&c.name).color(if ok { ui.visuals().text_color() } else { theme::TEXT_MUTED });
+        let name = RichText::new(&c.name).color(if ok { ui.visuals().text_color() } else { theme::text_muted() });
         ui.label(name);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match (&c.status, c.known, &c.id) {
             (Err(why), _, _) => {
-                ui.label(RichText::new("Can't paint").small().color(theme::TEXT_MUTED)).on_hover_text(why);
+                ui.label(RichText::new("Can't paint").small().color(theme::text_muted())).on_hover_text(why);
             }
             (Ok(()), Known::New, _) => {
                 if ui.button("Import").on_hover_text("Copy it into this app's brushes").clicked() {
@@ -205,7 +205,7 @@ fn row(ui: &mut egui::Ui, c: &Candidate, thumb: Option<&egui::TextureHandle>, i:
                     *act = Some(Do::Use(id.clone(), c.name.clone()));
                 }
                 let what = if known == Known::BuiltIn { "Built in" } else { "Imported" };
-                ui.label(RichText::new(what).small().color(theme::TEXT_MUTED));
+                ui.label(RichText::new(what).small().color(theme::text_muted()));
             }
             (Ok(()), _, None) => {}
         });

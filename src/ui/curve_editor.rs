@@ -89,17 +89,17 @@ pub fn curve_editor(ui: &mut egui::Ui, id: egui::Id, curve: &mut String) -> bool
     ui.data_mut(|d| d.insert_temp(drag_id, dragging));
 
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 3.0, theme::BG_BASE);
-    p.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::STROKE_THIN));
+    p.rect_filled(rect, 3.0, theme::bg_base());
+    p.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::stroke_thin()));
     for q in [0.25, 0.5, 0.75] {
         let a = to_screen((q, 0.0));
         let b = to_screen((q, 1.0));
-        p.line_segment([a, b], Stroke::new(1.0, theme::STROKE_THIN));
+        p.line_segment([a, b], Stroke::new(1.0, theme::stroke_thin()));
         let a = to_screen((0.0, q));
         let b = to_screen((1.0, q));
-        p.line_segment([a, b], Stroke::new(1.0, theme::STROKE_THIN));
+        p.line_segment([a, b], Stroke::new(1.0, theme::stroke_thin()));
     }
-    p.line_segment([to_screen((0.0, 0.0)), to_screen((1.0, 1.0))], Stroke::new(1.0, theme::BG_HOVER));
+    p.line_segment([to_screen((0.0, 0.0)), to_screen((1.0, 1.0))], Stroke::new(1.0, theme::bg_hover()));
     let c = CubicCurve::from_points(pts.clone());
     let n = (area.width() as usize).max(2);
     let line: Vec<Pos2> = c
@@ -108,12 +108,12 @@ pub fn curve_editor(ui: &mut egui::Ui, id: egui::Id, curve: &mut String) -> bool
         .enumerate()
         .map(|(i, &y)| to_screen((i as f64 / (n - 1) as f64, y)))
         .collect();
-    p.add(egui::Shape::line(line, Stroke::new(1.5, theme::ACCENT)));
+    p.add(egui::Shape::line(line, Stroke::new(1.5, theme::accent())));
     let hover = resp.hover_pos().and_then(|at| near(&pts, at));
     for (i, &q) in pts.iter().enumerate() {
         let hot = Some(i) == dragging || Some(i) == hover;
         let r = if hot { 4.5 } else { 3.5 };
-        p.circle(to_screen(q), r, theme::BG_SURFACE, Stroke::new(1.5, if hot { theme::ACCENT_HOVER } else { theme::TEXT }));
+        p.circle(to_screen(q), r, theme::bg_surface(), Stroke::new(1.5, if hot { theme::accent_hover() } else { theme::text() }));
     }
     resp.on_hover_text("Drag a point to move it. Click to add one; right-click one to remove it.");
     if changed {

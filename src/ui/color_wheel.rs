@@ -99,7 +99,7 @@ pub fn disc(ui: &mut Ui, diameter: f32, l: f32, markers: &[Marker]) -> Option<Di
         }
         let painter = ui.painter_at(rect.expand(GRAB_R));
         painter.add(Shape::mesh(mesh));
-        painter.circle_stroke(center, r, Stroke::new(1.0, theme::STROKE_THIN));
+        painter.circle_stroke(center, r, Stroke::new(1.0, theme::stroke_thin()));
 
         // Spokes first, so the dots sit on top of every line.
         if markers.len() > 1 {
@@ -114,7 +114,7 @@ pub fn disc(ui: &mut Ui, diameter: f32, l: f32, markers: &[Marker]) -> Option<Di
             painter.circle_filled(p, rad, m.hsl.to_color32());
             painter.circle_stroke(p, rad, Stroke::new(1.5, contrast(m.hsl)));
             if m.active {
-                painter.circle_stroke(p, rad + 2.0, Stroke::new(1.5, theme::ACCENT));
+                painter.circle_stroke(p, rad + 2.0, Stroke::new(1.5, theme::accent()));
             }
         }
     }
@@ -179,14 +179,14 @@ pub fn l_bar(ui: &mut Ui, height: f32, h: f32, s: f32, ticks: &[Tick]) -> Option
         }
         let painter = ui.painter_at(rect.expand(4.0));
         painter.add(Shape::mesh(mesh));
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, theme::STROKE_THIN));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, theme::stroke_thin()));
         for t in ticks.iter().filter(|t| !t.active).chain(ticks.iter().filter(|t| t.active)) {
             let y = y_of(t.l);
             let line = [pos2(rect.left() - 3.0, y), pos2(rect.right() + 3.0, y)];
             let edge = contrast(Hsl { h, s, l: t.l });
             if t.active {
                 painter.line_segment(line, Stroke::new(4.0, edge));
-                painter.line_segment(line, Stroke::new(2.0, theme::ACCENT));
+                painter.line_segment(line, Stroke::new(2.0, theme::accent()));
             } else {
                 painter.line_segment(line, Stroke::new(1.5, edge));
             }
@@ -228,7 +228,7 @@ pub fn hsl_fields(ui: &mut Ui, c: Hsl) -> Option<Hsl> {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let field = |ui: &mut Ui, v: &mut f32, label: &str, max: f32, suffix: &str, tip: &str| {
-            ui.label(egui::RichText::new(label).color(theme::TEXT_MUTED));
+            ui.label(egui::RichText::new(label).color(theme::text_muted()));
             ui.add(
                 egui::DragValue::new(v)
                     .range(0.0..=max)
@@ -253,9 +253,9 @@ fn swatch_button(ui: &mut Ui, rgb: [u8; 3], open: bool) -> Response {
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, 3.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
         let stroke = if open || resp.hovered() {
-            Stroke::new(1.5, theme::ACCENT)
+            Stroke::new(1.5, theme::accent())
         } else {
-            Stroke::new(1.0, theme::STROKE_THIN)
+            Stroke::new(1.0, theme::stroke_thin())
         };
         ui.painter().rect_stroke(rect, 3.0, stroke);
     }
@@ -420,9 +420,9 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
             let (rect, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
             ui.painter().rect_filled(rect, 3.0, m.to_color32());
             let stroke = if i == set.active {
-                Stroke::new(2.0, theme::ACCENT)
+                Stroke::new(2.0, theme::accent())
             } else {
-                Stroke::new(1.0, theme::STROKE_THIN)
+                Stroke::new(1.0, theme::stroke_thin())
             };
             ui.painter().rect_stroke(rect, 3.0, stroke);
             if i == set.scheme.base_index() {
