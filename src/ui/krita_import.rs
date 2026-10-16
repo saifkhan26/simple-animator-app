@@ -10,7 +10,7 @@ use egui_phosphor::regular as ic;
 use crate::app::AppState;
 use crate::brush_library::import::{Candidate, KritaImport, Known};
 use crate::ui::brush_picker::{pick, PAPER};
-use crate::ui::shell::{drag_by_title_only, floating_frame};
+use crate::ui::shell::{drag_by_title_only, floating_frame, title_shortfall};
 use crate::ui::theme;
 
 /// A row's thumbnail size.
@@ -37,7 +37,9 @@ pub fn krita_import_window(state: &mut AppState, ctx: &egui::Context) {
     }
     let mut open = true;
     let mut act = None;
-    egui::Window::new(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import Krita brushes"))
+    let title = theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import Krita brushes");
+    let shortfall = title_shortfall(ctx, &title);
+    egui::Window::new(title)
         // Pinned, like the other windows, so a rename keeps its place.
         .id(egui::Id::new("window_krita_import"))
         .open(&mut open)
@@ -48,7 +50,7 @@ pub fn krita_import_window(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             drag_by_title_only(ui);
-            body(imp, ui, &mut act);
+            body(imp, ui, shortfall, &mut act);
         });
     match act {
         Some(Do::Import(i)) => import(state, &[i]),
@@ -108,7 +110,7 @@ fn import(state: &mut AppState, which: &[usize]) {
     }
 }
 
-fn body(imp: &mut KritaImport, ui: &mut egui::Ui, act: &mut Option<Do>) {
+fn body(imp: &mut KritaImport, ui: &mut egui::Ui, shortfall: f32, act: &mut Option<Do>) {
     let found = imp.candidates.len();
     let paints = imp.candidates.iter().filter(|c| c.status.is_ok()).count();
     if imp.groups.is_empty() {
@@ -146,6 +148,8 @@ fn body(imp: &mut KritaImport, ui: &mut egui::Ui, act: &mut Option<Do>) {
     egui::ScrollArea::vertical()
         .id_salt("krita-import-list")
         .auto_shrink([false, false])
+        // The list fills the window; see `title_shortfall`.
+        .max_height((ui.available_height() - shortfall).max(0.0))
         .show(ui, |ui| {
             for g in 0..imp.groups.len() {
                 let rows = imp.visible(g);

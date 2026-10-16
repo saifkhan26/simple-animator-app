@@ -843,6 +843,13 @@ fn panel_window(
             window = window.current_pos(pos);
         }
     }
+    // The toolbar row can't wrap, so it is the timeline's narrowest: without
+    // this a drag could pull the panel under it until the drag ends.
+    if id == PanelId::Timeline {
+        if let Some(w) = ctx.data(|d| d.get_temp::<f32>(timeline_bar_id())) {
+            window = window.min_width(w);
+        }
+    }
     window.show(ctx, |ui| {
         drag_by_title_only(ui);
         panel_content(state, ctx, ui, id)
@@ -1268,6 +1275,11 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// Where the timeline toolbar leaves its full width for the panel.
+fn timeline_bar_id() -> egui::Id {
+    egui::Id::new("timeline_bar_width")
+}
+
 fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
     // One strip: transport, step size, whole-timeline frame edits, then the
     // active layer's own frame edits, with the frame counter and fps pinned to
@@ -1402,7 +1414,8 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
         // measure from where the edit started, not from a value the edit has
         // already moved.
         let base = cur as f64;
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let left_w = ui.min_rect().width();
+        let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add(
                 egui::DragValue::new(&mut state.project.fps)
                     .range(1.0..=60.0)
@@ -1431,6 +1444,16 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
             }
             ui.label(egui::RichText::new(ic::CLOCK).color(theme::TEXT_MUTED).size(13.0));
         });
+        // A right-to-left child that runs out of room keeps going left, over
+        // the buttons, and adds nothing to the row's width — so the panel
+        // could shrink under it. The row claims both groups instead, and the
+        // panel takes that as its narrowest (see `panel_window`).
+        let need = left_w + ui.spacing().item_spacing.x + right.response.rect.width();
+        // Not `set_min_width`: that measures from the cursor, which is past
+        // the right-hand group by now.
+        let row = ui.min_rect();
+        ui.expand_to_include_rect(Rect::from_min_size(row.min, egui::vec2(need, row.height())));
+        ctx.data_mut(|d| d.insert_temp(timeline_bar_id(), need));
     });
 
     ui.add_space(6.0);
@@ -1453,10 +1476,17 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
 /// exactly the size dragged.
 fn title_bar_shortfall(ctx: &egui::Context, id: PanelId) -> f32 {
     let (icon, title) = panel_meta(id);
+    title_shortfall(ctx, &theme::icon_text(icon, title))
+}
+
+/// [`title_bar_shortfall`] for any window, by its title. A window whose body
+/// fills the height it is given (a scroll list set not to shrink) leaves
+/// this much of it unused, or a sideways drag grows it taller.
+pub(crate) fn title_shortfall(ctx: &egui::Context, title: &str) -> f32 {
     let style = ctx.style();
     // Measured exactly as `Window` measures its title: a plain `RichText`,
     // which `Window::new` falls back to the Heading style.
-    let text = egui::RichText::new(theme::icon_text(icon, title)).text_style(egui::TextStyle::Heading);
+    let text = egui::RichText::new(title).text_style(egui::TextStyle::Heading);
     let budget = ctx.fonts(|f| text.font_height(f, &style));
     (style.spacing.interact_size.y - budget).max(0.0)
 }
@@ -2899,6 +2929,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                             .rounding(egui::Rounding::same(6.0))
                             .inner_margin(Margin::symmetric(6.0, 4.0))
                             .show(ui, |ui| {
+                                // A frame hugs what's in it; the row's fill
+                                // should span the list.
+                                ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     // A group's layers sit indented under it.
                                     if layer.in_group {
@@ -3673,8 +3706,10 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                 .auto_shrink([false, true])
                 .max_height(260.0)
                 .show(ui, |ui| {
+                    // Striped by hand: egui stripes a grid only as wide as
+                    // its columns add up to, which stops short of the panel
+                    // edge when there are few layers.
                     egui::Grid::new("xsheet_grid")
-                        .striped(true)
                         .min_col_width(28.0)
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new("Fr").color(theme::TEXT_MUTED).strong());
@@ -3692,6 +3727,7 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                             ui.end_row();
 
                             for f in 0..frame_count {
+                                let stripe = (f % 2 == 0).then(|| ui.painter().add(egui::Shape::Noop));
                                 let active_f = f == state.project.current_frame;
                                 let lbl = if active_f {
                                     egui::RichText::new(format!("{}  {f}", ic::CARET_RIGHT))
@@ -3701,6 +3737,14 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                                     egui::RichText::new(format!("{f}")).color(theme::TEXT_MUTED)
                                 };
                                 let fr_resp = ui.button(lbl);
+                                if let Some(idx) = stripe {
+                                    let clip = ui.clip_rect();
+                                    let rect = Rect::from_x_y_ranges(clip.x_range(), fr_resp.rect.y_range());
+                                    ui.painter().set(
+                                        idx,
+                                        egui::Shape::rect_filled(rect, 2.0, ui.visuals().faint_bg_color),
+                                    );
+                                }
                                 if fr_resp.clicked() {
                                     state.project.goto(f);
                                 }
@@ -3805,7 +3849,9 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
         return;
     }
     let mut open = state.show_settings;
-    egui::Window::new(theme::icon_text(ic::GEAR, "Settings"))
+    let title = theme::icon_text(ic::GEAR, "Settings");
+    let shortfall = title_shortfall(ctx, &title);
+    egui::Window::new(title)
         // Pinned: without it the window's persisted position is derived from
         // its title, so renaming it would strand the window off-screen.
         .id(egui::Id::new("window_settings"))
@@ -3963,6 +4009,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
+                .max_height((ui.available_height() - shortfall).max(0.0))
                 .show(ui, |ui| {
                     // Pressed, then held: a hold binding is read while a
                     // canvas drag starts, and can be bare modifiers.
@@ -6986,18 +7033,22 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         // Name the file Save is about to overwrite — it no longer prompts, so
         // this is where you check what you are clobbering.
+        // A long name is cut in the middle rather than wrapped: the menu
+        // keeps its width and the shortcut stays on the line.
         let save_label = match state.project_path.as_ref().and_then(|p| p.file_name()) {
             Some(name) => format!(
                 "Save  {}    {}",
-                name.to_string_lossy(),
+                ellipsize_middle(&name.to_string_lossy(), 28),
                 combo_text(state, Action::SaveProject)
             ),
             None => format!("Save project…    {}", combo_text(state, Action::SaveProject)),
         };
-        if ui
-            .button(theme::icon_text(ic::FLOPPY_DISK, &save_label))
-            .clicked()
-        {
+        let save = ui.button(theme::icon_text(ic::FLOPPY_DISK, &save_label));
+        let save = match &state.project_path {
+            Some(p) => save.on_hover_text(p.display().to_string()),
+            None => save,
+        };
+        if save.clicked() {
             state.save_project();
             ui.close_menu();
         }
@@ -7852,6 +7903,28 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
 }
 
 /// "Edit in Krita" until a link is live, then what the click does instead.
+/// `name` cut to `max` characters by dropping the middle of its stem, so the
+/// start and the end — the extension, and a version or shot number before
+/// it — still show.
+fn ellipsize_middle(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && name.len() - i <= 8 => name.split_at(i),
+        _ => (name, ""),
+    };
+    let keep = max.saturating_sub(ext.chars().count() + 1);
+    let tail = keep / 3;
+    let head = keep - tail;
+    let n = stem.chars().count();
+    let mut out: String = stem.chars().take(head).collect();
+    out.push('…');
+    out.extend(stem.chars().skip(n - tail));
+    out.push_str(ext);
+    out
+}
+
 fn krita_menu_label(state: &AppState) -> &'static str {
     if state.krita_linked() {
         "Send to Krita again"
@@ -10865,5 +10938,190 @@ mod camera_frame_drag_tests {
         drag(&ctx, &mut state, from, vec2(60.0, 0.0));
         assert!(painted(&state, id) > 20, "painted {}", painted(&state, id));
         assert!(state.project.camera.is_identity());
+    }
+}
+
+/// Single windows through the real egui window, with the app's theme, at
+/// widths their content has to keep up with.
+#[cfg(test)]
+mod window_layout_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1400.0, 900.0));
+
+    type Shapes = Vec<egui::epaint::ClippedShape>;
+
+    fn setup() -> (egui::Context, AppState) {
+        let mut state = AppState::for_test();
+        state.load_project(crate::doc::project::Project::new(1920, 1080, 24.0), None);
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        (ctx, state)
+    }
+
+    fn run(ctx: &egui::Context, events: Vec<egui::Event>, show: &mut dyn FnMut(&egui::Context)) -> Shapes {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| show(ctx)).shapes
+    }
+
+    fn settle(ctx: &egui::Context, show: &mut dyn FnMut(&egui::Context)) -> Shapes {
+        let mut shapes = Vec::new();
+        for _ in 0..4 {
+            shapes = run(ctx, vec![], show);
+        }
+        shapes
+    }
+
+    fn window(ctx: &egui::Context, id: egui::Id) -> Rect {
+        egui::AreaState::load(ctx, id).expect("window laid out").rect()
+    }
+
+    /// Drag a window's right edge to `x`, over several frames.
+    fn drag_right_edge(ctx: &egui::Context, id: egui::Id, x: f32, show: &mut dyn FnMut(&egui::Context)) {
+        let r = window(ctx, id);
+        let from = pos2(r.max.x - 1.0, r.center().y);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(ctx, vec![egui::Event::PointerMoved(from)], show);
+        run(ctx, vec![button(from, true)], show);
+        for i in 1..=12 {
+            let p = pos2(from.x + (x - from.x) * (i as f32 / 12.0), from.y);
+            run(ctx, vec![egui::Event::PointerMoved(p)], show);
+        }
+        run(ctx, vec![button(pos2(x, from.y), false)], show);
+        settle(ctx, show);
+    }
+
+    /// Every piece of text drawn, with its bounds.
+    fn texts(shapes: &Shapes) -> Vec<(String, Rect)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, Rect)>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.visual_bounding_rect())),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// Every filled rectangle of colour `fill`.
+    fn fills(shapes: &Shapes, fill: Color32) -> Vec<Rect> {
+        fn walk(shape: &egui::Shape, fill: Color32, out: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, out)),
+                egui::Shape::Rect(r) if r.fill == fill => out.push(r.rect),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            walk(&s.shape, fill, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn a_narrowed_timeline_keeps_its_frame_counter_off_the_buttons() {
+        let (ctx, mut state) = setup();
+        let id = egui::Id::new(panel_key(PanelId::Timeline));
+        let mut show =
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Timeline, [20.0, 300.0], 640.0, true, None);
+        settle(&ctx, &mut show);
+        let left = window(&ctx, id).min.x;
+        drag_right_edge(&ctx, id, left + 300.0, &mut show);
+        let shapes = settle(&ctx, &mut show);
+        let t = texts(&shapes);
+        let at = |s: &str| t.iter().find(|(x, _)| x == s).unwrap_or_else(|| panic!("no {s:?} drawn")).1;
+        let last_button = at(ic::ARROWS_IN_LINE_HORIZONTAL);
+        let clock = at(ic::CLOCK);
+        assert!(clock.min.x > last_button.max.x, "counter {clock:?} over the buttons {last_button:?}");
+        assert!(window(&ctx, id).width() > 300.0, "the panel stopped at the toolbar");
+    }
+
+    #[test]
+    fn a_layer_row_spans_a_widened_layers_panel() {
+        let (ctx, mut state) = setup();
+        let id = egui::Id::new(panel_key(PanelId::Layers));
+        let mut show =
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Layers, [20.0, 20.0], 252.0, true, None);
+        settle(&ctx, &mut show);
+        let left = window(&ctx, id).min.x;
+        drag_right_edge(&ctx, id, left + 420.0, &mut show);
+        let shapes = settle(&ctx, &mut show);
+        let panel = window(&ctx, id);
+        let rows = fills(&shapes, theme::ACCENT_DIM);
+        let row = rows.first().expect("the selected row is filled");
+        assert!(row.max.x > panel.max.x - 14.0, "row {row:?} stops short of {panel:?}");
+        assert!((panel.width() - 420.0).abs() < 2.0, "{panel:?}");
+    }
+
+    #[test]
+    fn x_sheet_stripes_reach_the_panel_edge() {
+        let (ctx, mut state) = setup();
+        for _ in 0..6 {
+            state.project.add_frame();
+        }
+        let id = egui::Id::new(panel_key(PanelId::Xsheet));
+        let mut show =
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Xsheet, [20.0, 20.0], 252.0, true, None);
+        settle(&ctx, &mut show);
+        let left = window(&ctx, id).min.x;
+        drag_right_edge(&ctx, id, left + 400.0, &mut show);
+        let shapes = settle(&ctx, &mut show);
+        let panel = window(&ctx, id);
+        let stripes = fills(&shapes, ctx.style().visuals.faint_bg_color);
+        assert!(stripes.len() >= 3, "{} stripes", stripes.len());
+        for s in &stripes {
+            assert!(s.max.x > panel.max.x - 14.0, "stripe {s:?} stops short of {panel:?}");
+        }
+    }
+
+    #[test]
+    fn dragging_settings_sideways_keeps_its_height() {
+        let (ctx, mut state) = setup();
+        state.show_settings = true;
+        let id = egui::Id::new("window_settings");
+        let mut show = |ctx: &egui::Context| settings_window(&mut state, ctx);
+        settle(&ctx, &mut show);
+        let before = window(&ctx, id);
+        drag_right_edge(&ctx, id, before.max.x + 80.0, &mut show);
+        let wide = window(&ctx, id);
+        assert!((wide.width() - (before.width() + 80.0)).abs() < 2.0, "{before:?} → {wide:?}");
+        assert!((wide.height() - before.height()).abs() < 1.0, "{before:?} → {wide:?}");
+        // Back again: it opens at its content's narrowest, so this is as far
+        // as it goes.
+        drag_right_edge(&ctx, id, before.max.x, &mut show);
+        let back = window(&ctx, id);
+        assert!((back.width() - before.width()).abs() < 2.0, "{before:?} → {back:?}");
+        assert!((back.height() - before.height()).abs() < 1.0, "{before:?} → {back:?}");
+    }
+
+    #[test]
+    fn a_long_file_name_is_cut_in_the_middle() {
+        assert_eq!(ellipsize_middle("short.anim", 28), "short.anim");
+        let cut = ellipsize_middle("my_very_long_project_name_shot_04.anim", 28);
+        assert_eq!(cut, "my_very_long_pr…shot_04.anim");
+        assert_eq!(cut.chars().count(), 28);
+        // No extension: the stem's own end is kept instead.
+        let bare = ellipsize_middle("a_name_with_no_extension_at_all_here", 20);
+        assert_eq!(bare.chars().count(), 20);
+        assert!(bare.starts_with("a_name") && bare.ends_with("_here"), "{bare}");
+        // Counted in characters, not bytes.
+        let wide = ellipsize_middle("アニメーションのとても長い名前のファイル.anim", 12);
+        assert_eq!(wide.chars().count(), 12);
+        assert!(wide.ends_with(".anim"), "{wide}");
     }
 }
