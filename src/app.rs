@@ -46,6 +46,7 @@ use crate::tools::stroke::StrokeBuilder;
 use crate::tools::shape::GridPlane;
 use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
 use crate::ui;
+use crate::ui::theme::{BaseColors, Scheme};
 use crate::undo::{self, History};
 
 pub struct NewProjectConfig {
@@ -422,6 +423,11 @@ struct UiPrefs {
     hidden_panels: Vec<PanelId>,
     /// Bumped by Reset panel layout; see [`AppState::panel_layout_gen`].
     panel_layout_gen: u32,
+    /// The colours the UI is drawn in, and the five a Custom scheme is
+    /// made from — kept while another scheme is picked, so switching back
+    /// finds them as they were.
+    color_scheme: Scheme,
+    custom_colors: BaseColors,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -520,6 +526,8 @@ impl Default for UiPrefs {
             last_camera_size: None,
             hidden_panels: Vec::new(),
             panel_layout_gen: 0,
+            color_scheme: Scheme::default(),
+            custom_colors: BaseColors::default(),
         }
     }
 }
@@ -1312,6 +1320,9 @@ pub struct AppState {
     /// for. Reset panel layout moves to a new one, so every panel opens as if
     /// for the first time; 0 is the ids panels have always had.
     pub panel_layout_gen: u32,
+    /// Settings > Appearance. Applied with [`AppState::apply_scheme`].
+    pub color_scheme: Scheme,
+    pub custom_colors: BaseColors,
     /// Minimal timeline bar shown when `show_panels` is false. Has its own
     /// toggle shortcut so the user can hide it too.
     pub show_mini_timeline: bool,
@@ -1461,7 +1472,9 @@ impl AppState {
             .and_then(|s| eframe::get_value(s, UI_PREFS_KEY))
             .unwrap_or_default();
         let root = shortcuts::config_dir().map(|d| d.join("brushes"));
-        Self::with_prefs(prefs, max_tex, root)
+        let state = Self::with_prefs(prefs, max_tex, root);
+        state.apply_scheme(&cc.egui_ctx);
+        state
     }
 
     /// A state with default preferences and no window, for driving UI code
@@ -1623,6 +1636,8 @@ impl AppState {
             show_panels: prefs.show_panels,
             hidden_panels: prefs.hidden_panels,
             panel_layout_gen: prefs.panel_layout_gen,
+            color_scheme: prefs.color_scheme,
+            custom_colors: prefs.custom_colors,
             show_mini_timeline: prefs.show_mini_timeline,
             show_new_project: false,
             new_project_cfg: NewProjectConfig::default(),
@@ -3207,6 +3222,11 @@ impl AppState {
     pub fn apply_camera_rotate(&mut self, d: f32) {
         self.project.camera.rot += d;
         self.hold_camera_inside();
+    }
+
+    /// Draw the UI in the picked colour scheme, from the next frame on.
+    pub fn apply_scheme(&self, ctx: &egui::Context) {
+        crate::ui::theme::apply(ctx, self.color_scheme.palette(self.custom_colors));
     }
 
     pub fn panel_shown(&self, id: PanelId) -> bool {
@@ -6131,6 +6151,8 @@ impl eframe::App for AppState {
                 last_camera_size: self.last_camera_size,
                 hidden_panels: self.hidden_panels.clone(),
                 panel_layout_gen: self.panel_layout_gen,
+                color_scheme: self.color_scheme,
+                custom_colors: self.custom_colors,
             },
         );
     }
@@ -8886,6 +8908,7 @@ mod tests {
         assert_eq!(prefs.krita_path, want.krita_path);
         assert_eq!(prefs.bg_color, want.bg_color);
         assert!(prefs.hidden_panels.is_empty() && prefs.panel_layout_gen == 0, "every panel where it was");
+        assert_eq!(prefs.color_scheme, Scheme::Graphite);
         let brushes = restore_tool_brushes(prefs.tool_brushes);
         assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
         assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
@@ -8923,6 +8946,21 @@ mod tests {
         let back = AppState::with_prefs(prefs, 8192, None);
         assert_eq!(back.hidden_panels, vec![PanelId::Onion]);
         assert_eq!(back.panel_layout_gen, 1);
+    }
+
+    #[test]
+    fn the_color_scheme_and_custom_colors_outlast_a_restart() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        assert_eq!(st.color_scheme, Scheme::Graphite, "what the app always looked like");
+        st.color_scheme = Scheme::Custom;
+        st.custom_colors.accent = [250, 120, 60];
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let back = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(back.color_scheme, Scheme::Custom);
+        assert_eq!(back.custom_colors, st.custom_colors);
     }
 
     /// Picking a colour off the screen changes the colour and nothing else.

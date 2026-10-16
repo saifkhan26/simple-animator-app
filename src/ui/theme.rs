@@ -89,6 +89,203 @@ impl Palette {
         sheen: Color32::WHITE,
         light: false,
     };
+
+    /// Blue-black, with a cyan accent.
+    pub const MIDNIGHT: Palette = Palette {
+        bg_base: Color32::from_rgb(8, 12, 20),
+        bg_panel: Color32::from_rgba_premultiplied(13, 18, 28, 240),
+        bg_surface: Color32::from_rgb(22, 30, 44),
+        bg_inactive: Color32::from_rgb(18, 25, 37),
+        bg_hover: Color32::from_rgb(32, 43, 62),
+        faint_bg: Color32::from_rgb(16, 22, 33),
+        extreme_bg: Color32::from_rgb(6, 9, 15),
+        text: Color32::from_rgb(214, 224, 238),
+        text_muted: Color32::from_rgb(128, 146, 172),
+        text_hover: Color32::WHITE,
+        // Dark on the cyan: white on it barely reads.
+        accent_text: Color32::from_rgb(6, 20, 28),
+        stroke_thin: Color32::from_rgb(34, 46, 66),
+        accent: Color32::from_rgb(70, 200, 235),
+        accent_hover: Color32::from_rgb(120, 220, 245),
+        accent_dim: Color32::from_rgb(18, 50, 66),
+        well: Color32::from_rgb(11, 16, 26),
+        row_line: Color32::from_rgb(24, 32, 46),
+        bar: Color32::from_rgb(40, 54, 78),
+        bar_hover: Color32::from_rgb(52, 70, 100),
+        warn: Color32::from_rgb(240, 140, 100),
+        key_layer: Color32::from_rgb(130, 170, 240),
+        key_camera: Color32::from_rgb(255, 196, 100),
+        sheen: Color32::WHITE,
+        light: false,
+    };
+
+    /// Light grey surfaces and dark text.
+    pub const PAPER: Palette = Palette {
+        bg_base: Color32::from_rgb(200, 202, 207),
+        // premul(236, 237, 240, 245): still a touch see-through.
+        bg_panel: Color32::from_rgba_premultiplied(227, 228, 231, 245),
+        bg_surface: Color32::from_rgb(252, 252, 253),
+        bg_inactive: Color32::from_rgb(226, 228, 233),
+        bg_hover: Color32::from_rgb(212, 216, 225),
+        faint_bg: Color32::from_rgb(226, 228, 232),
+        extreme_bg: Color32::from_rgb(255, 255, 255),
+        text: Color32::from_rgb(28, 30, 36),
+        text_muted: Color32::from_rgb(88, 93, 104),
+        text_hover: Color32::BLACK,
+        accent_text: Color32::WHITE,
+        stroke_thin: Color32::from_rgb(196, 199, 207),
+        accent: Color32::from_rgb(70, 84, 220),
+        accent_hover: Color32::from_rgb(96, 110, 236),
+        accent_dim: Color32::from_rgb(206, 211, 247),
+        well: Color32::from_rgb(216, 218, 224),
+        row_line: Color32::from_rgb(202, 205, 213),
+        bar: Color32::from_rgb(176, 182, 197),
+        bar_hover: Color32::from_rgb(158, 166, 185),
+        warn: Color32::from_rgb(190, 82, 34),
+        key_layer: Color32::from_rgb(46, 96, 186),
+        key_camera: Color32::from_rgb(196, 116, 6),
+        sheen: Color32::BLACK,
+        light: true,
+    };
+
+    /// A whole palette worked out from five colours. Everything else is a
+    /// mix of those, the way the presets' in-between shades relate to them,
+    /// so a custom scheme hangs together however the five are picked.
+    pub fn derive(b: BaseColors) -> Palette {
+        let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+        let (bg, panel, widget, text, accent) =
+            (rgb(b.bg), rgb(b.panel), rgb(b.widget), rgb(b.text), rgb(b.accent));
+        let light = luminance(panel) > 0.4;
+        let (sheen, far) = if light {
+            (Color32::BLACK, Color32::WHITE)
+        } else {
+            (Color32::WHITE, Color32::BLACK)
+        };
+        let well = mix(bg, panel, 0.6);
+        Palette {
+            bg_base: bg,
+            bg_panel: premul(panel.r(), panel.g(), panel.b(), 240),
+            bg_surface: widget,
+            bg_inactive: mix(widget, panel, 0.4),
+            bg_hover: mix(widget, text, 0.1),
+            faint_bg: mix(panel, text, 0.04),
+            extreme_bg: mix(widget, far, 0.4),
+            text,
+            text_muted: mix(text, panel, 0.42),
+            text_hover: mix(text, sheen, 0.5),
+            accent_text: if luminance(accent) > 0.4 {
+                Color32::from_rgb(12, 14, 18)
+            } else {
+                Color32::from_rgb(244, 245, 255)
+            },
+            stroke_thin: mix(panel, text, 0.14),
+            accent,
+            accent_hover: mix(accent, sheen, 0.2),
+            accent_dim: mix(panel, accent, 0.22),
+            well,
+            row_line: mix(well, text, 0.07),
+            bar: mix(widget, text, 0.14),
+            bar_hover: mix(widget, text, 0.24),
+            warn: if light { Palette::PAPER.warn } else { Palette::GRAPHITE.warn },
+            key_layer: if light { Palette::PAPER.key_layer } else { Palette::GRAPHITE.key_layer },
+            key_camera: if light { Palette::PAPER.key_camera } else { Palette::GRAPHITE.key_camera },
+            sheen,
+            light,
+        }
+    }
+
+    /// The five colours a custom scheme is made from, as this palette has
+    /// them — where "Start from" begins.
+    pub fn base(&self) -> BaseColors {
+        let rgb = |c: Color32| [c.r(), c.g(), c.b()];
+        // The panel fill is stored translucent; its colour is what shows.
+        let a = self.bg_panel.a().max(1) as u32;
+        let un = |c: u8| ((c as u32 * 255 + a / 2) / a).min(255) as u8;
+        let p = self.bg_panel;
+        BaseColors {
+            bg: rgb(self.bg_base),
+            panel: [un(p.r()), un(p.g()), un(p.b())],
+            widget: rgb(self.bg_surface),
+            text: rgb(self.text),
+            accent: rgb(self.accent),
+        }
+    }
+}
+
+/// Which colours the UI is drawn in. Stored with the app's preferences,
+/// never in a project.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scheme {
+    #[default]
+    Graphite,
+    Midnight,
+    Paper,
+    /// Worked out from the [`BaseColors`] kept beside the scheme.
+    Custom,
+}
+
+impl Scheme {
+    pub const ALL: [Scheme; 4] = [Scheme::Graphite, Scheme::Midnight, Scheme::Paper, Scheme::Custom];
+    pub const PRESETS: [Scheme; 3] = [Scheme::Graphite, Scheme::Midnight, Scheme::Paper];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Scheme::Graphite => "Graphite",
+            Scheme::Midnight => "Midnight",
+            Scheme::Paper => "Paper",
+            Scheme::Custom => "Custom",
+        }
+    }
+
+    /// The palette this scheme draws in; `custom` is only read by Custom.
+    pub fn palette(self, custom: BaseColors) -> Palette {
+        match self {
+            Scheme::Graphite => Palette::GRAPHITE,
+            Scheme::Midnight => Palette::MIDNIGHT,
+            Scheme::Paper => Palette::PAPER,
+            Scheme::Custom => Palette::derive(custom),
+        }
+    }
+}
+
+/// The five colours a custom scheme is picked as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BaseColors {
+    /// Behind the floating panels.
+    pub bg: [u8; 3],
+    pub panel: [u8; 3],
+    /// Buttons, fields and sliders.
+    pub widget: [u8; 3],
+    pub text: [u8; 3],
+    pub accent: [u8; 3],
+}
+
+impl Default for BaseColors {
+    fn default() -> Self {
+        Palette::GRAPHITE.base()
+    }
+}
+
+/// `a` moved fraction `t` of the way to `b`, in sRGB.
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// WCAG relative luminance, 0 (black) to 1 (white).
+pub fn luminance(c: Color32) -> f32 {
+    let lin = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+/// WCAG contrast ratio between two colours, 1 to 21.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
 thread_local! {
@@ -311,6 +508,82 @@ pub fn section_header(ui: &mut egui::Ui, icon: &str, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opaque colour a translucent panel fill shows as over `under`.
+    fn over(c: Color32, under: Color32) -> Color32 {
+        let k = 1.0 - c.a() as f32 / 255.0;
+        let m = |x: u8, y: u8| (x as f32 + y as f32 * k).round().min(255.0) as u8;
+        Color32::from_rgb(m(c.r(), under.r()), m(c.g(), under.g()), m(c.b(), under.b()))
+    }
+
+    /// Body text, muted text and the accent read on the surfaces they sit on:
+    /// WCAG AA for text (4.5), and 3 for muted labels and the accent.
+    fn readable(name: &str, p: &Palette) {
+        let panel = over(p.bg_panel, p.bg_base);
+        for (what, fg, bg, min) in [
+            ("text on panel", p.text, panel, 4.5),
+            ("text on widget", p.text, p.bg_surface, 4.5),
+            ("text on hover", p.text, p.bg_hover, 4.5),
+            ("muted on panel", p.text_muted, panel, 3.0),
+            ("accent text on accent", p.accent_text, p.accent, 3.0),
+            ("accent on panel", p.accent, panel, 3.0),
+            ("warn on panel", p.warn, panel, 3.0),
+            ("camera key on well", p.key_camera, p.well, 1.8),
+            ("layer key on well", p.key_layer, p.well, 1.8),
+        ] {
+            let c = contrast(fg, bg);
+            assert!(c >= min, "{name}: {what} is {c:.2}, wants {min}");
+        }
+    }
+
+    #[test]
+    fn every_preset_reads() {
+        for s in Scheme::PRESETS {
+            readable(s.label(), &s.palette(BaseColors::default()));
+        }
+    }
+
+    #[test]
+    fn a_custom_scheme_made_from_a_preset_reads_too() {
+        for s in Scheme::PRESETS {
+            let p = Palette::derive(s.palette(BaseColors::default()).base());
+            readable(&format!("custom from {}", s.label()), &p);
+            assert_eq!(p.light, s == Scheme::Paper, "{}", s.label());
+        }
+    }
+
+    #[test]
+    fn a_custom_scheme_keeps_its_five_colours() {
+        let b = BaseColors {
+            bg: [30, 10, 10],
+            panel: [50, 20, 20],
+            widget: [70, 30, 30],
+            text: [240, 230, 220],
+            accent: [250, 120, 60],
+        };
+        let p = Palette::derive(b);
+        assert_eq!(p.base(), b, "round trip through the palette");
+        assert_eq!(Scheme::Custom.palette(b), p);
+        assert_eq!(BaseColors::default(), Palette::GRAPHITE.base());
+    }
+
+    /// The scheme lands in both of egui's style slots, and the accessors
+    /// follow it.
+    #[test]
+    fn applying_a_scheme_restyles_both_slots() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        apply(&ctx, Palette::PAPER);
+        for t in [egui::Theme::Dark, egui::Theme::Light] {
+            let v = &ctx.style_of(t).visuals;
+            assert_eq!(v.window_fill, Palette::PAPER.bg_panel);
+            assert!(!v.dark_mode, "light visuals under Paper");
+        }
+        assert_eq!(text(), Palette::PAPER.text);
+        assert_eq!(tint(10), premul(0, 0, 0, 10), "highlights darken on light");
+        apply(&ctx, Palette::GRAPHITE);
+        assert_eq!(ctx.style_of(egui::Theme::Light).visuals.window_fill, Palette::GRAPHITE.bg_panel);
+    }
 
     #[test]
     fn premultiplying_stays_in_gamma_space() {

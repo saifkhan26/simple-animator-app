@@ -19,6 +19,7 @@ use crate::tools::fill;
 use crate::tools::select_mask::{self, SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, ShapeKind, Smoothing, StrokeCap};
+use crate::ui::theme::Scheme;
 use crate::ui::{color_wheel, expr, theme};
 
 /// Tooltip text including the currently-bound shortcut (e.g. "Pencil  (Q)").
@@ -3892,6 +3893,9 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             drag_by_title_only(ui);
+            appearance_section(state, ui);
+            ui.add_space(6.0);
+            theme::section_header(ui, ic::MOUSE, "Input");
             ui.checkbox(&mut state.invert_timeline_scroll, "Invert timeline scroll")
                 .on_hover_text(
                     "Which way the wheel goes through the timeline, for the wheel \
@@ -4081,6 +4085,110 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                 });
         });
     state.show_settings = open;
+}
+
+/// Settings > Appearance: the colour scheme, and the five colours of a
+/// custom one. Changes show at once.
+fn appearance_section(state: &mut AppState, ui: &mut egui::Ui) {
+    use crate::ui::theme::Palette;
+    theme::section_header(ui, ic::PALETTE, "Appearance");
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for s in Scheme::ALL {
+            let p = s.palette(state.custom_colors);
+            if scheme_card(ui, s, &p, state.color_scheme == s).clicked() && state.color_scheme != s {
+                state.color_scheme = s;
+                changed = true;
+            }
+        }
+    });
+    if state.color_scheme == Scheme::Custom {
+        ui.add_space(4.0);
+        egui::Grid::new("custom_colors")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                let c = &mut state.custom_colors;
+                for (label, rgb) in [
+                    ("Background", &mut c.bg),
+                    ("Panels", &mut c.panel),
+                    ("Buttons and fields", &mut c.widget),
+                    ("Text", &mut c.text),
+                    ("Accent", &mut c.accent),
+                ] {
+                    ui.label(label);
+                    changed |= color_wheel::hsl_edit_button(ui, rgb).changed();
+                    ui.end_row();
+                }
+            });
+        ui.menu_button(theme::icon_text(ic::COPY, "Start from…"), |ui| {
+            for s in Scheme::PRESETS {
+                if ui.button(s.label()).clicked() {
+                    state.custom_colors = s.palette(state.custom_colors).base();
+                    changed = true;
+                    ui.close_menu();
+                }
+            }
+        })
+        .response
+        .on_hover_text("Replace the five colours with a preset's, to tweak from there");
+        // Only says something when there is something wrong.
+        let p = Palette::derive(state.custom_colors);
+        let c = theme::contrast(p.text, Color32::from_rgb(
+            state.custom_colors.panel[0],
+            state.custom_colors.panel[1],
+            state.custom_colors.panel[2],
+        ));
+        if c < 4.5 {
+            ui.label(
+                egui::RichText::new(theme::icon_text(
+                    ic::WARNING,
+                    &format!("Text is hard to read on these panels ({c:.1}:1, 4.5 reads well)"),
+                ))
+                .color(theme::warn())
+                .size(11.0),
+            );
+        }
+    }
+    if changed {
+        state.apply_scheme(ui.ctx());
+    }
+}
+
+/// A clickable preview of a scheme: its panel on its background, a line of
+/// its text and a dab of its accent, with the name under it.
+fn scheme_card(ui: &mut egui::Ui, s: Scheme, p: &crate::ui::theme::Palette, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(80.0, 54.0), Sense::click());
+    let painter = ui.painter();
+    let card = Rect::from_min_size(rect.min, egui::vec2(rect.width(), 36.0));
+    painter.rect_filled(card, 6.0, p.bg_base);
+    let panel = card.shrink(5.0);
+    painter.rect_filled(panel, 4.0, p.bg_panel);
+    painter.text(
+        panel.left_center() + egui::vec2(7.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "Aa",
+        egui::FontId::proportional(13.0),
+        p.text,
+    );
+    let dab = Rect::from_center_size(panel.right_center() - egui::vec2(15.0, 0.0), egui::vec2(18.0, 8.0));
+    painter.rect_filled(dab, 4.0, p.accent);
+    let stroke = if selected {
+        Stroke::new(2.0, theme::accent())
+    } else if resp.hovered() {
+        Stroke::new(1.0, theme::accent_hover())
+    } else {
+        Stroke::new(1.0, theme::stroke_thin())
+    };
+    painter.rect_stroke(card, 6.0, stroke);
+    painter.text(
+        egui::pos2(card.center().x, card.max.y + 9.0),
+        egui::Align2::CENTER_CENTER,
+        s.label(),
+        egui::FontId::proportional(11.5),
+        if selected { theme::text() } else { theme::text_muted() },
+    );
+    resp
 }
 
 /// The wheel map in Settings: a picker per modifier. A change goes into
@@ -7016,11 +7124,11 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.separator();
         let shortcuts = if n_conflicts > 0 {
             ui.button(
-                egui::RichText::new(theme::icon_text(ic::WARNING, "Shortcuts…")).color(theme::warn()),
+                egui::RichText::new(theme::icon_text(ic::WARNING, "Settings…")).color(theme::warn()),
             )
             .on_hover_text("Some shortcuts clash. They are flagged in the list.")
         } else {
-            ui.button(theme::icon_text(ic::GEAR, "Shortcuts…"))
+            ui.button(theme::icon_text(ic::GEAR, "Settings…"))
         };
         if shortcuts.clicked() {
             state.show_settings = true;
@@ -7248,6 +7356,15 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             }
         }
         ui.separator();
+        ui.menu_button(theme::icon_text(ic::PALETTE, "Color scheme"), |ui| {
+            for s in Scheme::ALL {
+                if ui.radio(state.color_scheme == s, s.label()).clicked() {
+                    state.color_scheme = s;
+                    state.apply_scheme(ctx);
+                    ui.close_menu();
+                }
+            }
+        });
         if ui
             .button(theme::icon_text(ic::ARROW_COUNTER_CLOCKWISE, "Reset panel layout"))
             .on_hover_text("Every panel shown, back where it first opened and at its first size")
@@ -11218,6 +11335,59 @@ mod window_layout_tests {
         let shapes = settle(&ctx, &mut |ctx| draw(&mut state, ctx));
         assert!(titled(&shapes));
         assert!(egui::AreaState::load(&ctx, panel_area(&state, PanelId::Layers)).is_some());
+    }
+
+    #[test]
+    fn picking_a_scheme_in_settings_restyles_the_app() {
+        use crate::ui::theme::Palette;
+        let (ctx, mut state) = setup();
+        state.show_settings = true;
+        let mut show = |state: &mut AppState, events| run(&ctx, events, &mut |ctx| settings_window(state, ctx));
+        let card = |shapes: &Shapes, name: &str| {
+            let label = texts(shapes)
+                .into_iter()
+                .find(|(t, _)| t == name)
+                .unwrap_or_else(|| panic!("no {name} card"))
+                .1;
+            // The card sits right above its name.
+            label.center() - egui::vec2(0.0, 27.0)
+        };
+        let click = |state: &mut AppState, show: &mut dyn FnMut(&mut AppState, Vec<egui::Event>) -> Shapes, at| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            show(state, vec![egui::Event::PointerMoved(at), button(true)]);
+            show(state, vec![button(false)]);
+            show(state, vec![])
+        };
+        let mut shapes = Shapes::new();
+        for _ in 0..3 {
+            shapes = show(&mut state, vec![]);
+        }
+        assert!(!texts(&shapes).iter().any(|(t, _)| t == "Buttons and fields"), "no pickers off Custom");
+        let at = card(&shapes, "Paper");
+        let shapes = click(&mut state, &mut show, at);
+        assert_eq!(state.color_scheme, Scheme::Paper);
+        assert_eq!(ctx.style().visuals.window_fill, Palette::PAPER.bg_panel);
+        assert_eq!(theme::text(), Palette::PAPER.text);
+
+        let at = card(&shapes, "Custom");
+        let shapes = click(&mut state, &mut show, at);
+        assert_eq!(state.color_scheme, Scheme::Custom);
+        assert!(texts(&shapes).iter().any(|(t, _)| t == "Buttons and fields"), "the five pickers");
+        assert_eq!(ctx.style().visuals.window_fill, Palette::derive(state.custom_colors).bg_panel);
+        assert!(
+            !texts(&shapes).iter().any(|(t, _)| t.contains("hard to read")),
+            "the Graphite five read fine"
+        );
+        // Unreadable text is called out.
+        state.custom_colors.text = state.custom_colors.panel;
+        let shapes = show(&mut state, vec![]);
+        assert!(texts(&shapes).iter().any(|(t, _)| t.contains("hard to read")));
+        theme::apply(&ctx, Palette::GRAPHITE);
     }
 
     #[test]
