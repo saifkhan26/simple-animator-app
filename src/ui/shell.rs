@@ -2666,11 +2666,31 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
             if here { " — keyed on this frame" } else { "" }
         )
     };
-    ui.label(
-        egui::RichText::new(status)
-            .color(theme::TEXT_MUTED)
-            .size(10.5),
-    );
+    // Key to key, beside the count. Resolved first, as on the timeline:
+    // `add_enabled_ui` holds `state` while it runs.
+    let key_prev = state.project.prev_camera_key();
+    let key_next = state.project.next_camera_key();
+    let prev_tip = tip(state, Action::CameraKeyPrev, "Previous camera key");
+    let next_tip = tip(state, Action::CameraKeyNext, "Next camera key");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.add_enabled_ui(key_prev.is_some(), |ui| {
+            if theme::icon_button(ui, ic::CARET_LINE_LEFT, &prev_tip).clicked() {
+                state.project.goto(key_prev.unwrap_or_default());
+            }
+        });
+        ui.add_enabled_ui(key_next.is_some(), |ui| {
+            if theme::icon_button(ui, ic::CARET_LINE_RIGHT, &next_tip).clicked() {
+                state.project.goto(key_next.unwrap_or_default());
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(status)
+                .color(theme::TEXT_MUTED)
+                .size(10.5),
+        );
+    });
 
     // Ease of the key on this frame. It shapes the segment running *from* this
     // key to the next, which is why it lives on the key rather than the pair.
@@ -10630,6 +10650,27 @@ mod camera_panel_tests {
         crate::ui::theme::install(&ctx);
         frame(&ctx, &mut state, vec![]);
         (ctx, state)
+    }
+
+    #[test]
+    fn the_panel_jumps_from_camera_key_to_camera_key() {
+        let (ctx, mut state) = setup();
+        state.project.ensure_frame_count(10);
+        for f in [3, 7] {
+            state.project.set_camera_key(f, crate::doc::camera::Camera::default());
+        }
+        click(&ctx, &mut state, ic::CARET_LINE_RIGHT);
+        assert_eq!(state.project.current_frame, 3);
+        click(&ctx, &mut state, ic::CARET_LINE_RIGHT);
+        assert_eq!(state.project.current_frame, 7);
+        click(&ctx, &mut state, ic::CARET_LINE_LEFT);
+        assert_eq!(state.project.current_frame, 3);
+        // Same through the shortcut actions, which start unbound.
+        assert!(state.shortcuts.get(Action::CameraKeyNext).is_none());
+        state.dispatch(Action::CameraKeyNext);
+        assert_eq!(state.project.current_frame, 7);
+        state.dispatch(Action::CameraKeyPrev);
+        assert_eq!(state.project.current_frame, 3);
     }
 
     #[test]

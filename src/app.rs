@@ -5659,6 +5659,16 @@ impl AppState {
             Action::CameraKeyAdd => self.add_camera_key(),
             Action::CameraKeyDelete => self.delete_camera_key(),
             Action::CameraLookThrough => self.camera_look_through = !self.camera_look_through,
+            Action::CameraKeyPrev => {
+                if let Some(f) = self.project.prev_camera_key() {
+                    self.project.goto(f);
+                }
+            }
+            Action::CameraKeyNext => {
+                if let Some(f) = self.project.next_camera_key() {
+                    self.project.goto(f);
+                }
+            }
         }
     }
 

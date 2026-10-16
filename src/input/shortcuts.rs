@@ -142,6 +142,8 @@ pub enum Action {
     CameraKeyAdd,
     CameraKeyDelete,
     CameraLookThrough,
+    CameraKeyPrev,
+    CameraKeyNext,
 }
 
 impl Action {
@@ -248,6 +250,8 @@ impl Action {
         Action::CameraKeyAdd,
         Action::CameraKeyDelete,
         Action::CameraLookThrough,
+        Action::CameraKeyPrev,
+        Action::CameraKeyNext,
     ];
 
     pub fn label(self) -> &'static str {
@@ -355,6 +359,8 @@ impl Action {
             Action::CameraKeyAdd => "Add camera key",
             Action::CameraKeyDelete => "Delete camera key",
             Action::CameraLookThrough => "Look through camera",
+            Action::CameraKeyPrev => "Previous camera key",
+            Action::CameraKeyNext => "Next camera key",
         }
     }
 
@@ -1151,6 +1157,8 @@ impl Default for ShortcutMap {
         b.insert(Action::CameraKeyAdd, KeyCombo::ctrl(K::K));
         b.insert(Action::CameraKeyDelete, KeyCombo::ctrl_shift(K::K));
         b.insert(Action::CameraLookThrough, KeyCombo::shift(K::V));
+        // CameraKeyPrev / CameraKeyNext start unbound: every key near the
+        // camera binds is taken, and the panel has buttons for them.
         Self {
             bindings: b,
             unbound: BTreeSet::new(),
