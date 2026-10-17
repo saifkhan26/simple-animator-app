@@ -524,9 +524,21 @@ impl AppState {
         self.set_mask(next, true);
     }
 
-    /// Fill the selection with the brush colour, on the active drawing.
+    /// The Fill tool's opacity, which Fill selection shares: the live brush
+    /// while the bucket is the tool, its stored copy otherwise.
+    pub fn fill_opacity_mut(&mut self) -> &mut f32 {
+        if self.tool == ActiveTool::Fill {
+            &mut self.brush.opacity
+        } else {
+            &mut self.tool_brushes[ActiveTool::Fill.idx()].opacity
+        }
+    }
+
+    /// Fill the selection with the brush colour at the Fill tool's opacity, on
+    /// the active drawing.
     pub fn fill_selection(&mut self) {
-        if self.sel_mask.is_none() {
+        let opacity = *self.fill_opacity_mut();
+        if self.sel_mask.is_none() || opacity <= 0.0 {
             return;
         }
         self.cancel_gesture();
@@ -542,7 +554,7 @@ impl AppState {
         self.snapshot_pre(target);
         if let Some(c) = self.project.cell_mut(target) {
             c.dirty = None;
-            crate::tools::fill::fill_masked(c, &clip, color, alpha_lock);
+            crate::tools::fill::fill_masked(c, &clip, color, opacity, alpha_lock);
         }
         self.mark_dirty(target);
         if self.commit_undo(target) {
@@ -1676,6 +1688,29 @@ mod tests {
         st.fill_selection();
         assert_eq!(px(&st, 150, 150), [0, 120, 0, 255]);
         assert_eq!(px(&st, 90, 150)[3], 0);
+    }
+
+    #[test]
+    fn fill_selection_paints_at_the_fill_tools_opacity() {
+        let mut st = lasso();
+        paint(&mut st, (0, 0, 300, 300), [0, 0, 255, 255]);
+        drag(&mut st, (100.0, 100.0), (200.0, 200.0), None);
+        // Set from the Lasso panel: it lands on the Fill tool's own copy.
+        *st.fill_opacity_mut() = 0.5;
+        assert_eq!(st.brush.opacity, 1.0, "the Lasso's own brush is untouched");
+        st.brush.color = [255, 0, 0, 255];
+        st.fill_selection();
+        assert_eq!(px(&st, 150, 150), [128, 0, 128, 255], "half over the blue");
+        assert_eq!(px(&st, 90, 150), [0, 0, 255, 255]);
+        // The bucket shows the same value, and a change there reaches back.
+        st.set_tool(ActiveTool::Fill);
+        assert_eq!(st.brush.opacity, 0.5);
+        st.brush.opacity = 0.0;
+        st.set_tool(ActiveTool::Lasso);
+        assert_eq!(*st.fill_opacity_mut(), 0.0);
+        let steps = st.history.undo_len();
+        st.fill_selection();
+        assert_eq!(st.history.undo_len(), steps, "nothing to fill at zero");
     }
 
     #[test]

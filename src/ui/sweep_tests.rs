@@ -29,6 +29,8 @@ const PANELS: [PanelId; 8] = [
 #[derive(Clone, Copy, PartialEq)]
 enum Win {
     Panel(PanelId),
+    /// The Tools panel with another tool up: its options are that tool's.
+    ToolPanel(ActiveTool),
     Menu,
     MiniTimeline,
     Settings,
@@ -45,6 +47,7 @@ impl std::fmt::Debug for Win {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Win::Panel(p) => write!(f, "{p:?} panel"),
+            Win::ToolPanel(t) => write!(f, "Tools panel ({t:?})"),
             Win::Export(kind) => write!(f, "{:?}", kind.title()),
             Win::Menu => write!(f, "Menu"),
             Win::MiniTimeline => write!(f, "MiniTimeline"),
@@ -62,6 +65,8 @@ impl std::fmt::Debug for Win {
 fn all() -> Vec<Win> {
     let mut v: Vec<Win> = PANELS.iter().map(|&p| Win::Panel(p)).collect();
     v.extend([
+        Win::ToolPanel(ActiveTool::Fill),
+        Win::ToolPanel(ActiveTool::Lasso),
         Win::Menu,
         Win::MiniTimeline,
         Win::Settings,
@@ -92,6 +97,7 @@ impl Win {
     fn open(self, state: &mut AppState) {
         match self {
             Win::Panel(_) | Win::Menu => {}
+            Win::ToolPanel(t) => state.set_tool(t),
             Win::MiniTimeline => {
                 state.show_panels = false;
                 state.show_mini_timeline = true;
@@ -134,6 +140,10 @@ impl Win {
     fn show(self, state: &mut AppState, ctx: &egui::Context) {
         match self {
             Win::Panel(id) => panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None),
+            Win::ToolPanel(_) => {
+                let id = PanelId::Tools;
+                panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None)
+            }
             Win::Menu => menu_window(state, ctx),
             Win::MiniTimeline => mini_timeline_window(state, ctx),
             Win::Settings => settings_window(state, ctx),
@@ -156,7 +166,12 @@ impl Win {
     fn resizable(self) -> bool {
         matches!(
             self,
-            Win::Panel(_) | Win::Settings | Win::BrushSettings | Win::GridSettings | Win::KritaImport
+            Win::Panel(_)
+                | Win::ToolPanel(_)
+                | Win::Settings
+                | Win::BrushSettings
+                | Win::GridSettings
+                | Win::KritaImport
         )
     }
 }

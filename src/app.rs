@@ -4338,6 +4338,7 @@ impl AppState {
                 expand: self.brush.fill_expand,
                 gap: self.brush.fill_gap,
                 alpha_lock: self.active_alpha_lock(),
+                opacity: self.brush.opacity,
             };
             // Owned, so the immutable project borrow ends before `cell_mut`.
             let (cw, ch) = {

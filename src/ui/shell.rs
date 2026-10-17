@@ -1017,6 +1017,8 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
 
             // Tool-specific options only — keeps this panel about tools alone.
             if state.tool == ActiveTool::Fill {
+                ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Opacity"))
+                    .on_hover_text("Fill selection uses this opacity too.");
                 ui.add(
                     egui::Slider::new(&mut state.brush.fill_tolerance, 0..=128).text("Tolerance"),
                 );
@@ -5121,7 +5123,7 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
         {
             state.deselect();
         }
-        let fill = tip(state, Action::SelectionFill, "Fill with brush colour");
+        let fill = tip(state, Action::SelectionFill, "Fill with brush colour at the Fill tool's opacity");
         if ui
             .add_enabled(
                 state.sel_mask.is_some(),
@@ -5134,6 +5136,8 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
             state.fill_selection();
         }
     });
+    ui.add(egui::Slider::new(state.fill_opacity_mut(), 0.0..=1.0).text("Fill opacity"))
+        .on_hover_text("Shared with the Fill tool.");
     ui.horizontal(|ui| {
         let on = state.sel_mask.is_some();
         ui.add(
