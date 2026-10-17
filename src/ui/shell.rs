@@ -5165,7 +5165,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         };
         let t = state.display_transform(cur_layer, frame);
         let lc = layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
-        image_quad(&painter, tex.id(), lc, theme::white_alpha(a));
+        canvas_quad(&painter, state, tex.id(), lc, theme::white_alpha(a));
     };
     let draw_onion = || {
         // Pins at the bottom: they're references, usually far off. Then the
@@ -5196,8 +5196,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             if let Some((t, lc)) = tex.and_then(|t| Some((t, tex_corners(li, id, t.rect)?))) {
                 let dim = (layer.opacity * 0.45).clamp(0.0, 1.0);
                 let a = (dim * 255.0) as u8;
-                image_quad(
+                canvas_quad(
                     &painter,
+                    state,
                     t.tex.id(),
                     lc,
                     theme::white_alpha(a),
@@ -5229,7 +5230,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                         xf.doc_to_screen(x0, y1),
                     ];
                     let op = layer.opacity * state.layer_view_alpha(li);
-                    image_quad(&painter, tex.id(), q, theme::white_alpha((op.clamp(0.0, 1.0) * 255.0) as u8));
+                    canvas_quad(&painter, state, tex.id(), q, theme::white_alpha((op.clamp(0.0, 1.0) * 255.0) as u8));
                 }
             }
             continue;
@@ -5254,8 +5255,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             if let Some(lc) = tex_corners(li, id, rect) {
                 let op = layer.opacity * group_op * state.layer_view_alpha(li);
                 let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
-                image_quad(
+                canvas_quad(
                     &painter,
+                    state,
                     tex.id(),
                     lc,
                     theme::white_alpha(a),
@@ -5469,8 +5471,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             .map(|&(x, y)| cell_to_screen(x, y))
             .collect();
         if let Some(tex) = &state.selection_tex {
-            image_quad(
+            canvas_quad(
                 &painter,
+                state,
                 tex.id(),
                 [box_pts[0], box_pts[1], box_pts[2], box_pts[3]],
                 Color32::WHITE,
@@ -6296,6 +6299,22 @@ impl Xform {
             self.doc_to_screen(self.cw, self.ch),
             self.doc_to_screen(0.0, self.ch),
         ]
+    }
+}
+
+/// Draw artwork — a cell, ghost, group or lifted selection — as
+/// `image_quad` does, but through `ui::canvas_gpu` when there is one, which
+/// mixes texels in gamma space: egui's own sampler mixes them in linear
+/// light, and light ink gets a bright rim wherever a screen pixel falls
+/// between two texels. A texture egui hasn't made yet, or re-filled whole
+/// this frame, draws as before.
+fn canvas_quad(painter: &egui::Painter, state: &AppState, tex: egui::TextureId, corners: [egui::Pos2; 4], tint: Color32) {
+    let gpu = state.canvas_gpu.as_ref().filter(|_| !state.fresh_full.contains(&tex));
+    match gpu.and_then(|g| g.quad(painter.clip_rect(), tex, corners, tint)) {
+        Some(shape) => {
+            painter.add(shape);
+        }
+        None => image_quad(painter, tex, corners, tint),
     }
 }
 
@@ -11404,5 +11423,236 @@ mod window_layout_tests {
         let wide = ellipsize_middle("アニメーションのとても長い名前のファイル.anim", 12);
         assert_eq!(wide.chars().count(), 12);
         assert!(wide.ends_with(".anim"), "{wide}");
+    }
+}
+
+#[cfg(test)]
+mod canvas_gpu_tests {
+    use super::*;
+    use crate::doc::canvas::Canvas;
+    use crate::timeline::onion::OnionPin;
+    use crate::tools::select_mask::SelShape;
+    use crate::ui::canvas_gpu::{CanvasGpu, Recorded};
+    use egui::{pos2, Pos2};
+    use std::sync::Arc;
+
+    /// One painted quad, however it was painted, or anything else.
+    #[derive(Debug, PartialEq)]
+    enum Token {
+        Quad {
+            tex: egui::TextureId,
+            corners: [Pos2; 4],
+            tint: Color32,
+            clip: Rect,
+        },
+        Other,
+    }
+
+    fn tokens(shapes: &[egui::epaint::ClippedShape]) -> Vec<Token> {
+        shapes
+            .iter()
+            .map(|c| match &c.shape {
+                egui::Shape::Mesh(m) if m.indices == [0, 1, 2, 0, 2, 3] && m.vertices.len() == 4 => Token::Quad {
+                    tex: m.texture_id,
+                    corners: std::array::from_fn(|i| m.vertices[i].pos),
+                    tint: m.vertices[0].color,
+                    clip: c.clip_rect,
+                },
+                egui::Shape::Callback(cb) => {
+                    let r = cb.callback.downcast_ref::<Recorded>().expect("a canvas quad");
+                    assert_eq!(cb.rect, c.clip_rect, "the callback covers its clip");
+                    Token::Quad {
+                        tex: r.tex,
+                        corners: r.corners,
+                        tint: r.tint,
+                        clip: c.clip_rect,
+                    }
+                }
+                _ => Token::Other,
+            })
+            .collect()
+    }
+
+    /// A drawing with a block of `rgba` in it.
+    fn block(st: &AppState, (x0, y0, x1, y1): (u32, u32, u32, u32), rgba: [u8; 4]) -> Canvas {
+        let (w, h) = (st.project.width, st.project.height);
+        let mut c = Canvas::new(w, h);
+        let px = c.pixels_mut();
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&rgba);
+            }
+        }
+        c
+    }
+
+    /// Every kind of artwork the canvas paints, at once: a reference layer, a
+    /// group drawn merged below full opacity, a plain layer with past, future
+    /// and pinned ghosts, a layer clipped to it, and a floating selection.
+    /// Returns the state and the layers' indices: reference, group, plain,
+    /// clipped.
+    fn scene() -> (AppState, [usize; 4]) {
+        let mut st = AppState::for_test();
+        st.show_panels = false;
+        st.show_mini_timeline = false;
+        for _ in 0..4 {
+            st.project.add_layer();
+        }
+        let blocks = [
+            ((40, 40, 300, 200), [10, 20, 30, 255]),
+            ((100, 300, 400, 500), [200, 30, 30, 255]),
+            ((350, 320, 700, 600), [30, 200, 30, 180]),
+            ((600, 100, 900, 400), [246, 240, 226, 255]),
+            ((650, 150, 1200, 700), [20, 20, 220, 255]),
+        ];
+        for (li, (r, rgba)) in blocks.into_iter().enumerate() {
+            let c = block(&st, r, rgba);
+            let id = st.project.cells.len();
+            st.project.cells.push(Arc::new(c));
+            st.project.layers[li].set_key(0, id);
+        }
+        let cells: Vec<CellId> = (0..5).map(|li| st.project.layers[li].resolve(0).unwrap()).collect();
+        st.project.layers[0].reference = true;
+        let g = st.project.group_layers(&[1, 2]).expect("grouped");
+        st.project.layers[g].opacity = 0.6;
+        let find = |st: &AppState, cell: CellId| {
+            (0..st.project.layers.len())
+                .find(|&li| st.project.layers[li].resolve(0) == Some(cell))
+                .expect("layer")
+        };
+        let (reference, plain, clipped) = (find(&st, cells[0]), find(&st, cells[3]), find(&st, cells[4]));
+        assert_eq!(clipped, plain + 1, "clipped sits right above its base");
+        st.project.layers[clipped].clip = true;
+
+        // Ghosts: four more frames of the plain layer, the playhead on 2.
+        st.project.current_layer = plain;
+        st.onion.enabled = true;
+        st.onion.prev = 1;
+        st.onion.next = 1;
+        for _ in 0..4 {
+            st.structural_edit(false, |p| {
+                p.add_frame();
+                p.insert_blank_key_here();
+            });
+        }
+        st.project.layers[plain].onion_pins = vec![OnionPin { frame: 4, tint: [0, 200, 0], visible: true }];
+        st.project.goto(2);
+        let cur = st.project.layers[plain].resolve(2).unwrap();
+        st.project.cells[cur] = Arc::new(block(&st, (600, 100, 900, 400), [246, 240, 226, 255]));
+        st.mark_dirty(cur);
+
+        // A selection lifted off it and moved.
+        st.set_tool(ActiveTool::Lasso);
+        st.sel_shape = SelShape::Rect;
+        let drag = |st: &mut AppState, a: (f32, f32), b: (f32, f32)| {
+            st.select_down(a, None);
+            for i in 1..=8 {
+                let t = i as f32 / 8.0;
+                st.select_move((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+            }
+            st.select_up();
+        };
+        drag(&mut st, (620.0, 120.0), (760.0, 260.0));
+        drag(&mut st, (700.0, 200.0), (740.0, 230.0));
+        assert!(st.selection.is_some(), "floating");
+        (st, [reference, g, plain, clipped])
+    }
+
+    /// Two passes, the second past `GHOST_REST` so ghosts get built; the
+    /// second's shapes.
+    fn paint(st: &mut AppState) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        let mut shapes = Vec::new();
+        for time in [0.0, 1.0] {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+                time: Some(time),
+                max_texture_side: Some(8192),
+                ..Default::default()
+            };
+            shapes = ctx
+                .run(raw, |ctx| {
+                    st.sync_textures(ctx);
+                    draw(st, ctx);
+                })
+                .shapes;
+        }
+        shapes
+    }
+
+    /// Drawing through the canvas pipeline paints exactly what the mesh path
+    /// paints: every quad, in the same order among everything else, at the
+    /// same corners, tint and clip. And none of the artwork is left to the
+    /// mesh path.
+    #[test]
+    fn gpu_path_draws_what_the_mesh_path_draws() {
+        let (mut mesh, _) = scene();
+        let (mut gpu, [reference, g, plain, clipped]) = scene();
+        gpu.canvas_gpu = Some(CanvasGpu::recording());
+        let by_mesh = paint(&mut mesh);
+        let by_gpu = paint(&mut gpu);
+        assert!(
+            !by_mesh.iter().any(|c| matches!(c.shape, egui::Shape::Callback(_))),
+            "without a GPU nothing goes to the pipeline"
+        );
+        assert_eq!(tokens(&by_mesh), tokens(&by_gpu));
+
+        let recorded: Vec<egui::TextureId> = by_gpu
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Callback(cb) => cb.callback.downcast_ref::<Recorded>().map(|r| r.tex),
+                _ => None,
+            })
+            .collect();
+        let cell_tex = |li: usize| {
+            let id = gpu.project.layers[li].resolve(gpu.project.current_frame).unwrap();
+            gpu.cell_textures.get(&id).expect("cell texture").tex.id()
+        };
+        let ghost = |f: usize| {
+            let id = gpu.project.layers[plain].resolve(f).unwrap();
+            gpu.ghost_textures.get(&id).expect("ghost built").1.id()
+        };
+        let wanted = [
+            ("reference", cell_tex(reference)),
+            ("merged group", gpu.group_texture(g).expect("group image").0.id()),
+            ("plain layer", cell_tex(plain)),
+            ("clipped layer", gpu.layer_texture(clipped).expect("clip texture").1.id()),
+            ("past ghost", ghost(1)),
+            ("future ghost", ghost(3)),
+            ("pinned ghost", ghost(4)),
+            ("floating selection", gpu.selection_tex.as_ref().expect("selection texture").id()),
+        ];
+        for (name, tex) in wanted {
+            assert!(recorded.contains(&tex), "the {name} went through the canvas pipeline");
+        }
+    }
+
+    /// A texture re-filled whole this frame still holds its old image on the
+    /// GPU while the frame is built, so it draws as a mesh, once.
+    #[test]
+    fn a_texture_refilled_whole_draws_as_a_mesh_that_frame() {
+        let (mut st, [_, _, plain, _]) = scene();
+        st.canvas_gpu = Some(CanvasGpu::recording());
+        let _ = paint(&mut st);
+        let tex = {
+            let id = st.project.layers[plain].resolve(st.project.current_frame).unwrap();
+            st.cell_textures.get(&id).unwrap().tex.id()
+        };
+        st.fresh_full.insert(tex);
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+            ..Default::default()
+        };
+        let shapes = ctx.run(raw, |ctx| draw(&mut st, ctx)).shapes;
+        let as_mesh = shapes
+            .iter()
+            .any(|c| matches!(&c.shape, egui::Shape::Mesh(m) if m.texture_id == tex));
+        let as_callback = shapes.iter().any(|c| match &c.shape {
+            egui::Shape::Callback(cb) => cb.callback.downcast_ref::<Recorded>().is_some_and(|r| r.tex == tex),
+            _ => false,
+        });
+        assert!(as_mesh && !as_callback);
     }
 }

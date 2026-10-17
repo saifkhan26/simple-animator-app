@@ -112,6 +112,7 @@ dependencies = [
  "image",
  "libloading",
  "log",
+ "pollster",
  "postcard",
  "raw-window-handle",
  "rfd",

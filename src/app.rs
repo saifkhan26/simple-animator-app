@@ -46,6 +46,7 @@ use crate::tools::stroke::StrokeBuilder;
 use crate::tools::shape::GridPlane;
 use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
 use crate::ui;
+use crate::ui::canvas_gpu::CanvasGpu;
 use crate::ui::theme::{BaseColors, Scheme};
 use crate::undo::{self, History};
 
@@ -1026,6 +1027,14 @@ pub struct AppState {
     /// painted. Nothing painted last frame is released before this frame's own
     /// paint, so a one-frame delay is enough.
     retired_textures: Vec<TextureHandle>,
+    /// Draws the canvas textures, mixing texels in gamma space — see
+    /// `ui::canvas_gpu`. `None` without a GPU, as in tests: the canvas then
+    /// draws them as plain egui meshes.
+    pub canvas_gpu: Option<CanvasGpu>,
+    /// Textures re-filled whole this sync. egui only swaps the new image in
+    /// after the frame is built, so `canvas_gpu` would bind the old one —
+    /// stale, and placed by the new rect. These draw as meshes this frame.
+    pub fresh_full: HashSet<egui::TextureId>,
 
     pub tool: ActiveTool,
     pub brush: BrushSettings,
@@ -1472,7 +1481,8 @@ impl AppState {
             .and_then(|s| eframe::get_value(s, UI_PREFS_KEY))
             .unwrap_or_default();
         let root = shortcuts::config_dir().map(|d| d.join("brushes"));
-        let state = Self::with_prefs(prefs, max_tex, root);
+        let mut state = Self::with_prefs(prefs, max_tex, root);
+        state.canvas_gpu = cc.wgpu_render_state.as_ref().and_then(CanvasGpu::new);
         state.apply_scheme(&cc.egui_ctx);
         state
     }
@@ -1507,6 +1517,8 @@ impl AppState {
             ghost_textures: HashMap::new(),
             ghost_stale: HashSet::new(),
             retired_textures: Vec::new(),
+            canvas_gpu: None,
+            fresh_full: HashSet::new(),
             cell_dirty,
             sync_frame: 0,
             cell_tex_used: HashMap::new(),
@@ -3779,6 +3791,7 @@ impl AppState {
         // this frame: the meshes that referenced them were submitted a frame
         // ago, so freeing now can't invalidate a texture mid-submit.
         self.retired_textures.clear();
+        self.fresh_full.clear();
         self.ensure_cell_tracking();
         self.sync_frame += 1;
         let now = self.sync_frame;
@@ -3877,7 +3890,10 @@ impl AppState {
                 let dims = [sel.mask.w as usize, sel.mask.h as usize];
                 let image = premultiplied_image(dims, &sel.pixels);
                 match self.selection_tex.as_mut() {
-                    Some(tex) if tex.size() == dims => tex.set(image, TextureOptions::LINEAR),
+                    Some(tex) if tex.size() == dims => {
+                        tex.set(image, TextureOptions::LINEAR);
+                        self.fresh_full.insert(tex.id());
+                    }
                     _ => {
                         if let Some(old) = self.selection_tex.take() {
                             self.retired_textures.push(old);
@@ -4053,6 +4069,7 @@ impl AppState {
                     // Same size: re-fill the handle rather than swap it.
                     Some(t) if t.tex.size() == image.size => {
                         t.tex.set(image, TextureOptions::LINEAR);
+                        self.fresh_full.insert(t.tex.id());
                         t.rect = rect;
                         t.cell = cell;
                     }
@@ -4121,6 +4138,7 @@ impl AppState {
             if reusable {
                 if let Some((t, tex)) = self.ghost_textures.get_mut(&id) {
                     tex.set(image, TextureOptions::LINEAR);
+                    self.fresh_full.insert(tex.id());
                     *t = tint;
                 }
             } else {
@@ -6289,7 +6307,9 @@ impl eframe::App for AppState {
 /// Build a `ColorImage` by premultiplying straight-alpha RGBA8 in gamma
 /// (sRGB) space. egui's `from_rgba_unmultiplied` premultiplies in linear
 /// space, which over-brightens fractional-alpha AA edges once egui blends
-/// them in gamma space — light strokes get a white rim.
+/// them in gamma space — light strokes get a white rim. The same rim comes
+/// back between texels if they are *mixed* in linear light, as egui's
+/// sampler does, so the canvas draws them through `ui::canvas_gpu`.
 pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
     let pixels = rgba.chunks_exact(4).map(premultiplied).collect();
     ColorImage { size, pixels }

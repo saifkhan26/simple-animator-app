@@ -49,6 +49,9 @@ roxmltree = "0.19"
 # zeroed is paged in by the threads that fill it, not up front.
 bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
 glam     = { version = "0.29", features = ["bytemuck"] }
+# Waits on wgpu's error scope when the canvas pipeline is built (and on the
+# GPU in its tests). Already in the tree via eframe and rfd.
+pollster = "0.3"
 
 serde    = { version = "1", features = ["derive", "rc"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
