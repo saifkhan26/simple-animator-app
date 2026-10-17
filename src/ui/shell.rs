@@ -2969,7 +2969,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let rows = state.project.panel_rows();
             let picked = state.selected_layers.clone();
             let grp_key = combo_text(state, Action::LayerGroup);
-            let krita_label = krita_menu_label(state);
+            let krita_label = krita_menu_label(state, true);
             let clip_key = combo_text(state, Action::LayerClipToggle);
             let lock_key = combo_text(state, Action::LayerAlphaLockToggle);
             // What each clipped layer clips to — `None` for one clipped with
@@ -2991,6 +2991,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             // Where each layer's key jumps are linked to, resolved.
             let key_links: Vec<Option<usize>> = (0..n).map(|i| state.project.key_link(i)).collect();
             let layer_in_group: Vec<bool> = state.project.layers.iter().map(|l| l.in_group).collect();
+            // Reference and `-x` layers never go to Krita.
+            let krita_stays: Vec<bool> =
+                (0..n).map(|i| crate::krita_link::stays_here_at(&state.project, i)).collect();
             let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);
             // The rows scroll rather than growing the window: each one is three
             // lines tall, so a stack of them would otherwise push the Transform
@@ -3345,8 +3348,18 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             });
                                             ui.separator();
                                             if ui
-                                                .button(theme::icon_text(ic::PAINT_BRUSH, krita_label))
-                                                .on_hover_text("Opens the project in Krita with this layer selected")
+                                                .add_enabled(
+                                                    !krita_stays[i],
+                                                    egui::Button::new(theme::icon_text(ic::PAINT_BRUSH, krita_label)),
+                                                )
+                                                .on_hover_text(
+                                                    "Opens just this layer in Krita. The other layers stay \
+                                                     here, and a save there only changes this layer (and \
+                                                     any layer added in Krita).",
+                                                )
+                                                .on_disabled_hover_text(
+                                                    "Reference layers and layers named …-x stay here",
+                                                )
                                                 .clicked()
                                             {
                                                 krita_edit = Some(i);
@@ -3511,7 +3524,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 state.selected_layers.clear();
             }
             if let Some(i) = krita_edit {
-                state.edit_in_krita(i);
+                state.edit_in_krita(i, Some(i));
             }
             if let Some(l) = toggle_clip.and_then(|i| state.project.layers.get_mut(i)) {
                 l.clip = !l.clip;
@@ -7353,7 +7366,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         ui.separator();
         if ui
-            .button(theme::icon_text(ic::PAINT_BRUSH, krita_menu_label(state)))
+            .button(theme::icon_text(ic::PAINT_BRUSH, krita_menu_label(state, false)))
             .on_hover_text(
                 "Opens the project in Krita as an animation. Each time you save \
                  there, the drawings, timing and layers you changed come back \
@@ -7362,7 +7375,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             )
             .clicked()
         {
-            state.edit_in_krita(state.project.current_layer);
+            state.edit_in_krita(state.project.current_layer, None);
             ui.close_menu();
         }
         if state.krita_linked()
@@ -8217,7 +8230,6 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
         });
 }
 
-/// "Edit in Krita" until a link is live, then what the click does instead.
 /// `name` cut to `max` characters by dropping the middle of its stem, so the
 /// start and the end — the extension, and a version or shot number before
 /// it — still show.
@@ -8240,11 +8252,14 @@ fn ellipsize_middle(name: &str, max: usize) -> String {
     out
 }
 
-fn krita_menu_label(state: &AppState) -> &'static str {
-    if state.krita_linked() {
-        "Send to Krita again"
-    } else {
-        "Edit in Krita"
+/// "Edit in Krita" until a link is live, then what the click does instead.
+/// `layer`: the layer menu's, which sends that layer alone.
+fn krita_menu_label(state: &AppState, layer: bool) -> &'static str {
+    match (state.krita_linked(), layer) {
+        (true, false) => "Send to Krita again",
+        (false, false) => "Edit in Krita",
+        (true, true) => "Send layer to Krita again",
+        (false, true) => "Edit layer in Krita",
     }
 }
 

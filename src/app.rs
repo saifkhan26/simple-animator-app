@@ -6428,17 +6428,29 @@ impl AppState {
         Some(found)
     }
 
-    /// File ▸ Edit in Krita, and the layer menu's (with that layer selected
-    /// in Krita). The first time, writes the project as an animated `.kra`
-    /// and opens it in Krita. With a link live it starts a re-send round (see
+    /// File ▸ Edit in Krita (`only` = `None`: the whole project, layer
+    /// `selected` selected in Krita), and the layer menu's (`only` = that
+    /// layer, sent alone; the rest stay here, unlinked, and a Krita save
+    /// leaves them be). The first time, writes an animated `.kra` and opens
+    /// it in Krita. With a link live it starts a re-send round (see
     /// [`krita_link::Round`]): Krita's latest save comes in first, then the
     /// file is rewritten — and with the helper plugin enabled in Krita, Krita
     /// reloads it in place. Without it, Krita (which neither watches files
     /// nor has a Reload command) needs the file closed and reopened there.
-    pub fn edit_in_krita(&mut self, selected: usize) {
+    pub fn edit_in_krita(&mut self, selected: usize, only: Option<usize>) {
         if self.krita_send.is_some() || self.krita.as_ref().is_some_and(|k| k.round.is_some()) {
             return;
         }
+        let only = match only {
+            Some(li) if li >= self.project.layers.len() => return,
+            Some(li) if krita_link::stays_here_at(&self.project, li) => {
+                let name = self.project.layers[li].name.clone();
+                self.krita_notice(format!("\u{201c}{name}\u{201d} stays here (reference or \u{2026}-x): not sent."), true);
+                return;
+            }
+            Some(li) => Some(self.project.layers[li].uid),
+            None => None,
+        };
         let running = self.krita.as_mut().is_some_and(KritaLink::krita_running);
         let launch = if running {
             None
@@ -6448,15 +6460,15 @@ impl AppState {
                 None => return,
             }
         };
-        self.begin_send(selected, launch);
+        self.begin_send(selected, only, launch);
     }
 
-    /// [`Self::edit_in_krita`] once Krita's whereabouts are settled. Tests
-    /// come in here, so no real Krita is ever started.
-    fn begin_send(&mut self, selected: usize, launch: Option<PathBuf>) {
+    /// [`Self::edit_in_krita`] once Krita's whereabouts are settled, `only`
+    /// as a layer uid. Tests come in here, so no real Krita is ever started.
+    fn begin_send(&mut self, selected: usize, only: Option<u64>, launch: Option<PathBuf>) {
         let Some(link) = self.krita.as_mut().filter(|k| k.baseline.is_some()) else {
             // First send: there's nothing in Krita to bring in or reload.
-            self.start_send(selected, launch);
+            self.start_send(selected, only, launch);
             return;
         };
         let helper = link.use_helper.unwrap_or_else(crate::krita_helper::installed);
@@ -6464,6 +6476,7 @@ impl AppState {
             seq: 0,
             stage: krita_link::Stage::Sync,
             selected,
+            only,
             launch,
             helper_ready: false,
             helper_silent: false,
@@ -6482,9 +6495,31 @@ impl AppState {
         link.round = Some(round);
     }
 
-    /// Write the project as the linked `.kra` on a worker; `poll_krita`
-    /// picks up the result.
-    fn start_send(&mut self, selected: usize, launch: Option<PathBuf>) {
+    /// Write the project — or just layer `only` — as the linked `.kra` on a
+    /// worker; `poll_krita` picks up the result.
+    fn start_send(&mut self, selected: usize, only: Option<u64>, launch: Option<PathBuf>) {
+        let scope = match only.map(|uid| self.project.layers.iter().position(|l| l.uid == uid)) {
+            None => None,
+            Some(Some(li)) if !krita_link::stays_here_at(&self.project, li) => Some(li),
+            Some(found) => {
+                // Krita's save, just brought in, deleted the layer — or it was
+                // made to stay here since. Nothing to send.
+                if let Some(link) = self.krita.as_mut() {
+                    link.round = None;
+                }
+                let msg = match found {
+                    Some(li) => format!(
+                        "\u{201c}{}\u{201d} stays here (reference or \u{2026}-x): not sent.",
+                        self.project.layers[li].name
+                    ),
+                    None => "That layer is gone from here: nothing sent to Krita.".to_string(),
+                };
+                self.krita_notice(msg, true);
+                return;
+            }
+        };
+        let selected = scope.unwrap_or(selected);
+        let rows = scope.map(|li| self.project.block(li));
         let temp = KritaLink::temp_path(self.project_path.as_deref());
         let link = self.krita.get_or_insert_with(|| KritaLink::new(temp));
         // A read in flight was matched against the baseline this send
@@ -6492,16 +6527,21 @@ impl AppState {
         link.pending = None;
         link.baseline = None;
         // Reference and `-x` layers stay here: not sent, and unlinked if they
-        // were linked before.
-        let keep: Vec<bool> = krita_link::sendable(&self.project);
+        // were linked before. So do the layers a one-layer send leaves out —
+        // a Krita save then leaves them be.
+        let mut keep: Vec<bool> = krita_link::sendable(&self.project);
         let mut uuids = Vec::new();
         let mut kept_out = Vec::new();
-        for (l, &k) in self.project.layers.iter().zip(&keep) {
-            if k {
+        for (li, (l, k)) in self.project.layers.iter().zip(&mut keep).enumerate() {
+            let in_scope = rows.as_ref().map_or(true, |r| r.contains(&li));
+            if *k && in_scope {
                 uuids.push(link.uuids.entry(l.uid).or_insert_with(krita_link::new_uuid).clone());
             } else {
+                *k = false;
                 link.uuids.remove(&l.uid);
-                kept_out.push(l.name.clone());
+                if in_scope {
+                    kept_out.push(l.name.clone());
+                }
             }
         }
         let selected = keep
@@ -6695,7 +6735,7 @@ impl AppState {
                     link.start_pull(at, krita_link::present(&self.project, &link.uuids));
                 } else {
                     round.stage = Stage::Sending;
-                    send = Some((round.selected, round.launch.take()));
+                    send = Some((round.selected, round.only, round.launch.take()));
                 }
             }
             Stage::Sending => {}
@@ -6721,8 +6761,8 @@ impl AppState {
         if done.is_none() {
             link.round = Some(round);
         }
-        if let Some((selected, launch)) = send {
-            self.start_send(selected, launch);
+        if let Some((selected, only, launch)) = send {
+            self.start_send(selected, only, launch);
         }
         if let Some((msg, warn)) = done {
             self.krita_notice(msg, warn);
@@ -7715,7 +7755,7 @@ mod tests {
         link.poll_every = Duration::ZERO;
         link.settle = Duration::ZERO;
         st.krita = Some(link);
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
         (st, dir, path)
     }
@@ -7766,7 +7806,7 @@ mod tests {
         st.krita.as_mut().unwrap().use_helper = Some(true);
         st.project.layers[0].name = "Ink here".into();
 
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         assert_eq!(to_krita(&path), ("1".into(), "request".into()));
         for _ in 0..5 {
             st.poll_krita(&egui::Context::default());
@@ -7797,7 +7837,7 @@ mod tests {
         let id = k.layers[0].exposures[0].unwrap();
         k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&[255, 0, 0, 255]); // …and Krita paints
 
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         krita_saves(&st, &k, &path);
         crate::krita_helper::tests::plugin_says(&path, &[("seq", "1"), ("msg", "ready"), ("saved", "1")]);
         pump(&mut st, |_| to_krita(&path).1 == "sent");
@@ -7820,7 +7860,7 @@ mod tests {
             l.ready_timeout = Duration::ZERO;
         }
         st.project.layers[0].name = "Ink here".into();
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         pump(&mut st, |st| stage(st).is_none() && st.krita_send.is_none());
         assert_eq!(to_krita(&path).1, "request", "no \"sent\" without a ready helper");
         let doc = kra::read(std::fs::read(&path).unwrap()).unwrap();
@@ -7854,9 +7894,9 @@ mod tests {
     fn a_second_send_during_a_round_is_ignored() {
         let (mut st, dir, path) = linked("twice");
         st.krita.as_mut().unwrap().use_helper = Some(true);
-        st.begin_send(0, None);
-        st.edit_in_krita(0);
-        st.edit_in_krita(0);
+        st.begin_send(0, None, None);
+        st.edit_in_krita(0, None);
+        st.edit_in_krita(0, None);
         assert_eq!(to_krita(&path), ("1".into(), "request".into()));
         assert_eq!(st.krita.as_ref().unwrap().helper_seq, 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -7877,10 +7917,125 @@ mod tests {
         k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&[0, 255, 0, 255]);
         krita_saves(&st, &k, &path);
 
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         pump(&mut st, |st| stage(st).is_none() && st.krita_send.is_none());
         assert!(st.history.can_undo());
         assert_eq!(first_pixel_on_disk(&st, &path), [0, 255, 0, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two drawn layers and a link not yet sent, zero poll delays. Returns
+    /// the bottom and top layers' uids too.
+    fn two_layer_link(tag: &str) -> (AppState, PathBuf, PathBuf, u64, u64) {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        let id = st.project.cells.len();
+        let mut c = Canvas::new(st.project.width, st.project.height);
+        c.pixels_mut()[0..4].copy_from_slice(&[0, 0, 255, 255]);
+        st.project.cells.push(c.into());
+        st.project.layers[1].set_key(0, id);
+        let dir = std::env::temp_dir().join(format!("animator-layer-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("link.kra");
+        let mut link = KritaLink::new(path.clone());
+        link.poll_every = Duration::ZERO;
+        link.settle = Duration::ZERO;
+        link.use_helper = Some(false);
+        st.krita = Some(link);
+        let (bottom, top) = (st.project.layers[0].uid, st.project.layers[1].uid);
+        (st, dir, path, bottom, top)
+    }
+
+    fn names_on_disk(path: &std::path::Path) -> Vec<String> {
+        kra::read(std::fs::read(path).unwrap()).unwrap().layers.into_iter().map(|l| l.name).collect()
+    }
+
+    /// "Krita" paints pixel 0 of layer `uid`'s first drawing and saves, as
+    /// Krita holds it: that layer alone.
+    fn krita_paints_only(st: &AppState, uid: u64, px: [u8; 4], path: &std::path::Path) {
+        let mut k = st.project.clone();
+        k.layers.retain(|l| l.uid == uid);
+        let id = k.layers[0].exposures[0].unwrap();
+        k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&px);
+        krita_saves(st, &k, path);
+    }
+
+    fn layer_by_uid(st: &AppState, uid: u64) -> &crate::doc::layer::Layer {
+        st.project.layers.iter().find(|l| l.uid == uid).expect("layer still here")
+    }
+
+    /// The layer menu's send takes that layer alone; a Krita save then
+    /// changes it and leaves the layer that wasn't sent as it was.
+    #[test]
+    fn layer_send_takes_only_that_layer() {
+        let (mut st, dir, path, bottom, top) = two_layer_link("only");
+        let bottom_before = st.project.layers[0].exposures.clone();
+        st.begin_send(0, Some(top), None);
+        pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
+        assert_eq!(names_on_disk(&path), ["Layer 2"]);
+        assert_eq!(st.krita.as_ref().unwrap().uuids.keys().copied().collect::<Vec<_>>(), [top]);
+        assert!(st.krita_toast.as_ref().is_some_and(|t| !t.0.contains("Kept out")));
+
+        krita_paints_only(&st, top, [1, 2, 3, 255], &path);
+        pump(&mut st, |st| st.history.can_undo());
+        assert_eq!(st.project.layers.len(), 2);
+        let now = layer_by_uid(&st, top).exposures[0].unwrap();
+        assert_eq!(&st.project.cells[now].pixels()[0..4], &[1, 2, 3, 255]);
+        assert_eq!(layer_by_uid(&st, bottom).exposures, bottom_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With the whole project in Krita, the layer menu's re-send narrows
+    /// Krita's file to that layer; the other layer stays here, unlinked, and
+    /// Krita's next save doesn't delete it.
+    #[test]
+    fn layer_resend_narrows_a_whole_link() {
+        let (mut st, dir, path, bottom, top) = two_layer_link("narrow");
+        let bottom_before = st.project.layers[0].exposures.clone();
+        st.begin_send(1, None, None);
+        pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
+        assert_eq!(names_on_disk(&path), ["Layer 1", "Layer 2"]);
+
+        st.begin_send(0, Some(top), None);
+        pump(&mut st, |st| stage(st).is_none() && st.krita_send.is_none());
+        assert_eq!(names_on_disk(&path), ["Layer 2"]);
+        assert!(!st.krita.as_ref().unwrap().uuids.contains_key(&bottom));
+        assert!(st.krita_toast.as_ref().is_some_and(|t| !t.0.contains("Kept out")));
+
+        krita_paints_only(&st, top, [4, 5, 6, 255], &path);
+        pump(&mut st, |st| st.history.can_undo());
+        assert_eq!(st.project.layers.len(), 2);
+        assert_eq!(layer_by_uid(&st, bottom).exposures, bottom_before);
+        let now = layer_by_uid(&st, top).exposures[0].unwrap();
+        assert_eq!(&st.project.cells[now].pixels()[0..4], &[4, 5, 6, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reference layer's menu send is refused before anything starts —
+    /// no link, no Krita lookup.
+    #[test]
+    fn layer_send_of_a_reference_layer_sends_nothing() {
+        let mut st = AppState::for_test();
+        st.project.layers[0].reference = true;
+        st.edit_in_krita(0, Some(0));
+        assert!(st.krita.is_none() && st.krita_send.is_none());
+        assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.contains("stays here") && t.1));
+    }
+
+    /// The layer a re-send was for is gone once Krita's save is in: the
+    /// round ends with a note and the file is left as it was.
+    #[test]
+    fn layer_gone_before_the_send_ends_the_round() {
+        let (mut st, dir, path, _, _) = two_layer_link("gone");
+        st.begin_send(0, None, None);
+        pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
+        let before = std::fs::read(&path).unwrap();
+        st.begin_send(0, Some(u64::MAX), None);
+        pump(&mut st, |st| stage(st).is_none());
+        assert!(st.krita_send.is_none());
+        assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.contains("gone") && t.1));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(st.krita.as_ref().unwrap().baseline.is_some(), "the link carries on");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
