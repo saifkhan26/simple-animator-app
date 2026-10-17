@@ -817,6 +817,15 @@ fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, i
     }
 }
 
+/// The Layers panel's starting height, in points: its toolbar, three rows
+/// of list and the folded sections under it, as tall as the panel used to
+/// grow to with three layers.
+const LAYERS_DEFAULT_H: f32 = 440.0;
+
+/// The X-sheet panel's starting height, in points: its toolbar and about
+/// ten frames of sheet, what the sheet's old 260-point cap came to.
+const XSHEET_DEFAULT_H: f32 = 330.0;
+
 /// Render a panel as a draggable floating window.
 ///
 /// `resized` carries the previous viewport rect on frames where the window
@@ -849,6 +858,16 @@ fn panel_window(
         if let Some(pos) = resticked_pos(ctx, area, old, ctx.screen_rect()) {
             window = window.current_pos(pos);
         }
+    }
+    // The layer list and the sheet fill whatever height their panel has, so
+    // those panels need one to start at.
+    let start_h = match id {
+        PanelId::Layers => Some(LAYERS_DEFAULT_H),
+        PanelId::Xsheet => Some(XSHEET_DEFAULT_H),
+        _ => None,
+    };
+    if let Some(h) = start_h {
+        window = window.default_height(h);
     }
     // The toolbar row can't wrap, so it is the timeline's narrowest: without
     // this a drag could pull the panel under it until the drag ends.
@@ -1240,6 +1259,9 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        // Room for the colour button after it.
+                        let button = ui.spacing().interact_size.y + ui.spacing().button_padding.x * 2.0;
+                        fit_sliders(ui, "Opacity", button + ui.spacing().item_spacing.x);
                         ui.add(egui::Slider::new(&mut state.bg_opacity, 0.0..=1.0).text("Opacity"));
                         color_wheel::hsl_edit_button_f32(ui, &mut state.bg_color);
                     });
@@ -1293,6 +1315,24 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
             )
             .on_hover_text(tip);
     }
+}
+
+/// Narrow the sliders laid out next in `ui` so that one, with its value box
+/// and `label`, fits the width left (less `extra` for what follows it on the
+/// row). Laid out at the theme's slider width instead, a narrow panel widens
+/// to fit it the first time it shows, and egui never narrows it back. Never
+/// wider than the theme's width.
+fn fit_sliders(ui: &mut egui::Ui, label: &str, extra: f32) {
+    let style = ui.style().clone();
+    let width = |text: &str, ts: egui::TextStyle| {
+        ui.fonts(|f| f.layout_no_wrap(text.to_owned(), ts.resolve(&style), Color32::WHITE).size().x)
+    };
+    let s = &style.spacing;
+    let value = (width("0.000", egui::TextStyle::Button) + s.button_padding.x * 2.0).max(s.interact_size.x);
+    // Rounded up, with a margin: a row even a fraction too wide grows the
+    // panel a point a frame until the slider stops shrinking.
+    let fixed = (value.ceil() + width(label, egui::TextStyle::Body).ceil() + s.item_spacing.x * 2.0 + extra).ceil() + 2.0;
+    ui.spacing_mut().slider_width = (ui.available_width() - fixed).floor().clamp(40.0, s.slider_width);
 }
 
 /// Where the timeline toolbar leaves its full width for the panel.
@@ -2010,6 +2050,10 @@ fn loop_toggle(ui: &mut egui::Ui, state: &AppState) -> egui::Response {
     theme::icon_toggle(ui, ic::REPEAT, tip, state.loop_timeline)
 }
 
+/// The mini bar's slot for the active layer's name, in points: room for
+/// the 18 characters it cuts a name to.
+const MINI_BAR_NAME_W: f32 = 140.0;
+
 fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
     egui::Window::new("mini_timeline")
         .title_bar(false)
@@ -2069,12 +2113,20 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 )
                 .on_hover_text("Step size (move / insert)");
                 ui.separator();
+                // The bar sits centred, so anything that changes its width
+                // moves every button on it. The counter gets a slot wide
+                // enough for four-digit counts, the name below a fixed one.
                 let n = state.project.frame_count.max(1);
-                ui.label(
-                    egui::RichText::new(format!("{} / {}", state.project.current_frame + 1, n))
-                        .monospace()
-                        .color(theme::text()),
-                );
+                let digits = n.to_string().len().max(4);
+                let counter = egui::RichText::new(format!(
+                    "{:>digits$} / {n:<digits$}",
+                    state.project.current_frame + 1
+                ))
+                .monospace()
+                .color(theme::text());
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let slot = ui.fonts(|f| f.glyph_width(&font, '0')) * (digits * 2 + 3) as f32;
+                ui.add_sized([slot, ui.spacing().interact_size.y], egui::Label::new(counter));
                 ui.separator();
                 // Active tool icon + brush colour swatch.
                 ui.label(
@@ -2093,8 +2145,9 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 ui.painter()
                     .rect_stroke(rect, 3.0, Stroke::new(1.0, theme::stroke_thin()));
                 // Which layer the layer keys landed on — the Layers panel is
-                // hidden whenever this bar is up. Long names are cut short so
-                // the bar keeps its width.
+                // hidden whenever this bar is up. Long names are cut short,
+                // and wide glyphs further, in a slot of their own, so the bar
+                // keeps its width.
                 if let Some(l) = state.project.layers.get(state.project.current_layer) {
                     ui.separator();
                     let name: String = if l.name.chars().count() > 18 {
@@ -2102,10 +2155,17 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                     } else {
                         l.name.clone()
                     };
-                    ui.label(
-                        egui::RichText::new(format!("{} {name}", ic::STACK)).color(theme::text()),
-                    )
-                    .on_hover_text(format!("Active layer: {}", l.name));
+                    let size = egui::vec2(MINI_BAR_NAME_W, ui.spacing().interact_size.y);
+                    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(Align::Center), |ui| {
+                        ui.set_min_size(size);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{} {name}", ic::STACK)).color(theme::text()),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(format!("Active layer: {}", l.name));
+                    });
                 }
             });
             ui.add_space(3.0);
@@ -2161,65 +2221,71 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
     let height = 16.0;
     let view_w = 320.0_f32;
 
-    egui::ScrollArea::horizontal()
-        .max_width(view_w)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            let total_w = (n as f32 * dot_step).max(view_w);
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(total_w, height), Sense::click_and_drag());
-            let painter = ui.painter_at(rect);
-            let cy = rect.center().y;
+    // Room for the scroll bar whether it shows or not: it turning up on a
+    // long scene made the whole bar taller.
+    let full = height + ui.spacing().scroll.allocated_width();
+    ui.scope(|ui| {
+        ui.set_min_height(full);
+        egui::ScrollArea::horizontal()
+            .max_width(view_w)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let total_w = (n as f32 * dot_step).max(view_w);
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(total_w, height), Sense::click_and_drag());
+                let painter = ui.painter_at(rect);
+                let cy = rect.center().y;
 
-            for i in 0..n {
-                let center = egui::pos2(rect.min.x + (i as f32 + 0.5) * dot_step, cy);
-                if i == cur {
-                    painter.circle_filled(center, 4.0, theme::accent());
-                    painter.circle_stroke(center, 5.5, Stroke::new(1.0, theme::accent()));
-                } else {
-                    let in_loop = i >= state.project.loop_start && i < state.project.loop_end;
-                    let col = if in_loop { theme::text_muted() } else { theme::bg_hover() };
-                    painter.circle_filled(center, 2.6, col);
+                for i in 0..n {
+                    let center = egui::pos2(rect.min.x + (i as f32 + 0.5) * dot_step, cy);
+                    if i == cur {
+                        painter.circle_filled(center, 4.0, theme::accent());
+                        painter.circle_stroke(center, 5.5, Stroke::new(1.0, theme::accent()));
+                    } else {
+                        let in_loop = i >= state.project.loop_start && i < state.project.loop_end;
+                        let col = if in_loop { theme::text_muted() } else { theme::bg_hover() };
+                        painter.circle_filled(center, 2.6, col);
+                    }
+                    // Keyed frames get a tick under the dot — the layer, the
+                    // active grid and the camera, side by side when they share a
+                    // frame, in the colours the full timeline uses.
+                    let ty = rect.max.y - 1.5;
+                    let ticks: Vec<Color32> = [
+                        (layer_keys[i], theme::key_layer()),
+                        (grid_keys[i], grid_color.unwrap_or(theme::key_layer())),
+                        (camera_keys[i], theme::key_camera()),
+                    ]
+                    .into_iter()
+                    .filter_map(|(on, c)| on.then_some(c))
+                    .collect();
+                    let x0 = center.x - (ticks.len() as f32 - 1.0) * 2.5;
+                    for (k, c) in ticks.into_iter().enumerate() {
+                        painter.circle_filled(egui::pos2(x0 + k as f32 * 5.0, ty), 1.5, c);
+                    }
                 }
-                // Keyed frames get a tick under the dot — the layer, the
-                // active grid and the camera, side by side when they share a
-                // frame, in the colours the full timeline uses.
-                let ty = rect.max.y - 1.5;
-                let ticks: Vec<Color32> = [
-                    (layer_keys[i], theme::key_layer()),
-                    (grid_keys[i], grid_color.unwrap_or(theme::key_layer())),
-                    (camera_keys[i], theme::key_camera()),
-                ]
-                .into_iter()
-                .filter_map(|(on, c)| on.then_some(c))
-                .collect();
-                let x0 = center.x - (ticks.len() as f32 - 1.0) * 2.5;
-                for (k, c) in ticks.into_iter().enumerate() {
-                    painter.circle_filled(egui::pos2(x0 + k as f32 * 5.0, ty), 1.5, c);
-                }
-            }
 
-            // Auto-scroll to the active dot only when the frame changes, so the
-            // user can still scroll freely the rest of the time.
-            let mem_id = ui.id().with("mini_dots_frame");
-            let last: Option<usize> = ui.data(|d| d.get_temp(mem_id));
-            if last != Some(cur) {
-                let active = egui::Rect::from_center_size(
-                    egui::pos2(rect.min.x + (cur as f32 + 0.5) * dot_step, cy),
-                    egui::vec2(dot_step * 3.0, height),
-                );
-                ui.scroll_to_rect(active, Some(Align::Center));
-                ui.data_mut(|d| d.insert_temp(mem_id, cur));
-            }
-
-            if resp.dragged() || resp.clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let rel = ((pos.x - rect.min.x) / dot_step).floor() as isize;
-                    let idx = rel.clamp(0, n as isize - 1) as usize;
-                    state.project.goto(idx);
+                // Auto-scroll to the active dot only when the frame changes, so the
+                // user can still scroll freely the rest of the time.
+                let mem_id = ui.id().with("mini_dots_frame");
+                let last: Option<usize> = ui.data(|d| d.get_temp(mem_id));
+                if last != Some(cur) {
+                    let active = egui::Rect::from_center_size(
+                        egui::pos2(rect.min.x + (cur as f32 + 0.5) * dot_step, cy),
+                        egui::vec2(dot_step * 3.0, height),
+                    );
+                    ui.scroll_to_rect(active, Some(Align::Center));
+                    ui.data_mut(|d| d.insert_temp(mem_id, cur));
                 }
-            }
-        });
+
+                if resp.dragged() || resp.clicked() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let rel = ((pos.x - rect.min.x) / dot_step).floor() as isize;
+                        let idx = rel.clamp(0, n as isize - 1) as usize;
+                        state.project.goto(idx);
+                    }
+                }
+            });
+    });
 }
 
 /// The active grid's keyed frames and its colour, while grids are on show —
@@ -2386,14 +2452,11 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
     let Some(layer) = state.project.layers.get_mut(li) else {
         return;
     };
-    ui.label(
-        egui::RichText::new(format!(
-            "Pins on \u{201c}{}\u{201d} show while it's the active layer.",
-            layer.name
-        ))
-        .color(theme::text_muted())
-        .size(10.5),
-    );
+    // The name on a line of its own, cut to fit: wrapped into the sentence,
+    // a long one took more lines, which grew the panel for good.
+    let muted = |text: String| egui::RichText::new(text).color(theme::text_muted()).size(10.5);
+    ui.add(egui::Label::new(muted(format!("Pins on \u{201c}{}\u{201d}", layer.name))).truncate());
+    ui.label(muted("show while it's the active layer.".into()));
 
     // The frame to pin: a scratch value, kept in egui memory rather than in
     // the state. Numbered like the timeline, from 0.
@@ -2804,11 +2867,10 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
-/// How tall the layer list may grow before it starts scrolling, in points.
-/// Each row is three lines — name, opacity, fill-boundary link — so this is
-/// roughly four layers, which is enough to reorder against without the panel
-/// running off the bottom of a laptop screen.
-const LAYER_LIST_MAX_H: f32 = 320.0;
+/// The shortest the layer list gets when the sections under it want the
+/// room, in points: about one row (name, opacity, fill-boundary link).
+/// Past this the panel grows instead.
+const LAYER_LIST_MIN_H: f32 = 96.0;
 
 /// Drag-and-drop payload for a layer row: the dragged layer's index.
 struct LayerDrag(usize);
@@ -2866,6 +2928,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 .id_salt("layers_fade")
                 .default_open(false)
                 .show(ui, |ui| {
+                    fit_sliders(ui, "fade above", 0.0);
                     let fade_help = "How visible the other layers stay while faded. \
                                      View only: layer opacity and export are unaffected.";
                     let above = ui
@@ -2935,13 +2998,23 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             // the toolbar above and Transform below stay put, which is what
             // makes reordering a layer while looking at its transform possible.
             //
-            // `auto_shrink` vertically so one or two layers do not reserve the
-            // full height as blank space, but never horizontally: the rows
-            // should keep the panel's width.
-            egui::ScrollArea::vertical()
+            // The list takes the panel's height, less what the sections under
+            // it took last frame, whatever the number of rows. Sized to its
+            // rows instead, each new layer grew the panel, and egui never
+            // shrinks a window below what its content once asked for. Floored:
+            // a fraction over the panel's height would ratchet it up a hair
+            // every frame. See `title_shortfall` for the rest.
+            let below_id = ui.id().with("layers_below_h");
+            let below_h = ui.data(|d| d.get_temp::<f32>(below_id)).unwrap_or(0.0);
+            let shortfall = title_bar_shortfall(ui.ctx(), PanelId::Layers);
+            let list_h = (ui.available_height() - below_h - shortfall)
+                .floor()
+                .max(LAYER_LIST_MIN_H);
+            let list = egui::ScrollArea::vertical()
                 .id_salt("layer_rows")
-                .max_height(LAYER_LIST_MAX_H)
-                .auto_shrink([false, true])
+                .max_height(list_h)
+                .min_scrolled_height(list_h)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for i in rows.iter().copied() {
                         let layer = &mut layers[i];
@@ -2962,6 +3035,10 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                 // A frame hugs what's in it; the row's fill
                                 // should span the list.
                                 ui.set_min_width(ui.available_width());
+                                // A long name (a cleanup of a cleanup is
+                                // "… clean clean") is cut short rather than
+                                // widening the panel for good.
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                                 ui.horizontal(|ui| {
                                     // A group's layers sit indented under it.
                                     if layer.in_group {
@@ -3066,13 +3143,40 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         // still renames. One widget senses both:
                                         // a drag-only one laid over the label
                                         // would win the hit test and eat clicks.
+                                        //
+                                        // What follows the name keeps its
+                                        // room: the alpha-lock mark, and up to
+                                        // 40% for the link chip.
+                                        let chip = key_links[i].map(|s| {
+                                            egui::RichText::new(format!("{} {}", ic::LINK, names[s]))
+                                                .size(11.0)
+                                                .color(theme::accent())
+                                        });
+                                        let room = ui.available_width();
+                                        let gap = ui.spacing().item_spacing.x;
+                                        let chip_w = chip.clone().map_or(0.0, |c| {
+                                            let w = egui::WidgetText::from(c)
+                                                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button)
+                                                .size()
+                                                .x;
+                                            (w + gap).min(room * 0.4)
+                                        });
+                                        let lock_w = if layer.alpha_lock { 14.0 + gap } else { 0.0 };
+                                        let name_w = (room - chip_w - lock_w).max(0.0);
                                         let resp = ui
-                                            .add(egui::SelectableLabel::new(
-                                                selected,
-                                                egui::RichText::new(&layer.name).strong(),
-                                            ))
+                                            .scope(|ui| {
+                                                ui.set_max_width(name_w);
+                                                ui.add(egui::SelectableLabel::new(
+                                                    selected,
+                                                    egui::RichText::new(&layer.name).strong(),
+                                                ))
+                                            })
+                                            .inner
                                             .interact(Sense::click_and_drag())
-                                            .on_hover_text("Double-click to rename, drag to reorder");
+                                            .on_hover_text(format!(
+                                                "{}\nDouble-click to rename, drag to reorder",
+                                                layer.name
+                                            ));
                                         resp.dnd_set_drag_payload(LayerDrag(i));
                                         if resp.dragged() {
                                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -3103,16 +3207,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             ));
                                         }
                                         // The key-jump link, shown only while there is one.
-                                        if let Some(s) = key_links[i] {
+                                        if let (Some(s), Some(text)) = (key_links[i], chip) {
                                             let chip = ui
-                                                .add(
-                                                    egui::Button::new(
-                                                        egui::RichText::new(format!("{} {}", ic::LINK, names[s]))
-                                                            .size(11.0)
-                                                            .color(theme::accent()),
-                                                    )
-                                                    .frame(false),
-                                                )
+                                                .add(egui::Button::new(text).frame(false).truncate())
                                                 .on_hover_text(format!(
                                                     "Key jumps here also stop at {}'s drawings. Click to unlink.",
                                                     names[s]
@@ -3274,6 +3371,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         };
                                         egui::ComboBox::from_id_salt(("lines_from", i))
                                             .selected_text(egui::RichText::new(current).size(11.0))
+                                            .truncate()
                                             .show_ui(ui, |ui| {
                                                 ui.selectable_value(&mut layer.lines_from, None, "— none —");
                                                 for (j, name) in names.iter().enumerate() {
@@ -3438,22 +3536,43 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 state.orient_layers(&layers, o);
             }
 
-            // --- Layer transform ---
-            ui.add_space(6.0);
-            egui::CollapsingHeader::new(theme::icon_text(ic::RECTANGLE, "Transform"))
-                .id_salt("layers_transform")
-                .default_open(false)
-                .show(ui, |ui| layer_transform_section(state, ui));
+            // The sections under the list, laid out in a child that claims no
+            // room by itself. Opening one makes it taller than last frame's
+            // height, which the list made room for. Claiming the overflow
+            // would grow the panel for good, so the overflow is only claimed
+            // once the list is as short as it goes. Otherwise it's clipped for
+            // the frame until the list shrinks next frame.
+            let squeezable = list_h > LAYER_LIST_MIN_H;
+            let bottom = ui.max_rect().bottom() - shortfall;
+            let mut below = ui.new_child(egui::UiBuilder::new().id_salt("layers_below"));
+            if squeezable {
+                let mut clip = below.clip_rect();
+                clip.max.y = clip.max.y.min(bottom);
+                below.set_clip_rect(clip);
+            }
+            {
+                let ui = &mut below;
+                // --- Layer transform ---
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new(theme::icon_text(ic::RECTANGLE, "Transform"))
+                    .id_salt("layers_transform")
+                    .default_open(false)
+                    .show(ui, |ui| layer_transform_section(state, ui));
 
-            // --- Layer canvas ---
-            //
-            // Strokes are clipped to the cell buffer, so a layer parked off to
-            // the side of the camera still only gets a frame-sized sheet to
-            // draw on until it's expanded here.
-            egui::CollapsingHeader::new(theme::icon_text(ic::FRAME_CORNERS, "Layer canvas"))
-                .id_salt("layers_canvas")
-                .default_open(false)
-                .show(ui, |ui| layer_canvas_section(state, ui));
+                // --- Layer canvas ---
+                //
+                // Strokes are clipped to the cell buffer, so a layer parked off to
+                // the side of the camera still only gets a frame-sized sheet to
+                // draw on until it's expanded here.
+                egui::CollapsingHeader::new(theme::icon_text(ic::FRAME_CORNERS, "Layer canvas"))
+                    .id_salt("layers_canvas")
+                    .default_open(false)
+                    .show(ui, |ui| layer_canvas_section(state, ui));
+            }
+            let r = below.min_rect();
+            ui.data_mut(|d| d.insert_temp(below_id, r.bottom() - list.inner_rect.bottom()));
+            let claim = if squeezable { r.bottom().min(bottom).max(r.top()) } else { r.bottom() };
+            ui.advance_cursor_after_rect(Rect::from_min_max(r.min, egui::pos2(r.max.x, claim)));
     }
 }
 
@@ -3577,7 +3696,9 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
         });
     });
 
-    ui.horizontal(|ui| {
+    // Wider than the panel's default width: wrapped, rather than widening
+    // the panel for good the first time the section opens.
+    ui.horizontal_wrapped(|ui| {
         let add = combo_text(state, Action::TransformKeyAdd);
         if ui
             .button(theme::icon_text(ic::PLUS_SQUARE, &format!("Add key ({add})")))
@@ -3732,9 +3853,15 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
             // columns follow it marked, and a folded group's are left out.
             let cols: Vec<usize> = state.project.panel_rows().into_iter().rev().collect();
 
+            // The sheet takes the panel's height, whatever the frame and
+            // layer counts. Sized to its rows, every frame added grew the
+            // panel, and so did the scroll bar appearing; egui never shrinks
+            // a window back. Floored, and see `title_shortfall`, so the
+            // panel holds still frame to frame and on a sideways drag.
+            let shortfall = title_bar_shortfall(ui.ctx(), PanelId::Xsheet);
             egui::ScrollArea::both()
-                .auto_shrink([false, true])
-                .max_height(260.0)
+                .auto_shrink([false, false])
+                .max_height((ui.available_height() - shortfall).floor().max(0.0))
                 .show(ui, |ui| {
                     // Striped by hand: egui stripes a grid only as wide as
                     // its columns add up to, which stops short of the panel
@@ -3833,7 +3960,9 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
         return;
     }
     let mut open = state.show_brush_settings;
-    egui::Window::new(theme::icon_text(ic::PAINT_BRUSH, "Brush settings"))
+    let title = theme::icon_text(ic::PAINT_BRUSH, "Brush settings");
+    let shortfall = title_shortfall(ctx, &title);
+    egui::Window::new(title)
         // Pinned, for the same reason as the Settings window: egui derives a
         // window's persisted position from its title, so a rename would strand
         // it off-screen.
@@ -3846,30 +3975,33 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             drag_by_title_only(ui);
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                theme::section_header(ui, ic::PEN_NIB, "Preset");
-                crate::ui::brush_picker::brush_grid(state, ui);
-                if ui
-                    .small_button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import from Krita…"))
-                    .on_hover_text("Copy brushes from your Krita into this app")
-                    .clicked()
-                {
-                    state.open_krita_import();
-                }
+            // Taller than the window, the list fills it; see `title_shortfall`.
+            egui::ScrollArea::vertical()
+                .max_height((ui.available_height() - shortfall).max(0.0))
+                .show(ui, |ui| {
+                    theme::section_header(ui, ic::PEN_NIB, "Preset");
+                    crate::ui::brush_picker::brush_grid(state, ui);
+                    if ui
+                        .small_button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import from Krita…"))
+                        .on_hover_text("Copy brushes from your Krita into this app")
+                        .clicked()
+                    {
+                        state.open_krita_import();
+                    }
 
-                ui.add_space(6.0);
-                theme::section_header(ui, ic::SLIDERS, "Dynamics");
-                brush_dynamics(state, ui);
+                    ui.add_space(6.0);
+                    theme::section_header(ui, ic::SLIDERS, "Dynamics");
+                    brush_dynamics(state, ui);
 
-                ui.add_space(6.0);
-                theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
-                smoothing_controls(state, ui);
+                    ui.add_space(6.0);
+                    theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
+                    smoothing_controls(state, ui);
 
-                ui.add_space(6.0);
-                egui::CollapsingHeader::new(theme::icon_text(ic::PEN, "Tablet"))
-                    .default_open(false)
-                    .show(ui, |ui| tablet_diagnostics(state, ui));
-            });
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new(theme::icon_text(ic::PEN, "Tablet"))
+                        .default_open(false)
+                        .show(ui, |ui| tablet_diagnostics(state, ui));
+                });
         });
     state.show_brush_settings = open;
 }
@@ -4499,7 +4631,9 @@ fn grid_settings_window(state: &mut AppState, ctx: &egui::Context) {
     };
     let title = format!("Grid {} settings", state.perspective.active + 1);
     let mut open = true;
-    egui::Window::new(theme::icon_text(ic::GEAR, &title))
+    let title = theme::icon_text(ic::GEAR, &title);
+    let shortfall = title_shortfall(ctx, &title);
+    egui::Window::new(title)
         // Pinned: egui keys a window's remembered position on its title, and
         // this one's changes with the grid.
         .id(egui::Id::new("window_grid_settings"))
@@ -4511,7 +4645,10 @@ fn grid_settings_window(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             drag_by_title_only(ui);
-            egui::ScrollArea::vertical().show(ui, |ui| grid_settings(state, ui));
+            // Taller than the window, the body fills it; see `title_shortfall`.
+            egui::ScrollArea::vertical()
+                .max_height((ui.available_height() - shortfall).max(0.0))
+                .show(ui, |ui| grid_settings(state, ui));
         });
     state.show_grid_settings &= open;
 }
@@ -11424,7 +11561,43 @@ mod window_layout_tests {
         assert_eq!(wide.chars().count(), 12);
         assert!(wide.ends_with(".anim"), "{wide}");
     }
+
+    fn settle_layers(ctx: &egui::Context, state: &mut AppState) -> Shapes {
+        settle(ctx, &mut |ctx| panel_window(state, ctx, PanelId::Layers, [20.0, 20.0], 252.0, true, None))
+    }
+
+    /// Each cleanup layer is one more row, and a cleanup of a cleanup is a
+    /// longer name ("Body clean clean") with a longer link chip. Neither may
+    /// grow the panel: the list scrolls and the names are cut short.
+    #[test]
+    fn cleanup_layers_leave_the_layers_panel_its_size() {
+        let (ctx, mut state) = setup();
+        state.project.layers[0].name = "Body".into();
+        let id = egui::Id::new(panel_key(PanelId::Layers));
+        settle_layers(&ctx, &mut state);
+        let before = window(&ctx, id);
+        let mut shapes = Shapes::new();
+        for _ in 0..6 {
+            state.add_cleanup_layer(state.project.current_layer);
+            shapes = settle_layers(&ctx, &mut state);
+            let now = window(&ctx, id);
+            assert!(
+                (now.size() - before.size()).length() < 0.5,
+                "{before:?} → {now:?} at {} layers",
+                state.project.layers.len()
+            );
+        }
+        // Seven rows don't fit: the bottom one, the rough, is scrolled away.
+        let panel = window(&ctx, id);
+        let shown = |name: &str| texts(&shapes).iter().any(|(t, r)| t == name && panel.contains_rect(*r));
+        assert!(shown(&state.project.layers[6].name), "the new top row is in view");
+        assert!(!shown("Body"), "the rough is scrolled out of view");
+    }
 }
+
+#[cfg(test)]
+#[path = "sweep_tests.rs"]
+mod sweep_tests;
 
 #[cfg(test)]
 mod canvas_gpu_tests {
