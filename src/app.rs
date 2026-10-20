@@ -9252,6 +9252,58 @@ mod tests {
         assert_eq!(st.brush.hardness, BrushSettings::default_shape().hardness);
     }
 
+    /// Brush size keys keep Shape and the pen in step, with the panels up
+    /// and the keys going through `handle_keys` the way `update` runs them.
+    #[test]
+    fn size_keys_keep_shape_and_the_pen_in_step() {
+        let mut st = AppState::for_test();
+        st.shortcuts = ShortcutMap::default();
+        st.show_panels = true;
+        let ctx = egui::Context::default();
+        let frame = |st: &mut AppState, key: Option<egui::Key>| {
+            let events = key
+                .map(|key| egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .into_iter()
+                .collect();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 1000.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                let tab_focus = st.handle_keys(ctx);
+                ui::shell::draw(st, ctx);
+                st.drop_stray_focus(ctx, tab_focus);
+            });
+        };
+        frame(&mut st, None);
+        frame(&mut st, Some(egui::Key::W));
+        assert_eq!(st.tool, ActiveTool::Ink);
+        let start = st.brush.radius;
+        for _ in 0..3 {
+            frame(&mut st, Some(egui::Key::CloseBracket));
+        }
+        let ink = st.brush.radius;
+        assert!(ink > start, "{start} -> {ink}");
+        frame(&mut st, Some(egui::Key::G));
+        assert_eq!(st.tool, ActiveTool::Shape);
+        assert_eq!(st.brush.radius, ink, "Shape took the ink's new size");
+        frame(&mut st, Some(egui::Key::OpenBracket));
+        let shape = st.brush.radius;
+        assert!(shape < ink);
+        frame(&mut st, Some(egui::Key::W));
+        assert_eq!(st.brush.radius, shape, "the ink took Shape's new size");
+    }
+
     /// A Thickness set on Shape outlasts a restart, on the pen it follows.
     #[test]
     fn a_shape_thickness_is_saved_with_its_pen() {
