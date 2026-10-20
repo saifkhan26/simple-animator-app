@@ -695,9 +695,8 @@ impl AppState {
         if t != self.tool {
             self.land_float();
             self.cancel_gesture();
-            self.tool_brushes[self.tool.idx()] = self.brush.clone();
-            self.tool = t;
-            self.brush = self.tool_brushes[t.idx()].clone();
+            self.stash_brush();
+            self.load_brush(t);
         }
         if t == ActiveTool::Perspective {
             self.ensure_perspective_grid();

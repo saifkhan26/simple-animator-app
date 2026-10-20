@@ -1146,6 +1146,9 @@ pub struct AppState {
     pub selection_tex: Option<TextureHandle>,
     /// Per-tool brush settings preserved across tool switches.
     pub tool_brushes: [BrushSettings; TOOL_COUNT],
+    /// Pencil or Ink, whichever was active last: the pen whose size Shape
+    /// draws at. Session-only; the app comes back on the pencil anyway.
+    pub last_pen: ActiveTool,
     pub stroke: Option<StrokeBuilder>,
     /// CellId being painted into during the current stroke.
     pub stroke_target: Option<CellId>,
@@ -1585,6 +1588,7 @@ impl AppState {
             sel_tex_stale: false,
             selection_tex: None,
             tool_brushes: restore_tool_brushes(prefs.tool_brushes.clone()),
+            last_pen: ActiveTool::Pencil,
             stroke: None,
             stroke_target: None,
             shape_drag: None,
@@ -1739,9 +1743,8 @@ impl AppState {
         }
         // Brushes are the artist's, not the project's: keep every tool's,
         // the active one included, and come back on the pencil.
-        self.tool_brushes[self.tool.idx()] = self.brush.clone();
-        self.tool = ActiveTool::Pencil;
-        self.brush = self.tool_brushes[ActiveTool::Pencil.idx()].clone();
+        self.stash_brush();
+        self.load_brush(ActiveTool::Pencil);
         self.grid_drag = None;
         self.snap_lock = None;
         self.stroke = None;
@@ -5282,6 +5285,28 @@ impl AppState {
         self.tool_brushes[idx].color = c;
     }
 
+    /// Write the active brush back to its slot, for a tool switch or a save
+    /// to restore from. Shape has no size of its own, so its Thickness goes
+    /// to the pen it follows too.
+    pub(crate) fn stash_brush(&mut self) {
+        self.tool_brushes[self.tool.idx()] = self.brush.clone();
+        match self.tool {
+            ActiveTool::Pencil | ActiveTool::Ink => self.last_pen = self.tool,
+            ActiveTool::Shape => self.tool_brushes[self.last_pen.idx()].radius = self.brush.radius,
+            _ => {}
+        }
+    }
+
+    /// Make `t` the active tool with its stored brush. Shape draws at the
+    /// size of the pen used last, not at a size of its own.
+    pub(crate) fn load_brush(&mut self, t: ActiveTool) {
+        self.tool = t;
+        self.brush = self.tool_brushes[t.idx()].clone();
+        if t == ActiveTool::Shape {
+            self.brush.radius = self.tool_brushes[self.last_pen.idx()].radius;
+        }
+    }
+
     /// Pin the current brush colour. Re-pinning a colour already held is a
     /// no-op rather than a duplicate.
     pub fn pin_swatch(&mut self) {
@@ -5312,15 +5337,14 @@ impl AppState {
     pub fn commit_screen_pick(&mut self, color: [u8; 4]) {
         // The active brush may have changed since its slot was last written
         // (a preset, a slider); keep that before reloading from the slots.
-        self.tool_brushes[self.tool.idx()] = self.brush.clone();
+        self.stash_brush();
         // Apply to the active brush and every tool's stored colour so the sample
         // sticks across tool switches.
         for b in &mut self.tool_brushes {
             b.color = color;
         }
         let tool = self.screen_pick_return_tool;
-        self.tool = tool;
-        self.brush = self.tool_brushes[tool.idx()].clone();
+        self.load_brush(tool);
         self.brush.color = color;
         self.tool_brushes[tool.idx()].color = color;
         self.end_screen_pick();
@@ -6164,9 +6188,10 @@ impl eframe::App for AppState {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         // Only a tool switch writes the active brush back to its slot, so a
-        // change made since the last switch lives in `brush` alone.
-        let mut tool_brushes = self.tool_brushes.to_vec();
-        tool_brushes[self.tool.idx()] = self.brush.clone();
+        // change made since the last switch lives in `brush` alone until this
+        // stashes it.
+        self.stash_brush();
+        let tool_brushes = self.tool_brushes.to_vec();
         eframe::set_value(
             storage,
             UI_PREFS_KEY,
@@ -9200,6 +9225,61 @@ mod tests {
         st.reset_with(640, 480, 24.0);
         assert_eq!(st.tool, ActiveTool::Pencil);
         assert_eq!(st.brush.radius, 33.0);
+        assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
+    }
+
+    /// Shape draws at the size of the pen used last, and its Thickness goes
+    /// back to that pen. The two pens keep their own sizes.
+    #[test]
+    fn shape_shares_its_size_with_the_last_pen() {
+        let mut st = AppState::for_test();
+        st.brush.radius = 12.0;
+        st.set_tool(ActiveTool::Ink);
+        st.brush.radius = 4.0;
+        st.set_tool(ActiveTool::Shape);
+        assert_eq!(st.brush.radius, 4.0, "from the ink");
+        st.brush.radius = 7.0;
+        st.set_tool(ActiveTool::Fill);
+        st.set_tool(ActiveTool::Shape);
+        assert_eq!(st.brush.radius, 7.0, "kept through another tool");
+        st.set_tool(ActiveTool::Ink);
+        assert_eq!(st.brush.radius, 7.0, "Thickness went back to the ink");
+        st.set_tool(ActiveTool::Pencil);
+        assert_eq!(st.brush.radius, 12.0, "the pencil kept its own");
+        st.set_tool(ActiveTool::Shape);
+        assert_eq!(st.brush.radius, 12.0, "now from the pencil");
+        // Only the size is shared: Shape keeps its own hard edge.
+        assert_eq!(st.brush.hardness, BrushSettings::default_shape().hardness);
+    }
+
+    /// A Thickness set on Shape outlasts a restart, on the pen it follows.
+    #[test]
+    fn a_shape_thickness_is_saved_with_its_pen() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.set_tool(ActiveTool::Shape);
+        st.brush.radius = 21.0;
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let mut back = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(back.brush.radius, 21.0, "back on the pencil at Shape's size");
+        back.set_tool(ActiveTool::Shape);
+        assert_eq!(back.brush.radius, 21.0);
+    }
+
+    /// A colour picked off the screen while on Shape leaves its size alone.
+    #[test]
+    fn a_screen_pick_on_shape_keeps_the_pen_size() {
+        let mut st = AppState::for_test();
+        st.set_tool(ActiveTool::Ink);
+        st.brush.radius = 5.0;
+        st.set_tool(ActiveTool::Shape);
+        st.brush.radius = 9.0;
+        st.begin_screen_pick();
+        st.commit_screen_pick([1, 2, 3, 255]);
+        assert_eq!(st.tool, ActiveTool::Shape);
+        assert_eq!(st.brush.radius, 9.0);
         assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
     }
 

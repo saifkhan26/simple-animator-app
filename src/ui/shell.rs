@@ -1082,7 +1082,14 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 } else {
                     "Thickness"
                 };
-                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=64.0).text(label));
+                // Same range as the pens' Size: the slider clamps whatever it
+                // shows, so a narrower one would cut a big pen down.
+                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=128.0).text(label))
+                    .on_hover_text(format!(
+                        "Shared with the {}, the pen you used last: change one and the \
+                         other follows.",
+                        tool_name(state.last_pen)
+                    ));
             } else if state.tool == ActiveTool::Tracker {
                 ui.label(
                     egui::RichText::new(
@@ -10298,6 +10305,22 @@ mod button_drag_tests {
         state.show_panels = true;
         frame(&ctx, &mut state, vec![]);
         frame(&ctx, &mut state, vec![]);
+    }
+
+    /// Shape's Thickness slider shows a big pen's size without cutting it
+    /// down: an egui slider clamps whatever it shows to its range.
+    #[test]
+    fn the_shape_panel_keeps_a_big_pen_size() {
+        let mut state = state();
+        state.brush.radius = 100.0;
+        state.set_tool(ActiveTool::Shape);
+        state.show_panels = true;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        frame(&ctx, &mut state, vec![]);
+        assert_eq!(state.brush.radius, 100.0);
+        state.set_tool(ActiveTool::Pencil);
+        assert_eq!(state.brush.radius, 100.0);
     }
 
     #[test]
