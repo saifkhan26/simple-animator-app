@@ -7443,6 +7443,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         for (icon, label, kind) in [
             (ic::IMAGES, "Export PNG sequence…", ExportKind::PngSequence),
             (ic::FILM_REEL, "Export animated GIF…", ExportKind::Gif),
+            (ic::FILE_IMAGE, "Export animated WebP…", ExportKind::Webp),
             (ic::FILM_STRIP, "Export MP4…", ExportKind::Mp4),
             (ic::GRID_FOUR, "Export sprite sheet…", ExportKind::SpriteSheet),
         ] {
@@ -7497,6 +7498,13 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             .clicked()
         {
             state.open_gif_import();
+            ui.close_menu();
+        }
+        if ui
+            .button(theme::icon_text(ic::FILE_IMAGE, "Import WebP…"))
+            .clicked()
+        {
+            state.open_webp_import();
             ui.close_menu();
         }
         if ui
@@ -7918,7 +7926,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                         "Ping-pong (forward, then back)",
                     ),
                 );
-                // A GIF repeats forever by itself; only files with an end
+                // A GIF or WebP repeats by itself; only files with an end
                 // need a length.
                 if matches!(kind, ExportKind::Mp4 | ExportKind::PngSequence) {
                     ui.horizontal(|ui| {
@@ -7934,6 +7942,24 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                     });
                     ui.label(
                         egui::RichText::new("Rounds up to whole loops, so it repeats seamlessly.")
+                            .small()
+                            .color(theme::text_muted()),
+                    );
+                }
+                if kind == ExportKind::Webp {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut state.export_cfg.webp_stop, "Stop after");
+                        let plays = state.export_cfg.webp_plays;
+                        ui.add_enabled(
+                            state.export_cfg.webp_stop,
+                            egui::DragValue::new(&mut state.export_cfg.webp_plays)
+                                .range(1..=u16::MAX)
+                                .speed(0.1)
+                                .suffix(if plays == 1 { " play" } else { " plays" }),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new("Off, it repeats forever, like a GIF.")
                             .small()
                             .color(theme::text_muted()),
                     );
@@ -8069,7 +8095,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
-/// Start/end frame-range picker for video / GIF import (dual-knob slider plus
+/// Start/end frame-range picker for video / GIF / WebP import (dual-knob slider plus
 /// exact numeric inputs, with live previews of the start/end frames). The active
 /// layer is untouched; the chosen range is laid onto a new layer from frame 0.
 fn import_range_dialog(state: &mut AppState, ctx: &egui::Context) {

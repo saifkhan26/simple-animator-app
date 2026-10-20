@@ -1,4 +1,4 @@
-//! Persistence: project save, PNG sequence export, GIF export, ORA read.
+//! Persistence: project save, PNG sequence export, GIF / WebP export, ORA read.
 //!
 //! Phase A: only `png_save` (single canvas → PNG file via rfd dialog).
 
@@ -16,3 +16,5 @@ pub mod png_seq;
 pub mod project_file;
 pub mod sprite_sheet;
 pub mod video_import;
+pub mod webp_export;
+pub mod webp_import;

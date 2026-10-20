@@ -110,6 +110,7 @@ dependencies = [
  "gif",
  "glam",
  "image",
+ "image-webp",
  "libloading",
  "log",
  "pollster",

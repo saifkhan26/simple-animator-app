@@ -76,6 +76,7 @@ fn all() -> Vec<Win> {
         Win::NewProject,
         Win::Export(ExportKind::PngSequence),
         Win::Export(ExportKind::Gif),
+        Win::Export(ExportKind::Webp),
         Win::Export(ExportKind::Mp4),
         Win::Export(ExportKind::SpriteSheet),
         Win::ImportRange,
@@ -123,7 +124,7 @@ impl Win {
             Win::ImportRange => {
                 let frames = vec![crate::doc::canvas::Canvas::new(64, 48); 5];
                 state.import_range = Some(ImportRangeState {
-                    source: ImportSource::Gif(frames),
+                    source: ImportSource::Frames { frames, format: "GIF" },
                     total: 5,
                     start: 0,
                     end: 4,

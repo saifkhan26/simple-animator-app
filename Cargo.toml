@@ -34,6 +34,10 @@ image  = { version = "0.25", default-features = false, features = ["png", "jpeg"
 rfd    = "0.14"
 gif         = "0.13"
 color_quant = "1"
+# Animated WebP export and import. Already in the tree via `image`'s webp
+# feature; named here because the animation container is written by hand —
+# image-webp only encodes still images.
+image-webp  = "0.2"
 
 # Project files are mostly transparent pixels — four zero bytes each — so the
 # `.anim` payload deflates by one to two orders of magnitude. Already in the

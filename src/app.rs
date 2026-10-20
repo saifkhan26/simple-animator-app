@@ -11,7 +11,7 @@ pub use button_drag::ButtonDragState;
 pub use select::SelGesture;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -112,6 +112,7 @@ impl Default for Mp4ExportConfig {
 pub enum ExportKind {
     PngSequence,
     Gif,
+    Webp,
     Mp4,
     SpriteSheet,
 }
@@ -121,6 +122,7 @@ impl ExportKind {
         match self {
             ExportKind::PngSequence => "Export PNG sequence",
             ExportKind::Gif => "Export animated GIF",
+            ExportKind::Webp => "Export animated WebP",
             ExportKind::Mp4 => "Export MP4",
             ExportKind::SpriteSheet => "Export sprite sheet",
         }
@@ -131,13 +133,14 @@ impl ExportKind {
         match self {
             ExportKind::PngSequence => "Exporting PNG sequence…",
             ExportKind::Gif => "Exporting GIF…",
+            ExportKind::Webp => "Exporting WebP…",
             ExportKind::Mp4 => "Exporting MP4…",
             ExportKind::SpriteSheet => "Exporting sprite sheet…",
         }
     }
 }
 
-/// Everything the shared export dialog edits. One struct for all four formats:
+/// Everything the shared export dialog edits. One struct for every format:
 /// the range applies to every one of them, and the format-specific parts are
 /// small enough that separate configs would cost more than they save.
 pub struct ExportConfig {
@@ -149,12 +152,15 @@ pub struct ExportConfig {
     /// Sprite-sheet columns; `0` = near-square.
     pub sheet_columns: usize,
     pub sheet_padding: u32,
-    /// Play the range forward then back (MP4, PNG sequence, GIF).
+    /// Play the range forward then back (MP4, PNG sequence, GIF, WebP).
     pub ping_pong: bool,
     /// Repeat the range to fill `loop_secs`, rounded up to whole loops (MP4,
-    /// PNG sequence — a GIF repeats forever on its own).
+    /// PNG sequence — a GIF or WebP repeats on its own).
     pub loop_on: bool,
     pub loop_secs: f32,
+    /// A WebP stops after `webp_plays` plays instead of repeating forever.
+    pub webp_stop: bool,
+    pub webp_plays: u16,
 }
 
 impl ExportConfig {
@@ -180,6 +186,8 @@ impl Default for ExportConfig {
             ping_pong: false,
             loop_on: false,
             loop_secs: 10.0,
+            webp_stop: false,
+            webp_plays: 1,
         }
     }
 }
@@ -895,11 +903,12 @@ pub enum ImportSource {
     /// Video file; frames extracted on confirm via ffmpeg. `fps` drives the
     /// timestamp seek used for dialog previews.
     Video { path: PathBuf, fps: f64 },
-    /// GIF frames already decoded to full-size canvases.
-    Gif(Vec<Canvas>),
+    /// Frames of an animated image already decoded to full-size canvases.
+    /// `format` names it: "GIF", "WebP".
+    Frames { frames: Vec<Canvas>, format: &'static str },
 }
 
-/// Backing state for the frame-range import dialog (video / GIF).
+/// Backing state for the frame-range import dialog (video / GIF / WebP).
 pub struct ImportRangeState {
     pub source: ImportSource,
     /// Total number of source frames (slider/input upper bound is `total - 1`).
@@ -914,8 +923,12 @@ pub type PreviewFrame = (u32, u32, Vec<u8>);
 /// A long-running import step running on a worker thread. Polled each frame so
 /// the UI never blocks on ffmpeg / decoding. Only one runs at a time.
 pub enum BgJob {
-    /// Decoding a GIF before the range dialog opens.
-    GifDecode(Receiver<Result<Vec<Canvas>>>),
+    /// Decoding an animated image (`format`: GIF, WebP) before the range
+    /// dialog opens.
+    FramesDecode {
+        rx: Receiver<Result<Vec<Canvas>>>,
+        format: &'static str,
+    },
     /// Probing a video's frame count / fps before the range dialog opens.
     VideoProbe {
         rx: Receiver<Result<(usize, f64)>>,
@@ -1343,7 +1356,7 @@ pub struct AppState {
     pub show_export: bool,
     pub export_cfg: ExportConfig,
 
-    /// Frame-range import dialog (video / GIF) visibility + backing state.
+    /// Frame-range import dialog (video / GIF / WebP) visibility + backing state.
     pub show_import_range: bool,
     pub import_range: Option<ImportRangeState>,
 
@@ -2641,19 +2654,35 @@ impl AppState {
     /// File → Import GIF…: decode all frames on a worker thread, then open the
     /// range dialog.
     pub fn open_gif_import(&mut self) {
+        self.open_frames_import("GIF", "gif", "Decoding GIF…", crate::io::gif_import::decode_all);
+    }
+
+    /// File → Import WebP…: as [`Self::open_gif_import`]. A still WebP comes
+    /// in as one frame.
+    pub fn open_webp_import(&mut self) {
+        self.open_frames_import("WebP", "webp", "Decoding WebP…", crate::io::webp_import::decode_all);
+    }
+
+    fn open_frames_import(
+        &mut self,
+        format: &'static str,
+        ext: &'static str,
+        busy: &'static str,
+        decode: fn(&Path) -> Result<Vec<Canvas>>,
+    ) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("GIF", &["gif"])
-            .set_title("Choose a GIF to import")
+            .add_filter(format, &[ext])
+            .set_title(format!("Choose a {format} to import"))
             .pick_file()
         else {
             return;
         };
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = tx.send(crate::io::gif_import::decode_all(&path));
+            let _ = tx.send(decode(&path));
         });
-        self.bg_job = Some(BgJob::GifDecode(rx));
-        self.bg_label = Some("Decoding GIF…");
+        self.bg_job = Some(BgJob::FramesDecode { rx, format });
+        self.bg_label = Some(busy);
     }
 
     /// File → Export MP4…: pick an output path, then encode the whole project on
@@ -2671,6 +2700,10 @@ impl AppState {
             ExportKind::Gif => dialog
                 .add_filter("GIF", &["gif"])
                 .set_file_name("animation.gif")
+                .save_file(),
+            ExportKind::Webp => dialog
+                .add_filter("WebP", &["webp"])
+                .set_file_name("animation.webp")
                 .save_file(),
             ExportKind::Mp4 => dialog
                 .add_filter("MP4 video", &["mp4"])
@@ -2702,6 +2735,8 @@ impl AppState {
                 .preset_idx
                 .min(MP4_PRESETS.len() - 1)],
         };
+        // 0 = forever, as the file has it.
+        let plays = if self.export_cfg.webp_stop { self.export_cfg.webp_plays.max(1) } else { 0 };
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -2716,6 +2751,9 @@ impl AppState {
                 }
                 ExportKind::Gif => {
                     crate::io::gif_export::export_to(&project, &path, &order, cams.as_deref())
+                }
+                ExportKind::Webp => {
+                    crate::io::webp_export::export_to(&project, &path, &order, cams.as_deref(), plays)
                 }
                 ExportKind::Mp4 => crate::io::mp4_export::export_to(
                     &project,
@@ -2734,7 +2772,7 @@ impl AppState {
         self.bg_label = Some(kind.busy());
     }
 
-    /// Confirm the frame-range dialog: slice (GIF, instant) or extract (video,
+    /// Confirm the frame-range dialog: slice (GIF / WebP, instant) or extract (video,
     /// on a worker thread) the chosen `[start, end]` range onto a new layer.
     pub fn confirm_import_range(&mut self) {
         let Some(st) = self.import_range.take() else {
@@ -2759,13 +2797,13 @@ impl AppState {
                 });
                 self.bg_label = Some("Importing video…");
             }
-            ImportSource::Gif(frames) => {
+            ImportSource::Frames { frames, format } => {
                 let slice: Vec<Canvas> = frames
                     .into_iter()
                     .skip(start)
                     .take(end - start + 1)
                     .collect();
-                self.import_cells_as_layer("Imported GIF", slice, false);
+                self.import_cells_as_layer(format!("Imported {format}"), slice, false);
             }
         }
     }
@@ -3586,16 +3624,16 @@ impl AppState {
             return;
         };
         self.bg_job = match job {
-            BgJob::GifDecode(rx) => match rx.try_recv() {
+            BgJob::FramesDecode { rx, format } => match rx.try_recv() {
                 Ok(res) => {
                     self.bg_label = None;
-                    self.on_gif_decoded(res);
+                    self.on_frames_decoded(res, format);
                     None
                 }
-                Err(TryRecvError::Empty) => Some(BgJob::GifDecode(rx)),
+                Err(TryRecvError::Empty) => Some(BgJob::FramesDecode { rx, format }),
                 Err(TryRecvError::Disconnected) => {
                     self.bg_label = None;
-                    log::error!("GIF decode worker died");
+                    log::error!("{format} decode worker died");
                     None
                 }
             },
@@ -3668,22 +3706,22 @@ impl AppState {
         };
     }
 
-    fn on_gif_decoded(&mut self, res: Result<Vec<Canvas>>) {
+    fn on_frames_decoded(&mut self, res: Result<Vec<Canvas>>, format: &'static str) {
         match res {
             Ok(frames) if !frames.is_empty() => {
                 let total = frames.len();
                 self.preview_tex.clear();
                 self.preview_rx = None;
                 self.import_range = Some(ImportRangeState {
-                    source: ImportSource::Gif(frames),
+                    source: ImportSource::Frames { frames, format },
                     total,
                     start: 0,
                     end: total - 1,
                 });
                 self.show_import_range = true;
             }
-            Ok(_) => log::error!("GIF has no frames"),
-            Err(e) => log::error!("GIF decode failed: {e:#}"),
+            Ok(_) => log::error!("{format} has no frames"),
+            Err(e) => log::error!("{format} decode failed: {e:#}"),
         }
     }
 
@@ -3713,7 +3751,7 @@ impl AppState {
     }
 
     /// Ensure a range-dialog preview texture exists (or is being fetched) for
-    /// source frame `idx`. GIF previews are built instantly from decoded frames;
+    /// source frame `idx`. GIF / WebP previews are built instantly from decoded frames;
     /// video previews are fetched on a worker thread (one at a time).
     pub fn request_preview(&mut self, ctx: &egui::Context, idx: usize) {
         // Decide what to do without holding an import_range borrow across the
@@ -3728,7 +3766,7 @@ impl AppState {
         } else {
             match &self.import_range {
                 Some(st) => match &st.source {
-                    ImportSource::Gif(frames) => match frames.get(idx) {
+                    ImportSource::Frames { frames, .. } => match frames.get(idx) {
                         Some(c) => Act::Have(preview_color_image(c.width, c.height, &c.pixels())),
                         None => Act::Nothing,
                     },

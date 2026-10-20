@@ -46,8 +46,8 @@ threads except export.
   found.
 - **Undo / Redo** with bounded history (80 entries), stored as dirty-rect
   pixel snapshots so memory stays small.
-- **Export** to PNG sequence, animated GIF (NeuQuant palette), MP4, sprite
-  sheet, or a single PNG of the current flattened frame — each over a chosen
+- **Export** to PNG sequence, animated GIF (NeuQuant palette), animated WebP
+  (lossless), MP4, sprite sheet, or a single PNG of the current flattened frame — each over a chosen
   frame range.
 - **Edit in Krita** — opens the whole animation in Krita and brings each
   Krita save back as one undo step, changing only what Krita changed. Plain
@@ -426,6 +426,7 @@ canvas image — useful when working in transparent mode.
 | Current frame as PNG       | **File → Save PNG…**             |
 | PNG sequence               | **File → Export PNG sequence…**  |
 | Animated GIF               | **File → Export animated GIF…**  |
+| Animated WebP              | **File → Export animated WebP…** |
 | MP4 (needs ffmpeg on PATH) | **File → Export MP4…**           |
 | Sprite sheet               | **File → Export sprite sheet…**  |
 
@@ -437,13 +438,14 @@ count, and for a sheet the pixel dimensions, before you commit to it.
 
 A **Playback** section shapes how the range plays:
 
-- **Ping-pong** (MP4, PNG sequence, GIF) — forward, then back, without
+- **Ping-pong** (MP4, PNG sequence, GIF, WebP) — forward, then back, without
   doubling the end frames, so the wrap is seamless.
 - **Loop to N s** (MP4, PNG sequence) — repeats the range to fill that many
   seconds, rounded *up* to whole loops so the file ends on a loop boundary and
   a player that repeats it repeats it seamlessly. 21 frames at 24 fps looped
   to 10 s gives 12 loops, 10.5 s; the dialog shows the real length before you
-  export. GIFs repeat forever on their own, so they don't need it.
+  export. GIFs and WebPs repeat on their own, so they don't need it.
+- **Stop after N plays** (WebP) — off, it repeats forever like a GIF.
 
 These last until you quit, like the other export settings.
 
@@ -464,6 +466,14 @@ Export flattens visible non-reference layers per frame. The X-sheet's holds are
 resolved, so a single keyed cell held over 3 frames produces 3 identical PNGs
 (or GIF frames) — matching what playback shows. A flipped view is never
 exported.
+
+An animated WebP is lossless: exact colours and 8-bit alpha, where a GIF has a
+256-colour palette and on/off transparency. Each frame stores only the
+rectangle that changed, and a held drawing is stored once and shown for longer,
+so line art on twos comes out much smaller than the GIF. Full-colour painting
+at 4K can come out bigger than the GIF, which gets its size by dropping
+colours. **File → Import WebP…** brings one back in through the same
+frame-range dialog as *Import GIF…*.
 
 ## Krita
 
