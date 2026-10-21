@@ -10022,20 +10022,9 @@ mod fill_tests {
     const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
     const RED: [u8; 4] = [255, 0, 0, 255];
 
-    thread_local! {
-        /// Each test's clock, a 60th of a second a frame. Without one egui's
-        /// time stands still, and every click after the first is a double.
-        static CLOCK: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
-    }
-
     fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
-        let time = CLOCK.with(|c| {
-            c.set(c.get() + 1.0 / 60.0);
-            c.get()
-        });
         let raw = egui::RawInput {
             screen_rect: Some(SCREEN),
-            time: Some(time),
             events,
             ..Default::default()
         };
@@ -10119,7 +10108,8 @@ mod fill_tests {
         frame(ctx, state, vec![button(p, false)]);
     }
 
-    /// A click, then a second of frames: an unhurried tap.
+    /// A click, then a second of frames (each a 60th): an unhurried tap,
+    /// clear of egui's double- and triple-click times, 0.3 s and 0.6 s.
     fn tap(ctx: &egui::Context, state: &mut AppState, p: Pos2) {
         click(ctx, state, p);
         for _ in 0..60 {
