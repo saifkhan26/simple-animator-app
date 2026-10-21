@@ -32,7 +32,7 @@ threads except export.
   brush: its bar tip turns with the pen's lean and widens as it tilts,
   pressure sets how dark, over Krita's own paper texture, built up in 8 bits
   the way Krita paints. *Brush settings → Preset → Pencil-5*.
-- **Selections, Krita-style** — lasso, box, ellipse or polygon; add to,
+- **Selections, Krita-style** — lasso (drag freehand or tap corners), box or ellipse; add to,
   remove from or intersect them; every stroke and fill stays inside. Move,
   cut, copy and paste the selected pixels between frames and layers.
 - **Flip the view** horizontally or vertically as a drawing check. Never
@@ -138,7 +138,8 @@ proportion through a whole cycle. **Show mesh** draws the warp as a grid.
 panel) to switch the Fill tool from the bucket to the lasso; the tool button
 shows which is on. Drag round an area and let go to fill it, or tap it out
 corner by corner and tap the first corner, double-click or press `Enter` to
-fill. `Backspace` or `Ctrl+Z` takes back a corner, `Esc` drops the shape. It
+fill; a drag between corners adds a freehand stretch, as on the selection
+lasso. `Backspace` or `Ctrl+Z` takes back a corner, `Esc` drops the shape. It
 fills with the brush colour at the Fill opacity, inside the selection and
 under alpha lock.
 
@@ -183,10 +184,14 @@ a drawing, so you can scrub to the next frame or switch to the colour layer
 and keep painting inside the same shape. On a moved, scaled or rotated layer
 it clips where the marching ants are on screen.
 
-**Making one.** Pick a shape in the Lasso panel: freehand, rectangle, ellipse
-or polygon. A polygon takes a corner per click; `Enter`, a double-click or a
-click back on the first corner closes it, `Backspace` takes back the last
-corner and `Esc` abandons it.
+**Making one.** Pick a shape in the Lasso panel: lasso, rectangle or ellipse.
+The lasso takes a drag or taps: drag round an area and let go for a freehand
+selection, or tap to put down corners for a polygon. Between corners, a drag
+adds a freehand stretch, so one shape can have straight sides and curves. A
+tap back on the first corner, a double-click or `Enter` closes it,
+`Backspace` takes back the last corner (with any stretch drawn from it) and
+`Esc` abandons it. A quick click no longer deselects with the lasso; `Esc` or
+`Ctrl+D` does, and a click still does with the rectangle and ellipse.
 
 **Adding and removing.** Hold a modifier as the drag starts, or set the mode
 with the Lasso panel's buttons:

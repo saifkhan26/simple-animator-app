@@ -15,6 +15,7 @@ pub mod selection;
 pub mod shape;
 pub mod stabilizer;
 pub mod stroke;
+pub mod tap_lasso;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActiveTool {

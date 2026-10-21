@@ -1,10 +1,11 @@
 //! The Fill tool's lasso: drag an outline, or tap one out corner by corner,
 //! and what it closes round fills with the brush colour.
 //!
-//! One gesture serves both. A press that drags draws freehand, and letting
-//! go fills. A press that doesn't move starts a polygon instead: each tap
-//! adds a corner, and a tap back on the first one, a double-click or Enter
-//! closes it and fills. Held combos change what lands (see [`LassoHeld`]).
+//! The outline is the Lasso selection's (see [`TapLasso`]): a drag draws it
+//! freehand and letting go fills; a tap starts a polygon, closed by a tap on
+//! its first corner, a double-click or Enter, with freehand stretches
+//! dragged between corners. Held combos change what lands (see
+//! [`LassoHeld`]).
 //!
 //! The outline is kept in document space, like the selection's, and only
 //! goes into a drawing's pixels when it lands: the drawing it fills is the
@@ -15,6 +16,7 @@
 use super::AppState;
 use crate::tools::lasso::{self, Mask};
 use crate::tools::selection::HANDLE_PX;
+use crate::tools::tap_lasso::TapLasso;
 
 /// What the Fill tool does with a press: flood from it, or draw a lasso.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -32,32 +34,19 @@ pub struct LassoHeld {
     pub erase: bool,
     /// The other way from the Enclose & fill toggle, for this shape.
     pub enclose: bool,
-    /// Polygon edges turn in 15° steps.
+    /// Polygon corners turn in 15° steps.
     pub snap: bool,
 }
 
 /// A lasso fill being drawn, in document space.
 #[derive(Clone, Debug)]
 pub struct FillLasso {
-    /// Freehand samples, or the polygon's corners.
-    pub pts: Vec<(f32, f32)>,
-    /// Tapped out corner by corner.
-    pub polygon: bool,
-    /// The pen is down: the freehand line grows, or the newest corner
-    /// follows it.
-    pub pressed: bool,
-    /// Furthest the pen got from where it went down, in document pixels:
-    /// tells a tap from a drag.
-    max_dist: f32,
+    pub lasso: TapLasso,
     held: LassoHeld,
 }
 
 /// A press that travels less than this many screen pixels is a tap.
 const TAP_PX: f32 = 3.0;
-
-fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
-    (a.0 - b.0).hypot(a.1 - b.1)
-}
 
 /// `to`, turned about `from` to the nearest 15° — the same distance out.
 pub fn snap_15(from: (f32, f32), to: (f32, f32)) -> (f32, f32) {
@@ -91,7 +80,7 @@ impl AppState {
     /// A polygon fill is being tapped out: Enter, Backspace and a
     /// double-click are its until it closes.
     pub fn fill_polygon_active(&self) -> bool {
-        self.fill_lasso.as_ref().is_some_and(|l| l.polygon)
+        self.fill_lasso.as_ref().is_some_and(|l| l.lasso.polygon)
     }
 
     /// The lasso fill in progress, for drawing it.
@@ -100,13 +89,10 @@ impl AppState {
     }
 
     /// Where the next polygon corner goes with the pointer at `doc`: there,
-    /// or turned to a 15° step from the last corner while `snap` is held.
+    /// or turned to a 15° step from the outline's last point while `snap`
+    /// is held.
     pub fn fill_corner_at(&self, doc: (f32, f32), snap: bool) -> (f32, f32) {
-        let Some(l) = &self.fill_lasso else { return doc };
-        // While a corner is held down it is the last one; it snaps to the one
-        // before.
-        let n = l.pts.len() - usize::from(l.pressed);
-        match (snap, n.checked_sub(1).and_then(|i| l.pts.get(i))) {
+        match (snap, self.fill_lasso.as_ref().and_then(|l| l.lasso.pts.last())) {
             (true, Some(&from)) => snap_15(from, doc),
             _ => doc,
         }
@@ -116,116 +102,86 @@ impl AppState {
     pub fn fill_lasso_down(&mut self, doc: (f32, f32), held: LassoHeld) {
         self.playback.stop();
         if self.fill_polygon_active() {
-            let at = self.fill_corner_at(doc, held.snap);
+            let corner = self.fill_corner_at(doc, held.snap);
             let close = HANDLE_PX * 1.5 / self.view_scale.max(1e-6);
             let Some(l) = &mut self.fill_lasso else { return };
             l.held = held;
-            if l.pts.len() >= 3 && dist(l.pts[0], doc) <= close {
+            if l.lasso.press(doc, corner, close) {
                 self.fill_lasso_finish();
-            } else {
-                l.pts.push(at);
-                l.pressed = true;
             }
             return;
         }
         self.fill_lasso = Some(FillLasso {
-            pts: vec![doc],
-            polygon: false,
-            pressed: true,
-            max_dist: 0.0,
+            lasso: TapLasso::start(doc),
             held,
         });
     }
 
-    /// Lasso fill drag to document point `doc`.
-    pub fn fill_lasso_move(&mut self, doc: (f32, f32), held: LassoHeld) {
-        let at = self.fill_corner_at(doc, held.snap);
+    /// Lasso fill drag to document point `doc`: the freehand outline, or a
+    /// freehand stretch from the corner just put down.
+    pub fn fill_lasso_move(&mut self, doc: (f32, f32)) {
         // Finer than a document pixel zoomed in, as for the selection.
         let step = (1.0 / self.view_scale.max(1e-6)).min(1.0);
-        let Some(l) = &mut self.fill_lasso else { return };
-        if !l.pressed {
-            return;
-        }
-        if l.polygon {
-            if let Some(p) = l.pts.last_mut() {
-                *p = at;
-            }
-            return;
-        }
-        l.max_dist = l.max_dist.max(dist(l.pts[0], doc));
-        if l.pts.last().map_or(true, |&p| dist(p, doc) >= step) {
-            l.pts.push(doc);
+        let tap = TAP_PX / self.view_scale.max(1e-6);
+        if let Some(l) = &mut self.fill_lasso {
+            l.lasso.drag(doc, tap, step);
         }
     }
 
     /// Lasso fill release: a freehand outline lands; a tap starts a polygon,
     /// or puts down its corner.
     pub fn fill_lasso_up(&mut self) {
-        let tap = TAP_PX / self.view_scale.max(1e-6);
         let Some(l) = &mut self.fill_lasso else { return };
-        l.pressed = false;
-        if l.polygon {
+        if !l.lasso.release() {
             return;
         }
-        if l.max_dist < tap {
-            l.polygon = true;
-            l.pts.truncate(1);
-            return;
+        if let Some(l) = self.fill_lasso.take() {
+            self.land_lasso_fill(l.lasso, l.held);
         }
-        let Some(l) = self.fill_lasso.take() else { return };
-        self.land_lasso_fill(l.pts, l.held);
     }
 
-    /// Close the polygon in progress and fill it. Fewer than three distinct
-    /// corners is no shape, and just ends it.
+    /// Close the polygon in progress and fill it.
     pub fn fill_lasso_finish(&mut self) {
         if !self.fill_polygon_active() {
             return;
         }
-        let Some(l) = self.fill_lasso.take() else { return };
-        self.land_lasso_fill(l.pts, l.held);
+        if let Some(l) = self.fill_lasso.take() {
+            self.land_lasso_fill(l.lasso, l.held);
+        }
     }
 
     /// A double-click on the canvas: closes the polygon when both its presses
-    /// landed on one spot, its second corner on top of the first. egui counts
-    /// any two quick clicks, so corners tapped out fast would otherwise close
-    /// it early.
+    /// landed on one spot (see [`TapLasso::doubled`]).
     pub fn fill_lasso_double_click(&mut self) {
         let near = HANDLE_PX / self.view_scale.max(1e-6);
-        let doubled = self
-            .fill_lasso
-            .as_ref()
-            .filter(|l| l.polygon && l.pts.len() >= 2)
-            .is_some_and(|l| dist(l.pts[l.pts.len() - 1], l.pts[l.pts.len() - 2]) <= near);
-        if doubled {
+        if self.fill_lasso.as_ref().is_some_and(|l| l.lasso.polygon && l.lasso.doubled(near)) {
             self.fill_lasso_finish();
         }
     }
 
-    /// Take back the newest polygon corner. `false` when no polygon is being
-    /// tapped out, so the key can mean what it usually does.
+    /// Take back the newest polygon corner, with any stretch drawn from it.
+    /// `false` when no polygon is being tapped out, so the key can mean what
+    /// it usually does.
     pub fn fill_lasso_back(&mut self) -> bool {
-        let Some(l) = self.fill_lasso.as_mut().filter(|l| l.polygon) else {
+        let Some(l) = self.fill_lasso.as_mut().filter(|l| l.lasso.polygon) else {
             return false;
         };
-        l.pts.pop();
-        if l.pts.is_empty() {
+        if !l.lasso.back() {
             self.fill_lasso = None;
         }
         true
     }
 
-    /// Fill (or with `held.erase` clear) the closed outline `pts` on the
-    /// active drawing: inside the selection when there is one, at the Fill
-    /// tool's opacity, behind the paint with Behind on, or only the areas
-    /// its lines shut in with Enclose & fill. One undo step.
-    fn land_lasso_fill(&mut self, mut pts: Vec<(f32, f32)>, held: LassoHeld) {
+    /// Fill (or with `held.erase` clear) the closed outline on the active
+    /// drawing: inside the selection when there is one, at the Fill tool's
+    /// opacity, behind the paint with Behind on, or only the areas its lines
+    /// shut in with Enclose & fill. One undo step. Nothing for an outline
+    /// that makes no shape.
+    fn land_lasso_fill(&mut self, lasso: TapLasso, held: LassoHeld) {
         use crate::tools::fill;
-        // A double-click lands its second press on top of the first.
-        pts.dedup_by(|a, b| dist(*a, *b) < 1e-3);
-        if pts.len() < 3 {
+        let Some(pts) = lasso.finish() else {
             return;
-        }
+        };
         let opacity = *self.fill_opacity_mut();
         if !held.erase && opacity <= 0.0 {
             return;
@@ -335,7 +291,7 @@ mod tests {
     fn drag_square(st: &mut AppState, (x0, y0, x1, y1): (f32, f32, f32, f32), held: LassoHeld) {
         st.fill_lasso_down((x0, y0), held);
         for p in [(x1, y0), (x1, y1), (x0, y1)] {
-            st.fill_lasso_move(p, held);
+            st.fill_lasso_move(p);
         }
         st.fill_lasso_up();
     }
@@ -408,9 +364,9 @@ mod tests {
             st.fill_lasso_down(p, LassoHeld::default());
             st.fill_lasso_up();
         }
-        assert_eq!(st.fill_lasso().map(|l| l.pts.len()), Some(3));
+        assert_eq!(st.fill_lasso().map(|l| l.lasso.pts.len()), Some(3));
         st.undo();
-        assert_eq!(st.fill_lasso().map(|l| l.pts.len()), Some(2), "undo took a corner, not history");
+        assert_eq!(st.fill_lasso().map(|l| l.lasso.pts.len()), Some(2), "undo took a corner, not history");
         assert!(st.fill_lasso_back());
         assert!(st.cancel_gesture(), "Esc's path drops it");
         assert!(st.fill_lasso().is_none());
@@ -429,8 +385,29 @@ mod tests {
         st.fill_lasso_up();
         let snap = LassoHeld { snap: true, ..Default::default() };
         st.fill_lasso_down((100.0, 4.0), snap);
-        let corner = st.fill_lasso().unwrap().pts[1];
+        let corner = st.fill_lasso().unwrap().lasso.pts[1];
         assert!(corner.1.abs() < 1e-3, "flat: {corner:?}");
+    }
+
+    /// Between tapped corners a drag adds a freehand stretch to the fill's
+    /// outline, as on the selection.
+    #[test]
+    fn a_polygon_fill_takes_a_freehand_stretch() {
+        let mut st = state();
+        st.fill_lasso_down((100.0, 100.0), LassoHeld::default());
+        st.fill_lasso_up();
+        st.fill_lasso_down((200.0, 100.0), LassoHeld::default());
+        for p in [(260.0, 150.0), (200.0, 200.0)] {
+            st.fill_lasso_move(p);
+        }
+        st.fill_lasso_up();
+        st.fill_lasso_down((100.0, 200.0), LassoHeld::default());
+        st.fill_lasso_up();
+        assert!(st.fill_polygon_active());
+        st.fill_lasso_finish();
+        assert_eq!(px(&st, 240, 150), RED, "inside the bulge");
+        assert_eq!(px(&st, 150, 150), RED);
+        assert_eq!(px(&st, 280, 150)[3], 0);
     }
 
     #[test]

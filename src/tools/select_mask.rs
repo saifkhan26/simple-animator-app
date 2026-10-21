@@ -55,22 +55,21 @@ impl SelOp {
 /// What a selection drag draws.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SelShape {
+    /// The lasso: dragged freehand, or tapped out as a polygon. Prefs saved
+    /// when the polygon was a shape of its own read as this.
     #[default]
+    #[serde(alias = "Polygon")]
     Freehand,
     Rect,
     Ellipse,
-    /// Click corner points; Enter, a double-click or a click on the first
-    /// point closes it.
-    Polygon,
 }
 
 impl SelShape {
     pub fn label(self) -> &'static str {
         match self {
-            SelShape::Freehand => "Freehand",
+            SelShape::Freehand => "Lasso: drag freehand, or tap corners for a polygon",
             SelShape::Rect => "Rectangle",
             SelShape::Ellipse => "Ellipse",
-            SelShape::Polygon => "Polygon",
         }
     }
 }

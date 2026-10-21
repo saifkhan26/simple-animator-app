@@ -398,7 +398,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                         }
                         None if lasso_fill => {
                             if let Some(pos) = resp.interact_pointer_pos() {
-                                state.fill_lasso_move(canvas_to_doc(pos), lasso_held);
+                                state.fill_lasso_move(canvas_to_doc(pos));
                             }
                         }
                         // Screen points, not canvas: a drag step is the same
@@ -441,25 +441,20 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 state.hold_latch = None;
                 state.drag_inert = false;
             }
-            // A double-click closes a polygon selection. Its second press has
-            // already placed a corner on top of the first; `polygon_finish`
-            // drops the duplicate.
-            if state.polygon_active()
-                && resp.hovered()
-                && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
-            {
-                state.polygon_finish();
-            }
-            // And a polygon fill, when both presses landed on one spot. A
-            // double-click soon after the last corner's tap counts as a triple.
-            if state.fill_polygon_active()
-                && resp.hovered()
-                && ui.input(|i| {
-                    let p = egui::PointerButton::Primary;
-                    i.pointer.button_double_clicked(p) || i.pointer.button_triple_clicked(p)
-                })
-            {
-                state.fill_lasso_double_click();
+            // A double-click closes a polygon, selection or fill, when both
+            // its presses landed on one spot: its second press has put a
+            // corner on top of the first. A double-click soon after the last
+            // corner's tap counts as a triple.
+            let double = ui.input(|i| {
+                let p = egui::PointerButton::Primary;
+                i.pointer.button_double_clicked(p) || i.pointer.button_triple_clicked(p)
+            });
+            if double && resp.hovered() {
+                if state.polygon_active() {
+                    state.polygon_double_click();
+                } else if state.fill_polygon_active() {
+                    state.fill_lasso_double_click();
+                }
             }
 
             // Tool cursor preview — only while drawing (not during nav gestures),
@@ -5260,7 +5255,6 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
             (SelShape::Freehand, ic::LASSO),
             (SelShape::Rect, ic::RECTANGLE_DASHED),
             (SelShape::Ellipse, ic::CIRCLE_DASHED),
-            (SelShape::Polygon, ic::POLYGON),
         ] {
             if theme::icon_toggle(ui, icon, shape.label(), state.sel_shape == shape).clicked() {
                 // A half-placed polygon means nothing to the other shapes.
@@ -5905,83 +5899,30 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             .request_repaint_after(std::time::Duration::from_millis(60));
     }
 
-    // The selection being drawn, in document space like the selection itself.
-    if let Some(g) = &state.sel_gesture {
-        let to_screen = |&(x, y): &(f32, f32)| xf.doc_to_screen(x, y);
-        match g {
-            SelGesture::Drag {
-                shape,
-                pts,
-                start,
-                end,
-                ..
-            } => {
-                let path: Vec<egui::Pos2> = match shape {
-                    SelShape::Rect => select_mask::rect_path(*start, *end)
-                        .iter()
-                        .map(to_screen)
-                        .collect(),
-                    SelShape::Ellipse => select_mask::ellipse_path(*start, *end)
-                        .iter()
-                        .map(to_screen)
-                        .collect(),
-                    SelShape::Freehand | SelShape::Polygon => pts.iter().map(to_screen).collect(),
-                };
-                gesture_path(&painter, &path, true);
-            }
-            SelGesture::Polygon { pts, pressed, .. } => {
-                let mut path: Vec<egui::Pos2> = pts.iter().map(to_screen).collect();
-                let hover = ui
-                    .input(|i| i.pointer.hover_pos())
-                    .filter(|p| rect.contains(*p));
-                // Between clicks the next edge rubber-bands to the pointer.
-                if let (false, Some(h)) = (*pressed, hover) {
-                    path.push(h);
-                }
-                gesture_path(&painter, &path, true);
-                for p in pts.iter().map(to_screen) {
-                    painter.circle_filled(p, 2.5, Color32::WHITE);
-                    painter.circle_stroke(p, 2.5, Stroke::new(1.0, Color32::from_black_alpha(200)));
-                }
-                // Ring the first corner when a click there would close it.
-                let close = crate::tools::selection::HANDLE_PX * 1.5;
-                if let (Some(first), Some(h)) = (pts.first().map(to_screen), hover) {
-                    if pts.len() >= 3 && first.distance(h) <= close {
-                        painter.circle_stroke(first, close, Stroke::new(1.5, theme::accent()));
-                    }
-                }
-            }
+    // The selection being drawn, in document space like the selection itself,
+    // and a lasso fill the same way.
+    let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+    match &state.sel_gesture {
+        Some(SelGesture::Drag { shape, start, end, .. }) => {
+            let path = match shape {
+                SelShape::Ellipse => select_mask::ellipse_path(*start, *end),
+                _ => select_mask::rect_path(*start, *end),
+            };
+            let path: Vec<egui::Pos2> = path.iter().map(|&(x, y)| xf.doc_to_screen(x, y)).collect();
+            gesture_path(&painter, &path, true);
         }
+        Some(SelGesture::Lasso { lasso, .. }) => draw_tap_lasso(&painter, &xf, lasso, hover, hover),
+        None => {}
     }
-
-    // A lasso fill being drawn, the same way.
     if let Some(l) = state.fill_lasso() {
-        let to_screen = |&(x, y): &(f32, f32)| xf.doc_to_screen(x, y);
-        let mut path: Vec<egui::Pos2> = l.pts.iter().map(to_screen).collect();
-        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
-        if l.polygon {
-            // Between taps the next edge rubber-bands to the pointer,
-            // turned to its 15° step while that is held.
-            if let (false, Some(h)) = (l.pressed, hover) {
-                let snap = ui.input(|i| held_lasso(state, i).snap);
-                let (x, y) = xf.screen_to_doc(h);
-                let (x, y) = state.fill_corner_at((x, y), snap);
-                path.push(xf.doc_to_screen(x, y));
-            }
-        }
-        gesture_path(&painter, &path, true);
-        if l.polygon {
-            for p in l.pts.iter().map(to_screen) {
-                painter.circle_filled(p, 2.5, Color32::WHITE);
-                painter.circle_stroke(p, 2.5, Stroke::new(1.0, Color32::from_black_alpha(200)));
-            }
-            let close = crate::tools::selection::HANDLE_PX * 1.5;
-            if let (Some(first), Some(h)) = (l.pts.first().map(to_screen), hover) {
-                if l.pts.len() >= 3 && first.distance(h) <= close {
-                    painter.circle_stroke(first, close, Stroke::new(1.5, theme::accent()));
-                }
-            }
-        }
+        // The next edge turns to its 15° step while that is held.
+        let next = hover.map(|h| {
+            let snap = ui.input(|i| held_lasso(state, i).snap);
+            let (x, y) = xf.screen_to_doc(h);
+            let (x, y) = state.fill_corner_at((x, y), snap);
+            xf.doc_to_screen(x, y)
+        });
+        draw_tap_lasso(&painter, &xf, &l.lasso, hover, next);
     }
 
     // --- Camera guide + layer bounds ---
@@ -6753,6 +6694,39 @@ pub(crate) fn held_lasso(state: &AppState, i: &egui::InputState) -> LassoHeld {
         erase: on(Action::FillLassoErase),
         enclose: on(Action::FillLassoEnclose),
         snap: on(Action::FillPolygonSnap),
+    }
+}
+
+/// A lasso outline being drawn: the line so far, closing back to its start.
+/// On a polygon between presses, the next edge out to `next` (the pointer,
+/// or where a snapped corner would go), its tapped corners as dots, and a
+/// ring round the first one when the pointer is near enough for a tap there
+/// to close it.
+fn draw_tap_lasso(
+    painter: &egui::Painter,
+    xf: &Xform,
+    l: &crate::tools::tap_lasso::TapLasso,
+    hover: Option<egui::Pos2>,
+    next: Option<egui::Pos2>,
+) {
+    let to_screen = |&(x, y): &(f32, f32)| xf.doc_to_screen(x, y);
+    let mut path: Vec<egui::Pos2> = l.pts.iter().map(to_screen).collect();
+    if let (true, false, Some(n)) = (l.polygon, l.pressed, next) {
+        path.push(n);
+    }
+    gesture_path(painter, &path, true);
+    if !l.polygon {
+        return;
+    }
+    for p in l.corners.iter().map(|&i| to_screen(&l.pts[i])) {
+        painter.circle_filled(p, 2.5, Color32::WHITE);
+        painter.circle_stroke(p, 2.5, Stroke::new(1.0, Color32::from_black_alpha(200)));
+    }
+    let close = crate::tools::selection::HANDLE_PX * 1.5;
+    if let (Some(first), Some(h)) = (l.pts.first().map(to_screen), hover) {
+        if l.closable() && first.distance(h) <= close {
+            painter.circle_stroke(first, close, Stroke::new(1.5, theme::accent()));
+        }
     }
 }
 
@@ -10112,7 +10086,7 @@ mod fill_tests {
             click(&ctx, &mut state, p);
         }
         assert!(state.fill_polygon_active(), "still being tapped out");
-        assert_eq!(state.fill_lasso().map(|l| l.pts.len()), Some(3));
+        assert_eq!(state.fill_lasso().map(|l| l.lasso.pts.len()), Some(3));
     }
 
     #[test]

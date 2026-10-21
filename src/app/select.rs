@@ -20,30 +20,25 @@ use super::{AppState, SelDrag, SelTint};
 use crate::tools::lasso::{self, Mask};
 use crate::tools::select_mask::{self, SelOp, SelShape, SelectionMask};
 use crate::tools::selection::{self, Grab, Placement, Pose, Selection, HANDLE_PX};
+use crate::tools::tap_lasso::TapLasso;
 use crate::tools::ActiveTool;
 use crate::undo;
 
 /// An in-progress selection gesture, in document space.
 #[derive(Clone, Debug)]
 pub enum SelGesture {
-    /// Freehand, rectangle or ellipse: one press, drag, release.
+    /// Rectangle or ellipse: one press, drag, release.
     Drag {
         op: SelOp,
         shape: SelShape,
-        /// Freehand samples. Rectangle and ellipse only use `start`/`end`.
-        pts: Vec<(f32, f32)>,
         start: (f32, f32),
         end: (f32, f32),
         /// Furthest the pointer got from `start` — tells a click from a drag.
         max_dist: f32,
     },
-    /// Polygon: a corner per click until it is closed. While `pressed`, the
-    /// newest corner follows the pointer, so a click can be dragged into place.
-    Polygon {
-        op: SelOp,
-        pts: Vec<(f32, f32)>,
-        pressed: bool,
-    },
+    /// The lasso: dragged freehand, or tapped out as a polygon with
+    /// freehand stretches between corners. See [`TapLasso`].
+    Lasso { op: SelOp, lasso: TapLasso },
 }
 
 /// What the cached cell mask was built for: the selection's version and where
@@ -55,7 +50,8 @@ pub struct ClipKey {
 }
 
 /// A click that travels less than this many screen pixels is a click, not a
-/// drag — in Replace mode it deselects.
+/// drag: on a rectangle or ellipse, in Replace mode, it deselects; on the
+/// lasso it is a polygon corner.
 const CLICK_PX: f32 = 3.0;
 
 fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -259,17 +255,14 @@ impl AppState {
         self.playback.stop();
         if self.polygon_active() {
             // A press back on the first corner closes the shape; anywhere
-            // else adds a corner.
+            // else adds a corner, and a drag from it a freehand stretch.
             let close = HANDLE_PX * 1.5 / self.view_scale.max(1e-6);
-            let closes = matches!(
-                &self.sel_gesture,
-                Some(SelGesture::Polygon { pts, .. }) if pts.len() >= 3 && dist(pts[0], doc) <= close
-            );
+            let closes = match &mut self.sel_gesture {
+                Some(SelGesture::Lasso { lasso, .. }) => lasso.press(doc, doc, close),
+                _ => false,
+            };
             if closes {
                 self.polygon_finish();
-            } else if let Some(SelGesture::Polygon { pts, pressed, .. }) = &mut self.sel_gesture {
-                pts.push(doc);
-                *pressed = true;
             }
             return;
         }
@@ -282,15 +275,13 @@ impl AppState {
         }
         self.land_float();
         self.sel_gesture = Some(match self.sel_shape {
-            SelShape::Polygon => SelGesture::Polygon {
+            SelShape::Freehand => SelGesture::Lasso {
                 op,
-                pts: vec![doc],
-                pressed: true,
+                lasso: TapLasso::start(doc),
             },
             shape => SelGesture::Drag {
                 op,
                 shape,
-                pts: vec![doc],
                 start: doc,
                 end: doc,
                 max_dist: 0.0,
@@ -309,10 +300,9 @@ impl AppState {
         // follows the hand; one pixel when zoomed out, where the pen emits far
         // more samples than the polygon needs.
         let step = (1.0 / self.view_scale.max(1e-6)).min(1.0);
+        let tap = CLICK_PX / self.view_scale.max(1e-6);
         match &mut self.sel_gesture {
             Some(SelGesture::Drag {
-                shape,
-                pts,
                 start,
                 end,
                 max_dist,
@@ -320,20 +310,9 @@ impl AppState {
             }) => {
                 *end = doc;
                 *max_dist = max_dist.max(dist(*start, doc));
-                if *shape == SelShape::Freehand
-                    && pts.last().map_or(true, |&p| dist(p, doc) >= step)
-                {
-                    pts.push(doc);
-                }
             }
-            Some(SelGesture::Polygon {
-                pts, pressed: true, ..
-            }) => {
-                if let Some(p) = pts.last_mut() {
-                    *p = doc;
-                }
-            }
-            _ => {}
+            Some(SelGesture::Lasso { lasso, .. }) => lasso.drag(doc, tap, step),
+            None => {}
         }
     }
 
@@ -352,7 +331,6 @@ impl AppState {
             Some(SelGesture::Drag {
                 op,
                 shape,
-                pts,
                 start,
                 end,
                 max_dist,
@@ -364,54 +342,68 @@ impl AppState {
                     return;
                 }
                 let path = match shape {
-                    SelShape::Rect => select_mask::rect_path(start, end),
                     SelShape::Ellipse => select_mask::ellipse_path(start, end),
-                    SelShape::Freehand | SelShape::Polygon => pts,
+                    _ => select_mask::rect_path(start, end),
                 };
                 let m = SelectionMask::from_path(&path, self.selection_universe());
                 self.apply_op(op, m);
             }
-            Some(SelGesture::Polygon { op, pts, .. }) => {
-                self.sel_gesture = Some(SelGesture::Polygon {
-                    op,
-                    pts,
-                    pressed: false,
-                });
+            // A drag lands; a tap leaves a polygon to tap out.
+            Some(SelGesture::Lasso { op, mut lasso }) => {
+                if lasso.release() {
+                    self.apply_lasso(op, lasso);
+                } else {
+                    self.sel_gesture = Some(SelGesture::Lasso { op, lasso });
+                }
             }
             None => {}
         }
     }
 
-    pub fn polygon_active(&self) -> bool {
-        matches!(self.sel_gesture, Some(SelGesture::Polygon { .. }))
+    /// Combine a finished lasso outline into the selection. Fewer than three
+    /// distinct points is no shape at all, and changes nothing.
+    fn apply_lasso(&mut self, op: SelOp, lasso: TapLasso) {
+        if let Some(pts) = lasso.finish() {
+            let m = SelectionMask::from_path(&pts, self.selection_universe());
+            self.apply_op(op, m);
+        }
     }
 
-    /// Close the polygon in progress and apply it. Fewer than three distinct
-    /// corners is no shape at all, and just ends the gesture.
+    /// A lasso is being tapped out as a polygon.
+    pub fn polygon_active(&self) -> bool {
+        matches!(&self.sel_gesture, Some(SelGesture::Lasso { lasso, .. }) if lasso.polygon)
+    }
+
+    /// Close the polygon in progress and apply it.
     pub fn polygon_finish(&mut self) {
         if !self.polygon_active() {
             return;
         }
-        let Some(SelGesture::Polygon { op, mut pts, .. }) = self.sel_gesture.take() else {
-            return;
-        };
-        // A double-click lands its second press on top of the first.
-        pts.dedup_by(|a, b| dist(*a, *b) < 1e-3);
-        if pts.len() < 3 {
-            return;
+        if let Some(SelGesture::Lasso { op, lasso }) = self.sel_gesture.take() {
+            self.apply_lasso(op, lasso);
         }
-        let m = SelectionMask::from_path(&pts, self.selection_universe());
-        self.apply_op(op, m);
     }
 
-    /// Take back the newest polygon corner. `false` when no polygon is in
-    /// progress, so the key can mean what it usually does.
+    /// A double-click on the canvas: closes the polygon when both its presses
+    /// landed on one spot (see [`TapLasso::doubled`]).
+    pub fn polygon_double_click(&mut self) {
+        let near = HANDLE_PX / self.view_scale.max(1e-6);
+        if matches!(&self.sel_gesture, Some(SelGesture::Lasso { lasso, .. }) if lasso.polygon && lasso.doubled(near)) {
+            self.polygon_finish();
+        }
+    }
+
+    /// Take back the newest polygon corner, with any stretch drawn from it.
+    /// `false` when no polygon is in progress, so the key can mean what it
+    /// usually does.
     pub fn polygon_back(&mut self) -> bool {
-        let Some(SelGesture::Polygon { pts, .. }) = &mut self.sel_gesture else {
+        let Some(SelGesture::Lasso { lasso, .. }) = &mut self.sel_gesture else {
             return false;
         };
-        pts.pop();
-        if pts.is_empty() {
+        if !lasso.polygon {
+            return false;
+        }
+        if !lasso.back() {
             self.sel_gesture = None;
         }
         true
@@ -1649,10 +1641,11 @@ mod tests {
         assert_eq!(at(&st, 120, 50), 255);
     }
 
+    /// On the lasso a tap starts a polygon, a corner per tap after.
     #[test]
     fn a_polygon_takes_a_corner_per_click() {
         let mut st = lasso();
-        st.sel_shape = SelShape::Polygon;
+        st.sel_shape = SelShape::Freehand;
         for p in [(100.0, 100.0), (300.0, 100.0), (200.0, 260.0)] {
             st.select_down(p, None);
             st.select_up();
@@ -1666,6 +1659,41 @@ mod tests {
         st.select_up();
         assert!(st.cancel_gesture());
         assert_eq!(at(&st, 200, 150), 255);
+    }
+
+    /// A drag on the lasso is freehand; between tapped corners a drag adds a
+    /// freehand stretch, and the shape keeps going until it is closed.
+    #[test]
+    fn the_lasso_draws_freehand_and_mixes_stretches_into_a_polygon() {
+        let mut st = lasso();
+        st.sel_shape = SelShape::Freehand;
+        drag(&mut st, (100.0, 100.0), (300.0, 300.0), None);
+        assert!(st.sel_mask.is_none(), "a straight drag is no shape");
+        st.select_down((100.0, 100.0), None);
+        for p in [(300.0, 100.0), (300.0, 300.0), (100.0, 300.0)] {
+            st.select_move(p);
+        }
+        st.select_up();
+        assert!(!st.polygon_active(), "a drag lands as it lets go");
+        assert_eq!(at(&st, 200, 200), 255);
+
+        // Taps, with a stretch drawn from the second corner round a bulge.
+        st.deselect();
+        st.select_down((400.0, 100.0), None);
+        st.select_up();
+        st.select_down((500.0, 100.0), None);
+        for p in [(560.0, 150.0), (500.0, 200.0)] {
+            st.select_move(p);
+        }
+        st.select_up();
+        assert!(st.polygon_active(), "still open after the stretch");
+        st.select_down((400.0, 200.0), None);
+        st.select_up();
+        st.select_down((400.0, 100.0), None);
+        st.select_up();
+        assert!(!st.polygon_active(), "closed on its first corner");
+        assert_eq!(at(&st, 540, 150), 255, "inside the bulge");
+        assert_eq!(at(&st, 450, 150), 255);
     }
 
     #[test]

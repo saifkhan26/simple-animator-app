@@ -9692,6 +9692,10 @@ mod tests {
         // Prefs saved before the backdrop was kept load with the old default.
         let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
         assert_eq!((old.bg_color, old.bg_opacity), (DEFAULT_BG_COLOR, 1.0));
+        // A polygon selection shape from before the lasso took taps opens
+        // as the lasso.
+        let poly: UiPrefs = toml::from_str("sel_shape = \"Polygon\"").unwrap();
+        assert_eq!(poly.sel_shape, SelShape::Freehand);
         // And ones from while there was a checker still load, without it.
         let checker: UiPrefs = toml::from_str("show_checker = true\nbg_opacity = 0.5").unwrap();
         assert_eq!(checker.bg_opacity, 0.5);
