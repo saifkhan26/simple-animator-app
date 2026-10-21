@@ -1,6 +1,6 @@
 //! The HSL colour wheel: a disc (hue around, saturation out from the centre)
-//! beside a lightness bar. Three uses: the Color panel with its harmony set,
-//! and the compact picker behind every other colour button in the app.
+//! beside a lightness bar. Two uses: the Brush panel's wheel with its harmony
+//! set, and the compact picker behind every other colour button in the app.
 
 use egui::epaint::Mesh;
 use egui::{pos2, vec2, Color32, Frame, Id, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
@@ -450,16 +450,31 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
         changed = true;
     }
 
+    let mut pasted = None;
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(set.member(set.active).fmt()).monospace());
+        // The buttons first, from the right; the readout gets what's left,
+        // cut short in a narrow panel.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             pin = ui
                 .button("Pin set")
                 .on_hover_text("Add every colour of the set to the pinned swatches (the oldest drop past 32)")
                 .clicked();
+            if crate::ui::shell::paste_button(ui) {
+                pasted = crate::ui::shell::clipboard_color();
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let text = set.member(set.active).fmt();
+                ui.add(egui::Label::new(egui::RichText::new(&text).monospace()).truncate())
+                    .on_hover_text(text);
+            });
         });
     });
 
+    if let Some(rgb) = pasted {
+        // The brush takes it; next frame the set rebases around it.
+        state.set_brush_color(rgb);
+        return;
+    }
     if pin {
         let colors: Vec<[u8; 3]> = state.harmony.members().iter().map(|m| m.to_rgb()).collect();
         state.pin_set(&colors);

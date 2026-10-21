@@ -67,7 +67,6 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         // Left: tools + brush.  Right: layers / onion / x-sheet.  Bottom: timeline.
         panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, resized);
         panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 232.0, true, resized);
-        panel_window(state, ctx, PanelId::Color, [12.0, COLOR_PANEL_Y], 232.0, true, resized);
         panel_window(state, ctx, PanelId::Layers, [1004.0, 48.0], 252.0, true, resized);
         panel_window(state, ctx, PanelId::Onion, [1004.0, 300.0], 252.0, false, resized);
         panel_window(state, ctx, PanelId::Camera, [1004.0, 400.0], 252.0, false, resized);
@@ -783,10 +782,6 @@ fn zoom_view_at(state: &mut AppState, canvas_rect: Rect, at: egui::Pos2, factor:
 /// Trackpad scroll (in points) that counts as one wheel notch.
 const POINTS_PER_SCRUB_NOTCH: f32 = 24.0;
 
-/// Default top of the Color panel: just under Brush in the left column,
-/// clear of the timeline, which starts further right.
-const COLOR_PANEL_Y: f32 = 546.0;
-
 /// Stable egui Id for a panel window. Without this the Id is hashed from the
 /// window's title — which embeds a phosphor glyph — so bumping the icon font or
 /// editing a title in `panel_meta` would silently orphan every saved position.
@@ -807,13 +802,12 @@ fn panel_key(id: PanelId) -> &'static str {
 fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, id: PanelId) {
     match id {
         PanelId::Tools => tools_content(state, ui),
-        PanelId::Brush => brush_content(state, ui),
+        PanelId::Brush | PanelId::Color => brush_content(state, ui),
         PanelId::Layers => layers_content(state, ui),
         PanelId::Onion => onion_content(state, ui),
         PanelId::Xsheet => xsheet_content(state, ui),
         PanelId::Timeline => timeline_content(state, ctx, ui),
         PanelId::Camera => camera_content(state, ui),
-        PanelId::Color => color_wheel::color_panel(state, ui),
     }
 }
 
@@ -1232,20 +1226,10 @@ fn swatch_strip(state: &mut AppState, ui: &mut egui::Ui) {
 
 fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
+            // The colour wheel and its harmony set, then the pinned swatches.
             theme::section_header(ui, ic::PALETTE, "Color");
-            ui.horizontal(|ui| {
-                let c = state.brush.color;
-                let mut rgb = [c[0], c[1], c[2]];
-                if color_wheel::hsl_edit_button(ui, &mut rgb).changed() {
-                    state.set_brush_color(rgb);
-                }
-                ui.label(fmt_rgb(rgb));
-                if paste_button(ui) {
-                    if let Some(rgb) = clipboard_color() {
-                        state.set_brush_color(rgb);
-                    }
-                }
-            });
+            color_wheel::color_panel(state, ui);
+            ui.add_space(4.0);
             swatch_strip(state, ui);
 
             ui.add_space(6.0);
@@ -7094,14 +7078,14 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
 }
 
 /// The Paste button beside a colour readout.
-fn paste_button(ui: &mut egui::Ui) -> bool {
+pub(crate) fn paste_button(ui: &mut egui::Ui) -> bool {
     ui.button("Paste")
         .on_hover_text("Paste a colour copied as hsl(…), rgb(…) or #hex")
         .clicked()
 }
 
 /// The colour on the clipboard, in any form [`parse_color`] reads.
-fn clipboard_color() -> Option<[u8; 3]> {
+pub(crate) fn clipboard_color() -> Option<[u8; 3]> {
     let text = arboard::Clipboard::new().ok()?.get_text().ok()?;
     parse_color(&text)
 }
@@ -11128,8 +11112,10 @@ mod color_panel_layout_tests {
     use super::*;
     use egui::{pos2, Pos2};
 
+    /// The Brush panel, wheel and all, opens under Tools and clear of the
+    /// Timeline on a 1080p screen, with no Color panel of its own.
     #[test]
-    fn the_color_panel_opens_under_brush_on_a_1080p_screen() {
+    fn the_brush_panel_holds_the_wheel_and_fits_a_1080p_screen() {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let mut state = AppState::for_test();
@@ -11146,10 +11132,12 @@ mod color_panel_layout_tests {
                 .expect("panel laid out")
                 .rect()
         };
-        let (brush, color) = (rect(PanelId::Brush), rect(PanelId::Color));
-        assert!(color.top() >= brush.bottom(), "{brush:?} vs {color:?}");
-        assert!(color.bottom() <= 1080.0, "{color:?}");
-        assert!(!color.intersects(rect(PanelId::Timeline)), "{color:?}");
+        let (tools, brush) = (rect(PanelId::Tools), rect(PanelId::Brush));
+        assert!(brush.top() >= tools.bottom(), "{tools:?} vs {brush:?}");
+        assert!(brush.bottom() <= 1080.0, "{brush:?}");
+        assert!(!brush.intersects(rect(PanelId::Timeline)), "{brush:?}");
+        assert!(egui::AreaState::load(&ctx, egui::Id::new(panel_key(PanelId::Color))).is_none());
+        assert!(!PanelId::ALL.contains(&PanelId::Color), "not in the Panels menu");
     }
 }
 

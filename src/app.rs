@@ -868,16 +868,18 @@ pub enum PanelId {
     Xsheet,
     Timeline,
     Camera,
+    /// Retired: its wheel and harmonies moved into the Brush panel. Kept so
+    /// prefs that hid it still read; [`PanelId::ALL`] leaves it out, so it
+    /// is never drawn or listed.
     Color,
 }
 
 impl PanelId {
     /// Every panel, in the order the Panels menu lists them: the left
     /// column, the right column, then the timeline along the bottom.
-    pub const ALL: [PanelId; 8] = [
+    pub const ALL: [PanelId; 7] = [
         PanelId::Tools,
         PanelId::Brush,
-        PanelId::Color,
         PanelId::Layers,
         PanelId::Onion,
         PanelId::Camera,
@@ -1672,7 +1674,7 @@ impl AppState {
             show_brush_settings: false,
             show_grid_settings: false,
             show_panels: prefs.show_panels,
-            hidden_panels: prefs.hidden_panels,
+            hidden_panels: prefs.hidden_panels.into_iter().filter(|&p| p != PanelId::Color).collect(),
             panel_layout_gen: prefs.panel_layout_gen,
             color_scheme: prefs.color_scheme,
             custom_colors: prefs.custom_colors,

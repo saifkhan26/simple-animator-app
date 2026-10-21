@@ -15,10 +15,9 @@ type Shapes = Vec<egui::epaint::ClippedShape>;
 
 const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 1000.0));
 
-const PANELS: [PanelId; 8] = [
+const PANELS: [PanelId; 7] = [
     PanelId::Tools,
     PanelId::Brush,
-    PanelId::Color,
     PanelId::Layers,
     PanelId::Onion,
     PanelId::Camera,
