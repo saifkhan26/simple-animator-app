@@ -653,6 +653,33 @@ fn the_whole_ui_fits_common_screens() {
 }
 
 
+/// However narrow the Brush panel goes, the H/S/L fields stay clear of the
+/// Paste button after them, and the backdrop row keeps its colour and
+/// opacity. (Their frames, not their text, would collide, which the overlap
+/// sweep doesn't see.)
+#[test]
+fn the_brush_panel_keeps_its_rows_apart_at_its_narrowest() {
+    let mut rig = Rig::new(Win::Panel(PanelId::Brush));
+    rig.drag_right_edge(-400.0);
+    let shapes = rig.settle();
+    let t = texts(&shapes);
+    let paste = t
+        .iter()
+        .find(|t| t.text == egui_phosphor::regular::CLIPBOARD_TEXT)
+        .expect("Paste is drawn")
+        .rect;
+    let fields: Vec<&Text> = t
+        .iter()
+        .filter(|f| (f.rect.center().y - paste.center().y).abs() < 8.0 && (f.text.ends_with('%') || f.text.ends_with('\u{b0}')))
+        .collect();
+    assert_eq!(fields.len(), 3, "H, S and L on Paste's row");
+    for f in fields {
+        // The field's padding and the button's together, at the least.
+        assert!(f.rect.max.x + 12.0 <= paste.min.x, "{:?} at {:?} runs into Paste at {paste:?}", f.text, f.rect);
+    }
+    assert!(t.iter().any(|f| f.text == "100%"), "the backdrop's opacity is still there");
+}
+
 /// What `rig` draws, painted on the CPU into an image cropped to its window:
 /// egui's meshes over the theme background, at `ppp` pixels a point. For
 /// looking at a layout without starting the app, which would share the

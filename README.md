@@ -83,12 +83,12 @@ Release binary lands at `target/release/animator-app(.exe)`.
 │ │  Tools      │                                │  Layers          │  │
 │ │  Pencil…    │                                │  + − ▲ ▼         │  │
 │ │  Size  Flow │            CANVAS              │  ☑ Layer 2  α    │  │
-│ │  Bg α       │                                │  ☑ Layer 1  α    │  │
-│ │  ☐ Checker  │                                └──────────────────┘  │
+│ │             │                                │  ☑ Layer 1  α    │  │
+│ │             │                                └──────────────────┘  │
 │ ├─────────────┤                                                      │
 │ │  Brush      │                                ┌──────────────────┐  │
-│ │  Color      │                                │  X-sheet         │  │
-│ │  Hardness…  │                                │  Fr  L1  L2      │  │
+│ │  Wheel      │                                │  X-sheet         │  │
+│ │  Backdrop α │                                │  Fr  L1  L2      │  │
 │ └─────────────┘                                │  ▶0   0   ·      │  │
 │                                                │   1   ·   2      │  │
 │        ┌────────────────────────────────┐      └──────────────────┘  │
@@ -460,13 +460,11 @@ Linux / macOS tablet support is not wired in yet (see Roadmap).
 
 ## Window background
 
-**Settings → Appearance → Canvas backdrop** sets the colour behind the
-canvas and its **Opacity**, which drives the window clear-color alpha. Drop it
-to 0 to make the entire app background transparent. The floating windows stay
+**Backdrop**, the last row of the Brush panel, sets the colour behind the
+canvas (its swatch) and its opacity (the percentage: drag it sideways or click
+and type), which drives the window clear-color alpha. Drop it to 0% to make
+the entire app background transparent. The floating windows stay
 semi-translucent so they remain readable.
-
-Tick **Checker backdrop** there to render a Krita-style checker behind the
-canvas image — useful when working in transparent mode.
 
 ## Export
 

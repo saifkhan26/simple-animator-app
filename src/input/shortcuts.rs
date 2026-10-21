@@ -89,6 +89,8 @@ pub enum Action {
     Redo,
     ClearCell,
     PasteImage,
+    /// Retired with the checker backdrop. Kept so a `shortcuts.toml` that
+    /// binds it still reads; `parse` strips it. Not in [`Action::ALL`].
     ToggleCheckerBg,
     TogglePanels,
     ToggleMiniTimeline,
@@ -216,7 +218,6 @@ impl Action {
         Action::Redo,
         Action::ClearCell,
         Action::PasteImage,
-        Action::ToggleCheckerBg,
         Action::TogglePanels,
         Action::ToggleMiniTimeline,
         Action::ZoomReset,
@@ -330,7 +331,7 @@ impl Action {
             Action::Redo => "Redo",
             Action::ClearCell => "Clear current cell",
             Action::PasteImage => "Paste image as background",
-            Action::ToggleCheckerBg => "Toggle checker backdrop",
+            Action::ToggleCheckerBg => "Toggle checker backdrop (retired)",
             Action::TogglePanels => "Toggle floating panels",
             Action::ToggleMiniTimeline => "Toggle mini timeline",
             Action::ZoomReset => "Reset zoom",
@@ -1127,7 +1128,6 @@ impl Default for ShortcutMap {
         // an existing binding (see below).
         b.insert(Action::PasteImage, KeyCombo::ctrl_shift(K::V));
         // Backdrop toggle.
-        b.insert(Action::ToggleCheckerBg, KeyCombo::plain(K::Backtick));
         // Hide / show all floating panels.
         b.insert(Action::TogglePanels, KeyCombo::plain(K::Tab));
         // Mini timeline bar (shown when panels are hidden).
@@ -1417,6 +1417,9 @@ pub fn parse(text: &str) -> Result<ShortcutMap, String> {
             // Migration: the in-canvas eyedropper was folded into the screen
             // picker. Drop the retired binding, and hand its key to the picker
             // that replaced it unless the user had already rebound that one.
+            // Retired with the checker backdrop: nothing to hand on.
+            map.bindings.remove(&Action::ToggleCheckerBg);
+            map.unbound.remove(&Action::ToggleCheckerBg);
             if let Some(old) = map.bindings.remove(&Action::ToolColorPicker) {
                 let picker = map.bindings.get(&Action::PickScreenColor).copied();
                 if picker.is_none() || picker == Some(KeyCombo::shift(egui::Key::C)) {
@@ -1849,7 +1852,7 @@ mod tests {
         map.set(Action::PlayPause, KeyCombo::plain(egui::Key::Tab));
         map.set(Action::Redo, KeyCombo::ctrl_shift(egui::Key::Z));
         map.set(Action::TogglePanels, KeyCombo::ctrl(egui::Key::Tab));
-        map.set(Action::ToggleCheckerBg, KeyCombo::plain(egui::Key::Backtick));
+        map.set(Action::FadeOthersToggle, KeyCombo::plain(egui::Key::Backtick));
         let c = map.clashes();
         assert!(matches!(c[&Action::FramePrev][..], [Clash::Builtin(_)]));
         // Tab and ` reach whatever is bound on them, focus or not.
@@ -1860,12 +1863,23 @@ mod tests {
         assert!(c[&Action::OnionToggle].iter().any(|x| matches!(x, Clash::Builtin(_))));
         assert_eq!(c[&Action::Redo], vec![Clash::Action(Action::OnionToggle)]);
         assert!(!c.contains_key(&Action::TogglePanels));
-        assert!(!c.contains_key(&Action::ToggleCheckerBg));
+        assert!(!c.contains_key(&Action::FadeOthersToggle));
     }
 
     /// The reported map: the panels on M, the mini timeline on Shift+M and
     /// the last layer on Tab. Settings flagged Tab, because it was read as
     /// the panel toggle whenever a field had focus, whatever the map said.
+    /// The checker backdrop is gone: a file that binds its toggle still
+    /// reads, the binding dropped, with no line left over to warn about.
+    #[test]
+    fn a_saved_checker_toggle_is_dropped_quietly() {
+        let map = load_from_str("toggle_checker_bg = \"Ctrl+B\"\nplay_pause = \"Ctrl+Space\"");
+        assert_eq!(map.get(Action::ToggleCheckerBg), None);
+        assert!(map.unread.is_empty(), "{:?}", map.unread);
+        assert_eq!(map.get(Action::PlayPause), Some(KeyCombo::ctrl(egui::Key::Space)));
+        assert!(!Action::ALL.contains(&Action::ToggleCheckerBg), "not offered in Settings");
+    }
+
     #[test]
     fn tab_and_backtick_are_free_to_bind() {
         let mut map = ShortcutMap::default();
@@ -1873,14 +1887,14 @@ mod tests {
         map.set(Action::ToggleMiniTimeline, KeyCombo::shift(egui::Key::M));
         map.set(Action::LayerLast, KeyCombo::plain(egui::Key::Tab));
         map.set(Action::OnionToggle, KeyCombo::plain(egui::Key::Backtick));
-        map.set(Action::ToggleCheckerBg, KeyCombo::ctrl(egui::Key::Backtick));
+        map.set(Action::FadeOthersToggle, KeyCombo::ctrl(egui::Key::Backtick));
         let c = map.clashes();
         for a in [
             Action::TogglePanels,
             Action::ToggleMiniTimeline,
             Action::LayerLast,
             Action::OnionToggle,
-            Action::ToggleCheckerBg,
+            Action::FadeOthersToggle,
         ] {
             assert!(!c.contains_key(&a), "{a:?}: {:?}", c.get(&a));
         }
@@ -1922,6 +1936,7 @@ mod tests {
         map.set(Action::TogglePanels, KeyCombo::plain(egui::Key::M));
         map.set(Action::ToggleMiniTimeline, KeyCombo::shift(egui::Key::M));
         map.set(Action::LayerLast, KeyCombo::plain(egui::Key::Tab));
+        map.set(Action::OnionToggle, KeyCombo::plain(egui::Key::Backtick));
         let none = egui::Modifiers::default();
         let shift = egui::Modifiers {
             shift: true,
@@ -1935,7 +1950,7 @@ mod tests {
         assert!(press(egui::Key::M, none, |c| map.poll_focused(c)).is_empty());
         assert_eq!(
             press(egui::Key::Backtick, none, |c| map.poll_focused(c)),
-            vec![Action::ToggleCheckerBg]
+            vec![Action::OnionToggle]
         );
         // With nothing focused, M is the panels as usual.
         assert_eq!(

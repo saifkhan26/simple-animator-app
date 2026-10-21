@@ -422,12 +422,11 @@ struct UiPrefs {
     /// Dim everything outside the selection. The switch persists, like the
     /// other view guides.
     tint_outside: bool,
-    /// The canvas backdrop: colour (RGB, 0..1), its opacity, and the checker.
+    /// The canvas backdrop: colour (RGB, 0..1) and its opacity.
     /// A workspace preference — the colour an artist works against follows
     /// them from project to project.
     bg_color: [f32; 3],
     bg_opacity: f32,
-    show_checker: bool,
     /// The Color panel's harmony scheme. Only the scheme persists: the set
     /// is rebuilt around the brush colour each launch.
     harmony: Harmony,
@@ -540,7 +539,6 @@ impl Default for UiPrefs {
             tint_outside: false,
             bg_color: DEFAULT_BG_COLOR,
             bg_opacity: 1.0,
-            show_checker: false,
             harmony: Harmony::default(),
             last_camera_size: None,
             hidden_panels: Vec::new(),
@@ -1290,7 +1288,6 @@ pub struct AppState {
     pub bg_opacity: f32,
     /// Background clear color (RGB, 0..1).
     pub bg_color: [f32; 3],
-    pub show_checker: bool,
 
     pub pen: PenInput,
     /// A pen recording under way (Tablet readout), and where the last one
@@ -1672,7 +1669,6 @@ impl AppState {
             canvas_rect: egui::Rect::NOTHING,
             bg_opacity: prefs.bg_opacity,
             bg_color: prefs.bg_color,
-            show_checker: prefs.show_checker,
             pen: PenInput::new(),
             pen_record: None,
             pen_record_saved: None,
@@ -5814,7 +5810,7 @@ impl AppState {
             // Retired: the in-canvas eyedropper was folded into PickScreenColor,
             // which samples the canvas as well as everything behind the window.
             // The variant survives only so an old shortcuts.toml still parses.
-            Action::ToolColorPicker => {}
+            Action::ToolColorPicker | Action::ToggleCheckerBg => {}
             Action::PickScreenColor => {
                 if self.screen_pick {
                     self.end_screen_pick();
@@ -5946,7 +5942,6 @@ impl AppState {
             Action::Redo => self.redo(),
             Action::ClearCell => self.clear_active(),
             Action::PasteImage => self.paste_image_as_background(),
-            Action::ToggleCheckerBg => self.show_checker = !self.show_checker,
             Action::TogglePanels => self.show_panels = !self.show_panels,
             Action::ToggleMiniTimeline => self.show_mini_timeline = !self.show_mini_timeline,
             Action::ZoomReset => self.view.zoom = 1.0,
@@ -6440,7 +6435,6 @@ impl eframe::App for AppState {
                 tint_outside: self.tint_outside,
                 bg_color: self.bg_color,
                 bg_opacity: self.bg_opacity,
-                show_checker: self.show_checker,
                 harmony: self.harmony.scheme,
                 last_camera_size: self.last_camera_size,
                 hidden_panels: self.hidden_panels.clone(),
@@ -9687,18 +9681,20 @@ mod tests {
         let prefs = UiPrefs {
             bg_color: [0.9, 0.85, 0.7],
             bg_opacity: 0.5,
-            show_checker: true,
             ..UiPrefs::default()
         };
         let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
         let mut st = AppState::with_prefs(back, 8192, None);
-        assert_eq!((st.bg_color, st.bg_opacity, st.show_checker), ([0.9, 0.85, 0.7], 0.5, true));
+        assert_eq!((st.bg_color, st.bg_opacity), ([0.9, 0.85, 0.7], 0.5));
         // File > New starts a fresh project, not a fresh workspace.
         st.reset();
-        assert_eq!((st.bg_color, st.bg_opacity, st.show_checker), ([0.9, 0.85, 0.7], 0.5, true));
+        assert_eq!((st.bg_color, st.bg_opacity), ([0.9, 0.85, 0.7], 0.5));
         // Prefs saved before the backdrop was kept load with the old default.
         let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
-        assert_eq!((old.bg_color, old.bg_opacity, old.show_checker), (DEFAULT_BG_COLOR, 1.0, false));
+        assert_eq!((old.bg_color, old.bg_opacity), (DEFAULT_BG_COLOR, 1.0));
+        // And ones from while there was a checker still load, without it.
+        let checker: UiPrefs = toml::from_str("show_checker = true\nbg_opacity = 0.5").unwrap();
+        assert_eq!(checker.bg_opacity, 0.5);
     }
 
     #[test]

@@ -1345,6 +1345,9 @@ fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
         )
         .on_hover_text(tip);
     });
+
+    ui.add_space(4.0);
+    backdrop_row(state, ui);
 }
 
 /// Room for the tablet status icon beside Brush settings.
@@ -1376,27 +1379,39 @@ fn tablet_status(state: &AppState) -> (&'static str, Color32, &'static str) {
     }
 }
 
-/// The canvas backdrop: its colour and opacity (below 1 the desktop shows
-/// through the window), and the checker. A view setting, so it sits in
-/// Settings with the colour schemes.
-fn backdrop_settings(state: &mut AppState, ui: &mut egui::Ui) {
-    ui.label(egui::RichText::new(theme::icon_text(ic::IMAGE, "Canvas backdrop")).strong());
+/// The canvas backdrop on one row: its name, its colour, and its opacity as
+/// a percentage to drag or type. Below 100% the desktop shows through the
+/// window. The name gives way first when the panel is narrow.
+fn backdrop_row(state: &mut AppState, ui: &mut egui::Ui) {
+    let tip = "Canvas backdrop: the colour behind the canvas, and how opaque it is. \
+               Below 100% the desktop shows through the window.";
     ui.horizontal(|ui| {
-        color_wheel::hsl_edit_button_f32(ui, &mut state.bg_color);
-        let rgb = state.bg_color.map(|c| (c * 255.0).round() as u8);
-        ui.label(egui::RichText::new(fmt_rgb(rgb)).color(theme::text_muted()));
-        if paste_button(ui) {
-            if let Some(rgb) = clipboard_color() {
-                state.bg_color = rgb.map(|c| c as f32 / 255.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut pct = (state.bg_opacity * 100.0).round();
+            let field = ui
+                .add(
+                    egui::DragValue::new(&mut pct)
+                        .range(0.0..=100.0)
+                        .speed(0.5)
+                        .fixed_decimals(0)
+                        .suffix("%"),
+                )
+                .on_hover_text("Backdrop opacity: drag sideways, or click and type");
+            if field.changed() {
+                state.bg_opacity = pct / 100.0;
             }
-        }
+            color_wheel::hsl_edit_button_f32(ui, &mut state.bg_color);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(theme::icon_text(ic::IMAGE, "Backdrop")).color(theme::text_muted()),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tip);
+            });
+        });
     });
-    ui.horizontal(|ui| {
-        fit_sliders(ui, "Opacity", 0.0);
-        ui.add(egui::Slider::new(&mut state.bg_opacity, 0.0..=1.0).text("Opacity"))
-            .on_hover_text("Below 1 the desktop shows through the window behind the canvas.");
-    });
-    ui.checkbox(&mut state.show_checker, "Checker backdrop");
 }
 
 /// Narrow the sliders laid out next in `ui` so that one, with its value box
@@ -4485,8 +4500,6 @@ fn appearance_section(state: &mut AppState, ui: &mut egui::Ui) {
     if changed {
         state.apply_scheme(ui.ctx());
     }
-    ui.add_space(8.0);
-    backdrop_settings(state, ui);
 }
 
 /// A clickable preview of a scheme: its panel on its background, a line of
@@ -5433,27 +5446,6 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     let xf = Xform::new(state, rect);
     let scale = xf.scale;
     let corners = xf.corners();
-
-    // Checker backdrop. Follows zoom/pan; skipped while rotated (the rotated
-    // doc quad isn't axis-aligned and a flat fallback would be misleading).
-    // Left alone during screen-pick: the picker no longer alters the backdrop,
-    // so hiding the checker would be the same unwanted change by another route.
-    if state.show_checker && state.view.rotation.abs() < 1e-3 {
-        let dst = Rect::from_two_pos(corners[0], corners[2]);
-        let cell = 12.0;
-        let cols = (dst.width() / cell).ceil() as i32;
-        let rows = (dst.height() / cell).ceil() as i32;
-        let a = Color32::from_gray(48);
-        let b = Color32::from_gray(64);
-        for r in 0..rows {
-            for c in 0..cols {
-                let color = if (r + c) & 1 == 0 { a } else { b };
-                let p = dst.min + Vec2::new(c as f32 * cell, r as f32 * cell);
-                let cell_rect = Rect::from_min_size(p, Vec2::new(cell, cell)).intersect(dst);
-                painter.rect_filled(cell_rect, 0.0, color);
-            }
-        }
-    }
 
     let cur_frame = state.project.current_frame;
     let cur_layer = state.project.current_layer;
@@ -7209,13 +7201,6 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
             painter.circle_stroke(pos, gap, Stroke::new(1.0, theme::accent()));
         }
     }
-}
-
-/// The Paste button beside a colour readout.
-pub(crate) fn paste_button(ui: &mut egui::Ui) -> bool {
-    ui.button("Paste")
-        .on_hover_text("Paste a colour copied as hsl(…), rgb(…) or #hex")
-        .clicked()
 }
 
 /// The colour on the clipboard, in any form [`parse_color`] reads.

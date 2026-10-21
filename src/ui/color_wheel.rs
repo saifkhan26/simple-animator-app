@@ -533,12 +533,13 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
         edited = ui
             .allocate_ui(vec2(fields_w, ui.spacing().interact_size.y), |ui| hsl_fields(ui, cur))
             .inner;
-        // Into the room kept for it, against the right edge under Pin set.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if theme::icon_button(ui, icon, "Paste a colour copied as hsl(…), rgb(…) or #hex").clicked() {
-                pasted = crate::ui::shell::clipboard_color();
-            }
-        });
+        // Against the right edge under the pin when there is room; straight
+        // after the fields when they ran past theirs. Laid out right to left
+        // instead, it would sit on top of them.
+        ui.add_space((ui.available_width() - paste_w).floor().max(0.0));
+        if theme::icon_button(ui, icon, "Paste a colour copied as hsl(…), rgb(…) or #hex").clicked() {
+            pasted = crate::ui::shell::clipboard_color();
+        }
     });
     if let Some(n) = edited {
         let i = set.active;
