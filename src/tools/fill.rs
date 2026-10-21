@@ -464,8 +464,10 @@ fn put_behind(canvas: &mut Canvas, x: i32, y: i32, color: [u8; 4], t: f32) {
 /// art, already in this cell's pixels), or without one in `pre`, the cell
 /// as it was. A break up to `opts.gap` wide counts as shut, as for the
 /// bucket, and each area grows by `opts.expand` to tuck under its lines.
-/// The canvas edge shuts nothing in. `clip` holds the paint to a selection.
-/// Returns the pixels changed, marked dirty.
+/// The canvas edge shuts an area in as a line does, as it does for the
+/// bucket: two strokes across a corner make a shape with it. So a lasso
+/// round the whole canvas fills the background too. `clip` holds the paint
+/// to a selection. Returns the pixels changed, marked dirty.
 pub fn enclose_fill(
     canvas: &mut Canvas,
     pre: &[u8],
@@ -483,8 +485,7 @@ pub fn enclose_fill(
     let src = boundary.unwrap_or(pre);
     let tol = opts.tolerance;
     let open = |x: i32, y: i32| matches_target(src, w, x, y, CLEAR, tol);
-    let inside =
-        |x: i32, y: i32| x > 0 && y > 0 && x < w - 1 && y < h - 1 && lasso.at(x as u32, y as u32) > 0;
+    let inside = |x: i32, y: i32| lasso.at(x as u32, y as u32) > 0;
     // Shut in: every pixel of it inside the lasso.
     let held = |mask: &[bool], b: Bbox| {
         (b.1..=b.3).all(|y| (b.0..=b.2).all(|x| !mask[(y * w + x) as usize] || inside(x, y)))
@@ -1140,6 +1141,29 @@ mod tests {
         enclose_fill(&mut c, &pre, None, &lasso, &o, false, None);
         assert!(filled_at(&c, 10, 15) && filled_at(&c, 27, 15));
         assert!(!filled_at(&c, 2, 5) && !filled_at(&c, 27, 5));
+    }
+
+    /// Two strokes across a corner make a shape with the canvas's edges.
+    #[test]
+    fn enclose_counts_the_canvas_edge_as_a_line() {
+        let corner = || {
+            let mut c = Canvas::new(40, 40);
+            for i in 0..=12 {
+                write_px(&mut c, 12, i, [0, 0, 0, 255]);
+                write_px(&mut c, i, 12, [0, 0, 0, 255]);
+            }
+            c
+        };
+        let mut c = corner();
+        let pre = c.pixels().into_owned();
+        assert!(enclose_fill(&mut c, &pre, None, &lasso_box(0, 0, 25, 25), &opts(0), false, None).is_some());
+        assert!(filled_at(&c, 0, 0) && filled_at(&c, 5, 5), "the corner shape, up to the edge");
+        assert!(!filled_at(&c, 20, 20), "round it, open to the rest of the canvas");
+
+        // Round the whole canvas, the frame shuts the background in too.
+        let mut c = corner();
+        enclose_fill(&mut c, &pre, None, &lasso_box(0, 0, 40, 40), &opts(0), false, None);
+        assert!(filled_at(&c, 5, 5) && filled_at(&c, 30, 30));
     }
 
     #[test]
