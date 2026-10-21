@@ -38,7 +38,10 @@ threads except export.
 - **Flip the view** horizontally or vertically as a drawing check. Never
   touches the document.
 - **Pinned colour swatches**, remembered across runs.
-- **Colour wheel with harmonies** — an HSL wheel in the Color panel that lays
+- **Lasso fill** — the Fill tool's second mode: drag round an area or tap it
+  out as a polygon, and it fills; optionally only what its lines shut in, or
+  behind the line art.
+- **Colour wheel with harmonies** — an HSL wheel in the Brush panel that lays
   Complementary, Monochromatic, Analogous, Triadic or Tetradic colours around
   the one you pick. Every colour in the app reads and pastes as `hsl(…)`.
 - **Tablet pressure** on Windows via Wintab (Wacom, Huion, XP-Pen, Gaomon, …)
@@ -102,7 +105,7 @@ the window; double-click it to toggle maximize.
 ## Drawing
 
 1. Pick a tool in the **Tools** window.
-2. Set color in the **Brush** window, or on the wheel in the **Color** window.
+2. Set color on the wheel in the **Brush** window.
 3. Drag on the canvas to draw on the currently-selected layer's currently-
    visible cell.
 
@@ -116,7 +119,7 @@ new cell and keys it there automatically.
 | Pencil | Soft round stamp. Pressure → size + flow.                        |
 | Ink    | Harder, denser stamps for clean-up lines.                        |
 | Eraser | Punches alpha to 0 (no white).                                   |
-| Fill   | Scanline flood within tolerance bound. Click once to fill.       |
+| Fill   | Bucket: scanline flood within tolerance, click once to fill. Lasso: drag or tap round what to fill. |
 | Liquify | Push the drawing's pixels with the pen, inside the selection.   |
 
 **Liquify.** Drag on a drawing to push its pixels along (Push), or to even
@@ -130,6 +133,23 @@ the lines. `Ctrl+Z` takes back a stroke; `Enter`, or changing tool, frame or
 layer, applies the warp as one undo step; `Esc` throws it away. With **All
 frames** on, the same warp lands on every drawing of the layer — fixing a
 proportion through a whole cycle. **Show mesh** draws the warp as a grid.
+
+**Lasso fill.** Press the Fill key again (or pick **Lasso** in the Tools
+panel) to switch the Fill tool from the bucket to the lasso; the tool button
+shows which is on. Drag round an area and let go to fill it, or tap it out
+corner by corner and tap the first corner, double-click or press `Enter` to
+fill. `Backspace` or `Ctrl+Z` takes back a corner, `Esc` drops the shape. It
+fills with the brush colour at the Fill opacity, inside the selection and
+under alpha lock.
+
+- **Enclose & fill** — fill only the areas the lines inside the lasso shut
+  in, not the space between them and the lasso. It reads lines the way the
+  bucket does (*lines from*, gap closing, expand). Hold `Ctrl+Shift` as a
+  shape lands for the other way.
+- **Behind existing paint** — the fill goes under what is already there:
+  line art keeps its colour and its soft edges.
+- Hold `Ctrl+Alt` to erase the shape instead, and `Shift+Alt` to turn
+  polygon edges in 15° steps. All three holds are rebindable.
 
 ### Brush parameters
 
@@ -242,7 +262,10 @@ Pasting an image from the system clipboard as a new layer is
 
 ### Timeline window
 
-- **▶ / ❚❚** — play / pause the loop range.
+- **▶ / ❚❚** — play / pause the loop range. Stopping goes back to the frame
+  playback started on, as does a run with the loop off reaching its end;
+  `Shift+Space` or a Shift-click pauses where it is instead. A scrub while
+  playing stops where you put it.
 - **⏮ ◀ ▶** — jump to loop start / step prev / step next.
 - **+ Frame** — insert an empty exposure after the current frame on every
   layer (effectively a hold).
@@ -260,12 +283,22 @@ Pasting an image from the system clipboard as a new layer is
 
 ### Layers window
 
-- `+` / `−` — add / remove layer.
-- `▲` / `▼` — reorder.
-- **α** — layer opacity in composite.
-- **🔒** — lock (refuses strokes).
-- **Ref** — light-table reference layer. Renders dimmed across all frames;
-  excluded from PNG / GIF export.
+- `+` / `−` — add / remove layer. `▲` / `▼` — reorder.
+- **Second toolbar** — flip horizontally / vertically and turn every drawing
+  of the active layer and every layer picked with it; **clip to layer below**
+  and **lock alpha** for the same layers.
+- **Opacity** — the slider under the toolbars sets the active layer's
+  opacity, or every picked layer's at once; one undo step per drag, a
+  double-click puts it back to 100%. A layer under 100% shows its opacity on
+  its row.
+- On each row: eye, **🔒** lock (refuses strokes), **Ref** light-table
+  layer (dimmed on every frame, left out of export), the name (double-click to
+  rename, drag to reorder), and **⋮** for the rest (rename, group, Edit in
+  Krita; for a group, ungroup / merge / delete). Right-click the name for the
+  same menu.
+- **lines from** — the layer whose lines a fill on this one stops at.
+- **keys with** — key jumps on this layer also stop at that layer's drawings,
+  and the button beside it adds a cleanup layer over this one, already linked.
 
 Layers paint bottom-up. The list shows them top-down (top of list = on top).
 
@@ -281,10 +314,10 @@ level deep: a group holds layers, not other groups.
   other — the same picture Krita draws.
 - **Drag** a layer onto a layer inside a group to put it in; drag it out to
   take it out. Dragging the group row moves the whole group.
-- **Right-click the group row** — *Ungroup*, *Merge group* (one layer holding
+- **The group row's ⋮** — *Ungroup*, *Merge group* (one layer holding
   exactly what the group showed, at the group's opacity; hidden and reference
-  layers inside are kept as layers), *Delete group*, and flip / turn every
-  drawing inside.
+  layers inside are kept as layers), *Delete group*. With the group active,
+  the flip and turn buttons work on every drawing inside.
 - **Clip to the layer below** on a layer sitting just above a group clips it
   to everything the group shows. Inside a group, a layer clips to the layer
   below it in the same group.
@@ -313,13 +346,13 @@ keyed at that slot, or `·` for a hold.
 
 ## Colour swatches
 
-The Brush panel keeps a strip of pinned colours under the picker: `+` pins the
+The Brush panel keeps a strip of pinned colours under the wheel: `+` pins the
 current colour, a click selects one, right-click removes it. Up to 32, saved
 with your preferences, so a palette follows you between projects.
 
 ## Colour wheel
 
-The **Color** panel is an HSL wheel: hue goes round the disc, saturation runs
+The top of the **Brush** panel is an HSL wheel: hue goes round the disc, saturation runs
 out from the centre, and the bar beside it is lightness. Pick a scheme and the
 wheel shows every colour of the set as a dot:
 
@@ -569,13 +602,14 @@ lines stay as you wrote them. A few of the defaults:
 |---------------------------|-------------------------------|
 | Q / W / E / R / G / Y     | Pencil / Ink / Eraser / Fill / Shape / Lasso |
 | A / S                     | Previous / next frame         |
-| Space                     | Play / pause                  |
+| Space / Shift+Space       | Play / pause (back to the start frame / where it stops) |
 | O                         | Toggle onion skin             |
 | F / Shift+F               | Flip view H / V               |
 | Ctrl+X / C / V            | Selection cut / copy / paste  |
 | Ctrl+A / Ctrl+Shift+I     | Select all / invert selection |
 | Esc / Ctrl+D              | Deselect                      |
 | Ctrl+Shift / Ctrl+Alt / Shift+Alt (held) | Add to / remove from / intersect the selection |
+| Ctrl+Shift / Ctrl+Alt / Shift+Alt (held) | Lasso fill: Enclose & fill the other way / erase / 15° polygon edges |
 | Alt+X / C / V             | Drawing cut / copy / paste    |
 | Ctrl+Z / Ctrl+Y           | Undo / redo                   |
 | Ctrl+G                    | Group the picked layers (new installs; Shift+Alt+G is the perspective grid) |
