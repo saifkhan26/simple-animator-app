@@ -1363,11 +1363,13 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
         } else {
             ic::PLAY
         };
-        let play_base = if state.playback.playing { "Pause" } else { "Play" };
-        let play_tip = tip(state, Action::PlayPause, play_base);
-        if theme::icon_button(ui, play_icon, &play_tip).clicked() {
+        if play_button(state, ui, play_icon).clicked() {
             let now = ctx.input(|i| i.time);
-            state.playback.toggle(now);
+            if ui.input(|i| i.modifiers.shift) {
+                state.play_pause_here(Some(now));
+            } else {
+                state.play_pause(Some(now));
+            }
         }
         if loop_toggle(ui, state).clicked() {
             state.loop_timeline = !state.loop_timeline;
@@ -2049,6 +2051,21 @@ fn stabilizer_controls(state: &mut AppState, ui: &mut egui::Ui) {
 /// The Loop toggle shared by both timeline windows. One flag covers playback,
 /// wheel scrub and the frame step actions, so "loop off" means the same thing
 /// however the playhead is being moved.
+/// The Timeline's and the mini timeline's Play / Pause button. Shift-click
+/// pauses where the playhead is instead of going back to the start frame.
+fn play_button(state: &AppState, ui: &mut egui::Ui, icon: &str) -> egui::Response {
+    let base = if state.playback.playing {
+        format!(
+            "Pause, back on the frame playback started on. Shift-click, or {}, to stay where it stops",
+            combo_text(state, Action::PlayPauseHere)
+        )
+    } else {
+        "Play".to_string()
+    };
+    let tip = tip(state, Action::PlayPause, &base);
+    theme::icon_button(ui, icon, &tip)
+}
+
 fn loop_toggle(ui: &mut egui::Ui, state: &AppState) -> egui::Response {
     let tip = if state.loop_timeline {
         "Loop on — playback repeats, and stepping wraps at both ends"
@@ -2077,11 +2094,13 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 } else {
                     ic::PLAY
                 };
-                let play_base = if state.playback.playing { "Pause" } else { "Play" };
-                let play_tip = tip(state, Action::PlayPause, play_base);
-                if theme::icon_button(ui, play_icon, &play_tip).clicked() {
+                if play_button(state, ui, play_icon).clicked() {
                     let now = ctx.input(|i| i.time);
-                    state.playback.toggle(now);
+                    if ui.input(|i| i.modifiers.shift) {
+                        state.play_pause_here(Some(now));
+                    } else {
+                        state.play_pause(Some(now));
+                    }
                 }
                 if loop_toggle(ui, state).clicked() {
                     state.loop_timeline = !state.loop_timeline;

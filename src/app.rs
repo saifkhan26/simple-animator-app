@@ -1399,6 +1399,9 @@ pub struct AppState {
     /// loops is playing — it has its own place then, apart from the frame
     /// showing. `None` the rest of the time. See `follow_stretched_camera`.
     shot_cam: Option<f32>,
+    /// The frame playback started on, for Play/Pause to stop back on.
+    /// Cleared by a pause that stays put.
+    play_from: Option<usize>,
     /// Last frame the camera edit buffer was synced for.
     cam_sync_last: Option<usize>,
     /// Lock the editor viewport to the camera, so what you see is the shot.
@@ -1692,6 +1695,7 @@ impl AppState {
             cam_drag: None,
             cam_key_drag: None,
             shot_cam: None,
+            play_from: None,
             cam_sync_last: None,
             camera_look_through: false,
             show_camera_guide: prefs.show_camera_guide,
@@ -3100,15 +3104,59 @@ impl AppState {
     /// is; otherwise the frames and the camera run together, as ever.
     fn advance_playback(&mut self, now: f64) -> bool {
         let stretched = self.project.camera_loops() > 1;
-        let moved = if stretched {
+        let was = self.playback.playing;
+        let mut moved = if stretched {
             self.playback
                 .tick_shot(&mut self.project, now, self.loop_timeline)
         } else {
             self.playback
                 .tick(&mut self.project, now, self.loop_timeline)
         };
+        // Run out at the end of the range with the loop off: back to the
+        // start, as a stop would.
+        if was && !self.playback.playing {
+            moved |= self.return_to_play_start();
+        }
         self.follow_stretched_camera(stretched);
         moved
+    }
+
+    /// Play, or stop and go back to the frame playback started on. `now` is
+    /// the clock when there is one to hand (a button); a shortcut has none.
+    pub fn play_pause(&mut self, now: Option<f64>) {
+        if self.playback.playing {
+            self.playback.stop();
+            self.return_to_play_start();
+            return;
+        }
+        self.play_from = Some(self.project.current_frame);
+        match now {
+            Some(t) => self.playback.toggle(t),
+            None => self.playback.toggle_unclocked(),
+        }
+    }
+
+    /// Play, or stop on the frame playback has got to: for catching a
+    /// drawing to fix mid-playback.
+    pub fn play_pause_here(&mut self, now: Option<f64>) {
+        if self.playback.playing {
+            self.play_from = None;
+            self.playback.stop();
+        } else {
+            self.play_pause(now);
+        }
+    }
+
+    /// Put the playhead back where playback started. Whether it moved.
+    fn return_to_play_start(&mut self) -> bool {
+        let Some(f) = self.play_from.take() else { return false };
+        // A camera move stretched over loops would otherwise put the
+        // playhead on the frame the camera reached.
+        self.shot_cam = None;
+        self.cam_sync_last = None;
+        let was = self.project.current_frame;
+        self.project.goto(f);
+        self.project.current_frame != was
     }
 
     /// While a camera move stretched over loops plays, note where it has got
@@ -5714,7 +5762,8 @@ impl AppState {
                 self.perspective.snap = !self.perspective.snap;
             }
             Action::PerspectiveNextGrid => self.cycle_perspective_grid(),
-            Action::PlayPause => self.playback.toggle_unclocked(),
+            Action::PlayPause => self.play_pause(None),
+            Action::PlayPauseHere => self.play_pause_here(None),
             Action::FramePrev => self
                 .project
                 .step(-self.frame_step_delta(), self.loop_timeline),
@@ -9920,6 +9969,48 @@ mod tests {
         assert_eq!(st.project.current_frame, 3, "the first tick only starts the clock");
         st.playback.tick(&mut st.project, t + 1.0 / fps, true);
         assert_eq!(st.project.current_frame, 4);
+    }
+
+    /// Play/Pause stops back on the frame playback started on, wherever the
+    /// playhead had got to; the pause-here action stays put.
+    #[test]
+    fn stopping_goes_back_to_the_start_frame_unless_paused_here() {
+        let mut st = AppState::for_test();
+        st.project.ensure_frame_count(24);
+        let fps = st.project.fps as f64;
+        st.project.goto(8);
+        st.play_pause(Some(0.0));
+        st.advance_playback(5.2 / fps);
+        assert_eq!(st.project.current_frame, 13, "played on");
+        st.play_pause(Some(6.0 / fps));
+        assert!(!st.playback.playing);
+        assert_eq!(st.project.current_frame, 8);
+
+        st.dispatch(Action::PlayPauseHere);
+        st.advance_playback(1.0);
+        st.advance_playback(1.0 + 3.2 / fps);
+        assert_eq!(st.project.current_frame, 11);
+        st.dispatch(Action::PlayPauseHere);
+        assert!(!st.playback.playing);
+        st.advance_playback(2.0);
+        assert_eq!(st.project.current_frame, 11, "paused where it was");
+    }
+
+    /// With the loop off, running out at the end of the range goes back to
+    /// the start frame too.
+    #[test]
+    fn running_out_with_the_loop_off_goes_back_to_the_start_frame() {
+        let mut st = AppState::for_test();
+        st.project.ensure_frame_count(12);
+        st.loop_timeline = false;
+        let fps = st.project.fps as f64;
+        st.project.goto(8);
+        st.play_pause(Some(0.0));
+        st.advance_playback(2.2 / fps);
+        assert_eq!(st.project.current_frame, 10);
+        assert!(st.advance_playback(9.0 / fps), "the frame on screen changed");
+        assert!(!st.playback.playing);
+        assert_eq!(st.project.current_frame, 8);
     }
 
     /// The toggle is session-only: a fresh state never opens faded.

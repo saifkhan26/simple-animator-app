@@ -36,6 +36,9 @@ pub enum Action {
     /// strokes snap to.
     PerspectiveNextGrid,
     PlayPause,
+    /// Play / Pause, the pause staying on the frame it reached instead of
+    /// going back to where playback started.
+    PlayPauseHere,
     FramePrev,
     FrameNext,
     KeyJumpPrev,
@@ -162,6 +165,7 @@ impl Action {
         Action::TogglePerspectiveSnap,
         Action::PerspectiveNextGrid,
         Action::PlayPause,
+        Action::PlayPauseHere,
         Action::FramePrev,
         Action::FrameNext,
         Action::KeyJumpPrev,
@@ -270,7 +274,8 @@ impl Action {
             Action::TogglePerspectiveGrid => "Show perspective grids",
             Action::TogglePerspectiveSnap => "Snap strokes to perspective grid",
             Action::PerspectiveNextGrid => "Next perspective grid",
-            Action::PlayPause => "Play / Pause",
+            Action::PlayPause => "Play / Pause (back to the start frame)",
+            Action::PlayPauseHere => "Play / Pause where it stops",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
             Action::KeyJumpPrev => "Previous drawing key",
@@ -1023,6 +1028,7 @@ impl Default for ShortcutMap {
         b.insert(Action::FrameDelete, KeyCombo::shift(K::F));
         // Playback / onion.
         b.insert(Action::PlayPause, KeyCombo::plain(K::Space));
+        b.insert(Action::PlayPauseHere, KeyCombo::shift(K::Space));
         b.insert(Action::OnionToggle, KeyCombo::plain(K::O));
         // Layers.
         b.insert(Action::LayerAdd, KeyCombo::plain(K::T));
