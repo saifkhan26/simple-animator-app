@@ -117,7 +117,8 @@ impl AppState {
             }
             ButtonDrag::SwatchPie => {
                 let off = at - d.anchor;
-                d.pie_hover = pie_slot(self.palette.len(), [off.x, off.y]);
+                let (colors, cap) = self.pie_colors();
+                d.pie_hover = pie_slot(colors.len(), cap, [off.x, off.y]);
             }
             ButtonDrag::None | ButtonDrag::Pan | ButtonDrag::Zoom | ButtonDrag::Rotate => {}
         }
@@ -132,7 +133,7 @@ impl AppState {
         match d.kind {
             ButtonDrag::Flip => self.project.goto(d.start_frame),
             ButtonDrag::SwatchPie => {
-                if let Some(&rgb) = d.pie_hover.and_then(|i| self.palette.get(i)) {
+                if let Some(rgb) = d.pie_hover.and_then(|i| self.pie_colors().0.get(i).copied()) {
                     self.set_brush_color(rgb);
                 }
             }
@@ -436,6 +437,38 @@ mod tests {
         st.button_drag_to(AT + vec2(4.0, 4.0));
         st.end_button_drag();
         assert_eq!(st.brush.color, [40, 0, 0, 255]);
+    }
+
+    /// With the wheel pinned its set has the inner ring to itself, and the
+    /// pinned swatches move out round it.
+    #[test]
+    fn a_pinned_wheel_s_set_leads_the_pie() {
+        let mut st = AppState::for_test();
+        st.palette = vec![[10, 10, 10], [20, 20, 20], [30, 30, 30]];
+        st.harmony.set_scheme(crate::color::Harmony::Complementary);
+        st.set_brush_color([200, 40, 40]);
+        st.set_wheel_pinned(true);
+        let (colors, cap) = st.pie_colors();
+        let set: Vec<[u8; 3]> = st.harmony.members().iter().map(|m| m.to_rgb()).collect();
+        assert_eq!(cap, set.len());
+        assert_eq!(&colors[..cap], &set[..]);
+        assert_eq!(&colors[cap..], &st.palette[..]);
+
+        // Straight down on the inner ring: the second of the pair.
+        st.begin_button_drag(ButtonDrag::SwatchPie, AT);
+        st.button_drag_to(AT + vec2(0.0, 50.0));
+        st.end_button_drag();
+        let [r, g, b] = set[1];
+        assert_eq!(st.brush.color, [r, g, b, 255]);
+
+        // Out on the outer ring, straight up: the first pinned swatch.
+        st.begin_button_drag(ButtonDrag::SwatchPie, AT);
+        st.button_drag_to(AT + vec2(0.0, -100.0));
+        st.end_button_drag();
+        assert_eq!(st.brush.color, [10, 10, 10, 255]);
+
+        st.set_wheel_pinned(false);
+        assert_eq!(st.pie_colors().0, st.palette, "unpinned, the swatches alone");
     }
 
     #[test]

@@ -1169,6 +1169,9 @@ pub struct AppState {
     /// Pencil or Ink, whichever was active last: the pen whose size Shape
     /// draws at. Session-only; the app comes back on the pencil anyway.
     pub last_pen: ActiveTool,
+    /// The colour wheel is pinned: every tool paints in one colour, and the
+    /// wheel's set leads the swatch pie. Session-only.
+    wheel_pinned: bool,
     pub stroke: Option<StrokeBuilder>,
     /// CellId being painted into during the current stroke.
     pub stroke_target: Option<CellId>,
@@ -1622,6 +1625,7 @@ impl AppState {
             selection_tex: None,
             tool_brushes: restore_tool_brushes(prefs.tool_brushes.clone()),
             last_pen: ActiveTool::Pencil,
+            wheel_pinned: false,
             stroke: None,
             stroke_target: None,
             shape_drag: None,
@@ -5363,8 +5367,43 @@ impl AppState {
     pub fn set_brush_color(&mut self, rgb: [u8; 3]) {
         let c = [rgb[0], rgb[1], rgb[2], 255];
         self.brush.color = c;
-        let idx = self.tool.idx();
-        self.tool_brushes[idx].color = c;
+        if self.wheel_pinned {
+            for b in &mut self.tool_brushes {
+                b.color = c;
+            }
+        } else {
+            let idx = self.tool.idx();
+            self.tool_brushes[idx].color = c;
+        }
+    }
+
+    /// Whether the colour wheel is pinned.
+    pub fn wheel_pinned(&self) -> bool {
+        self.wheel_pinned
+    }
+
+    /// Pin the colour wheel, or let it go. Pinning hands the colour in use
+    /// to every tool; letting go leaves each tool with it, to drift apart
+    /// again from there.
+    pub fn set_wheel_pinned(&mut self, on: bool) {
+        self.wheel_pinned = on;
+        if on {
+            let c = self.brush.color;
+            self.set_brush_color([c[0], c[1], c[2]]);
+        }
+    }
+
+    /// What the swatch pie offers, and how many of those its inner ring
+    /// takes: the pinned swatches, or with the wheel pinned its set first,
+    /// on the inner ring by itself.
+    pub fn pie_colors(&self) -> (Vec<[u8; 3]>, usize) {
+        if !self.wheel_pinned {
+            return (self.palette.clone(), crate::input::button_drag::PIE_INNER);
+        }
+        let mut colors: Vec<[u8; 3]> = self.harmony.members().iter().map(|m| m.to_rgb()).collect();
+        let set = colors.len();
+        colors.extend_from_slice(&self.palette);
+        (colors, set)
     }
 
     /// Write the active brush back to its slot, for a tool switch or a save
@@ -5382,8 +5421,15 @@ impl AppState {
     /// Make `t` the active tool with its stored brush. Shape draws at the
     /// size of the pen used last, not at a size of its own.
     pub(crate) fn load_brush(&mut self, t: ActiveTool) {
+        // A pinned wheel's colour goes with the pen to the next tool, however
+        // it was set.
+        let shared = self.wheel_pinned.then_some(self.brush.color);
         self.tool = t;
         self.brush = self.tool_brushes[t.idx()].clone();
+        if let Some(c) = shared {
+            self.brush.color = c;
+            self.tool_brushes[t.idx()].color = c;
+        }
         if t == ActiveTool::Shape {
             self.brush.radius = self.tool_brushes[self.last_pen.idx()].radius;
         }
@@ -5873,6 +5919,7 @@ impl AppState {
                 }
             }
             Action::FadeOthersToggle => self.fade_others = !self.fade_others,
+            Action::WheelPinToggle => self.set_wheel_pinned(!self.wheel_pinned),
             Action::LayerClipToggle => self.toggle_selected_clip(),
             Action::LayerAlphaLockToggle => self.toggle_selected_alpha_lock(),
             Action::LayerKeyLinkBelow => {
@@ -7831,6 +7878,35 @@ mod tests {
             frame(&mut st, true, false);
             assert_eq!(clicked, clicks, "Space with pan on it: {pan_on_space}");
         }
+    }
+
+    /// Pinned, the wheel's colour is every tool's: set on one, it is there on
+    /// the next. Unpinned, each tool keeps its own again.
+    #[test]
+    fn a_pinned_wheel_gives_every_tool_one_colour() {
+        let mut st = AppState::for_test();
+        st.set_tool(ActiveTool::Pencil);
+        st.set_brush_color([200, 0, 0]);
+        st.set_tool(ActiveTool::Ink);
+        st.set_brush_color([0, 0, 200]);
+        st.set_tool(ActiveTool::Pencil);
+        assert_eq!(st.brush.color, [200, 0, 0, 255], "unpinned: each its own");
+
+        st.set_wheel_pinned(true);
+        st.set_tool(ActiveTool::Fill);
+        assert_eq!(st.brush.color, [200, 0, 0, 255], "pinning hands the colour on");
+        st.set_brush_color([0, 150, 0]);
+        for t in [ActiveTool::Ink, ActiveTool::Shape, ActiveTool::Pencil] {
+            st.set_tool(t);
+            assert_eq!(st.brush.color, [0, 150, 0, 255], "{t:?}");
+        }
+
+        st.set_wheel_pinned(false);
+        st.set_brush_color([9, 9, 9]);
+        st.set_tool(ActiveTool::Ink);
+        assert_eq!(st.brush.color, [0, 150, 0, 255], "let go: tools drift apart again");
+        st.dispatch(Action::WheelPinToggle);
+        assert!(st.wheel_pinned());
     }
 
     /// An opacity drag over a pick sets every picked layer, and lands as one

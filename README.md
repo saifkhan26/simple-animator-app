@@ -366,10 +366,17 @@ wheel shows every colour of the set as a dot:
 Click a swatch under the wheel to paint with it; the set stays where it is.
 Drag the base dot (or press bare disc) to move the whole set; drag a side dot
 of Analogous or Tetradic to widen or narrow it. H / S / L fields set the
-current colour exactly, and the pin beside the scheme (**Pin set**) adds the
-whole set to your swatches.
+current colour exactly, and the **+** at the end of the set adds the whole set
+to your swatches.
 The set rebuilds around the brush colour whenever it changes elsewhere
 (eyedropper, a swatch, Paste). The scheme is remembered; the set is not.
+
+**Pin the wheel** with the pin beside the scheme (or bind *Pin the colour
+wheel* in Settings). While it's lit, every tool paints in one colour: pick it
+on the Pencil and the Ink, Fill and Shape have it too. Normally each tool keeps
+its own. The wheel's set also leads the swatch pie under the pen, on the inner
+ring by itself, with your pinned swatches on a ring round it. Unpinning leaves
+every tool on the colour it had; it starts unpinned each launch.
 
 Every colour button in the app opens the same wheel. Colours show as
 `hsl(h, s%, l%)` (hover a swatch), and **Paste** — the clipboard button at the

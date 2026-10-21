@@ -73,6 +73,8 @@ pub enum Action {
     LayerPick8,
     LayerPick9,
     FadeOthersToggle,
+    /// Pin the colour wheel (see `AppState::set_wheel_pinned`). Unbound.
+    WheelPinToggle,
     LayerClipToggle,
     LayerAlphaLockToggle,
     /// Link the active layer's key jumps to the nearest drawing layer below
@@ -201,6 +203,7 @@ impl Action {
         Action::LayerPick8,
         Action::LayerPick9,
         Action::FadeOthersToggle,
+        Action::WheelPinToggle,
         Action::LayerClipToggle,
         Action::LayerAlphaLockToggle,
         Action::LayerKeyLinkBelow,
@@ -314,6 +317,7 @@ impl Action {
             Action::LayerPick8 => "Select layer 8 (from top)",
             Action::LayerPick9 => "Select layer 9 (from top)",
             Action::FadeOthersToggle => "Fade other layers",
+            Action::WheelPinToggle => "Pin the colour wheel (one colour for every tool)",
             Action::LayerClipToggle => "Clip layer to the one below",
             Action::LayerAlphaLockToggle => "Lock layer alpha",
             Action::LayerKeyLinkBelow => "Toggle key link to layer below",

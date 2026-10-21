@@ -485,7 +485,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 }
             }
             if let Some(d) = state.button_drag.filter(|d| d.kind == ButtonDrag::SwatchPie) {
-                draw_swatch_pie(ctx, &state.palette, &d, state.brush.color);
+                let (colors, cap) = state.pie_colors();
+                draw_swatch_pie(ctx, &colors, cap, &d, state.brush.color);
             }
             } // end: if !state.screen_pick
         });
@@ -6851,6 +6852,7 @@ fn draw_readout(painter: &egui::Painter, pos: egui::Pos2, text: String) {
 fn draw_swatch_pie(
     ctx: &egui::Context,
     palette: &[[u8; 3]],
+    cap: usize,
     d: &crate::app::ButtonDragState,
     current: [u8; 4],
 ) {
@@ -6860,7 +6862,7 @@ fn draw_swatch_pie(
         egui::Id::new("swatch_pie"),
     ));
     let c = d.anchor;
-    let (inner, outer) = pie_rings(palette.len());
+    let (inner, outer) = pie_rings(palette.len(), cap);
     let edge = if outer > 0 { PIE_OUTER } else { PIE_RING };
     painter.circle_filled(c, edge + 4.0, theme::premul(20, 20, 22, 210));
     let quiet = Stroke::new(1.0, theme::premul(0, 0, 0, 160));
@@ -11368,6 +11370,8 @@ mod color_panel_layout_tests {
         assert!(!brush.intersects(rect(PanelId::Timeline)), "{brush:?}");
         assert!(egui::AreaState::load(&ctx, egui::Id::new(panel_key(PanelId::Color))).is_none());
         assert!(!PanelId::ALL.contains(&PanelId::Color), "not in the Panels menu");
+        // 200 points inside, 20 of frame: no row may push it wider.
+        assert!((brush.width() - 220.0).abs() < 0.5, "{brush:?}");
     }
 }
 

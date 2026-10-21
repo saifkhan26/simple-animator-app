@@ -741,6 +741,9 @@ fn snapshots() {
     rig.state.palette = vec![[250, 200, 40], [10, 10, 10], [24, 32, 30], [30, 52, 40], [230, 215, 190], [90, 90, 90], [245, 240, 230]];
     rig.state.set_brush_color([83, 63, 4]);
     snapshot(&mut rig, 2.0).save(dir.join("brush.png")).unwrap();
+    rig.state.set_wheel_pinned(true);
+    snapshot(&mut rig, 2.0).save(dir.join("brush_pinned.png")).unwrap();
+    rig.state.set_wheel_pinned(false);
     rig.drag_right_edge(-400.0);
     snapshot(&mut rig, 2.0).save(dir.join("brush_narrowest.png")).unwrap();
     let mut rig = Rig::new(Win::Settings);

@@ -15,6 +15,9 @@ const SEGMENTS: usize = 72;
 const RINGS: usize = 8;
 /// Width of the lightness bar.
 pub const BAR_W: f32 = 16.0;
+/// The + that adds the set to the pinned swatches, at the end of its row.
+const SET_ADD_W: f32 = 22.0;
+
 /// The Brush panel's disc at its largest: what its 200-point opening width
 /// leaves for it.
 const DISC_MAX: f32 = 159.0;
@@ -378,18 +381,26 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
 
     let mut changed = false;
     let mut pin = false;
+    let mut toggle_pin = false;
+    let pinned = state.wheel_pinned();
     let set = &mut state.harmony;
 
-    // The scheme, and Pin set at the end of its row.
+    // The scheme, and the pin at the end of its row.
     let mut scheme = set.scheme;
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            pin = theme::icon_button(
-                ui,
-                egui_phosphor::regular::PUSH_PIN,
-                "Pin set: add every colour of the set to the pinned swatches (the oldest drop past 32)",
-            )
-            .clicked();
+            let icon = egui::RichText::new(egui_phosphor::regular::PUSH_PIN).size(15.0);
+            let icon = if pinned { icon.color(theme::accent()) } else { icon };
+            toggle_pin = ui
+                .add(egui::Button::new(icon).selected(pinned).min_size(vec2(28.0, 22.0)))
+                .on_hover_text(if pinned {
+                    "Pinned: every tool paints in this colour, and the set leads the swatch pie. \
+                     Click to let each tool keep its own colour again."
+                } else {
+                    "Pin the wheel: every tool paints in this colour, and the set leads the \
+                     swatch pie under the pen"
+                })
+                .clicked();
             egui::ComboBox::from_id_salt("harmony_scheme")
                 .selected_text(scheme.label())
                 .width(ui.available_width())
@@ -453,11 +464,19 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
         }
     });
 
-    // The set as swatches: click to paint with one. The set stays put.
+    // The set as swatches: click to paint with one. The set stays put. The
+    // + at the end adds it to the pinned swatches.
     ui.add_space(4.0);
     let members = set.members();
     let n = members.len() as f32;
-    let w = ((ui.available_width() - gap * (n - 1.0)) / n).floor();
+    // The + as wide as egui will draw it: its padding makes it more than
+    // its minimum, and a row that comes out over widens the panel.
+    let plus = ui.fonts(|f| {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        f.layout_no_wrap("+".to_owned(), font, Color32::WHITE).size().x
+    });
+    let add_w = (plus + 2.0 * ui.spacing().button_padding.x).max(SET_ADD_W).ceil();
+    let w = ((ui.available_width() - add_w - gap * n) / n).floor();
     ui.horizontal(|ui| {
         for (i, m) in members.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
@@ -478,6 +497,10 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
                 changed = true;
             }
         }
+        pin = ui
+            .add(egui::Button::new("+").min_size(vec2(add_w, 22.0)))
+            .on_hover_text("Add the set to the pinned swatches (the oldest drop past 32)")
+            .clicked();
     });
 
     // The colour exactly, and Paste at the end of the row. Hovering a set
@@ -523,6 +546,9 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
     if pin {
         let colors: Vec<[u8; 3]> = state.harmony.members().iter().map(|m| m.to_rgb()).collect();
         state.pin_set(&colors);
+    }
+    if toggle_pin {
+        state.set_wheel_pinned(!pinned);
     }
     if changed {
         state.set_brush_color(state.harmony.active_rgb());
@@ -694,11 +720,26 @@ mod tests {
         state.palette = vec![state.harmony.member(0).to_rgb()];
         let ctx = egui::Context::default();
         let out = run(&ctx, vec![], |ui| color_panel(&mut state, ui));
-        let p = text_pos(&out, egui_phosphor::regular::PUSH_PIN);
+        let p = text_pos(&out, "+");
         run(&ctx, press(p), |ui| color_panel(&mut state, ui));
         run(&ctx, release(p), |ui| color_panel(&mut state, ui));
         let want: Vec<[u8; 3]> = state.harmony.members().iter().map(|m| m.to_rgb()).collect();
         assert_eq!(state.palette, want, "the held base is not pinned twice");
+        assert!(!state.wheel_pinned(), "adding the set doesn't pin the wheel");
+    }
+
+    #[test]
+    fn the_pin_pins_the_wheel_and_lets_it_go() {
+        let mut state = state_on(Harmony::Complementary, [200, 60, 30]);
+        let ctx = egui::Context::default();
+        let out = run(&ctx, vec![], |ui| color_panel(&mut state, ui));
+        let p = text_pos(&out, egui_phosphor::regular::PUSH_PIN);
+        for want in [true, false] {
+            run(&ctx, press(p), |ui| color_panel(&mut state, ui));
+            run(&ctx, release(p), |ui| color_panel(&mut state, ui));
+            assert_eq!(state.wheel_pinned(), want);
+        }
+        assert!(state.palette.is_empty(), "pinning adds no swatches");
     }
 
     #[test]
