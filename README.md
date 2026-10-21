@@ -144,8 +144,10 @@ under alpha lock.
 
 - **Enclose & fill** — fill only the areas the lines inside the lasso shut
   in, not the space between them and the lasso. It reads lines the way the
-  bucket does (*lines from*, gap closing, expand). Hold `Ctrl+Shift` as a
-  shape lands for the other way.
+  bucket does (*lines from*, gap closing, expand), and the canvas edge closes
+  an area as a line does: two strokes across a corner make a shape with it
+  (drag the lasso past the edge to take it in). Hold `Ctrl+Shift` as a shape
+  lands for the other way.
 - **Behind existing paint** — the fill goes under what is already there:
   line art keeps its colour and its soft edges.
 - Hold `Ctrl+Alt` to erase the shape instead, and `Shift+Alt` to turn

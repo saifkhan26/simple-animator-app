@@ -387,6 +387,20 @@ mod tests {
         assert_eq!(px(&st, 60, 100), BLACK, "still behind the line");
     }
 
+    /// A lasso dragged out past the canvas's corner fills the shape two
+    /// strokes make with its edges.
+    #[test]
+    fn enclose_fills_a_shape_closed_by_the_canvas_edge() {
+        let mut st = state();
+        paint(&mut st, (60, 0, 61, 61), BLACK);
+        paint(&mut st, (0, 60, 61, 61), BLACK);
+        let enclose = LassoHeld { enclose: true, ..Default::default() };
+        drag_square(&mut st, (-30.0, -30.0, 120.0, 120.0), enclose);
+        assert_eq!(px(&st, 0, 0), RED, "up to the edge");
+        assert_eq!(px(&st, 30, 30), RED);
+        assert_eq!(px(&st, 90, 90)[3], 0, "outside the strokes stays bare");
+    }
+
     #[test]
     fn backspace_and_undo_take_back_corners_and_esc_drops_the_polygon() {
         let mut st = state();
