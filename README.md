@@ -375,8 +375,12 @@ The set rebuilds around the brush colour whenever it changes elsewhere
 wheel* in Settings). While it's lit, every tool paints in one colour: pick it
 on the Pencil and the Ink, Fill and Shape have it too. Normally each tool keeps
 its own. The wheel's set also leads the swatch pie under the pen, on the inner
-ring by itself, with your pinned swatches on a ring round it. Unpinning leaves
-every tool on the colour it had; it starts unpinned each launch.
+ring by itself, with your pinned swatches on a ring round it. The set stays put
+while pinned: only the wheel's own dots, bar and fields move it. Picking one of
+its colours from the pie lights that member; any other colour (a swatch, the
+eyedropper, Paste) paints without touching the set. Unpinning lets it follow
+the brush colour again, and leaves every tool on the colour it had; it starts
+unpinned each launch.
 
 Every colour button in the app opens the same wheel. Colours show as
 `hsl(h, s%, l%)` (hover a swatch), and **Paste** — the clipboard button at the

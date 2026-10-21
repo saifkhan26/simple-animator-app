@@ -371,18 +371,30 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
     // The brush colour can change from anywhere — eyedropper, a pinned
     // swatch, the swatch pie, Paste, a tool switch. Rather than hook every
     // one, notice the brush no longer matches and rebuild around it.
+    //
+    // Pinned, the set stays put instead: only the wheel's own controls move
+    // it. A colour that is one of the set selects that member; any other
+    // leaves no member lit (`lit`) until one is picked again.
     let brush = {
         let c = state.brush.color;
         [c[0], c[1], c[2]]
     };
-    if state.harmony.active_rgb() != brush {
+    let pinned = state.wheel_pinned();
+    let lit = if state.harmony.active_rgb() == brush {
+        true
+    } else if !pinned {
         state.harmony.rebase(brush);
-    }
+        true
+    } else if let Some(i) = state.harmony.members().iter().position(|m| m.to_rgb() == brush) {
+        state.harmony.pick(i);
+        true
+    } else {
+        false
+    };
 
     let mut changed = false;
     let mut pin = false;
     let mut toggle_pin = false;
-    let pinned = state.wheel_pinned();
     let set = &mut state.harmony;
 
     // The scheme, and the pin at the end of its row.
@@ -423,22 +435,22 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
     // Monochrome members share hue and saturation, so they are one dot on
     // the disc; what tells them apart is lightness, shown as bar ticks.
     let markers: Vec<Marker> = if mono {
-        vec![Marker { index: active, hsl: members[active], active: true }]
+        vec![Marker { index: active, hsl: members[active], active: lit }]
     } else {
         members
             .iter()
             .enumerate()
-            .map(|(i, &hsl)| Marker { index: i, hsl, active: i == active })
+            .map(|(i, &hsl)| Marker { index: i, hsl, active: lit && i == active })
             .collect()
     };
     let ticks: Vec<Tick> = if mono {
         members
             .iter()
             .enumerate()
-            .map(|(i, m)| Tick { index: i, l: m.l, active: i == active })
+            .map(|(i, m)| Tick { index: i, l: m.l, active: lit && i == active })
             .collect()
     } else {
-        vec![Tick { index: active, l: set.base.l, active: true }]
+        vec![Tick { index: active, l: set.base.l, active: lit }]
     };
 
     ui.add_space(4.0);
@@ -481,7 +493,7 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
         for (i, m) in members.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
             ui.painter().rect_filled(rect, 3.0, m.to_color32());
-            let stroke = if i == set.active {
+            let stroke = if lit && i == set.active {
                 Stroke::new(2.0, theme::accent())
             } else {
                 Stroke::new(1.0, theme::stroke_thin())
@@ -726,6 +738,34 @@ mod tests {
         let want: Vec<[u8; 3]> = state.harmony.members().iter().map(|m| m.to_rgb()).collect();
         assert_eq!(state.palette, want, "the held base is not pinned twice");
         assert!(!state.wheel_pinned(), "adding the set doesn't pin the wheel");
+    }
+
+    /// Pinned, colours picked elsewhere (the swatch pie, a swatch) never move
+    /// the set: one of its own selects that member, any other leaves it be.
+    /// Unpinned, it follows the brush again.
+    #[test]
+    fn a_pinned_wheel_keeps_its_set_whatever_picks_a_colour() {
+        let mut state = state_on(Harmony::Complementary, [200, 60, 30]);
+        state.set_wheel_pinned(true);
+        let ctx = egui::Context::default();
+        let set = state.harmony.members();
+        let base = state.harmony.base;
+
+        // The complement, as the pie's inner ring would hand it over.
+        state.set_brush_color(set[1].to_rgb());
+        run(&ctx, vec![], |ui| color_panel(&mut state, ui));
+        assert_eq!(state.harmony.base, base, "the set stays put");
+        assert_eq!(state.harmony.active, 1, "the complement is the one lit");
+
+        // A pinned swatch that isn't in the set.
+        state.set_brush_color([10, 200, 90]);
+        run(&ctx, vec![], |ui| color_panel(&mut state, ui));
+        assert_eq!(state.harmony.base, base);
+        assert_eq!(state.brush.color, [10, 200, 90, 255], "the brush keeps the swatch");
+
+        state.set_wheel_pinned(false);
+        run(&ctx, vec![], |ui| color_panel(&mut state, ui));
+        assert_eq!(state.harmony.active_rgb(), [10, 200, 90], "unpinned, it follows again");
     }
 
     #[test]

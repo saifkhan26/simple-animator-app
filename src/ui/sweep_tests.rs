@@ -743,6 +743,9 @@ fn snapshots() {
     snapshot(&mut rig, 2.0).save(dir.join("brush.png")).unwrap();
     rig.state.set_wheel_pinned(true);
     snapshot(&mut rig, 2.0).save(dir.join("brush_pinned.png")).unwrap();
+    // A swatch from outside the set: the set stays, nothing lit.
+    rig.state.set_brush_color([230, 215, 190]);
+    snapshot(&mut rig, 2.0).save(dir.join("brush_pinned_off_set.png")).unwrap();
     rig.state.set_wheel_pinned(false);
     rig.drag_right_edge(-400.0);
     snapshot(&mut rig, 2.0).save(dir.join("brush_narrowest.png")).unwrap();
