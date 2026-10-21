@@ -4860,10 +4860,22 @@ impl AppState {
     fn warm_pre(&mut self, ctx: &egui::Context) {
         let paints = matches!(
             self.tool,
-            ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser | ActiveTool::Fill | ActiveTool::Shape
+            ActiveTool::Pencil
+                | ActiveTool::Ink
+                | ActiveTool::Eraser
+                | ActiveTool::Fill
+                | ActiveTool::Shape
+                | ActiveTool::Liquify
         );
         let busy = self.stroke_pre_live || self.playback.playing || self.selection.is_some() || !paints;
-        let Some(target) = self.pen_cell().filter(|_| !busy) else {
+        // A warp works on the drawing that is there, auto-key or not.
+        let target = if self.tool == ActiveTool::Liquify {
+            let p = &self.project;
+            p.paintable(p.current_layer).then(|| p.resolved_current())
+        } else {
+            self.pen_cell()
+        };
+        let Some(target) = target.filter(|_| !busy) else {
             self.warm_wait = None;
             return;
         };
@@ -10304,6 +10316,76 @@ mod tests {
             after_bytes as f64 / MB,
             undo as f64 / MB,
         );
+    }
+
+    /// Liquify timings by canvas and brush size: pen-down, then a 600 px push
+    /// at four pen samples a frame (`move`, the pointer calls; `total`, them
+    /// and the frame after, where the warp catches up), and the apply
+    /// (Enter). `cargo test --release perf_liquify -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn perf_liquify() {
+        const MB: f64 = 1024.0 * 1024.0;
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        for (w, h) in [(1920u32, 1080u32), (3840, 2160), (7680, 4320)] {
+            for radius in [50.0f32, 200.0, 400.0, 700.0, 1000.0] {
+                let mut st = AppState::for_test();
+                st.load_project(probe_project(w, h, 1), None);
+                st.lock_brush_to_view = false;
+                st.set_tool(ActiveTool::Liquify);
+                st.brush.radius = radius;
+                st.brush.liquify_strength = 1.0;
+                let ctx = egui::Context::default();
+                for _ in 0..30 {
+                    probe_frame(&mut st, &ctx);
+                }
+                let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+                let (a, b) = ((cx - 300.0, cy), (cx + 300.0, cy + 60.0));
+                let steps = 100usize;
+                let sample = |i: usize| {
+                    let t = i as f32 / steps as f32;
+                    PointerSample {
+                        x: a.0 + (b.0 - a.0) * t,
+                        y: a.1 + (b.1 - a.1) * t,
+                        pressure: 1.0,
+                        t: i as f32 / 240.0,
+                        time_ms: i as f64 * 1000.0 / 240.0,
+                        ..Default::default()
+                    }
+                };
+                let start = Instant::now();
+                st.pointer_down(sample(0));
+                let down = ms(start);
+                let (first, _) = probe_frame(&mut st, &ctx);
+                let (mut moves, mut frames, mut sent) = (Vec::new(), Vec::new(), 0usize);
+                let all: Vec<usize> = (1..=steps).collect();
+                for chunk in all.chunks(4) {
+                    let start = Instant::now();
+                    for &i in chunk {
+                        st.pointer_move(sample(i));
+                    }
+                    moves.push(ms(start));
+                    let (f, bytes) = probe_frame(&mut st, &ctx);
+                    frames.push(f + moves[moves.len() - 1]);
+                    sent += bytes;
+                }
+                st.pointer_up();
+                let start = Instant::now();
+                st.commit_liquify();
+                let apply = ms(start);
+                let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+                let max = |v: &[f64]| v.iter().copied().fold(0.0, f64::max);
+                eprintln!(
+                    "{w}x{h} r{radius:<4} down {down:>6.1} +{first:>6.1} | move mean {:>6.1} max {:>6.1} | \
+                     total mean {:>6.1} max {:>6.1} | sent {:>7.1} MB | apply {apply:>6.1}",
+                    mean(&moves),
+                    max(&moves),
+                    mean(&frames),
+                    max(&frames),
+                    sent as f64 / MB,
+                );
+            }
+        }
     }
 
     /// Stroke timings on a big portrait canvas, stage by stage: pen-down

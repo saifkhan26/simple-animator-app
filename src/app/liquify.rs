@@ -23,14 +23,67 @@ use crate::doc::canvas::DirtyRect;
 use crate::doc::layer::CellId;
 use crate::input::pointer::PointerSample;
 use crate::tools::lasso::Mask;
-use crate::tools::liquify::{edge_weights, resample, LiquifyField, LiquifyMode, MIN_RADIUS, STEP};
+use crate::tools::liquify::{edge_weights, resample, resample_field, LiquifyField, LiquifyMode, MIN_RADIUS, STEP};
 use crate::tools::selection::Placement;
 use crate::tools::ActiveTool;
 use crate::undo;
 
 /// What the per-stroke copies of the field, kept for Ctrl+Z, may take
-/// between them. About fifteen strokes on an 8K drawing; the oldest go first.
+/// between them; the oldest go first.
 const BACKUP_BYTES: usize = 256 << 20;
+
+/// Grid points a side of a tile of the field, the unit a stroke's backup
+/// keeps: 128 pixels.
+const TILE: usize = 32;
+
+/// A tile's (column, row) among the field's tiles.
+type TileAt = (usize, usize);
+
+/// The field as it was before one stroke, kept only where the stroke
+/// wrote: each tile it reached, saved the first time a dab did. A copy of
+/// the whole field at every pen-down was 16 MB on an 8K drawing.
+#[derive(Default)]
+struct StrokeBackup {
+    /// Each tile kept, and the values its points had.
+    tiles: Vec<(TileAt, Vec<[f32; 2]>)>,
+    saved: std::collections::HashSet<TileAt>,
+}
+
+impl StrokeBackup {
+    /// Keep the tiles under grid points `(i0..=i1, j0..=j1)` not kept yet,
+    /// before a dab writes there.
+    fn save(&mut self, field: &LiquifyField, (i0, i1, j0, j1): (usize, usize, usize, usize)) {
+        for tj in j0 / TILE..=j1 / TILE {
+            for ti in i0 / TILE..=i1 / TILE {
+                if !self.saved.insert((ti, tj)) {
+                    continue;
+                }
+                let (x0, x1) = (ti * TILE, ((ti + 1) * TILE).min(field.nw));
+                let (y0, y1) = (tj * TILE, ((tj + 1) * TILE).min(field.nh));
+                let mut v = Vec::with_capacity((x1 - x0) * (y1 - y0));
+                for j in y0..y1 {
+                    v.extend_from_slice(&field.d[j * field.nw + x0..j * field.nw + x1]);
+                }
+                self.tiles.push(((ti, tj), v));
+            }
+        }
+    }
+
+    /// Put the kept tiles back.
+    fn restore(&self, field: &mut LiquifyField) {
+        for &((ti, tj), ref v) in &self.tiles {
+            let (x0, x1) = (ti * TILE, ((ti + 1) * TILE).min(field.nw));
+            for (r, j) in (tj * TILE..((tj + 1) * TILE).min(field.nh)).enumerate() {
+                let w = x1 - x0;
+                field.d[j * field.nw + x0..j * field.nw + x1].copy_from_slice(&v[r * w..(r + 1) * w]);
+            }
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.tiles.iter().map(|(_, v)| v.len() * std::mem::size_of::<[f32; 2]>()).sum()
+    }
+}
 
 /// A warp under way on one drawing.
 pub struct LiquifySession {
@@ -49,8 +102,15 @@ pub struct LiquifySession {
     touched: Option<DirtyRect>,
     /// Where the last dab landed, while the pen is down.
     last: Option<(f32, f32)>,
+    /// Where the pen has got to since, and its pressure there: dabbed toward
+    /// once a frame (see [`AppState::flush_liquify`]).
+    aim: Option<((f32, f32), f32)>,
+    /// Cell pixels the dabs have changed the field under since the drawing
+    /// was last resampled, and where those dabs landed.
+    pending: Option<DirtyRect>,
+    dabs: Vec<(f32, f32)>,
     /// The field before each stroke, newest last: what Ctrl+Z goes back to.
-    backups: Vec<Vec<[f32; 2]>>,
+    backups: Vec<StrokeBackup>,
 }
 
 impl AppState {
@@ -77,26 +137,65 @@ impl AppState {
             l.edge = edge_weights(&l.field, l.clip.as_deref(), width);
             l.edge_width = width;
         }
-        let bytes = (l.field.d.len() * std::mem::size_of::<[f32; 2]>()).max(1);
-        l.backups.push(l.field.d.clone());
-        while l.backups.len() > 1 && l.backups.len() * bytes > BACKUP_BYTES {
-            l.backups.remove(0);
+        // The oldest strokes' backups go first past the cap.
+        let mut kept: usize = l.backups.iter().map(StrokeBackup::bytes).sum();
+        while !l.backups.is_empty() && kept > BACKUP_BYTES {
+            kept -= l.backups.remove(0).bytes();
         }
+        l.backups.push(StrokeBackup::default());
         l.last = Some((s.x, s.y));
+        l.aim = None;
         if self.brush.liquify_mode == LiquifyMode::Smooth {
             self.liquify_dab((s.x, s.y), (s.x, s.y), s.pressure);
         }
     }
 
+    /// The pen moved on. A push is noted, and dabbed toward when the
+    /// frame's samples are all in (see [`AppState::flush_liquify`]). A
+    /// smooth dabs now, every sample as before: held still, a smooth keeps
+    /// working at the pen's rate, and a frame's worth in one would ease less.
     pub(super) fn liquify_move(&mut self, s: PointerSample) {
-        if let Some(from) = self.liquify.as_ref().and_then(|l| l.last) {
-            self.liquify_dab(from, (s.x, s.y), s.pressure);
+        let smooth = self.brush.liquify_mode == LiquifyMode::Smooth;
+        let Some(l) = self.liquify.as_mut().filter(|l| l.last.is_some()) else {
+            return;
+        };
+        if smooth {
+            if let Some(from) = l.last {
+                self.liquify_dab(from, (s.x, s.y), s.pressure);
+            }
+        } else {
+            l.aim = Some(((s.x, s.y), s.pressure));
         }
     }
 
     pub(super) fn liquify_up(&mut self) {
+        self.flush_liquify();
         if let Some(l) = &mut self.liquify {
             l.last = None;
+        }
+    }
+
+    /// Catch the warp up with the pen, once a frame: dab from where the last
+    /// dab landed to where the pen is now, then resample what all of that
+    /// changed. A pen sends several samples a frame, and every dab moves the
+    /// field under the whole brush; dabbing and resampling a frame at a time,
+    /// not a sample at a time, is what keeps a big brush smooth. The canvas
+    /// calls it after each frame's samples; pen-up and landing the warp call
+    /// it too.
+    pub fn flush_liquify(&mut self) {
+        let step = self.liquify.as_mut().and_then(|l| Some((l.last?, l.aim.take()?)));
+        if let Some((from, (to, pressure))) = step {
+            self.liquify_dab(from, to, pressure);
+        }
+        let Some(l) = self.liquify.as_mut() else {
+            return;
+        };
+        let dabs = std::mem::take(&mut l.dabs);
+        if let Some(r) = l.pending.take() {
+            // Past the brush's rim the field never moved; a grid step either
+            // way more, the pixels between still read from points that did.
+            let reach = self.effective_radius().max(MIN_RADIUS) + 2.0 * STEP as f32;
+            self.liquify_render(r, Some((&dabs, reach)));
         }
     }
 
@@ -133,6 +232,8 @@ impl AppState {
         let field = LiquifyField::new(region);
         let edge_width = self.brush.liquify_edge.max(0.0);
         let edge = edge_weights(&field, clip.as_deref(), edge_width);
+        // Usually free: the drawing was readied while the pen rested (see
+        // `warm_pre`).
         self.snapshot_pre(cell);
         if let Some(c) = self.project.cell_mut(cell) {
             c.dirty = None;
@@ -147,6 +248,9 @@ impl AppState {
             placement: self.active_placement(),
             touched: None,
             last: None,
+            aim: None,
+            pending: None,
+            dabs: Vec::new(),
             backups: Vec::new(),
         });
         true
@@ -166,6 +270,12 @@ impl AppState {
         let dist = dx.hypot(dy);
         let spacing = (radius / 4.0).max(1.0);
         let mut dirty: Option<DirtyRect> = None;
+        // What each dab is about to write is kept first, for Ctrl+Z.
+        let keep = |l: &mut LiquifySession, at: (f32, f32)| {
+            if let (Some(b), Some(win)) = (l.backups.last_mut(), l.field.window(at.0, at.1, radius)) {
+                b.save(&l.field, win);
+            }
+        };
         match mode {
             LiquifyMode::Push => {
                 if dist > 0.0 {
@@ -173,8 +283,10 @@ impl AppState {
                     let step = (dx / n, dy / n);
                     for k in 0..n as usize {
                         let at = (from.0 + step.0 * k as f32, from.1 + step.1 * k as f32);
+                        keep(l, at);
                         if let Some(r) = l.field.push(at, step, radius, strength, &l.edge) {
                             dirty = Some(union_rect(dirty, r));
+                            l.dabs.push(at);
                         }
                     }
                 }
@@ -184,20 +296,23 @@ impl AppState {
                 for k in 0..=n {
                     let t = if n == 0 { 0.0 } else { k as f32 / n as f32 };
                     let at = (from.0 + dx * t, from.1 + dy * t);
+                    keep(l, at);
                     if let Some(r) = l.field.smooth(at, radius, strength, &l.edge) {
                         dirty = Some(union_rect(dirty, r));
+                        l.dabs.push(at);
                     }
                 }
             }
         }
         l.last = Some(to);
         if let Some(r) = dirty {
-            self.liquify_render(r);
+            l.pending = Some(union_rect(l.pending, r));
         }
     }
 
-    /// Resample `rect` of the warped drawing from the original.
-    fn liquify_render(&mut self, rect: DirtyRect) {
+    /// Resample `rect` of the warped drawing from the original: all of it,
+    /// or with `dabs` only what those dabs reached (see `resample_field`).
+    fn liquify_render(&mut self, rect: DirtyRect, dabs: Option<(&[(f32, f32)], f32)>) {
         let Some(l) = self.liquify.as_mut() else {
             return;
         };
@@ -215,12 +330,7 @@ impl AppState {
         if rect.max_x <= rect.min_x || rect.max_y <= rect.min_y {
             return;
         }
-        let field = &l.field;
-        let src = |x: f32, y: f32| {
-            let d = field.at(x, y);
-            (d != [0.0, 0.0]).then_some((x + d[0], y + d[1]))
-        };
-        resample(
+        resample_field(
             &self.stroke_pre_pixels,
             cw,
             ch,
@@ -228,7 +338,8 @@ impl AppState {
             c.pixels_mut(),
             l.clip.as_deref(),
             l.alpha_lock,
-            &src,
+            &l.field,
+            dabs,
         );
         c.mark_dirty(rect.min_x, rect.min_y, rect.max_x - rect.min_x, rect.max_y - rect.min_y);
         l.touched = Some(union_rect(l.touched, rect));
@@ -238,6 +349,7 @@ impl AppState {
     /// Land the warp, if one is under way: one undo step, for every drawing
     /// it reached with the Lasso's "All frames" on.
     pub fn commit_liquify(&mut self) {
+        self.flush_liquify();
         let Some(l) = self.liquify.take() else {
             return;
         };
@@ -384,10 +496,13 @@ impl AppState {
         let Some(prev) = l.backups.pop() else {
             return self.cancel_liquify();
         };
-        l.field.d = prev;
+        prev.restore(&mut l.field);
         l.last = None;
+        l.aim = None;
+        l.pending = None;
+        l.dabs.clear();
         if let Some(r) = l.touched {
-            self.liquify_render(r);
+            self.liquify_render(r, None);
         }
         true
     }
@@ -482,6 +597,24 @@ mod tests {
         assert!(pixels(&st, cell) == before, "undo is byte-exact");
         st.redo();
         assert!((centre(&st, cell).0 - start.0 - moved).abs() < 1e-3);
+    }
+
+    /// Ctrl+Z puts the field back exactly as it was before each stroke, from
+    /// the tiles the stroke kept — at the drawing's edge too, where the
+    /// tiles are cut short.
+    #[test]
+    fn ctrl_z_restores_the_field_exactly_from_its_tiles() {
+        let (mut st, _) = liquify();
+        st.brush.radius = 60.0;
+        let (w, h) = (st.project.width as f32, st.project.height as f32);
+        push(&mut st, (w - 20.0, h - 20.0), -40.0);
+        let after_one = st.liquify.as_ref().unwrap().field.d.clone();
+        push(&mut st, (100.0, 104.0), 50.0);
+        assert_ne!(st.liquify.as_ref().unwrap().field.d, after_one);
+        st.undo();
+        assert_eq!(st.liquify.as_ref().unwrap().field.d, after_one, "back to after the first stroke");
+        st.undo();
+        assert!(st.liquify.as_ref().unwrap().field.d.iter().all(|d| *d == [0.0, 0.0]), "and before it");
     }
 
     #[test]

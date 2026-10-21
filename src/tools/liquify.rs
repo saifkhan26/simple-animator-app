@@ -88,8 +88,9 @@ impl LiquifyField {
         out
     }
 
-    /// Grid points within `reach` pixels of `(cx, cy)`, as index ranges.
-    fn window(&self, cx: f32, cy: f32, reach: f32) -> Option<(usize, usize, usize, usize)> {
+    /// Grid points within `reach` pixels of `(cx, cy)`, as index ranges:
+    /// everything a dab there can write.
+    pub fn window(&self, cx: f32, cy: f32, reach: f32) -> Option<(usize, usize, usize, usize)> {
         let s = STEP as f32;
         let lo = |c: f32, o: i32| ((c - reach - o as f32) / s).ceil().max(0.0);
         let hi = |c: f32, o: i32, n: usize| ((c + reach - o as f32) / s).floor().min(n as f32 - 1.0);
@@ -147,21 +148,55 @@ impl LiquifyField {
         let win = self.window(cx, cy, radius)?;
         let travel = (v.0.hypot(v.1) * strength.max(0.0) / STEP as f32).ceil() as usize + 1;
         let old = self.snapshot(win, travel);
-        let (i0, i1, j0, j1) = win;
-        for j in j0..=j1 {
+        let (i0, i1, _, _) = win;
+        let (ox, oy) = (self.ox, self.oy);
+        self.each_row(win, |j, row| {
+            let gy = (oy + (j as u32 * STEP) as i32) as f32;
             for i in i0..=i1 {
-                let (gx, gy) = self.point(i, j);
-                let k = j * self.nw + i;
-                let w = strength * falloff(gx - cx, gy - cy, radius) * edge[k];
+                let gx = (ox + (i as u32 * STEP) as i32) as f32;
+                let w = strength * falloff(gx - cx, gy - cy, radius) * edge[j * row.len() + i];
                 if w <= 0.0 {
                     continue;
                 }
                 let (bx, by) = (v.0 * w, v.1 * w);
                 let back = old.at(gx - bx, gy - by);
-                self.d[k] = [back[0] - bx, back[1] - by];
+                row[i] = [back[0] - bx, back[1] - by];
             }
-        }
+        });
         Some(self.pixels_of(win))
+    }
+
+    /// Run `f` on each grid row `j` of the window `win`, with all of that
+    /// row's points, on several threads when the window is big enough to
+    /// be worth starting them: a 1000-pixel brush's dab is a quarter of a
+    /// million points.
+    fn each_row(&mut self, (i0, i1, j0, j1): (usize, usize, usize, usize), f: impl Fn(usize, &mut [[f32; 2]]) + Sync) {
+        const PAR_POINTS: usize = 1 << 16;
+        let nw = self.nw;
+        let rows = &mut self.d[j0 * nw..(j1 + 1) * nw];
+        let points = (i1 - i0 + 1) * (j1 - j0 + 1);
+        let threads = if points < PAR_POINTS {
+            1
+        } else {
+            std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
+        };
+        if threads == 1 {
+            for (r, row) in rows.chunks_exact_mut(nw).enumerate() {
+                f(j0 + r, row);
+            }
+            return;
+        }
+        let per = (j1 - j0 + 1).div_ceil(threads);
+        std::thread::scope(|s| {
+            for (k, band) in rows.chunks_mut(per * nw).enumerate() {
+                let f = &f;
+                s.spawn(move || {
+                    for (r, row) in band.chunks_exact_mut(nw).enumerate() {
+                        f(j0 + k * per + r, row);
+                    }
+                });
+            }
+        });
     }
 
     /// One smoothing dab: each point under the brush eases toward the
@@ -169,12 +204,13 @@ impl LiquifyField {
     pub fn smooth(&mut self, (cx, cy): (f32, f32), radius: f32, strength: f32, edge: &[f32]) -> Option<DirtyRect> {
         let win = self.window(cx, cy, radius)?;
         let old = self.snapshot(win, 1);
-        let (i0, i1, j0, j1) = win;
-        for j in j0..=j1 {
+        let (i0, i1, _, _) = win;
+        let (ox, oy) = (self.ox, self.oy);
+        self.each_row(win, |j, row| {
+            let gy = (oy + (j as u32 * STEP) as i32) as f32;
             for i in i0..=i1 {
-                let (gx, gy) = self.point(i, j);
-                let k = j * self.nw + i;
-                let w = strength * falloff(gx - cx, gy - cy, radius) * edge[k];
+                let gx = (ox + (i as u32 * STEP) as i32) as f32;
+                let w = strength * falloff(gx - cx, gy - cy, radius) * edge[j * row.len() + i];
                 if w <= 0.0 {
                     continue;
                 }
@@ -185,11 +221,11 @@ impl LiquifyField {
                     avg[0] += n[0] * 0.25;
                     avg[1] += n[1] * 0.25;
                 }
-                let cur = self.d[k];
+                let cur = row[i];
                 let t = 0.5 * w;
-                self.d[k] = [cur[0] + (avg[0] - cur[0]) * t, cur[1] + (avg[1] - cur[1]) * t];
+                row[i] = [cur[0] + (avg[0] - cur[0]) * t, cur[1] + (avg[1] - cur[1]) * t];
             }
-        }
+        });
         Some(self.pixels_of(win))
     }
 }
@@ -286,8 +322,11 @@ pub fn edge_weights(field: &LiquifyField, clip: Option<&Mask>, width: f32) -> Ve
 /// doesn't drag a dark fringe along. Off the cell reads as clear. Under a
 /// partial selection the result is blended back toward the original by the
 /// coverage, and with `alpha_lock` only the colour moves.
+///
+/// Generic in `src`, not a `dyn`: it is called for every pixel, and inlined
+/// it costs a fraction of an indirect call.
 #[allow(clippy::too_many_arguments)]
-pub fn resample(
+pub fn resample<F>(
     orig: &[u8],
     cw: u32,
     ch: u32,
@@ -295,8 +334,10 @@ pub fn resample(
     out: &mut [u8],
     clip: Option<&Mask>,
     alpha_lock: bool,
-    src: &(dyn Fn(f32, f32) -> Option<(f32, f32)> + Sync),
-) {
+    src: &F,
+) where
+    F: Fn(f32, f32) -> Option<(f32, f32)> + Sync,
+{
     let rect = DirtyRect {
         min_x: rect.min_x.min(cw),
         min_y: rect.min_y.min(ch),
@@ -311,39 +352,170 @@ pub fn resample(
     par_rows(rows, w4, |first, band| {
         for (y, row) in (rect.min_y + first as u32..).zip(band.chunks_exact_mut(w4)) {
             for x in rect.min_x..rect.max_x {
-                let i = x as usize * 4;
-                let o = &orig[y as usize * w4 + i..y as usize * w4 + i + 4];
-                let cov = clip.map_or(255, |m| m.at(x, y));
-                let warped = if cov == 0 {
-                    None
-                } else {
-                    src(x as f32 + 0.5, y as f32 + 0.5).map(|(sx, sy)| sample(orig, cw, ch, sx - 0.5, sy - 0.5))
-                };
-                let Some(mut px) = warped else {
-                    row[i..i + 4].copy_from_slice(o);
-                    continue;
-                };
-                if alpha_lock {
-                    px = if px[3] == 0 { [o[0], o[1], o[2], o[3]] } else { [px[0], px[1], px[2], o[3]] };
-                }
-                if cov < 255 {
-                    let t = cov as f32 / 255.0;
-                    for c in 0..4 {
-                        px[c] = (o[c] as f32 + (px[c] as f32 - o[c] as f32) * t).round() as u8;
-                    }
-                }
-                row[i..i + 4].copy_from_slice(&px);
+                let to = src(x as f32 + 0.5, y as f32 + 0.5);
+                put(orig, cw, ch, row, x, y, clip, alpha_lock, to);
             }
         }
     });
 }
 
+/// [`resample`] through `field`, the warp in hand on its own drawing: the
+/// same pixels for a fraction of the work. Each row interpolates the grid
+/// down to itself once, a pair of values per grid column, and each pixel
+/// then only blends the two either side of it — not four grid points for
+/// every pixel.
+///
+/// With `dabs`, the centres of the dabs since the last resample and how far
+/// from them the field can have changed, only pixels within that reach of
+/// one are redone: a round brush's dabs leave the corners of their square
+/// as they were.
+#[allow(clippy::too_many_arguments)]
+pub fn resample_field(
+    orig: &[u8],
+    cw: u32,
+    ch: u32,
+    rect: DirtyRect,
+    out: &mut [u8],
+    clip: Option<&Mask>,
+    alpha_lock: bool,
+    field: &LiquifyField,
+    dabs: Option<(&[(f32, f32)], f32)>,
+) {
+    let rect = DirtyRect {
+        min_x: rect.min_x.min(cw),
+        min_y: rect.min_y.min(ch),
+        max_x: rect.max_x.min(cw),
+        max_y: rect.max_y.min(ch),
+    };
+    if rect.max_x <= rect.min_x || rect.max_y <= rect.min_y || field.nw < 2 || field.nh < 2 {
+        return;
+    }
+    let s = STEP as f32;
+    let (mx, my) = ((field.nw - 1) as f32, (field.nh - 1) as f32);
+    let w4 = cw as usize * 4;
+    let rows = &mut out[rect.min_y as usize * w4..rect.max_y as usize * w4];
+    par_rows(rows, w4, |first, band| {
+        let mut line = vec![[0.0f32; 2]; field.nw];
+        for (y, row) in (rect.min_y + first as u32..).zip(band.chunks_exact_mut(w4)) {
+            let py = y as f32 + 0.5;
+            let gy = (py - field.oy as f32) / s;
+            let on_grid = (0.0..=my).contains(&gy);
+            if on_grid {
+                let j = (gy.floor() as usize).min(field.nh - 2);
+                let ty = gy - j as f32;
+                let (top, bot) = (&field.d[j * field.nw..(j + 1) * field.nw], &field.d[(j + 1) * field.nw..(j + 2) * field.nw]);
+                for ((l, a), b) in line.iter_mut().zip(top).zip(bot) {
+                    *l = [a[0] + (b[0] - a[0]) * ty, a[1] + (b[1] - a[1]) * ty];
+                }
+            }
+            // The span of this row the dabs reached.
+            let (x0, x1) = match dabs {
+                None => (rect.min_x, rect.max_x),
+                Some((centres, reach)) => {
+                    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+                    for &(cx, cy) in centres {
+                        let dy = py - cy;
+                        if dy.abs() <= reach {
+                            let half = (reach * reach - dy * dy).sqrt();
+                            lo = lo.min(cx - half);
+                            hi = hi.max(cx + half);
+                        }
+                    }
+                    if hi < lo {
+                        continue;
+                    }
+                    let lo = (lo.floor().max(0.0) as u32).clamp(rect.min_x, rect.max_x);
+                    let hi = ((hi.ceil() + 1.0).max(0.0) as u32).clamp(rect.min_x, rect.max_x);
+                    (lo, hi)
+                }
+            };
+            for x in x0..x1 {
+                let px = x as f32 + 0.5;
+                let gx = (px - field.ox as f32) / s;
+                let to = if on_grid && (0.0..=mx).contains(&gx) {
+                    let i = (gx.floor() as usize).min(field.nw - 2);
+                    let tx = gx - i as f32;
+                    let (a, b) = (line[i], line[i + 1]);
+                    let d = [a[0] + (b[0] - a[0]) * tx, a[1] + (b[1] - a[1]) * tx];
+                    (d != [0.0, 0.0]).then_some((px + d[0], py + d[1]))
+                } else {
+                    None
+                };
+                put(orig, cw, ch, row, x, y, clip, alpha_lock, to);
+            }
+        }
+    });
+}
+
+/// Pixel `x` of `row` (cell row `y`) as a resample writes it: the original
+/// where nothing moves it, else the original read at `to`, held to the
+/// selection's coverage and an alpha lock.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn put(orig: &[u8], cw: u32, ch: u32, row: &mut [u8], x: u32, y: u32, clip: Option<&Mask>, alpha_lock: bool, to: Option<(f32, f32)>) {
+    let i = x as usize * 4;
+    let w4 = cw as usize * 4;
+    let o = &orig[y as usize * w4 + i..y as usize * w4 + i + 4];
+    let cov = clip.map_or(255, |m| m.at(x, y));
+    let warped = if cov == 0 {
+        None
+    } else {
+        to.map(|(sx, sy)| sample(orig, cw, ch, sx - 0.5, sy - 0.5))
+    };
+    let Some(mut px) = warped else {
+        row[i..i + 4].copy_from_slice(o);
+        return;
+    };
+    if alpha_lock {
+        px = if px[3] == 0 { [o[0], o[1], o[2], o[3]] } else { [px[0], px[1], px[2], o[3]] };
+    }
+    if cov < 255 {
+        let t = cov as f32 / 255.0;
+        for c in 0..4 {
+            px[c] = (o[c] as f32 + (px[c] as f32 - o[c] as f32) * t).round() as u8;
+        }
+    }
+    row[i..i + 4].copy_from_slice(&px);
+}
+
 /// Bilinear RGBA at `(x, y)` in pixel space, premultiplied for the blend and
 /// straight again after. Off the cell is clear.
+///
+/// Most of a line drawing is clear, and most of a fill is one colour: where
+/// the four pixels read are all clear, or all the same, that is the answer
+/// without the arithmetic.
 fn sample(px: &[u8], w: u32, h: u32, x: f32, y: f32) -> [u8; 4] {
     let (x0, y0) = (x.floor(), y.floor());
     let (tx, ty) = (x - x0, y - y0);
     let (x0, y0) = (x0 as i64, y0 as i64);
+    if x0 >= 0 && y0 >= 0 && x0 + 1 < w as i64 && y0 + 1 < h as i64 {
+        // The two pixels on each row as one fixed-size load: no per-byte
+        // bounds checks in the hot path below.
+        let i = (y0 as usize * w as usize + x0 as usize) * 4;
+        let j = i + w as usize * 4;
+        let (Ok(top), Ok(bot)) = (<&[u8; 8]>::try_from(&px[i..i + 8]), <&[u8; 8]>::try_from(&px[j..j + 8])) else {
+            return [0; 4];
+        };
+        let quad = |r: &[u8; 8], k: usize| u32::from_ne_bytes([r[k], r[k + 1], r[k + 2], r[k + 3]]);
+        let (a, b, c, d) = (quad(top, 0), quad(top, 4), quad(bot, 0), quad(bot, 4));
+        if a == b && a == c && a == d {
+            return if top[3] == 0 { [0; 4] } else { a.to_ne_bytes() };
+        }
+        if (top[3] | top[7] | bot[3] | bot[7]) == 0 {
+            return [0; 4];
+        }
+        // Inside a line or a fill, all four opaque: premultiplying by 255
+        // and dividing it out again changes nothing, so blend straight.
+        if (top[3] & top[7] & bot[3] & bot[7]) == 255 {
+            let mut m = [255u8; 4];
+            for k in 0..3 {
+                let t = top[k] as f32 + (top[4 + k] as f32 - top[k] as f32) * tx;
+                let b = bot[k] as f32 + (bot[4 + k] as f32 - bot[k] as f32) * tx;
+                m[k] = (t + (b - t) * ty).round().clamp(0.0, 255.0) as u8;
+            }
+            return m;
+        }
+    }
     let tap = |xi: i64, yi: i64| -> [f32; 4] {
         if xi < 0 || yi < 0 || xi >= w as i64 || yi >= h as i64 {
             return [0.0; 4];
@@ -579,12 +751,9 @@ mod tests {
         let rect = f.push((1900.0, 1000.0), (20.0, 5.0), 400.0, 1.0, &edge).unwrap();
         let field_ms = t.elapsed().as_secs_f64() * 1000.0;
         let t = std::time::Instant::now();
-        let src = |x: f32, y: f32| {
-            let d = f.at(x, y);
-            (d != [0.0, 0.0]).then_some((x + d[0], y + d[1]))
-        };
-        resample(&orig, w, h, rect, &mut out, None, false, &src);
+        resample_field(&orig, w, h, rect, &mut out, None, false, &f, None);
         let resample_ms = t.elapsed().as_secs_f64() * 1000.0;
         println!("field {field_ms:.2} ms, resample {resample_ms:.2} ms");
     }
 }
+

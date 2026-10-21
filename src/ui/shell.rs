@@ -441,6 +441,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 state.hold_latch = None;
                 state.drag_inert = false;
             }
+            // A warp's dabs from this frame's pen samples, resampled at once.
+            state.flush_liquify();
             // A double-click closes a polygon, selection or fill, when both
             // its presses landed on one spot: its second press has put a
             // corner on top of the first. A double-click soon after the last
