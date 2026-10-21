@@ -1372,6 +1372,9 @@ pub struct AppState {
     /// Timeline snapshot captured at the start of a layer-transform drag, used
     /// to push a single undo entry when the drag ends.
     layer_xform_before: Option<undo::TimelineState>,
+    /// The same for an opacity drag in the Layers panel, which may change
+    /// several layers at once.
+    layer_opacity_before: Option<undo::TimelineState>,
     /// What a group being transformed turns and scales about, in document
     /// space: the middle of its layers when the drag started.
     group_pivot: Option<(f32, f32)>,
@@ -1419,11 +1422,14 @@ pub struct AppState {
 
     /// Layer selected before the current one, for the "jump back" shortcut.
     /// Maintained by `track_layer_change` rather than by every site that
-    /// assigns `current_layer` — there are eight of those.
-    prev_layer: Option<usize>,
+    /// assigns `current_layer` — there are eight of those. A uid, so adding
+    /// or deleting layers around it doesn't lose it.
+    prev_layer: Option<u64>,
     /// Previous frame's (current_layer, layer count), the baseline that
     /// `track_layer_change` diffs against.
     layer_watch: (usize, usize),
+    /// Uid of the layer that was active last frame.
+    layer_watch_uid: Option<u64>,
 
     /// Tracker tool: when on, each frame takes two clicks (point A then B) so
     /// stabilization can correct rotation/zoom shake as well as position.
@@ -1677,6 +1683,7 @@ impl AppState {
             layer_xform: false,
             nav_to_layer: false,
             layer_xform_before: None,
+            layer_opacity_before: None,
             group_pivot: None,
             xform_sync_last: None,
             camera_edit: false,
@@ -1695,6 +1702,7 @@ impl AppState {
             expand_cfg: None,
             prev_layer: None,
             layer_watch: (0, 1),
+            layer_watch_uid: None,
             tracker_two_points: false,
             tracker_pending_b: None,
             bg_job: None,
@@ -1785,6 +1793,7 @@ impl AppState {
         self.layer_xform = false;
         self.nav_to_layer = false;
         self.layer_xform_before = None;
+        self.layer_opacity_before = None;
         self.xform_sync_last = None;
         // Camera guide / dim / bounds are view preferences, kept like the panel
         // toggles above; only the transient edit + lock modes reset.
@@ -1799,6 +1808,7 @@ impl AppState {
         self.expand_cfg = None;
         self.prev_layer = None;
         self.layer_watch = (self.project.current_layer, self.project.layers.len());
+        self.layer_watch_uid = self.project.layers.get(self.project.current_layer).map(|l| l.uid);
         self.tracker_pending_b = None;
         self.bg_job = None;
         self.bg_label = None;
@@ -5426,19 +5436,20 @@ impl AppState {
     /// different places (panel clicks, x-sheet clicks, add/delete/move, undo,
     /// import), and diffing here catches all of them without touching any.
     ///
-    /// A change in layer *count* drops the link instead of remapping it — after
-    /// an add or delete the stored index may mean a different layer, and
-    /// silently jumping to the wrong one is worse than not jumping.
+    /// Tracked by uid, so a new layer still jumps back to the one it was
+    /// added over. A layer that was deleted out from under the selection
+    /// isn't remembered: the one before it stays the way back.
     fn track_layer_change(&mut self) {
         let now = (self.project.current_layer, self.project.layers.len());
-        if now.1 != self.layer_watch.1 {
-            self.prev_layer = None;
-        } else if now.0 != self.layer_watch.0 {
-            self.prev_layer = Some(self.layer_watch.0);
+        let uid = self.project.layers.get(now.0).map(|l| l.uid);
+        if uid != self.layer_watch_uid {
+            if let Some(old) = self.layer_watch_uid.filter(|&u| self.project.layers.iter().any(|l| l.uid == u)) {
+                self.prev_layer = Some(old);
+            }
+            self.layer_watch_uid = uid;
         }
         // Moving the active layer anywhere the panel's picks don't include
         // ends the multi-selection.
-        let uid = self.project.layers.get(now.0).map(|l| l.uid);
         if now != self.layer_watch && uid.is_some_and(|u| !self.selected_layers.contains(&u)) {
             self.selected_layers.clear();
         }
@@ -5446,11 +5457,11 @@ impl AppState {
     }
 
     /// Jump to the layer selected before the current one. No-op when there
-    /// isn't one yet or it has gone stale.
+    /// isn't one yet or it has since been deleted.
     pub fn goto_last_layer(&mut self) {
         let Some(prev) = self.prev_layer else { return };
-        if prev < self.project.layers.len() && prev != self.project.current_layer {
-            self.project.current_layer = prev;
+        if let Some(i) = self.project.layers.iter().position(|l| l.uid == prev) {
+            self.project.current_layer = i;
         }
     }
 
@@ -5517,6 +5528,85 @@ impl AppState {
         (0..self.project.layers.len())
             .filter(|&i| i == cur || self.selected_layers.contains(&self.project.layers[i].uid))
             .collect()
+    }
+
+    /// The selected layers that hold drawings: a picked group stands for
+    /// its layers. Bottom first, each once.
+    fn selected_drawing_layers(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for i in self.selected_layer_indices() {
+            if self.project.is_group(i) {
+                out.extend(self.project.children(i));
+            } else {
+                out.push(i);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Flip or turn every drawing of every selected layer, a picked group's
+    /// layers with them. One undo step; locked and reference layers are
+    /// left alone.
+    pub fn orient_selected_layers(&mut self, o: Orient) {
+        let layers = self.selected_drawing_layers();
+        self.orient_layers(&layers, o);
+    }
+
+    /// Set every selected layer's opacity, a group's own included. The first
+    /// change since the last [`AppState::commit_layer_opacity`] opens the
+    /// undo step, so a whole drag lands as one.
+    pub fn set_selected_opacity(&mut self, v: f32) {
+        if self.layer_opacity_before.is_none() {
+            self.layer_opacity_before = Some(undo::TimelineState::capture(&self.project));
+        }
+        for i in self.selected_layer_indices() {
+            self.project.layers[i].opacity = v.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Close the undo step an opacity drag opened. Nothing when it changed
+    /// nothing.
+    pub fn commit_layer_opacity(&mut self) {
+        let Some(before) = self.layer_opacity_before.take() else { return };
+        let changed = before.layers.len() != self.project.layers.len()
+            || before.layers.iter().zip(&self.project.layers).any(|(a, b)| a.opacity != b.opacity);
+        if changed {
+            let after = undo::TimelineState::capture(&self.project);
+            self.history.push(undo::Command::Structural {
+                before,
+                after,
+                cell_pixels: Vec::new(),
+            });
+        }
+    }
+
+    /// Clip to the layer below on the selected layers, or off again: all go
+    /// the opposite way to the active one, so a mixed pick ends up alike.
+    /// Groups don't clip and are skipped.
+    pub fn toggle_selected_clip(&mut self) {
+        self.toggle_selected_flag(|l| &mut l.clip);
+    }
+
+    /// Alpha lock on the selected layers, the same way as
+    /// [`AppState::toggle_selected_clip`].
+    pub fn toggle_selected_alpha_lock(&mut self) {
+        self.toggle_selected_flag(|l| &mut l.alpha_lock);
+    }
+
+    fn toggle_selected_flag(&mut self, flag: impl Fn(&mut crate::doc::layer::Layer) -> &mut bool) {
+        let cur = self.project.current_layer;
+        let sel: Vec<usize> =
+            self.selected_layer_indices().into_iter().filter(|&i| !self.project.is_group(i)).collect();
+        // A group active says nothing; the first picked layer leads then.
+        let Some(lead) = sel.iter().copied().find(|&i| i == cur).or(sel.first().copied()) else {
+            return;
+        };
+        let on = !*flag(&mut self.project.layers[lead]);
+        for i in sel {
+            *flag(&mut self.project.layers[i]) = on;
+        }
     }
 
     /// Put the selected layers in a new group. One undo step.
@@ -5708,16 +5798,8 @@ impl AppState {
                 }
             }
             Action::FadeOthersToggle => self.fade_others = !self.fade_others,
-            Action::LayerClipToggle => {
-                if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
-                    l.clip = !l.clip;
-                }
-            }
-            Action::LayerAlphaLockToggle => {
-                if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
-                    l.alpha_lock = !l.alpha_lock;
-                }
-            }
+            Action::LayerClipToggle => self.toggle_selected_clip(),
+            Action::LayerAlphaLockToggle => self.toggle_selected_alpha_lock(),
             Action::LayerKeyLinkBelow => {
                 self.project.toggle_key_link_below(self.project.current_layer);
             }
@@ -7668,6 +7750,58 @@ mod tests {
         }
     }
 
+    /// An opacity drag over a pick sets every picked layer, and lands as one
+    /// undo step however many frames it took.
+    #[test]
+    fn an_opacity_drag_sets_the_pick_in_one_undo_step() {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.project.add_layer();
+        st.selected_layers.insert(st.project.layers[0].uid);
+        st.project.current_layer = 2;
+        let depth = st.history.undo_len();
+        for v in [0.9, 0.7, 0.5] {
+            st.set_selected_opacity(v);
+        }
+        st.commit_layer_opacity();
+        st.commit_layer_opacity();
+        let opac: Vec<f32> = st.project.layers.iter().map(|l| l.opacity).collect();
+        assert_eq!(opac, [0.5, 1.0, 0.5]);
+        assert_eq!(st.history.undo_len(), depth + 1);
+        st.undo();
+        assert!(st.project.layers.iter().all(|l| l.opacity == 1.0));
+    }
+
+    /// "Last layer" survives the stack changing: after adding a layer it goes
+    /// back to the one the layer was added over, and a deleted layer leaves
+    /// the one before it as the way back.
+    #[test]
+    fn last_layer_survives_adding_and_deleting_layers() {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.project.add_layer();
+        st.project.current_layer = 1;
+        st.track_layer_change();
+        let rough = st.project.layers[1].uid;
+
+        st.structural_edit(false, |p| {
+            p.add_layer_above_active();
+        });
+        st.track_layer_change();
+        assert_eq!(st.project.current_layer, 2, "the new layer is active");
+        st.goto_last_layer();
+        st.track_layer_change();
+        assert_eq!(st.project.layers[st.project.current_layer].uid, rough);
+
+        // Over to the top, then delete it: back still leads to the rough.
+        st.project.current_layer = st.project.layers.len() - 1;
+        st.track_layer_change();
+        st.delete_selected_layers();
+        st.track_layer_change();
+        st.goto_last_layer();
+        assert_eq!(st.project.layers[st.project.current_layer].uid, rough);
+    }
+
     /// With the panels moved to M and "last layer" put on Tab, Tab inside a
     /// text field must go to the last layer: what gets through focus is the
     /// map's binding on Tab, not a key wired to the panels.
@@ -7719,7 +7853,7 @@ mod tests {
         };
         for (mods, jumps) in [(egui::Modifiers::NONE, true), (shift, false)] {
             st.project.current_layer = 1;
-            st.prev_layer = Some(0);
+            st.prev_layer = Some(st.project.layers[0].uid);
             frame(&mut st, None, true);
             assert_eq!(ctx.memory(|m| m.focused()), Some(field));
             frame(&mut st, Some((egui::Key::Tab, mods)), false);

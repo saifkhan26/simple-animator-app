@@ -817,10 +817,9 @@ fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, i
     }
 }
 
-/// The Layers panel's starting height, in points: its toolbar, three rows
-/// of list and the folded sections under it, as tall as the panel used to
-/// grow to with three layers.
-const LAYERS_DEFAULT_H: f32 = 440.0;
+/// The Layers panel's starting height, in points: its two toolbars and
+/// opacity slider, three rows of list and the folded sections under it.
+const LAYERS_DEFAULT_H: f32 = 496.0;
 
 /// The X-sheet panel's starting height, in points: its toolbar and about
 /// ten frames of sheet, what the sheet's old 260-point cap came to.
@@ -2877,12 +2876,199 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 /// The shortest the layer list gets when the sections under it want the
-/// room, in points: about one row (name, opacity, fill-boundary link).
+/// room, in points: about one row (name, fill-boundary link, key link).
 /// Past this the panel grows instead.
 const LAYER_LIST_MIN_H: f32 = 96.0;
 
 /// Drag-and-drop payload for a layer row: the dragged layer's index.
 struct LayerDrag(usize);
+
+/// Width of the ⋮ button at a layer row's top right.
+const ROW_DOTS_W: f32 = 22.0;
+
+/// What a layer row's ⋮ menu picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowCmd {
+    Rename,
+    GroupSelected,
+    Krita,
+    Ungroup,
+    MergeGroup,
+    DeleteGroup,
+}
+
+/// What a layer row's menu needs to know about the row.
+struct RowMenu<'a> {
+    header: bool,
+    grp_key: &'a str,
+    krita_label: &'static str,
+    /// Not a reference or `-x` layer, which never go to Krita.
+    krita_ok: bool,
+}
+
+/// A layer row's menu, behind its ⋮ and a right-click on its name: what
+/// the toolbars over the list and the row itself don't already show.
+fn layer_row_menu(ui: &mut egui::Ui, m: &RowMenu, out: &mut Option<RowCmd>) {
+    let mut item = |ui: &mut egui::Ui, resp: egui::Response, cmd: RowCmd| {
+        if resp.clicked() {
+            *out = Some(cmd);
+            ui.close_menu();
+        }
+    };
+    let r = ui.button(theme::icon_text(ic::PENCIL_SIMPLE, "Rename")).on_hover_text("Or double-click the name");
+    item(ui, r, RowCmd::Rename);
+    if m.header {
+        let r = ui.button(theme::icon_text(ic::FOLDER_OPEN, "Ungroup"));
+        item(ui, r, RowCmd::Ungroup);
+        let r = ui
+            .button(theme::icon_text(ic::ARROWS_MERGE, "Merge group into one layer"))
+            .on_hover_text(
+                "Its layers as they show, at the group's opacity. \
+                 Hidden and reference layers stay as they are.",
+            );
+        item(ui, r, RowCmd::MergeGroup);
+        let r = ui.button(theme::icon_text(ic::TRASH, "Delete group"));
+        item(ui, r, RowCmd::DeleteGroup);
+        return;
+    }
+    let r = ui.button(theme::icon_text(
+        ic::FOLDER_SIMPLE_PLUS,
+        &format!("Group selected layers ({})", m.grp_key),
+    ));
+    item(ui, r, RowCmd::GroupSelected);
+    ui.separator();
+    let r = ui
+        .add_enabled(m.krita_ok, egui::Button::new(theme::icon_text(ic::PAINT_BRUSH, m.krita_label)))
+        .on_hover_text(
+            "Opens just this layer in Krita. The other layers stay \
+             here, and a save there only changes this layer (and \
+             any layer added in Krita).",
+        )
+        .on_disabled_hover_text("Reference layers and layers named …-x stay here");
+    item(ui, r, RowCmd::Krita);
+}
+
+/// A caption in a layer row, as wide as the widest of them so the
+/// dropdowns after them line up.
+fn row_caption(ui: &mut egui::Ui, text: &str) {
+    let rich = |t: &str| egui::RichText::new(t).color(theme::text_muted()).size(11.0);
+    let w = ["lines from", "keys with"]
+        .iter()
+        .map(|t| {
+            egui::WidgetText::from(rich(t))
+                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    let h = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(egui::vec2(w, h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.label(rich(text));
+    });
+}
+
+/// An icon button that stays lit while `on`, sized like
+/// [`theme::icon_button`] so it sits in the same row.
+fn icon_button_on(ui: &mut egui::Ui, icon: &str, tooltip: &str, on: bool) -> egui::Response {
+    let text = egui::RichText::new(icon).size(15.0);
+    let text = if on { text.color(theme::accent()) } else { text };
+    ui.add(egui::Button::new(text).selected(on).min_size(egui::vec2(28.0, 22.0)))
+        .on_hover_text(tooltip)
+}
+
+/// The Layers panel's second toolbar and its opacity slider: what acts on
+/// the active layer and every layer picked with it.
+fn layer_selection_actions(state: &mut AppState, ui: &mut egui::Ui) {
+    let sel = state.selected_layer_indices();
+    let cur = state.project.current_layer;
+    let many = sel.len() > 1;
+    let which = if many { "the selected layers" } else { "this layer" };
+    ui.horizontal(|ui| {
+        // Seven buttons in a 252-point panel: tighter than the row above.
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.spacing_mut().button_padding.x = 4.0;
+        let paintable = sel.iter().any(|&i| {
+            let p = &state.project;
+            if p.is_group(i) {
+                p.children(i).any(|c| p.paintable(c))
+            } else {
+                p.paintable(i)
+            }
+        });
+        let mut orient = None;
+        ui.add_enabled_ui(paintable, |ui| {
+            for (o, _, icon, name) in ORIENT_ART {
+                let tip = format!("{name}: every drawing on {which}, about the canvas centre");
+                if theme::icon_button(ui, icon, &tip)
+                    .on_disabled_hover_text("Locked and reference layers stay as they are")
+                    .clicked()
+                {
+                    orient = Some(o);
+                }
+            }
+        });
+        if let Some(o) = orient {
+            state.orient_selected_layers(o);
+        }
+        ui.separator();
+        // Lit by the active layer: a mixed pick all goes the other way.
+        let lead = sel.iter().copied().find(|&i| i == cur && !state.project.is_group(i))
+            .or_else(|| sel.iter().copied().find(|&i| !state.project.is_group(i)));
+        let (clip_on, lock_on) = lead.map_or((false, false), |i| {
+            let l = &state.project.layers[i];
+            (l.clip, l.alpha_lock)
+        });
+        let clip_key = combo_text(state, Action::LayerClipToggle);
+        let lock_key = combo_text(state, Action::LayerAlphaLockToggle);
+        ui.add_enabled_ui(lead.is_some(), |ui| {
+            if icon_button_on(
+                ui,
+                ic::ARROW_BEND_LEFT_DOWN,
+                &format!(
+                    "Clip to layer below ({clip_key}): show {which} only where the first \
+                     unclipped layer under it has paint"
+                ),
+                clip_on,
+            )
+            .clicked()
+            {
+                state.toggle_selected_clip();
+            }
+            if icon_button_on(
+                ui,
+                ic::CHECKERBOARD,
+                &format!("Lock alpha ({lock_key}): painting on {which} only changes pixels that already have paint"),
+                lock_on,
+            )
+            .clicked()
+            {
+                state.toggle_selected_alpha_lock();
+            }
+        });
+    });
+
+    // Opacity: the active layer's, set on every picked layer at once. One
+    // undo step per drag; a double-click puts it back to full.
+    let Some(mut v) = state.project.layers.get(cur).map(|l| l.opacity) else { return };
+    let label = if many { format!("opacity ×{}", sel.len()) } else { "opacity".to_string() };
+    fit_sliders(ui, &label, 0.0);
+    let resp = ui
+        .add(egui::Slider::new(&mut v, 0.0..=1.0).text(&label))
+        .on_hover_text(if many {
+            "Every selected layer takes this opacity. Double-click for 100%."
+        } else {
+            "The active layer's opacity. Double-click for 100%."
+        });
+    if resp.double_clicked() {
+        v = 1.0;
+    }
+    if (v - state.project.layers[cur].opacity).abs() > f32::EPSILON || (resp.changed() && many) {
+        state.set_selected_opacity(v);
+    }
+    if !resp.dragged() && !resp.has_focus() {
+        state.commit_layer_opacity();
+    }
+}
 
 fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
@@ -2930,6 +3116,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                     state.fade_others = !state.fade_others;
                 }
             });
+            layer_selection_actions(state, ui);
             // How faint the other layers go. Dragging either slider switches
             // the fade on — adjusting an amount you can't see is guesswork.
             // Folded away with the rest: the toggle above is what gets used.
@@ -2959,27 +3146,19 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut start_rename: Option<usize> = None;
             let mut rename_commit = false;
             let mut rename_cancel = false;
-            let mut krita_edit: Option<usize> = None;
-            let mut toggle_clip: Option<usize> = None;
-            let mut toggle_alpha_lock: Option<usize> = None;
-            let mut orient_layer: Option<(usize, crate::doc::orient::Orient)> = None;
             // A layer's key-jump link set (`Some(uid)`) or cleared (`None`),
             // and a cleanup layer to add over a rough.
             let mut set_key_link: Option<(usize, Option<u64>)> = None;
             let mut cleanup_of: Option<usize> = None;
             let mut drop: Option<(usize, usize, bool)> = None;
-            // Group rows' own commands, and Ctrl/Shift-click picks.
+            // Group rows' fold, a row's ⋮ menu pick, and Ctrl/Shift-click picks.
             let mut toggle_fold: Option<usize> = None;
-            let mut ungroup: Option<usize> = None;
-            let mut merge_group: Option<usize> = None;
-            let mut delete_group: Option<usize> = None;
-            let mut group_now = false;
+            let mut menu_pick: Option<(usize, RowCmd)> = None;
             let mut pick: Option<(usize, bool)> = None;
             let rows = state.project.panel_rows();
             let picked = state.selected_layers.clone();
             let grp_key = combo_text(state, Action::LayerGroup);
             let krita_label = krita_menu_label(state, true);
-            let clip_key = combo_text(state, Action::LayerClipToggle);
             let lock_key = combo_text(state, Action::LayerAlphaLockToggle);
             // What each clipped layer clips to — `None` for one clipped with
             // nothing under it to clip to.
@@ -3157,24 +3336,24 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         // would win the hit test and eat clicks.
                                         //
                                         // What follows the name keeps its
-                                        // room: the alpha-lock mark, and up to
-                                        // 40% for the link chip.
-                                        let chip = key_links[i].map(|s| {
-                                            egui::RichText::new(format!("{} {}", ic::LINK, names[s]))
+                                        // room: the alpha-lock mark, the
+                                        // opacity when under full, and the ⋮.
+                                        let badge = (layer.opacity < 0.995).then(|| {
+                                            egui::RichText::new(format!("{:.0}%", layer.opacity * 100.0))
                                                 .size(11.0)
-                                                .color(theme::accent())
+                                                .color(theme::text_muted())
                                         });
                                         let room = ui.available_width();
                                         let gap = ui.spacing().item_spacing.x;
-                                        let chip_w = chip.clone().map_or(0.0, |c| {
-                                            let w = egui::WidgetText::from(c)
-                                                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button)
+                                        let badge_w = badge.clone().map_or(0.0, |b| {
+                                            let w = egui::WidgetText::from(b)
+                                                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
                                                 .size()
                                                 .x;
-                                            (w + gap).min(room * 0.4)
+                                            w + gap
                                         });
                                         let lock_w = if layer.alpha_lock { 14.0 + gap } else { 0.0 };
-                                        let name_w = (room - chip_w - lock_w).max(0.0);
+                                        let name_w = (room - badge_w - lock_w - ROW_DOTS_W - gap).max(0.0);
                                         let resp = ui
                                             .scope(|ui| {
                                                 ui.set_max_width(name_w);
@@ -3218,197 +3397,119 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                                  changes pixels that already have paint"
                                             ));
                                         }
-                                        // The key-jump link, shown only while there is one.
-                                        if let (Some(s), Some(text)) = (key_links[i], chip) {
-                                            let chip = ui
-                                                .add(egui::Button::new(text).frame(false).truncate())
-                                                .on_hover_text(format!(
-                                                    "Key jumps here also stop at {}'s drawings. Click to unlink.",
-                                                    names[s]
-                                                ));
-                                            if chip.clicked() {
-                                                set_key_link = Some((i, None));
-                                            }
-                                        }
-                                        resp.context_menu(|ui| {
-                                            if header {
-                                                if ui.button(theme::icon_text(ic::FOLDER_OPEN, "Ungroup")).clicked() {
-                                                    ungroup = Some(i);
-                                                    ui.close_menu();
-                                                }
-                                                if ui
-                                                    .button(theme::icon_text(ic::ARROWS_MERGE, "Merge group into one layer"))
-                                                    .on_hover_text(
-                                                        "Its layers as they show, at the group's opacity. \
-                                                         Hidden and reference layers stay as they are.",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    merge_group = Some(i);
-                                                    ui.close_menu();
-                                                }
-                                                if ui.button(theme::icon_text(ic::TRASH, "Delete group")).clicked() {
-                                                    delete_group = Some(i);
-                                                    ui.close_menu();
-                                                }
-                                                ui.separator();
-                                                ui.add_enabled_ui(!layer.locked, |ui| {
-                                                    for (o, _, icon, name, _) in ORIENT_ART {
-                                                        if ui
-                                                            .button(theme::icon_text(icon, &format!("{name} (whole group)")))
-                                                            .on_hover_text("Every drawing of every layer in the group")
-                                                            .clicked()
-                                                        {
-                                                            orient_layer = Some((i, o));
-                                                            ui.close_menu();
-                                                        }
-                                                    }
-                                                });
-                                                return;
-                                            }
-                                            if ui
-                                                .button(theme::icon_text(
-                                                    ic::FOLDER_SIMPLE_PLUS,
-                                                    &format!("Group selected layers ({grp_key})"),
-                                                ))
-                                                .clicked()
-                                            {
-                                                group_now = true;
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            if ui
-                                                .selectable_label(
-                                                    layer.clip,
-                                                    format!("Clip to layer below ({clip_key})"),
-                                                )
-                                                .on_hover_text(
-                                                    "Show this layer only where the first \
-                                                     unclipped layer under it has paint",
-                                                )
-                                                .clicked()
-                                            {
-                                                toggle_clip = Some(i);
-                                                ui.close_menu();
-                                            }
-                                            if ui
-                                                .selectable_label(
-                                                    layer.alpha_lock,
-                                                    format!("Lock alpha ({lock_key})"),
-                                                )
-                                                .on_hover_text(
-                                                    "Painting only changes pixels that already \
-                                                     have paint",
-                                                )
-                                                .clicked()
-                                            {
-                                                toggle_alpha_lock = Some(i);
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            ui.menu_button(theme::icon_text(ic::LINK, "Jump keys with"), |ui| {
-                                                if ui.selectable_label(key_links[i].is_none(), "— none —").clicked() {
-                                                    set_key_link = Some((i, None));
-                                                    ui.close_menu();
-                                                }
-                                                // Top of the stack first, as the panel lists them.
-                                                for j in (0..names.len()).rev() {
-                                                    if j == i || headers[j] {
-                                                        continue;
-                                                    }
-                                                    if ui.selectable_label(key_links[i] == Some(j), &names[j]).clicked() {
-                                                        set_key_link = Some((i, Some(uids[j])));
-                                                        ui.close_menu();
-                                                    }
-                                                }
-                                            })
-                                            .response
-                                            .on_hover_text(
-                                                "Shift+A / Shift+S, the jump buttons and the wheel on \
-                                                 this layer also stop at that layer's drawings — for \
-                                                 redrawing a rough on a layer over it",
+                                        if let Some(b) = badge {
+                                            ui.label(b).on_hover_text(
+                                                "Layer opacity. Set it with the slider over the list.",
                                             );
-                                            if ui
-                                                .button(theme::icon_text(ic::STACK_PLUS, "New cleanup layer"))
-                                                .on_hover_text(
-                                                    "A layer over this one to redraw it on, its key \
-                                                     jumps following this layer's drawings",
-                                                )
-                                                .clicked()
-                                            {
-                                                cleanup_of = Some(i);
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            ui.add_enabled_ui(!layer.locked && !layer.reference, |ui| {
-                                                for (o, _, icon, _, text) in ORIENT_ART {
-                                                    if ui
-                                                        .button(theme::icon_text(icon, text))
-                                                        .on_hover_text(
-                                                            "Every drawing on this layer, about the \
-                                                             canvas centre",
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        orient_layer = Some((i, o));
-                                                        ui.close_menu();
-                                                    }
-                                                }
-                                            });
-                                            ui.separator();
-                                            if ui
-                                                .add_enabled(
-                                                    !krita_stays[i],
-                                                    egui::Button::new(theme::icon_text(ic::PAINT_BRUSH, krita_label)),
-                                                )
-                                                .on_hover_text(
-                                                    "Opens just this layer in Krita. The other layers stay \
-                                                     here, and a save there only changes this layer (and \
-                                                     any layer added in Krita).",
-                                                )
-                                                .on_disabled_hover_text(
-                                                    "Reference layers and layers named …-x stay here",
-                                                )
-                                                .clicked()
-                                            {
-                                                krita_edit = Some(i);
-                                                ui.close_menu();
-                                            }
+                                        }
+                                        // The rest of what the layer offers: the
+                                        // ⋮ at the row's top right, and the same
+                                        // menu on a right-click of the name.
+                                        let menu = RowMenu {
+                                            header,
+                                            grp_key: &grp_key,
+                                            krita_label,
+                                            krita_ok: !krita_stays[i],
+                                        };
+                                        let mut cmd = None;
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let dots = egui::Button::new(
+                                                egui::RichText::new(ic::DOTS_THREE_VERTICAL).size(15.0),
+                                            )
+                                            .frame(false)
+                                            .min_size(egui::vec2(ROW_DOTS_W, 22.0));
+                                            egui::menu::menu_custom_button(ui, dots, |ui| layer_row_menu(ui, &menu, &mut cmd))
+                                                .response
+                                                .on_hover_text("Layer options");
                                         });
+                                        resp.context_menu(|ui| layer_row_menu(ui, &menu, &mut cmd));
+                                        if let Some(c) = cmd {
+                                            menu_pick = Some((i, c));
+                                        }
                                     }
                                 });
-                                ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
                                 // Flood fill on this layer reads its boundaries from
                                 // the linked layer — line art above, colour below.
+                                // Both dropdowns end where the cleanup
+                                // button starts, so they line up.
+                                let combo_w = |ui: &egui::Ui| (ui.available_width() - ui.spacing().item_spacing.x - 36.0).max(48.0);
                                 if !header {
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("lines from")
-                                                .color(theme::text_muted())
-                                                .size(11.0),
-                                        );
+                                        row_caption(ui, "lines from");
                                         let current = match layer.lines_from {
                                             Some(s) => names.get(s).map(String::as_str).unwrap_or("—"),
                                             None => "— none —",
                                         };
-                                        egui::ComboBox::from_id_salt(("lines_from", i))
-                                            .selected_text(egui::RichText::new(current).size(11.0))
-                                            .truncate()
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(&mut layer.lines_from, None, "— none —");
-                                                for (j, name) in names.iter().enumerate() {
-                                                    if j == i || headers[j] {
-                                                        continue;
+                                        let w = combo_w(ui);
+                                        ui.scope(|ui| {
+                                            ui.set_max_width(w);
+                                            egui::ComboBox::from_id_salt(("lines_from", i))
+                                                .selected_text(egui::RichText::new(current).size(11.0))
+                                                .width(w)
+                                                .truncate()
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut layer.lines_from, None, "— none —");
+                                                    for (j, name) in names.iter().enumerate() {
+                                                        if j == i || headers[j] {
+                                                            continue;
+                                                        }
+                                                        ui.selectable_value(&mut layer.lines_from, Some(j), name);
                                                     }
-                                                    ui.selectable_value(&mut layer.lines_from, Some(j), name);
-                                                }
-                                            });
+                                                });
+                                        });
                                     })
                                     .response
                                     .on_hover_text(
                                         "Flood fill on this layer stops at the linked layer's strokes, \
                                          so colour can be painted under line art.",
                                     );
+                                    // Key jumps on this layer also stop at the
+                                    // linked layer's drawings; the button adds a
+                                    // layer over this one, already linked to it.
+                                    ui.horizontal(|ui| {
+                                        row_caption(ui, "keys with");
+                                        let current = key_links[i].map_or("— none —", |s| names[s].as_str());
+                                        let mut link = key_links[i].map(|s| uids[s]);
+                                        let was = link;
+                                        let w = combo_w(ui);
+                                        ui.scope(|ui| {
+                                            ui.set_max_width(w);
+                                            egui::ComboBox::from_id_salt(("keys_with", i))
+                                                .selected_text(egui::RichText::new(current).size(11.0))
+                                                .width(w)
+                                                .truncate()
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut link, None, "— none —");
+                                                    // Top of the stack first, as the panel lists them.
+                                                    for j in (0..names.len()).rev() {
+                                                        if j == i || headers[j] {
+                                                            continue;
+                                                        }
+                                                        ui.selectable_value(&mut link, Some(uids[j]), &names[j]);
+                                                    }
+                                                })
+                                        })
+                                        .inner
+                                        .response
+                                            .on_hover_text(
+                                                "Shift+A / Shift+S, the jump buttons and the wheel on this \
+                                                 layer also stop at that layer's drawings — for redrawing a \
+                                                 rough on a layer over it",
+                                            );
+                                        if link != was {
+                                            set_key_link = Some((i, link));
+                                        }
+                                        if theme::icon_button(
+                                            ui,
+                                            ic::STACK_PLUS,
+                                            "New cleanup layer: a layer over this one to redraw it on, \
+                                             its key jumps following this layer's drawings",
+                                        )
+                                        .clicked()
+                                        {
+                                            cleanup_of = Some(i);
+                                        }
+                                    });
                                 }
                             })
                             .response;
@@ -3495,19 +3596,20 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                     }
                 }
             }
-            if let Some(g) = ungroup {
-                state.project.current_layer = g;
-                state.ungroup_active();
-            }
-            if let Some(g) = merge_group {
-                state.merge_group(g);
-            }
-            if let Some(g) = delete_group {
-                state.structural_edit(false, |p| p.delete_block(g));
-                state.selected_layers.clear();
-            }
-            if group_now {
-                state.group_selected_layers();
+            match menu_pick {
+                Some((i, RowCmd::Rename)) => start_rename = Some(i),
+                Some((_, RowCmd::GroupSelected)) => state.group_selected_layers(),
+                Some((i, RowCmd::Krita)) => state.edit_in_krita(i, Some(i)),
+                Some((g, RowCmd::Ungroup)) => {
+                    state.project.current_layer = g;
+                    state.ungroup_active();
+                }
+                Some((g, RowCmd::MergeGroup)) => state.merge_group(g),
+                Some((g, RowCmd::DeleteGroup)) => {
+                    state.structural_edit(false, |p| p.delete_block(g));
+                    state.selected_layers.clear();
+                }
+                None => {}
             }
             if rename_cancel {
                 state.layer_rename = None;
@@ -3532,15 +3634,6 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 state.project.current_layer = i;
                 state.selected_layers.clear();
             }
-            if let Some(i) = krita_edit {
-                state.edit_in_krita(i, Some(i));
-            }
-            if let Some(l) = toggle_clip.and_then(|i| state.project.layers.get_mut(i)) {
-                l.clip = !l.clip;
-            }
-            if let Some(l) = toggle_alpha_lock.and_then(|i| state.project.layers.get_mut(i)) {
-                l.alpha_lock = !l.alpha_lock;
-            }
             if let Some((i, uid)) = set_key_link {
                 if let Some(l) = state.project.layers.get_mut(i) {
                     l.keys_from = uid;
@@ -3548,14 +3641,6 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             }
             if let Some(i) = cleanup_of {
                 state.add_cleanup_layer(i);
-            }
-            if let Some((i, o)) = orient_layer {
-                let layers: Vec<usize> = if state.project.is_group(i) {
-                    state.project.children(i).collect()
-                } else {
-                    vec![i]
-                };
-                state.orient_layers(&layers, o);
             }
 
             // The sections under the list, laid out in a child that claims no
@@ -5165,7 +5250,7 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
     // Flip and turn the pixels — the view flip leaves them alone.
     ui.horizontal(|ui| {
         let scope = orient_scope(state);
-        for (o, action, icon, name, _) in ORIENT_ART {
+        for (o, action, icon, name) in ORIENT_ART {
             let text = tip(state, action, &format!("{name}: {scope}"));
             if theme::icon_button(ui, icon, &text).clicked() {
                 state.orient_art(o);
@@ -5190,23 +5275,22 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
     );
 }
 
-/// The art flips and turns, as the Lasso panel, the Edit menu and a layer's
-/// menu list them: what it does, its shortcut, its icon, and its name on the
-/// selection-or-drawing commands and on the whole-layer ones.
-const ORIENT_ART: [(crate::doc::orient::Orient, Action, &str, &str, &str); 5] = {
+/// The art flips and turns, as the Lasso panel, the Edit menu and the Layers
+/// panel's toolbar list them: what it does, its shortcut, its icon and its
+/// name.
+const ORIENT_ART: [(crate::doc::orient::Orient, Action, &str, &str); 5] = {
     use crate::doc::orient::Orient;
     [
-        (Orient::FLIP_H, Action::ArtFlipH, ic::FLIP_HORIZONTAL, "Flip horizontally", "Flip layer horizontally"),
-        (Orient::FLIP_V, Action::ArtFlipV, ic::FLIP_VERTICAL, "Flip vertically", "Flip layer vertically"),
-        (Orient::CW, Action::ArtRotateCw, ic::ARROW_CLOCKWISE, "Rotate 90° clockwise", "Rotate layer 90° clockwise"),
+        (Orient::FLIP_H, Action::ArtFlipH, ic::FLIP_HORIZONTAL, "Flip horizontally"),
+        (Orient::FLIP_V, Action::ArtFlipV, ic::FLIP_VERTICAL, "Flip vertically"),
+        (Orient::CW, Action::ArtRotateCw, ic::ARROW_CLOCKWISE, "Rotate 90° clockwise"),
         (
             Orient::CCW,
             Action::ArtRotateCcw,
             ic::ARROW_COUNTER_CLOCKWISE,
             "Rotate 90° anticlockwise",
-            "Rotate layer 90° anticlockwise",
         ),
-        (Orient::HALF, Action::ArtRotate180, ic::ARROWS_CLOCKWISE, "Rotate 180°", "Rotate layer 180°"),
+        (Orient::HALF, Action::ArtRotate180, ic::ARROWS_CLOCKWISE, "Rotate 180°"),
     ]
 };
 
@@ -7289,7 +7373,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.separator();
         ui.menu_button(theme::icon_text(ic::FLIP_HORIZONTAL, "Flip / rotate"), |ui| {
             let scope = orient_scope(state);
-            for (o, action, icon, name, _) in ORIENT_ART {
+            for (o, action, icon, name) in ORIENT_ART {
                 let key = state.shortcuts.get(action).map(|c| format!("  ({})", c.display()));
                 if ui
                     .button(theme::icon_text(icon, &format!("{name}{}", key.unwrap_or_default())))
@@ -9397,40 +9481,46 @@ mod layers_panel_tests {
         (state, ctx, shapes)
     }
 
-    /// Whether any text painted inside the Layers panel contains `glyph`.
-    fn panel_shows(
+    /// How many texts painted inside the Layers panel contain `glyph`.
+    fn panel_count(
         ctx: &egui::Context,
         shapes: &[egui::epaint::ClippedShape],
         glyph: &str,
-    ) -> bool {
-        fn find(shape: &egui::Shape, glyph: &str, panel: Rect) -> bool {
+    ) -> usize {
+        fn find(shape: &egui::Shape, glyph: &str, panel: Rect) -> usize {
             match shape {
-                egui::Shape::Vec(v) => v.iter().any(|s| find(s, glyph, panel)),
+                egui::Shape::Vec(v) => v.iter().map(|s| find(s, glyph, panel)).sum(),
                 egui::Shape::Text(t) => {
-                    t.galley.text().contains(glyph) && panel.contains_rect(t.visual_bounding_rect())
+                    usize::from(t.galley.text().contains(glyph) && panel.contains_rect(t.visual_bounding_rect()))
                 }
-                _ => false,
+                _ => 0,
             }
         }
         let panel = egui::AreaState::load(ctx, egui::Id::new(panel_key(PanelId::Layers)))
             .expect("Layers panel laid out")
             .rect();
-        shapes.iter().any(|s| find(&s.shape, glyph, panel))
+        shapes.iter().map(|s| find(&s.shape, glyph, panel)).sum()
+    }
+
+    /// Whether any text painted inside the Layers panel contains `glyph`.
+    fn panel_shows(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], glyph: &str) -> bool {
+        panel_count(ctx, shapes, glyph) > 0
     }
 
     #[test]
     fn clipped_and_alpha_locked_layers_are_marked_in_the_panel() {
+        // Once each in the toolbar, as the buttons; a row's mark adds one.
         let (mut state, ctx, shapes) = setup();
-        assert!(!panel_shows(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN));
-        assert!(!panel_shows(&ctx, &shapes, ic::CHECKERBOARD));
+        assert_eq!(panel_count(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN), 1);
+        assert_eq!(panel_count(&ctx, &shapes, ic::CHECKERBOARD), 1);
         state.project.layers[1].clip = true;
         state.project.layers[2].alpha_lock = true;
         let mut shapes = Vec::new();
         for _ in 0..2 {
             shapes = frame(&ctx, &mut state, vec![]);
         }
-        assert!(panel_shows(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN));
-        assert!(panel_shows(&ctx, &shapes, ic::CHECKERBOARD));
+        assert_eq!(panel_count(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN), 2);
+        assert_eq!(panel_count(&ctx, &shapes, ic::CHECKERBOARD), 2);
     }
 
     fn names(state: &AppState) -> Vec<&str> {
@@ -9616,6 +9706,101 @@ mod layers_panel_tests {
             state.layer_rename.as_ref().is_some_and(|r| r.index == 0),
             "double-click opens the rename box"
         );
+    }
+
+    /// Every text painted anywhere containing `text`, top first.
+    fn text_rects(shapes: &[egui::epaint::ClippedShape], text: &str) -> Vec<Rect> {
+        fn find(shape: &egui::Shape, text: &str, clip: Rect, out: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| find(s, text, clip, out)),
+                egui::Shape::Text(t) if t.galley.text().contains(text) => {
+                    let r = t.visual_bounding_rect();
+                    if clip.intersects(r) {
+                        out.push(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            find(&s.shape, text, s.clip_rect, &mut out);
+        }
+        out.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        out
+    }
+
+    /// Press and let go at `at`, a frame each, then settle a frame.
+    fn click(ctx: &egui::Context, state: &mut AppState, at: Pos2) -> Vec<egui::epaint::ClippedShape> {
+        frame(ctx, state, vec![egui::Event::PointerMoved(at), button(at, true)]);
+        frame(ctx, state, vec![button(at, false)]);
+        frame(ctx, state, vec![])
+    }
+
+    /// The `glyph` painted on the same line as layer `name`'s label.
+    fn on_row(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], name: &str, glyph: &str) -> Pos2 {
+        let y = name_rect(ctx, shapes, name).center().y;
+        text_rects(shapes, glyph)
+            .into_iter()
+            .find(|r| (r.center().y - y).abs() < 8.0)
+            .unwrap_or_else(|| panic!("no {glyph:?} on {name}'s row"))
+            .center()
+    }
+
+    /// The toolbar's clip button works on every picked layer, and turns
+    /// them all the same way.
+    #[test]
+    fn the_toolbar_clips_every_picked_layer() {
+        let (mut state, ctx, shapes) = setup();
+        state.project.layers[1].clip = true;
+        state.selected_layers.extend(state.project.layers.iter().map(|l| l.uid));
+        let clip = text_rects(&shapes, ic::ARROW_BEND_LEFT_DOWN)[0].center();
+        click(&ctx, &mut state, clip);
+        assert!(state.project.layers.iter().all(|l| l.clip), "all on, from the active one being off");
+        click(&ctx, &mut state, clip);
+        assert!(state.project.layers.iter().all(|l| !l.clip));
+    }
+
+    /// A layer under full opacity says how far under, on its row.
+    #[test]
+    fn a_faded_layer_shows_its_opacity_on_its_row() {
+        let (mut state, ctx, shapes) = setup();
+        assert!(text_rects(&shapes, "40%").is_empty());
+        state.project.layers[0].opacity = 0.4;
+        frame(&ctx, &mut state, vec![]);
+        let shapes = frame(&ctx, &mut state, vec![]);
+        on_row(&ctx, &shapes, "Alpha", "40%");
+    }
+
+    /// The ⋮ on a row opens the layer's menu, and its Rename opens the
+    /// rename box on that row.
+    #[test]
+    fn the_dots_open_the_layer_menu() {
+        let (mut state, ctx, shapes) = setup();
+        let dots = on_row(&ctx, &shapes, "Alpha", ic::DOTS_THREE_VERTICAL);
+        let shapes = click(&ctx, &mut state, dots);
+        let rename = text_rects(&shapes, "Rename").first().expect("the menu is open").center();
+        click(&ctx, &mut state, rename);
+        assert!(state.layer_rename.as_ref().is_some_and(|r| r.index == 0));
+    }
+
+    /// The cleanup button on a row adds the cleanup over that layer, already
+    /// following its keys; the row says so in its "keys with" dropdown.
+    #[test]
+    fn the_row_s_cleanup_button_adds_a_linked_layer() {
+        let (mut state, ctx, shapes) = setup();
+        assert_eq!(text_rects(&shapes, "keys with").len(), 3, "a dropdown on every row");
+        let alpha = state.project.layers[0].uid;
+        let y = name_rect(&ctx, &shapes, "Alpha").bottom();
+        let plus = text_rects(&shapes, ic::STACK_PLUS)
+            .into_iter()
+            .find(|r| r.top() > y)
+            .expect("Alpha's cleanup button, under its name")
+            .center();
+        let shapes = click(&ctx, &mut state, plus);
+        let clean = state.project.layers.iter().position(|l| l.name == "Alpha clean").expect("added");
+        assert_eq!(state.project.layers[clean].keys_from, Some(alpha));
+        assert!(!text_rects(&shapes, "Alpha").is_empty());
     }
 
     #[test]
