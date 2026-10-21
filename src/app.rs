@@ -3,15 +3,17 @@
 mod button_drag;
 mod grids;
 mod groups;
+mod lasso_fill;
 mod liquify;
 mod orient;
 mod select;
 
 pub use button_drag::ButtonDragState;
+pub use lasso_fill::{FillMode, LassoHeld};
 pub use select::SelGesture;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -46,6 +48,8 @@ use crate::tools::stroke::StrokeBuilder;
 use crate::tools::shape::GridPlane;
 use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
 use crate::ui;
+use crate::ui::canvas_gpu::CanvasGpu;
+use crate::ui::theme::{BaseColors, Scheme};
 use crate::undo::{self, History};
 
 pub struct NewProjectConfig {
@@ -110,6 +114,7 @@ impl Default for Mp4ExportConfig {
 pub enum ExportKind {
     PngSequence,
     Gif,
+    Webp,
     Mp4,
     SpriteSheet,
 }
@@ -119,6 +124,7 @@ impl ExportKind {
         match self {
             ExportKind::PngSequence => "Export PNG sequence",
             ExportKind::Gif => "Export animated GIF",
+            ExportKind::Webp => "Export animated WebP",
             ExportKind::Mp4 => "Export MP4",
             ExportKind::SpriteSheet => "Export sprite sheet",
         }
@@ -129,13 +135,14 @@ impl ExportKind {
         match self {
             ExportKind::PngSequence => "Exporting PNG sequence…",
             ExportKind::Gif => "Exporting GIF…",
+            ExportKind::Webp => "Exporting WebP…",
             ExportKind::Mp4 => "Exporting MP4…",
             ExportKind::SpriteSheet => "Exporting sprite sheet…",
         }
     }
 }
 
-/// Everything the shared export dialog edits. One struct for all four formats:
+/// Everything the shared export dialog edits. One struct for every format:
 /// the range applies to every one of them, and the format-specific parts are
 /// small enough that separate configs would cost more than they save.
 pub struct ExportConfig {
@@ -147,12 +154,15 @@ pub struct ExportConfig {
     /// Sprite-sheet columns; `0` = near-square.
     pub sheet_columns: usize,
     pub sheet_padding: u32,
-    /// Play the range forward then back (MP4, PNG sequence, GIF).
+    /// Play the range forward then back (MP4, PNG sequence, GIF, WebP).
     pub ping_pong: bool,
     /// Repeat the range to fill `loop_secs`, rounded up to whole loops (MP4,
-    /// PNG sequence — a GIF repeats forever on its own).
+    /// PNG sequence — a GIF or WebP repeats on its own).
     pub loop_on: bool,
     pub loop_secs: f32,
+    /// A WebP stops after `webp_plays` plays instead of repeating forever.
+    pub webp_stop: bool,
+    pub webp_plays: u16,
 }
 
 impl ExportConfig {
@@ -178,6 +188,8 @@ impl Default for ExportConfig {
             ping_pong: false,
             loop_on: false,
             loop_secs: 10.0,
+            webp_stop: false,
+            webp_plays: 1,
         }
     }
 }
@@ -402,6 +414,11 @@ struct UiPrefs {
     /// takes. Workspace preferences, like the tool brushes.
     sel_shape: SelShape,
     sel_amount: u32,
+    /// The Fill tool's mode and its lasso's two switches. Workspace
+    /// preferences, like the selection shape.
+    fill_mode: FillMode,
+    fill_enclose: bool,
+    fill_behind: bool,
     /// Dim everything outside the selection. The switch persists, like the
     /// other view guides.
     tint_outside: bool,
@@ -417,6 +434,16 @@ struct UiPrefs {
     /// The camera frame size last set. The size itself lasts only for the
     /// session, so this is what brings it back with one click the next time.
     last_camera_size: Option<(u32, u32)>,
+    /// Panels closed from the Panels menu or their title bar. Part of the
+    /// workspace layout, like where each panel sits.
+    hidden_panels: Vec<PanelId>,
+    /// Bumped by Reset panel layout; see [`AppState::panel_layout_gen`].
+    panel_layout_gen: u32,
+    /// The colours the UI is drawn in, and the five a Custom scheme is
+    /// made from — kept while another scheme is picked, so switching back
+    /// finds them as they were.
+    color_scheme: Scheme,
+    custom_colors: BaseColors,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -507,12 +534,19 @@ impl Default for UiPrefs {
             project_presets: Vec::new(),
             sel_shape: SelShape::Freehand,
             sel_amount: 4,
+            fill_mode: FillMode::Bucket,
+            fill_enclose: false,
+            fill_behind: false,
             tint_outside: false,
             bg_color: DEFAULT_BG_COLOR,
             bg_opacity: 1.0,
             show_checker: false,
             harmony: Harmony::default(),
             last_camera_size: None,
+            hidden_panels: Vec::new(),
+            panel_layout_gen: 0,
+            color_scheme: Scheme::default(),
+            custom_colors: BaseColors::default(),
         }
     }
 }
@@ -834,7 +868,8 @@ fn evictions(entries: &[TexEntry], budget: usize, now: u64, playing: bool) -> Ve
 }
 
 /// The tool panels (each rendered as a floating window).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PanelId {
     Tools,
     Brush,
@@ -843,7 +878,24 @@ pub enum PanelId {
     Xsheet,
     Timeline,
     Camera,
+    /// Retired: its wheel and harmonies moved into the Brush panel. Kept so
+    /// prefs that hid it still read; [`PanelId::ALL`] leaves it out, so it
+    /// is never drawn or listed.
     Color,
+}
+
+impl PanelId {
+    /// Every panel, in the order the Panels menu lists them: the left
+    /// column, the right column, then the timeline along the bottom.
+    pub const ALL: [PanelId; 7] = [
+        PanelId::Tools,
+        PanelId::Brush,
+        PanelId::Layers,
+        PanelId::Onion,
+        PanelId::Camera,
+        PanelId::Xsheet,
+        PanelId::Timeline,
+    ];
 }
 
 impl Default for NewProjectConfig {
@@ -863,11 +915,12 @@ pub enum ImportSource {
     /// Video file; frames extracted on confirm via ffmpeg. `fps` drives the
     /// timestamp seek used for dialog previews.
     Video { path: PathBuf, fps: f64 },
-    /// GIF frames already decoded to full-size canvases.
-    Gif(Vec<Canvas>),
+    /// Frames of an animated image already decoded to full-size canvases.
+    /// `format` names it: "GIF", "WebP".
+    Frames { frames: Vec<Canvas>, format: &'static str },
 }
 
-/// Backing state for the frame-range import dialog (video / GIF).
+/// Backing state for the frame-range import dialog (video / GIF / WebP).
 pub struct ImportRangeState {
     pub source: ImportSource,
     /// Total number of source frames (slider/input upper bound is `total - 1`).
@@ -882,8 +935,12 @@ pub type PreviewFrame = (u32, u32, Vec<u8>);
 /// A long-running import step running on a worker thread. Polled each frame so
 /// the UI never blocks on ffmpeg / decoding. Only one runs at a time.
 pub enum BgJob {
-    /// Decoding a GIF before the range dialog opens.
-    GifDecode(Receiver<Result<Vec<Canvas>>>),
+    /// Decoding an animated image (`format`: GIF, WebP) before the range
+    /// dialog opens.
+    FramesDecode {
+        rx: Receiver<Result<Vec<Canvas>>>,
+        format: &'static str,
+    },
     /// Probing a video's frame count / fps before the range dialog opens.
     VideoProbe {
         rx: Receiver<Result<(usize, f64)>>,
@@ -995,6 +1052,14 @@ pub struct AppState {
     /// painted. Nothing painted last frame is released before this frame's own
     /// paint, so a one-frame delay is enough.
     retired_textures: Vec<TextureHandle>,
+    /// Draws the canvas textures, mixing texels in gamma space — see
+    /// `ui::canvas_gpu`. `None` without a GPU, as in tests: the canvas then
+    /// draws them as plain egui meshes.
+    pub canvas_gpu: Option<CanvasGpu>,
+    /// Textures re-filled whole this sync. egui only swaps the new image in
+    /// after the frame is built, so `canvas_gpu` would bind the old one —
+    /// stale, and placed by the new rect. These draw as meshes this frame.
+    pub fresh_full: HashSet<egui::TextureId>,
 
     pub tool: ActiveTool,
     pub brush: BrushSettings,
@@ -1064,6 +1129,14 @@ pub struct AppState {
     pub sel_all_frames: bool,
     /// What a selection drag draws.
     pub sel_shape: SelShape,
+    /// Whether a Fill press floods or draws a lasso.
+    pub fill_mode: FillMode,
+    /// A lasso fill fills only what its lines shut in.
+    pub fill_enclose: bool,
+    /// A lasso fill goes under the paint already there.
+    pub fill_behind: bool,
+    /// The lasso fill being drawn.
+    fill_lasso: Option<lasso_fill::FillLasso>,
     /// Pixels a Grow / Shrink / Feather takes.
     pub sel_amount: u32,
     /// Dim everything outside the selection.
@@ -1093,6 +1166,12 @@ pub struct AppState {
     pub selection_tex: Option<TextureHandle>,
     /// Per-tool brush settings preserved across tool switches.
     pub tool_brushes: [BrushSettings; TOOL_COUNT],
+    /// Pencil or Ink, whichever was active last: the pen whose size Shape
+    /// draws at. Session-only; the app comes back on the pencil anyway.
+    pub last_pen: ActiveTool,
+    /// The colour wheel is pinned: every tool paints in one colour, and the
+    /// wheel's set leads the swatch pie. Session-only.
+    wheel_pinned: bool,
     pub stroke: Option<StrokeBuilder>,
     /// CellId being painted into during the current stroke.
     pub stroke_target: Option<CellId>,
@@ -1282,6 +1361,16 @@ pub struct AppState {
     pub show_grid_settings: bool,
     /// Master visibility of all floating panel windows. Tab toggles it.
     pub show_panels: bool,
+    /// Panels closed one at a time, from the Panels menu or the × in their
+    /// title bar. `show_panels` still hides the rest all at once.
+    pub hidden_panels: Vec<PanelId>,
+    /// Which generation of panel windows egui is keeping positions and sizes
+    /// for. Reset panel layout moves to a new one, so every panel opens as if
+    /// for the first time; 0 is the ids panels have always had.
+    pub panel_layout_gen: u32,
+    /// Settings > Appearance. Applied with [`AppState::apply_scheme`].
+    pub color_scheme: Scheme,
+    pub custom_colors: BaseColors,
     /// Minimal timeline bar shown when `show_panels` is false. Has its own
     /// toggle shortcut so the user can hide it too.
     pub show_mini_timeline: bool,
@@ -1293,7 +1382,7 @@ pub struct AppState {
     pub show_export: bool,
     pub export_cfg: ExportConfig,
 
-    /// Frame-range import dialog (video / GIF) visibility + backing state.
+    /// Frame-range import dialog (video / GIF / WebP) visibility + backing state.
     pub show_import_range: bool,
     pub import_range: Option<ImportRangeState>,
 
@@ -1306,6 +1395,9 @@ pub struct AppState {
     /// Timeline snapshot captured at the start of a layer-transform drag, used
     /// to push a single undo entry when the drag ends.
     layer_xform_before: Option<undo::TimelineState>,
+    /// The same for an opacity drag in the Layers panel, which may change
+    /// several layers at once.
+    layer_opacity_before: Option<undo::TimelineState>,
     /// What a group being transformed turns and scales about, in document
     /// space: the middle of its layers when the drag started.
     group_pivot: Option<(f32, f32)>,
@@ -1330,6 +1422,9 @@ pub struct AppState {
     /// loops is playing — it has its own place then, apart from the frame
     /// showing. `None` the rest of the time. See `follow_stretched_camera`.
     shot_cam: Option<f32>,
+    /// The frame playback started on, for Play/Pause to stop back on.
+    /// Cleared by a pause that stays put.
+    play_from: Option<usize>,
     /// Last frame the camera edit buffer was synced for.
     cam_sync_last: Option<usize>,
     /// Lock the editor viewport to the camera, so what you see is the shot.
@@ -1353,11 +1448,14 @@ pub struct AppState {
 
     /// Layer selected before the current one, for the "jump back" shortcut.
     /// Maintained by `track_layer_change` rather than by every site that
-    /// assigns `current_layer` — there are eight of those.
-    prev_layer: Option<usize>,
+    /// assigns `current_layer` — there are eight of those. A uid, so adding
+    /// or deleting layers around it doesn't lose it.
+    prev_layer: Option<u64>,
     /// Previous frame's (current_layer, layer count), the baseline that
     /// `track_layer_change` diffs against.
     layer_watch: (usize, usize),
+    /// Uid of the layer that was active last frame.
+    layer_watch_uid: Option<u64>,
 
     /// Tracker tool: when on, each frame takes two clicks (point A then B) so
     /// stabilization can correct rotation/zoom shake as well as position.
@@ -1431,7 +1529,10 @@ impl AppState {
             .and_then(|s| eframe::get_value(s, UI_PREFS_KEY))
             .unwrap_or_default();
         let root = shortcuts::config_dir().map(|d| d.join("brushes"));
-        Self::with_prefs(prefs, max_tex, root)
+        let mut state = Self::with_prefs(prefs, max_tex, root);
+        state.canvas_gpu = cc.wgpu_render_state.as_ref().and_then(CanvasGpu::new);
+        state.apply_scheme(&cc.egui_ctx);
+        state
     }
 
     /// A state with default preferences and no window, for driving UI code
@@ -1464,6 +1565,8 @@ impl AppState {
             ghost_textures: HashMap::new(),
             ghost_stale: HashSet::new(),
             retired_textures: Vec::new(),
+            canvas_gpu: None,
+            fresh_full: HashSet::new(),
             cell_dirty,
             sync_frame: 0,
             cell_tex_used: HashMap::new(),
@@ -1504,6 +1607,10 @@ impl AppState {
             sel_op: SelOp::Replace,
             sel_all_frames: false,
             sel_shape: prefs.sel_shape,
+            fill_mode: prefs.fill_mode,
+            fill_enclose: prefs.fill_enclose,
+            fill_behind: prefs.fill_behind,
+            fill_lasso: None,
             sel_amount: prefs.sel_amount.max(1),
             tint_outside: prefs.tint_outside,
             sel_tint: None,
@@ -1517,6 +1624,8 @@ impl AppState {
             sel_tex_stale: false,
             selection_tex: None,
             tool_brushes: restore_tool_brushes(prefs.tool_brushes.clone()),
+            last_pen: ActiveTool::Pencil,
+            wheel_pinned: false,
             stroke: None,
             stroke_target: None,
             shape_drag: None,
@@ -1591,6 +1700,10 @@ impl AppState {
             show_brush_settings: false,
             show_grid_settings: false,
             show_panels: prefs.show_panels,
+            hidden_panels: prefs.hidden_panels.into_iter().filter(|&p| p != PanelId::Color).collect(),
+            panel_layout_gen: prefs.panel_layout_gen,
+            color_scheme: prefs.color_scheme,
+            custom_colors: prefs.custom_colors,
             show_mini_timeline: prefs.show_mini_timeline,
             show_new_project: false,
             new_project_cfg: NewProjectConfig::default(),
@@ -1601,6 +1714,7 @@ impl AppState {
             layer_xform: false,
             nav_to_layer: false,
             layer_xform_before: None,
+            layer_opacity_before: None,
             group_pivot: None,
             xform_sync_last: None,
             camera_edit: false,
@@ -1609,6 +1723,7 @@ impl AppState {
             cam_drag: None,
             cam_key_drag: None,
             shot_cam: None,
+            play_from: None,
             cam_sync_last: None,
             camera_look_through: false,
             show_camera_guide: prefs.show_camera_guide,
@@ -1619,6 +1734,7 @@ impl AppState {
             expand_cfg: None,
             prev_layer: None,
             layer_watch: (0, 1),
+            layer_watch_uid: None,
             tracker_two_points: false,
             tracker_pending_b: None,
             bg_job: None,
@@ -1667,9 +1783,8 @@ impl AppState {
         }
         // Brushes are the artist's, not the project's: keep every tool's,
         // the active one included, and come back on the pencil.
-        self.tool_brushes[self.tool.idx()] = self.brush.clone();
-        self.tool = ActiveTool::Pencil;
-        self.brush = self.tool_brushes[ActiveTool::Pencil.idx()].clone();
+        self.stash_brush();
+        self.load_brush(ActiveTool::Pencil);
         self.grid_drag = None;
         self.snap_lock = None;
         self.stroke = None;
@@ -1710,6 +1825,7 @@ impl AppState {
         self.layer_xform = false;
         self.nav_to_layer = false;
         self.layer_xform_before = None;
+        self.layer_opacity_before = None;
         self.xform_sync_last = None;
         // Camera guide / dim / bounds are view preferences, kept like the panel
         // toggles above; only the transient edit + lock modes reset.
@@ -1724,6 +1840,7 @@ impl AppState {
         self.expand_cfg = None;
         self.prev_layer = None;
         self.layer_watch = (self.project.current_layer, self.project.layers.len());
+        self.layer_watch_uid = self.project.layers.get(self.project.current_layer).map(|l| l.uid);
         self.tracker_pending_b = None;
         self.bg_job = None;
         self.bg_label = None;
@@ -2582,19 +2699,35 @@ impl AppState {
     /// File → Import GIF…: decode all frames on a worker thread, then open the
     /// range dialog.
     pub fn open_gif_import(&mut self) {
+        self.open_frames_import("GIF", "gif", "Decoding GIF…", crate::io::gif_import::decode_all);
+    }
+
+    /// File → Import WebP…: as [`Self::open_gif_import`]. A still WebP comes
+    /// in as one frame.
+    pub fn open_webp_import(&mut self) {
+        self.open_frames_import("WebP", "webp", "Decoding WebP…", crate::io::webp_import::decode_all);
+    }
+
+    fn open_frames_import(
+        &mut self,
+        format: &'static str,
+        ext: &'static str,
+        busy: &'static str,
+        decode: fn(&Path) -> Result<Vec<Canvas>>,
+    ) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("GIF", &["gif"])
-            .set_title("Choose a GIF to import")
+            .add_filter(format, &[ext])
+            .set_title(format!("Choose a {format} to import"))
             .pick_file()
         else {
             return;
         };
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = tx.send(crate::io::gif_import::decode_all(&path));
+            let _ = tx.send(decode(&path));
         });
-        self.bg_job = Some(BgJob::GifDecode(rx));
-        self.bg_label = Some("Decoding GIF…");
+        self.bg_job = Some(BgJob::FramesDecode { rx, format });
+        self.bg_label = Some(busy);
     }
 
     /// File → Export MP4…: pick an output path, then encode the whole project on
@@ -2612,6 +2745,10 @@ impl AppState {
             ExportKind::Gif => dialog
                 .add_filter("GIF", &["gif"])
                 .set_file_name("animation.gif")
+                .save_file(),
+            ExportKind::Webp => dialog
+                .add_filter("WebP", &["webp"])
+                .set_file_name("animation.webp")
                 .save_file(),
             ExportKind::Mp4 => dialog
                 .add_filter("MP4 video", &["mp4"])
@@ -2643,6 +2780,8 @@ impl AppState {
                 .preset_idx
                 .min(MP4_PRESETS.len() - 1)],
         };
+        // 0 = forever, as the file has it.
+        let plays = if self.export_cfg.webp_stop { self.export_cfg.webp_plays.max(1) } else { 0 };
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -2657,6 +2796,9 @@ impl AppState {
                 }
                 ExportKind::Gif => {
                     crate::io::gif_export::export_to(&project, &path, &order, cams.as_deref())
+                }
+                ExportKind::Webp => {
+                    crate::io::webp_export::export_to(&project, &path, &order, cams.as_deref(), plays)
                 }
                 ExportKind::Mp4 => crate::io::mp4_export::export_to(
                     &project,
@@ -2675,7 +2817,7 @@ impl AppState {
         self.bg_label = Some(kind.busy());
     }
 
-    /// Confirm the frame-range dialog: slice (GIF, instant) or extract (video,
+    /// Confirm the frame-range dialog: slice (GIF / WebP, instant) or extract (video,
     /// on a worker thread) the chosen `[start, end]` range onto a new layer.
     pub fn confirm_import_range(&mut self) {
         let Some(st) = self.import_range.take() else {
@@ -2700,13 +2842,13 @@ impl AppState {
                 });
                 self.bg_label = Some("Importing video…");
             }
-            ImportSource::Gif(frames) => {
+            ImportSource::Frames { frames, format } => {
                 let slice: Vec<Canvas> = frames
                     .into_iter()
                     .skip(start)
                     .take(end - start + 1)
                     .collect();
-                self.import_cells_as_layer("Imported GIF", slice, false);
+                self.import_cells_as_layer(format!("Imported {format}"), slice, false);
             }
         }
     }
@@ -2990,15 +3132,59 @@ impl AppState {
     /// is; otherwise the frames and the camera run together, as ever.
     fn advance_playback(&mut self, now: f64) -> bool {
         let stretched = self.project.camera_loops() > 1;
-        let moved = if stretched {
+        let was = self.playback.playing;
+        let mut moved = if stretched {
             self.playback
                 .tick_shot(&mut self.project, now, self.loop_timeline)
         } else {
             self.playback
                 .tick(&mut self.project, now, self.loop_timeline)
         };
+        // Run out at the end of the range with the loop off: back to the
+        // start, as a stop would.
+        if was && !self.playback.playing {
+            moved |= self.return_to_play_start();
+        }
         self.follow_stretched_camera(stretched);
         moved
+    }
+
+    /// Play, or stop and go back to the frame playback started on. `now` is
+    /// the clock when there is one to hand (a button); a shortcut has none.
+    pub fn play_pause(&mut self, now: Option<f64>) {
+        if self.playback.playing {
+            self.playback.stop();
+            self.return_to_play_start();
+            return;
+        }
+        self.play_from = Some(self.project.current_frame);
+        match now {
+            Some(t) => self.playback.toggle(t),
+            None => self.playback.toggle_unclocked(),
+        }
+    }
+
+    /// Play, or stop on the frame playback has got to: for catching a
+    /// drawing to fix mid-playback.
+    pub fn play_pause_here(&mut self, now: Option<f64>) {
+        if self.playback.playing {
+            self.play_from = None;
+            self.playback.stop();
+        } else {
+            self.play_pause(now);
+        }
+    }
+
+    /// Put the playhead back where playback started. Whether it moved.
+    fn return_to_play_start(&mut self) -> bool {
+        let Some(f) = self.play_from.take() else { return false };
+        // A camera move stretched over loops would otherwise put the
+        // playhead on the frame the camera reached.
+        self.shot_cam = None;
+        self.cam_sync_last = None;
+        let was = self.project.current_frame;
+        self.project.goto(f);
+        self.project.current_frame != was
     }
 
     /// While a camera move stretched over loops plays, note where it has got
@@ -3175,6 +3361,30 @@ impl AppState {
     pub fn apply_camera_rotate(&mut self, d: f32) {
         self.project.camera.rot += d;
         self.hold_camera_inside();
+    }
+
+    /// Draw the UI in the picked colour scheme, from the next frame on.
+    pub fn apply_scheme(&self, ctx: &egui::Context) {
+        crate::ui::theme::apply(ctx, self.color_scheme.palette(self.custom_colors));
+    }
+
+    pub fn panel_shown(&self, id: PanelId) -> bool {
+        !self.hidden_panels.contains(&id)
+    }
+
+    pub fn set_panel_shown(&mut self, id: PanelId, shown: bool) {
+        self.hidden_panels.retain(|&p| p != id);
+        if !shown {
+            self.hidden_panels.push(id);
+        }
+    }
+
+    /// Every panel shown again, back where it first opened and at its first
+    /// size. egui keeps those per window id, so the panels move to new ids
+    /// rather than having each piece of egui state cleared.
+    pub fn reset_panel_layout(&mut self) {
+        self.hidden_panels.clear();
+        self.panel_layout_gen = self.panel_layout_gen.wrapping_add(1).max(1);
     }
 
     /// Reset the camera to identity — frame rect back on the document rect.
@@ -3503,16 +3713,16 @@ impl AppState {
             return;
         };
         self.bg_job = match job {
-            BgJob::GifDecode(rx) => match rx.try_recv() {
+            BgJob::FramesDecode { rx, format } => match rx.try_recv() {
                 Ok(res) => {
                     self.bg_label = None;
-                    self.on_gif_decoded(res);
+                    self.on_frames_decoded(res, format);
                     None
                 }
-                Err(TryRecvError::Empty) => Some(BgJob::GifDecode(rx)),
+                Err(TryRecvError::Empty) => Some(BgJob::FramesDecode { rx, format }),
                 Err(TryRecvError::Disconnected) => {
                     self.bg_label = None;
-                    log::error!("GIF decode worker died");
+                    log::error!("{format} decode worker died");
                     None
                 }
             },
@@ -3585,22 +3795,22 @@ impl AppState {
         };
     }
 
-    fn on_gif_decoded(&mut self, res: Result<Vec<Canvas>>) {
+    fn on_frames_decoded(&mut self, res: Result<Vec<Canvas>>, format: &'static str) {
         match res {
             Ok(frames) if !frames.is_empty() => {
                 let total = frames.len();
                 self.preview_tex.clear();
                 self.preview_rx = None;
                 self.import_range = Some(ImportRangeState {
-                    source: ImportSource::Gif(frames),
+                    source: ImportSource::Frames { frames, format },
                     total,
                     start: 0,
                     end: total - 1,
                 });
                 self.show_import_range = true;
             }
-            Ok(_) => log::error!("GIF has no frames"),
-            Err(e) => log::error!("GIF decode failed: {e:#}"),
+            Ok(_) => log::error!("{format} has no frames"),
+            Err(e) => log::error!("{format} decode failed: {e:#}"),
         }
     }
 
@@ -3630,7 +3840,7 @@ impl AppState {
     }
 
     /// Ensure a range-dialog preview texture exists (or is being fetched) for
-    /// source frame `idx`. GIF previews are built instantly from decoded frames;
+    /// source frame `idx`. GIF / WebP previews are built instantly from decoded frames;
     /// video previews are fetched on a worker thread (one at a time).
     pub fn request_preview(&mut self, ctx: &egui::Context, idx: usize) {
         // Decide what to do without holding an import_range borrow across the
@@ -3645,7 +3855,7 @@ impl AppState {
         } else {
             match &self.import_range {
                 Some(st) => match &st.source {
-                    ImportSource::Gif(frames) => match frames.get(idx) {
+                    ImportSource::Frames { frames, .. } => match frames.get(idx) {
                         Some(c) => Act::Have(preview_color_image(c.width, c.height, &c.pixels())),
                         None => Act::Nothing,
                     },
@@ -3708,6 +3918,7 @@ impl AppState {
         // this frame: the meshes that referenced them were submitted a frame
         // ago, so freeing now can't invalidate a texture mid-submit.
         self.retired_textures.clear();
+        self.fresh_full.clear();
         self.ensure_cell_tracking();
         self.sync_frame += 1;
         let now = self.sync_frame;
@@ -3806,7 +4017,10 @@ impl AppState {
                 let dims = [sel.mask.w as usize, sel.mask.h as usize];
                 let image = premultiplied_image(dims, &sel.pixels);
                 match self.selection_tex.as_mut() {
-                    Some(tex) if tex.size() == dims => tex.set(image, TextureOptions::LINEAR),
+                    Some(tex) if tex.size() == dims => {
+                        tex.set(image, TextureOptions::LINEAR);
+                        self.fresh_full.insert(tex.id());
+                    }
                     _ => {
                         if let Some(old) = self.selection_tex.take() {
                             self.retired_textures.push(old);
@@ -3982,6 +4196,7 @@ impl AppState {
                     // Same size: re-fill the handle rather than swap it.
                     Some(t) if t.tex.size() == image.size => {
                         t.tex.set(image, TextureOptions::LINEAR);
+                        self.fresh_full.insert(t.tex.id());
                         t.rect = rect;
                         t.cell = cell;
                     }
@@ -4050,6 +4265,7 @@ impl AppState {
             if reusable {
                 if let Some((t, tex)) = self.ghost_textures.get_mut(&id) {
                     tex.set(image, TextureOptions::LINEAR);
+                    self.fresh_full.insert(tex.id());
                     *t = tint;
                 }
             } else {
@@ -4249,6 +4465,7 @@ impl AppState {
                 expand: self.brush.fill_expand,
                 gap: self.brush.fill_gap,
                 alpha_lock: self.active_alpha_lock(),
+                opacity: self.brush.opacity,
             };
             // Owned, so the immutable project borrow ends before `cell_mut`.
             let (cw, ch) = {
@@ -5150,8 +5367,72 @@ impl AppState {
     pub fn set_brush_color(&mut self, rgb: [u8; 3]) {
         let c = [rgb[0], rgb[1], rgb[2], 255];
         self.brush.color = c;
-        let idx = self.tool.idx();
-        self.tool_brushes[idx].color = c;
+        if self.wheel_pinned {
+            for b in &mut self.tool_brushes {
+                b.color = c;
+            }
+        } else {
+            let idx = self.tool.idx();
+            self.tool_brushes[idx].color = c;
+        }
+    }
+
+    /// Whether the colour wheel is pinned.
+    pub fn wheel_pinned(&self) -> bool {
+        self.wheel_pinned
+    }
+
+    /// Pin the colour wheel, or let it go. Pinning hands the colour in use
+    /// to every tool; letting go leaves each tool with it, to drift apart
+    /// again from there.
+    pub fn set_wheel_pinned(&mut self, on: bool) {
+        self.wheel_pinned = on;
+        if on {
+            let c = self.brush.color;
+            self.set_brush_color([c[0], c[1], c[2]]);
+        }
+    }
+
+    /// What the swatch pie offers, and how many of those its inner ring
+    /// takes: the pinned swatches, or with the wheel pinned its set first,
+    /// on the inner ring by itself.
+    pub fn pie_colors(&self) -> (Vec<[u8; 3]>, usize) {
+        if !self.wheel_pinned {
+            return (self.palette.clone(), crate::input::button_drag::PIE_INNER);
+        }
+        let mut colors: Vec<[u8; 3]> = self.harmony.members().iter().map(|m| m.to_rgb()).collect();
+        let set = colors.len();
+        colors.extend_from_slice(&self.palette);
+        (colors, set)
+    }
+
+    /// Write the active brush back to its slot, for a tool switch or a save
+    /// to restore from. Shape has no size of its own, so its Thickness goes
+    /// to the pen it follows too.
+    pub(crate) fn stash_brush(&mut self) {
+        self.tool_brushes[self.tool.idx()] = self.brush.clone();
+        match self.tool {
+            ActiveTool::Pencil | ActiveTool::Ink => self.last_pen = self.tool,
+            ActiveTool::Shape => self.tool_brushes[self.last_pen.idx()].radius = self.brush.radius,
+            _ => {}
+        }
+    }
+
+    /// Make `t` the active tool with its stored brush. Shape draws at the
+    /// size of the pen used last, not at a size of its own.
+    pub(crate) fn load_brush(&mut self, t: ActiveTool) {
+        // A pinned wheel's colour goes with the pen to the next tool, however
+        // it was set.
+        let shared = self.wheel_pinned.then_some(self.brush.color);
+        self.tool = t;
+        self.brush = self.tool_brushes[t.idx()].clone();
+        if let Some(c) = shared {
+            self.brush.color = c;
+            self.tool_brushes[t.idx()].color = c;
+        }
+        if t == ActiveTool::Shape {
+            self.brush.radius = self.tool_brushes[self.last_pen.idx()].radius;
+        }
     }
 
     /// Pin the current brush colour. Re-pinning a colour already held is a
@@ -5184,15 +5465,14 @@ impl AppState {
     pub fn commit_screen_pick(&mut self, color: [u8; 4]) {
         // The active brush may have changed since its slot was last written
         // (a preset, a slider); keep that before reloading from the slots.
-        self.tool_brushes[self.tool.idx()] = self.brush.clone();
+        self.stash_brush();
         // Apply to the active brush and every tool's stored colour so the sample
         // sticks across tool switches.
         for b in &mut self.tool_brushes {
             b.color = color;
         }
         let tool = self.screen_pick_return_tool;
-        self.tool = tool;
-        self.brush = self.tool_brushes[tool.idx()].clone();
+        self.load_brush(tool);
         self.brush.color = color;
         self.tool_brushes[tool.idx()].color = color;
         self.end_screen_pick();
@@ -5274,19 +5554,20 @@ impl AppState {
     /// different places (panel clicks, x-sheet clicks, add/delete/move, undo,
     /// import), and diffing here catches all of them without touching any.
     ///
-    /// A change in layer *count* drops the link instead of remapping it — after
-    /// an add or delete the stored index may mean a different layer, and
-    /// silently jumping to the wrong one is worse than not jumping.
+    /// Tracked by uid, so a new layer still jumps back to the one it was
+    /// added over. A layer that was deleted out from under the selection
+    /// isn't remembered: the one before it stays the way back.
     fn track_layer_change(&mut self) {
         let now = (self.project.current_layer, self.project.layers.len());
-        if now.1 != self.layer_watch.1 {
-            self.prev_layer = None;
-        } else if now.0 != self.layer_watch.0 {
-            self.prev_layer = Some(self.layer_watch.0);
+        let uid = self.project.layers.get(now.0).map(|l| l.uid);
+        if uid != self.layer_watch_uid {
+            if let Some(old) = self.layer_watch_uid.filter(|&u| self.project.layers.iter().any(|l| l.uid == u)) {
+                self.prev_layer = Some(old);
+            }
+            self.layer_watch_uid = uid;
         }
         // Moving the active layer anywhere the panel's picks don't include
         // ends the multi-selection.
-        let uid = self.project.layers.get(now.0).map(|l| l.uid);
         if now != self.layer_watch && uid.is_some_and(|u| !self.selected_layers.contains(&u)) {
             self.selected_layers.clear();
         }
@@ -5294,11 +5575,11 @@ impl AppState {
     }
 
     /// Jump to the layer selected before the current one. No-op when there
-    /// isn't one yet or it has gone stale.
+    /// isn't one yet or it has since been deleted.
     pub fn goto_last_layer(&mut self) {
         let Some(prev) = self.prev_layer else { return };
-        if prev < self.project.layers.len() && prev != self.project.current_layer {
-            self.project.current_layer = prev;
+        if let Some(i) = self.project.layers.iter().position(|l| l.uid == prev) {
+            self.project.current_layer = i;
         }
     }
 
@@ -5365,6 +5646,85 @@ impl AppState {
         (0..self.project.layers.len())
             .filter(|&i| i == cur || self.selected_layers.contains(&self.project.layers[i].uid))
             .collect()
+    }
+
+    /// The selected layers that hold drawings: a picked group stands for
+    /// its layers. Bottom first, each once.
+    fn selected_drawing_layers(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for i in self.selected_layer_indices() {
+            if self.project.is_group(i) {
+                out.extend(self.project.children(i));
+            } else {
+                out.push(i);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Flip or turn every drawing of every selected layer, a picked group's
+    /// layers with them. One undo step; locked and reference layers are
+    /// left alone.
+    pub fn orient_selected_layers(&mut self, o: Orient) {
+        let layers = self.selected_drawing_layers();
+        self.orient_layers(&layers, o);
+    }
+
+    /// Set every selected layer's opacity, a group's own included. The first
+    /// change since the last [`AppState::commit_layer_opacity`] opens the
+    /// undo step, so a whole drag lands as one.
+    pub fn set_selected_opacity(&mut self, v: f32) {
+        if self.layer_opacity_before.is_none() {
+            self.layer_opacity_before = Some(undo::TimelineState::capture(&self.project));
+        }
+        for i in self.selected_layer_indices() {
+            self.project.layers[i].opacity = v.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Close the undo step an opacity drag opened. Nothing when it changed
+    /// nothing.
+    pub fn commit_layer_opacity(&mut self) {
+        let Some(before) = self.layer_opacity_before.take() else { return };
+        let changed = before.layers.len() != self.project.layers.len()
+            || before.layers.iter().zip(&self.project.layers).any(|(a, b)| a.opacity != b.opacity);
+        if changed {
+            let after = undo::TimelineState::capture(&self.project);
+            self.history.push(undo::Command::Structural {
+                before,
+                after,
+                cell_pixels: Vec::new(),
+            });
+        }
+    }
+
+    /// Clip to the layer below on the selected layers, or off again: all go
+    /// the opposite way to the active one, so a mixed pick ends up alike.
+    /// Groups don't clip and are skipped.
+    pub fn toggle_selected_clip(&mut self) {
+        self.toggle_selected_flag(|l| &mut l.clip);
+    }
+
+    /// Alpha lock on the selected layers, the same way as
+    /// [`AppState::toggle_selected_clip`].
+    pub fn toggle_selected_alpha_lock(&mut self) {
+        self.toggle_selected_flag(|l| &mut l.alpha_lock);
+    }
+
+    fn toggle_selected_flag(&mut self, flag: impl Fn(&mut crate::doc::layer::Layer) -> &mut bool) {
+        let cur = self.project.current_layer;
+        let sel: Vec<usize> =
+            self.selected_layer_indices().into_iter().filter(|&i| !self.project.is_group(i)).collect();
+        // A group active says nothing; the first picked layer leads then.
+        let Some(lead) = sel.iter().copied().find(|&i| i == cur).or(sel.first().copied()) else {
+            return;
+        };
+        let on = !*flag(&mut self.project.layers[lead]);
+        for i in sel {
+            *flag(&mut self.project.layers[i]) = on;
+        }
     }
 
     /// Put the selected layers in a new group. One undo step.
@@ -5448,6 +5808,8 @@ impl AppState {
             Action::ToolPencil => self.set_tool(ActiveTool::Pencil),
             Action::ToolInk => self.set_tool(ActiveTool::Ink),
             Action::ToolEraser => self.set_tool(ActiveTool::Eraser),
+            // Again while Fill is the tool, it swaps the bucket and the lasso.
+            Action::ToolFill if self.tool == ActiveTool::Fill => self.toggle_fill_mode(),
             Action::ToolFill => self.set_tool(ActiveTool::Fill),
             // Retired: the in-canvas eyedropper was folded into PickScreenColor,
             // which samples the canvas as well as everything behind the window.
@@ -5472,7 +5834,8 @@ impl AppState {
                 self.perspective.snap = !self.perspective.snap;
             }
             Action::PerspectiveNextGrid => self.cycle_perspective_grid(),
-            Action::PlayPause => self.playback.toggle_unclocked(),
+            Action::PlayPause => self.play_pause(None),
+            Action::PlayPauseHere => self.play_pause_here(None),
             Action::FramePrev => self
                 .project
                 .step(-self.frame_step_delta(), self.loop_timeline),
@@ -5556,16 +5919,9 @@ impl AppState {
                 }
             }
             Action::FadeOthersToggle => self.fade_others = !self.fade_others,
-            Action::LayerClipToggle => {
-                if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
-                    l.clip = !l.clip;
-                }
-            }
-            Action::LayerAlphaLockToggle => {
-                if let Some(l) = self.project.layers.get_mut(self.project.current_layer) {
-                    l.alpha_lock = !l.alpha_lock;
-                }
-            }
+            Action::WheelPinToggle => self.set_wheel_pinned(!self.wheel_pinned),
+            Action::LayerClipToggle => self.toggle_selected_clip(),
+            Action::LayerAlphaLockToggle => self.toggle_selected_alpha_lock(),
             Action::LayerKeyLinkBelow => {
                 self.project.toggle_key_link_below(self.project.current_layer);
             }
@@ -5644,7 +6000,10 @@ impl AppState {
             | Action::HoldSwatchPie
             | Action::SelModeAdd
             | Action::SelModeSubtract
-            | Action::SelModeIntersect => {}
+            | Action::SelModeIntersect
+            | Action::FillLassoErase
+            | Action::FillLassoEnclose
+            | Action::FillPolygonSnap => {}
             Action::LayerTransformToggle => self.layer_xform = !self.layer_xform,
             Action::TransformKeyAdd => self.add_transform_key(),
             Action::TransformKeyDelete => self.delete_transform_key(),
@@ -5659,6 +6018,16 @@ impl AppState {
             Action::CameraKeyAdd => self.add_camera_key(),
             Action::CameraKeyDelete => self.delete_camera_key(),
             Action::CameraLookThrough => self.camera_look_through = !self.camera_look_through,
+            Action::CameraKeyPrev => {
+                if let Some(f) = self.project.prev_camera_key() {
+                    self.project.goto(f);
+                }
+            }
+            Action::CameraKeyNext => {
+                if let Some(f) = self.project.next_camera_key() {
+                    self.project.goto(f);
+                }
+            }
         }
     }
 
@@ -5812,7 +6181,7 @@ impl AppState {
         // polygon loses its newest corner, a warp its last stroke, and
         // floating pixels go back where they were picked up — nothing about
         // any of them is recorded yet.
-        if self.polygon_back() || self.liquify_step_back() {
+        if self.polygon_back() || self.fill_lasso_back() || self.liquify_step_back() {
             return;
         }
         self.cancel_gesture();
@@ -5921,13 +6290,13 @@ impl AppState {
                 let tracks_own_delete = !self.track_sel.is_empty();
                 // Backspace takes back a polygon corner while one is being
                 // placed, rather than clearing the drawing under it.
-                let polygon = self.polygon_active();
+                let polygon = self.polygon_active() || self.fill_polygon_active();
                 for a in actions {
                     match a {
                         Action::TrackClear if !tracks_own_delete => continue,
                         Action::SelectionDelete if tracks_own_delete => continue,
                         Action::ClearCell if polygon => {
-                            self.polygon_back();
+                            let _ = self.polygon_back() || self.fill_lasso_back();
                             continue;
                         }
                         _ => {}
@@ -5944,6 +6313,8 @@ impl AppState {
                 if enter {
                     if self.polygon_active() {
                         self.polygon_finish();
+                    } else if self.fill_polygon_active() {
+                        self.fill_lasso_finish();
                     } else {
                         self.land_float();
                     }
@@ -6026,9 +6397,10 @@ impl eframe::App for AppState {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         // Only a tool switch writes the active brush back to its slot, so a
-        // change made since the last switch lives in `brush` alone.
-        let mut tool_brushes = self.tool_brushes.to_vec();
-        tool_brushes[self.tool.idx()] = self.brush.clone();
+        // change made since the last switch lives in `brush` alone until this
+        // stashes it.
+        self.stash_brush();
+        let tool_brushes = self.tool_brushes.to_vec();
         eframe::set_value(
             storage,
             UI_PREFS_KEY,
@@ -6061,6 +6433,9 @@ impl eframe::App for AppState {
                 krita_path: self.krita_path.clone(),
                 project_presets: self.project_presets.clone(),
                 sel_shape: self.sel_shape,
+                fill_mode: self.fill_mode,
+                fill_enclose: self.fill_enclose,
+                fill_behind: self.fill_behind,
                 sel_amount: self.sel_amount,
                 tint_outside: self.tint_outside,
                 bg_color: self.bg_color,
@@ -6068,6 +6443,10 @@ impl eframe::App for AppState {
                 show_checker: self.show_checker,
                 harmony: self.harmony.scheme,
                 last_camera_size: self.last_camera_size,
+                hidden_panels: self.hidden_panels.clone(),
+                panel_layout_gen: self.panel_layout_gen,
+                color_scheme: self.color_scheme,
+                custom_colors: self.custom_colors,
             },
         );
     }
@@ -6204,7 +6583,9 @@ impl eframe::App for AppState {
 /// Build a `ColorImage` by premultiplying straight-alpha RGBA8 in gamma
 /// (sRGB) space. egui's `from_rgba_unmultiplied` premultiplies in linear
 /// space, which over-brightens fractional-alpha AA edges once egui blends
-/// them in gamma space — light strokes get a white rim.
+/// them in gamma space — light strokes get a white rim. The same rim comes
+/// back between texels if they are *mixed* in linear light, as egui's
+/// sampler does, so the canvas draws them through `ui::canvas_gpu`.
 pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
     let pixels = rgba.chunks_exact(4).map(premultiplied).collect();
     ColorImage { size, pixels }
@@ -6323,17 +6704,29 @@ impl AppState {
         Some(found)
     }
 
-    /// File ▸ Edit in Krita, and the layer menu's (with that layer selected
-    /// in Krita). The first time, writes the project as an animated `.kra`
-    /// and opens it in Krita. With a link live it starts a re-send round (see
+    /// File ▸ Edit in Krita (`only` = `None`: the whole project, layer
+    /// `selected` selected in Krita), and the layer menu's (`only` = that
+    /// layer, sent alone; the rest stay here, unlinked, and a Krita save
+    /// leaves them be). The first time, writes an animated `.kra` and opens
+    /// it in Krita. With a link live it starts a re-send round (see
     /// [`krita_link::Round`]): Krita's latest save comes in first, then the
     /// file is rewritten — and with the helper plugin enabled in Krita, Krita
     /// reloads it in place. Without it, Krita (which neither watches files
     /// nor has a Reload command) needs the file closed and reopened there.
-    pub fn edit_in_krita(&mut self, selected: usize) {
+    pub fn edit_in_krita(&mut self, selected: usize, only: Option<usize>) {
         if self.krita_send.is_some() || self.krita.as_ref().is_some_and(|k| k.round.is_some()) {
             return;
         }
+        let only = match only {
+            Some(li) if li >= self.project.layers.len() => return,
+            Some(li) if krita_link::stays_here_at(&self.project, li) => {
+                let name = self.project.layers[li].name.clone();
+                self.krita_notice(format!("\u{201c}{name}\u{201d} stays here (reference or \u{2026}-x): not sent."), true);
+                return;
+            }
+            Some(li) => Some(self.project.layers[li].uid),
+            None => None,
+        };
         let running = self.krita.as_mut().is_some_and(KritaLink::krita_running);
         let launch = if running {
             None
@@ -6343,15 +6736,15 @@ impl AppState {
                 None => return,
             }
         };
-        self.begin_send(selected, launch);
+        self.begin_send(selected, only, launch);
     }
 
-    /// [`Self::edit_in_krita`] once Krita's whereabouts are settled. Tests
-    /// come in here, so no real Krita is ever started.
-    fn begin_send(&mut self, selected: usize, launch: Option<PathBuf>) {
+    /// [`Self::edit_in_krita`] once Krita's whereabouts are settled, `only`
+    /// as a layer uid. Tests come in here, so no real Krita is ever started.
+    fn begin_send(&mut self, selected: usize, only: Option<u64>, launch: Option<PathBuf>) {
         let Some(link) = self.krita.as_mut().filter(|k| k.baseline.is_some()) else {
             // First send: there's nothing in Krita to bring in or reload.
-            self.start_send(selected, launch);
+            self.start_send(selected, only, launch);
             return;
         };
         let helper = link.use_helper.unwrap_or_else(crate::krita_helper::installed);
@@ -6359,6 +6752,7 @@ impl AppState {
             seq: 0,
             stage: krita_link::Stage::Sync,
             selected,
+            only,
             launch,
             helper_ready: false,
             helper_silent: false,
@@ -6377,9 +6771,31 @@ impl AppState {
         link.round = Some(round);
     }
 
-    /// Write the project as the linked `.kra` on a worker; `poll_krita`
-    /// picks up the result.
-    fn start_send(&mut self, selected: usize, launch: Option<PathBuf>) {
+    /// Write the project — or just layer `only` — as the linked `.kra` on a
+    /// worker; `poll_krita` picks up the result.
+    fn start_send(&mut self, selected: usize, only: Option<u64>, launch: Option<PathBuf>) {
+        let scope = match only.map(|uid| self.project.layers.iter().position(|l| l.uid == uid)) {
+            None => None,
+            Some(Some(li)) if !krita_link::stays_here_at(&self.project, li) => Some(li),
+            Some(found) => {
+                // Krita's save, just brought in, deleted the layer — or it was
+                // made to stay here since. Nothing to send.
+                if let Some(link) = self.krita.as_mut() {
+                    link.round = None;
+                }
+                let msg = match found {
+                    Some(li) => format!(
+                        "\u{201c}{}\u{201d} stays here (reference or \u{2026}-x): not sent.",
+                        self.project.layers[li].name
+                    ),
+                    None => "That layer is gone from here: nothing sent to Krita.".to_string(),
+                };
+                self.krita_notice(msg, true);
+                return;
+            }
+        };
+        let selected = scope.unwrap_or(selected);
+        let rows = scope.map(|li| self.project.block(li));
         let temp = KritaLink::temp_path(self.project_path.as_deref());
         let link = self.krita.get_or_insert_with(|| KritaLink::new(temp));
         // A read in flight was matched against the baseline this send
@@ -6387,16 +6803,21 @@ impl AppState {
         link.pending = None;
         link.baseline = None;
         // Reference and `-x` layers stay here: not sent, and unlinked if they
-        // were linked before.
-        let keep: Vec<bool> = krita_link::sendable(&self.project);
+        // were linked before. So do the layers a one-layer send leaves out —
+        // a Krita save then leaves them be.
+        let mut keep: Vec<bool> = krita_link::sendable(&self.project);
         let mut uuids = Vec::new();
         let mut kept_out = Vec::new();
-        for (l, &k) in self.project.layers.iter().zip(&keep) {
-            if k {
+        for (li, (l, k)) in self.project.layers.iter().zip(&mut keep).enumerate() {
+            let in_scope = rows.as_ref().map_or(true, |r| r.contains(&li));
+            if *k && in_scope {
                 uuids.push(link.uuids.entry(l.uid).or_insert_with(krita_link::new_uuid).clone());
             } else {
+                *k = false;
                 link.uuids.remove(&l.uid);
-                kept_out.push(l.name.clone());
+                if in_scope {
+                    kept_out.push(l.name.clone());
+                }
             }
         }
         let selected = keep
@@ -6590,7 +7011,7 @@ impl AppState {
                     link.start_pull(at, krita_link::present(&self.project, &link.uuids));
                 } else {
                     round.stage = Stage::Sending;
-                    send = Some((round.selected, round.launch.take()));
+                    send = Some((round.selected, round.only, round.launch.take()));
                 }
             }
             Stage::Sending => {}
@@ -6616,8 +7037,8 @@ impl AppState {
         if done.is_none() {
             link.round = Some(round);
         }
-        if let Some((selected, launch)) = send {
-            self.start_send(selected, launch);
+        if let Some((selected, only, launch)) = send {
+            self.start_send(selected, only, launch);
         }
         if let Some((msg, warn)) = done {
             self.krita_notice(msg, warn);
@@ -7459,6 +7880,87 @@ mod tests {
         }
     }
 
+    /// Pinned, the wheel's colour is every tool's: set on one, it is there on
+    /// the next. Unpinned, each tool keeps its own again.
+    #[test]
+    fn a_pinned_wheel_gives_every_tool_one_colour() {
+        let mut st = AppState::for_test();
+        st.set_tool(ActiveTool::Pencil);
+        st.set_brush_color([200, 0, 0]);
+        st.set_tool(ActiveTool::Ink);
+        st.set_brush_color([0, 0, 200]);
+        st.set_tool(ActiveTool::Pencil);
+        assert_eq!(st.brush.color, [200, 0, 0, 255], "unpinned: each its own");
+
+        st.set_wheel_pinned(true);
+        st.set_tool(ActiveTool::Fill);
+        assert_eq!(st.brush.color, [200, 0, 0, 255], "pinning hands the colour on");
+        st.set_brush_color([0, 150, 0]);
+        for t in [ActiveTool::Ink, ActiveTool::Shape, ActiveTool::Pencil] {
+            st.set_tool(t);
+            assert_eq!(st.brush.color, [0, 150, 0, 255], "{t:?}");
+        }
+
+        st.set_wheel_pinned(false);
+        st.set_brush_color([9, 9, 9]);
+        st.set_tool(ActiveTool::Ink);
+        assert_eq!(st.brush.color, [0, 150, 0, 255], "let go: tools drift apart again");
+        st.dispatch(Action::WheelPinToggle);
+        assert!(st.wheel_pinned());
+    }
+
+    /// An opacity drag over a pick sets every picked layer, and lands as one
+    /// undo step however many frames it took.
+    #[test]
+    fn an_opacity_drag_sets_the_pick_in_one_undo_step() {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.project.add_layer();
+        st.selected_layers.insert(st.project.layers[0].uid);
+        st.project.current_layer = 2;
+        let depth = st.history.undo_len();
+        for v in [0.9, 0.7, 0.5] {
+            st.set_selected_opacity(v);
+        }
+        st.commit_layer_opacity();
+        st.commit_layer_opacity();
+        let opac: Vec<f32> = st.project.layers.iter().map(|l| l.opacity).collect();
+        assert_eq!(opac, [0.5, 1.0, 0.5]);
+        assert_eq!(st.history.undo_len(), depth + 1);
+        st.undo();
+        assert!(st.project.layers.iter().all(|l| l.opacity == 1.0));
+    }
+
+    /// "Last layer" survives the stack changing: after adding a layer it goes
+    /// back to the one the layer was added over, and a deleted layer leaves
+    /// the one before it as the way back.
+    #[test]
+    fn last_layer_survives_adding_and_deleting_layers() {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.project.add_layer();
+        st.project.current_layer = 1;
+        st.track_layer_change();
+        let rough = st.project.layers[1].uid;
+
+        st.structural_edit(false, |p| {
+            p.add_layer_above_active();
+        });
+        st.track_layer_change();
+        assert_eq!(st.project.current_layer, 2, "the new layer is active");
+        st.goto_last_layer();
+        st.track_layer_change();
+        assert_eq!(st.project.layers[st.project.current_layer].uid, rough);
+
+        // Over to the top, then delete it: back still leads to the rough.
+        st.project.current_layer = st.project.layers.len() - 1;
+        st.track_layer_change();
+        st.delete_selected_layers();
+        st.track_layer_change();
+        st.goto_last_layer();
+        assert_eq!(st.project.layers[st.project.current_layer].uid, rough);
+    }
+
     /// With the panels moved to M and "last layer" put on Tab, Tab inside a
     /// text field must go to the last layer: what gets through focus is the
     /// map's binding on Tab, not a key wired to the panels.
@@ -7510,7 +8012,7 @@ mod tests {
         };
         for (mods, jumps) in [(egui::Modifiers::NONE, true), (shift, false)] {
             st.project.current_layer = 1;
-            st.prev_layer = Some(0);
+            st.prev_layer = Some(st.project.layers[0].uid);
             frame(&mut st, None, true);
             assert_eq!(ctx.memory(|m| m.focused()), Some(field));
             frame(&mut st, Some((egui::Key::Tab, mods)), false);
@@ -7610,7 +8112,7 @@ mod tests {
         link.poll_every = Duration::ZERO;
         link.settle = Duration::ZERO;
         st.krita = Some(link);
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
         (st, dir, path)
     }
@@ -7661,7 +8163,7 @@ mod tests {
         st.krita.as_mut().unwrap().use_helper = Some(true);
         st.project.layers[0].name = "Ink here".into();
 
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         assert_eq!(to_krita(&path), ("1".into(), "request".into()));
         for _ in 0..5 {
             st.poll_krita(&egui::Context::default());
@@ -7692,7 +8194,7 @@ mod tests {
         let id = k.layers[0].exposures[0].unwrap();
         k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&[255, 0, 0, 255]); // …and Krita paints
 
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         krita_saves(&st, &k, &path);
         crate::krita_helper::tests::plugin_says(&path, &[("seq", "1"), ("msg", "ready"), ("saved", "1")]);
         pump(&mut st, |_| to_krita(&path).1 == "sent");
@@ -7715,7 +8217,7 @@ mod tests {
             l.ready_timeout = Duration::ZERO;
         }
         st.project.layers[0].name = "Ink here".into();
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         pump(&mut st, |st| stage(st).is_none() && st.krita_send.is_none());
         assert_eq!(to_krita(&path).1, "request", "no \"sent\" without a ready helper");
         let doc = kra::read(std::fs::read(&path).unwrap()).unwrap();
@@ -7749,9 +8251,9 @@ mod tests {
     fn a_second_send_during_a_round_is_ignored() {
         let (mut st, dir, path) = linked("twice");
         st.krita.as_mut().unwrap().use_helper = Some(true);
-        st.begin_send(0, None);
-        st.edit_in_krita(0);
-        st.edit_in_krita(0);
+        st.begin_send(0, None, None);
+        st.edit_in_krita(0, None);
+        st.edit_in_krita(0, None);
         assert_eq!(to_krita(&path), ("1".into(), "request".into()));
         assert_eq!(st.krita.as_ref().unwrap().helper_seq, 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -7772,10 +8274,125 @@ mod tests {
         k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&[0, 255, 0, 255]);
         krita_saves(&st, &k, &path);
 
-        st.begin_send(0, None);
+        st.begin_send(0, None, None);
         pump(&mut st, |st| stage(st).is_none() && st.krita_send.is_none());
         assert!(st.history.can_undo());
         assert_eq!(first_pixel_on_disk(&st, &path), [0, 255, 0, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two drawn layers and a link not yet sent, zero poll delays. Returns
+    /// the bottom and top layers' uids too.
+    fn two_layer_link(tag: &str) -> (AppState, PathBuf, PathBuf, u64, u64) {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        let id = st.project.cells.len();
+        let mut c = Canvas::new(st.project.width, st.project.height);
+        c.pixels_mut()[0..4].copy_from_slice(&[0, 0, 255, 255]);
+        st.project.cells.push(c.into());
+        st.project.layers[1].set_key(0, id);
+        let dir = std::env::temp_dir().join(format!("animator-layer-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("link.kra");
+        let mut link = KritaLink::new(path.clone());
+        link.poll_every = Duration::ZERO;
+        link.settle = Duration::ZERO;
+        link.use_helper = Some(false);
+        st.krita = Some(link);
+        let (bottom, top) = (st.project.layers[0].uid, st.project.layers[1].uid);
+        (st, dir, path, bottom, top)
+    }
+
+    fn names_on_disk(path: &std::path::Path) -> Vec<String> {
+        kra::read(std::fs::read(path).unwrap()).unwrap().layers.into_iter().map(|l| l.name).collect()
+    }
+
+    /// "Krita" paints pixel 0 of layer `uid`'s first drawing and saves, as
+    /// Krita holds it: that layer alone.
+    fn krita_paints_only(st: &AppState, uid: u64, px: [u8; 4], path: &std::path::Path) {
+        let mut k = st.project.clone();
+        k.layers.retain(|l| l.uid == uid);
+        let id = k.layers[0].exposures[0].unwrap();
+        k.cell_mut(id).unwrap().pixels_mut()[0..4].copy_from_slice(&px);
+        krita_saves(st, &k, path);
+    }
+
+    fn layer_by_uid(st: &AppState, uid: u64) -> &crate::doc::layer::Layer {
+        st.project.layers.iter().find(|l| l.uid == uid).expect("layer still here")
+    }
+
+    /// The layer menu's send takes that layer alone; a Krita save then
+    /// changes it and leaves the layer that wasn't sent as it was.
+    #[test]
+    fn layer_send_takes_only_that_layer() {
+        let (mut st, dir, path, bottom, top) = two_layer_link("only");
+        let bottom_before = st.project.layers[0].exposures.clone();
+        st.begin_send(0, Some(top), None);
+        pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
+        assert_eq!(names_on_disk(&path), ["Layer 2"]);
+        assert_eq!(st.krita.as_ref().unwrap().uuids.keys().copied().collect::<Vec<_>>(), [top]);
+        assert!(st.krita_toast.as_ref().is_some_and(|t| !t.0.contains("Kept out")));
+
+        krita_paints_only(&st, top, [1, 2, 3, 255], &path);
+        pump(&mut st, |st| st.history.can_undo());
+        assert_eq!(st.project.layers.len(), 2);
+        let now = layer_by_uid(&st, top).exposures[0].unwrap();
+        assert_eq!(&st.project.cells[now].pixels()[0..4], &[1, 2, 3, 255]);
+        assert_eq!(layer_by_uid(&st, bottom).exposures, bottom_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With the whole project in Krita, the layer menu's re-send narrows
+    /// Krita's file to that layer; the other layer stays here, unlinked, and
+    /// Krita's next save doesn't delete it.
+    #[test]
+    fn layer_resend_narrows_a_whole_link() {
+        let (mut st, dir, path, bottom, top) = two_layer_link("narrow");
+        let bottom_before = st.project.layers[0].exposures.clone();
+        st.begin_send(1, None, None);
+        pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
+        assert_eq!(names_on_disk(&path), ["Layer 1", "Layer 2"]);
+
+        st.begin_send(0, Some(top), None);
+        pump(&mut st, |st| stage(st).is_none() && st.krita_send.is_none());
+        assert_eq!(names_on_disk(&path), ["Layer 2"]);
+        assert!(!st.krita.as_ref().unwrap().uuids.contains_key(&bottom));
+        assert!(st.krita_toast.as_ref().is_some_and(|t| !t.0.contains("Kept out")));
+
+        krita_paints_only(&st, top, [4, 5, 6, 255], &path);
+        pump(&mut st, |st| st.history.can_undo());
+        assert_eq!(st.project.layers.len(), 2);
+        assert_eq!(layer_by_uid(&st, bottom).exposures, bottom_before);
+        let now = layer_by_uid(&st, top).exposures[0].unwrap();
+        assert_eq!(&st.project.cells[now].pixels()[0..4], &[4, 5, 6, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reference layer's menu send is refused before anything starts —
+    /// no link, no Krita lookup.
+    #[test]
+    fn layer_send_of_a_reference_layer_sends_nothing() {
+        let mut st = AppState::for_test();
+        st.project.layers[0].reference = true;
+        st.edit_in_krita(0, Some(0));
+        assert!(st.krita.is_none() && st.krita_send.is_none());
+        assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.contains("stays here") && t.1));
+    }
+
+    /// The layer a re-send was for is gone once Krita's save is in: the
+    /// round ends with a note and the file is left as it was.
+    #[test]
+    fn layer_gone_before_the_send_ends_the_round() {
+        let (mut st, dir, path, _, _) = two_layer_link("gone");
+        st.begin_send(0, None, None);
+        pump(&mut st, |st| st.krita.as_ref().is_some_and(|k| k.baseline.is_some()));
+        let before = std::fs::read(&path).unwrap();
+        st.begin_send(0, Some(u64::MAX), None);
+        pump(&mut st, |st| stage(st).is_none());
+        assert!(st.krita_send.is_none());
+        assert!(st.krita_toast.as_ref().is_some_and(|t| t.0.contains("gone") && t.1));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(st.krita.as_ref().unwrap().baseline.is_some(), "the link carries on");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8822,6 +9439,8 @@ mod tests {
         assert_eq!(prefs.palette, want.palette);
         assert_eq!(prefs.krita_path, want.krita_path);
         assert_eq!(prefs.bg_color, want.bg_color);
+        assert!(prefs.hidden_panels.is_empty() && prefs.panel_layout_gen == 0, "every panel where it was");
+        assert_eq!(prefs.color_scheme, Scheme::Graphite);
         let brushes = restore_tool_brushes(prefs.tool_brushes);
         assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
         assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
@@ -8841,6 +9460,39 @@ mod tests {
         let pencil = &restore_tool_brushes(prefs.tool_brushes)[ActiveTool::Pencil.idx()];
         assert_eq!(pencil.mode, crate::tools::BrushMode::Krita);
         assert_eq!(pencil.radius, 33.0);
+    }
+
+    #[test]
+    fn hidden_panels_and_the_layout_reset_outlast_a_restart() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.set_panel_shown(PanelId::Brush, false);
+        st.reset_panel_layout();
+        assert!(st.panel_shown(PanelId::Brush), "a reset shows every panel");
+        st.set_panel_shown(PanelId::Onion, false);
+        st.set_panel_shown(PanelId::Xsheet, false);
+        st.set_panel_shown(PanelId::Xsheet, true);
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let back = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(back.hidden_panels, vec![PanelId::Onion]);
+        assert_eq!(back.panel_layout_gen, 1);
+    }
+
+    #[test]
+    fn the_color_scheme_and_custom_colors_outlast_a_restart() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        assert_eq!(st.color_scheme, Scheme::Graphite, "what the app always looked like");
+        st.color_scheme = Scheme::Custom;
+        st.custom_colors.accent = [250, 120, 60];
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let back = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(back.color_scheme, Scheme::Custom);
+        assert_eq!(back.custom_colors, st.custom_colors);
     }
 
     /// Picking a colour off the screen changes the colour and nothing else.
@@ -8866,6 +9518,113 @@ mod tests {
         st.reset_with(640, 480, 24.0);
         assert_eq!(st.tool, ActiveTool::Pencil);
         assert_eq!(st.brush.radius, 33.0);
+        assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
+    }
+
+    /// Shape draws at the size of the pen used last, and its Thickness goes
+    /// back to that pen. The two pens keep their own sizes.
+    #[test]
+    fn shape_shares_its_size_with_the_last_pen() {
+        let mut st = AppState::for_test();
+        st.brush.radius = 12.0;
+        st.set_tool(ActiveTool::Ink);
+        st.brush.radius = 4.0;
+        st.set_tool(ActiveTool::Shape);
+        assert_eq!(st.brush.radius, 4.0, "from the ink");
+        st.brush.radius = 7.0;
+        st.set_tool(ActiveTool::Fill);
+        st.set_tool(ActiveTool::Shape);
+        assert_eq!(st.brush.radius, 7.0, "kept through another tool");
+        st.set_tool(ActiveTool::Ink);
+        assert_eq!(st.brush.radius, 7.0, "Thickness went back to the ink");
+        st.set_tool(ActiveTool::Pencil);
+        assert_eq!(st.brush.radius, 12.0, "the pencil kept its own");
+        st.set_tool(ActiveTool::Shape);
+        assert_eq!(st.brush.radius, 12.0, "now from the pencil");
+        // Only the size is shared: Shape keeps its own hard edge.
+        assert_eq!(st.brush.hardness, BrushSettings::default_shape().hardness);
+    }
+
+    /// Brush size keys keep Shape and the pen in step, with the panels up
+    /// and the keys going through `handle_keys` the way `update` runs them.
+    #[test]
+    fn size_keys_keep_shape_and_the_pen_in_step() {
+        let mut st = AppState::for_test();
+        st.shortcuts = ShortcutMap::default();
+        st.show_panels = true;
+        let ctx = egui::Context::default();
+        let frame = |st: &mut AppState, key: Option<egui::Key>| {
+            let events = key
+                .map(|key| egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .into_iter()
+                .collect();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 1000.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                let tab_focus = st.handle_keys(ctx);
+                ui::shell::draw(st, ctx);
+                st.drop_stray_focus(ctx, tab_focus);
+            });
+        };
+        frame(&mut st, None);
+        frame(&mut st, Some(egui::Key::W));
+        assert_eq!(st.tool, ActiveTool::Ink);
+        let start = st.brush.radius;
+        for _ in 0..3 {
+            frame(&mut st, Some(egui::Key::CloseBracket));
+        }
+        let ink = st.brush.radius;
+        assert!(ink > start, "{start} -> {ink}");
+        frame(&mut st, Some(egui::Key::G));
+        assert_eq!(st.tool, ActiveTool::Shape);
+        assert_eq!(st.brush.radius, ink, "Shape took the ink's new size");
+        frame(&mut st, Some(egui::Key::OpenBracket));
+        let shape = st.brush.radius;
+        assert!(shape < ink);
+        frame(&mut st, Some(egui::Key::W));
+        assert_eq!(st.brush.radius, shape, "the ink took Shape's new size");
+    }
+
+    /// A Thickness set on Shape outlasts a restart, on the pen it follows.
+    #[test]
+    fn a_shape_thickness_is_saved_with_its_pen() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.set_tool(ActiveTool::Shape);
+        st.brush.radius = 21.0;
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let mut back = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(back.brush.radius, 21.0, "back on the pencil at Shape's size");
+        back.set_tool(ActiveTool::Shape);
+        assert_eq!(back.brush.radius, 21.0);
+    }
+
+    /// A colour picked off the screen while on Shape leaves its size alone.
+    #[test]
+    fn a_screen_pick_on_shape_keeps_the_pen_size() {
+        let mut st = AppState::for_test();
+        st.set_tool(ActiveTool::Ink);
+        st.brush.radius = 5.0;
+        st.set_tool(ActiveTool::Shape);
+        st.brush.radius = 9.0;
+        st.begin_screen_pick();
+        st.commit_screen_pick([1, 2, 3, 255]);
+        assert_eq!(st.tool, ActiveTool::Shape);
+        assert_eq!(st.brush.radius, 9.0);
         assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
     }
 
@@ -9320,6 +10079,48 @@ mod tests {
         assert_eq!(st.project.current_frame, 3, "the first tick only starts the clock");
         st.playback.tick(&mut st.project, t + 1.0 / fps, true);
         assert_eq!(st.project.current_frame, 4);
+    }
+
+    /// Play/Pause stops back on the frame playback started on, wherever the
+    /// playhead had got to; the pause-here action stays put.
+    #[test]
+    fn stopping_goes_back_to_the_start_frame_unless_paused_here() {
+        let mut st = AppState::for_test();
+        st.project.ensure_frame_count(24);
+        let fps = st.project.fps as f64;
+        st.project.goto(8);
+        st.play_pause(Some(0.0));
+        st.advance_playback(5.2 / fps);
+        assert_eq!(st.project.current_frame, 13, "played on");
+        st.play_pause(Some(6.0 / fps));
+        assert!(!st.playback.playing);
+        assert_eq!(st.project.current_frame, 8);
+
+        st.dispatch(Action::PlayPauseHere);
+        st.advance_playback(1.0);
+        st.advance_playback(1.0 + 3.2 / fps);
+        assert_eq!(st.project.current_frame, 11);
+        st.dispatch(Action::PlayPauseHere);
+        assert!(!st.playback.playing);
+        st.advance_playback(2.0);
+        assert_eq!(st.project.current_frame, 11, "paused where it was");
+    }
+
+    /// With the loop off, running out at the end of the range goes back to
+    /// the start frame too.
+    #[test]
+    fn running_out_with_the_loop_off_goes_back_to_the_start_frame() {
+        let mut st = AppState::for_test();
+        st.project.ensure_frame_count(12);
+        st.loop_timeline = false;
+        let fps = st.project.fps as f64;
+        st.project.goto(8);
+        st.play_pause(Some(0.0));
+        st.advance_playback(2.2 / fps);
+        assert_eq!(st.project.current_frame, 10);
+        assert!(st.advance_playback(9.0 / fps), "the frame on screen changed");
+        assert!(!st.playback.playing);
+        assert_eq!(st.project.current_frame, 8);
     }
 
     /// The toggle is session-only: a fresh state never opens faded.

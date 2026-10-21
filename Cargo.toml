@@ -34,6 +34,10 @@ image  = { version = "0.25", default-features = false, features = ["png", "jpeg"
 rfd    = "0.14"
 gif         = "0.13"
 color_quant = "1"
+# Animated WebP export and import. Already in the tree via `image`'s webp
+# feature; named here because the animation container is written by hand —
+# image-webp only encodes still images.
+image-webp  = "0.2"
 
 # Project files are mostly transparent pixels — four zero bytes each — so the
 # `.anim` payload deflates by one to two orders of magnitude. Already in the
@@ -49,6 +53,9 @@ roxmltree = "0.19"
 # zeroed is paged in by the threads that fill it, not up front.
 bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
 glam     = { version = "0.29", features = ["bytemuck"] }
+# Waits on wgpu's error scope when the canvas pipeline is built (and on the
+# GPU in its tests). Already in the tree via eframe and rfd.
+pollster = "0.3"
 
 serde    = { version = "1", features = ["derive", "rc"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }

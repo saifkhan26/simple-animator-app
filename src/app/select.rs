@@ -214,7 +214,7 @@ impl AppState {
     /// layer's cell at this frame. Nothing outside it can be painted, and it
     /// stops a lasso drawn while zoomed far out from asking for a gigapixel
     /// mask.
-    fn selection_universe(&self) -> (i32, i32, i32, i32) {
+    pub(super) fn selection_universe(&self) -> (i32, i32, i32, i32) {
         let (pw, ph) = (self.project.width as f32, self.project.height as f32);
         let (mut x0, mut y0, mut x1, mut y1) = (0.0f32, 0.0f32, pw, ph);
         let f = self.project.current_frame;
@@ -417,9 +417,12 @@ impl AppState {
         true
     }
 
-    /// Abandon a selection gesture in progress. `true` if there was one.
+    /// Abandon a selection gesture, or a lasso fill, in progress. `true` if
+    /// there was one.
     pub fn cancel_gesture(&mut self) -> bool {
-        self.sel_gesture.take().is_some()
+        // The Fill tool's lasso too: it ends the same ways.
+        let fill = self.fill_lasso.take().is_some();
+        self.sel_gesture.take().is_some() || fill
     }
 
     /// A press on the float's transform box, or on the selection itself when
@@ -524,9 +527,21 @@ impl AppState {
         self.set_mask(next, true);
     }
 
-    /// Fill the selection with the brush colour, on the active drawing.
+    /// The Fill tool's opacity, which Fill selection shares: the live brush
+    /// while the bucket is the tool, its stored copy otherwise.
+    pub fn fill_opacity_mut(&mut self) -> &mut f32 {
+        if self.tool == ActiveTool::Fill {
+            &mut self.brush.opacity
+        } else {
+            &mut self.tool_brushes[ActiveTool::Fill.idx()].opacity
+        }
+    }
+
+    /// Fill the selection with the brush colour at the Fill tool's opacity, on
+    /// the active drawing.
     pub fn fill_selection(&mut self) {
-        if self.sel_mask.is_none() {
+        let opacity = *self.fill_opacity_mut();
+        if self.sel_mask.is_none() || opacity <= 0.0 {
             return;
         }
         self.cancel_gesture();
@@ -542,7 +557,7 @@ impl AppState {
         self.snapshot_pre(target);
         if let Some(c) = self.project.cell_mut(target) {
             c.dirty = None;
-            crate::tools::fill::fill_masked(c, &clip, color, alpha_lock);
+            crate::tools::fill::fill_masked(c, &clip, color, opacity, alpha_lock, false);
         }
         self.mark_dirty(target);
         if self.commit_undo(target) {
@@ -683,9 +698,8 @@ impl AppState {
         if t != self.tool {
             self.land_float();
             self.cancel_gesture();
-            self.tool_brushes[self.tool.idx()] = self.brush.clone();
-            self.tool = t;
-            self.brush = self.tool_brushes[t.idx()].clone();
+            self.stash_brush();
+            self.load_brush(t);
         }
         if t == ActiveTool::Perspective {
             self.ensure_perspective_grid();
@@ -1042,6 +1056,7 @@ impl AppState {
         self.retire_float_tex();
         self.float_pre_live = false;
         self.sel_gesture = None;
+        self.fill_lasso = None;
         self.sel_mask = None;
         self.mask_changed();
     }
@@ -1676,6 +1691,29 @@ mod tests {
         st.fill_selection();
         assert_eq!(px(&st, 150, 150), [0, 120, 0, 255]);
         assert_eq!(px(&st, 90, 150)[3], 0);
+    }
+
+    #[test]
+    fn fill_selection_paints_at_the_fill_tools_opacity() {
+        let mut st = lasso();
+        paint(&mut st, (0, 0, 300, 300), [0, 0, 255, 255]);
+        drag(&mut st, (100.0, 100.0), (200.0, 200.0), None);
+        // Set from the Lasso panel: it lands on the Fill tool's own copy.
+        *st.fill_opacity_mut() = 0.5;
+        assert_eq!(st.brush.opacity, 1.0, "the Lasso's own brush is untouched");
+        st.brush.color = [255, 0, 0, 255];
+        st.fill_selection();
+        assert_eq!(px(&st, 150, 150), [128, 0, 128, 255], "half over the blue");
+        assert_eq!(px(&st, 90, 150), [0, 0, 255, 255]);
+        // The bucket shows the same value, and a change there reaches back.
+        st.set_tool(ActiveTool::Fill);
+        assert_eq!(st.brush.opacity, 0.5);
+        st.brush.opacity = 0.0;
+        st.set_tool(ActiveTool::Lasso);
+        assert_eq!(*st.fill_opacity_mut(), 0.0);
+        let steps = st.history.undo_len();
+        st.fill_selection();
+        assert_eq!(st.history.undo_len(), steps, "nothing to fill at zero");
     }
 
     #[test]

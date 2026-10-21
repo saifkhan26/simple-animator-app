@@ -36,6 +36,9 @@ pub enum Action {
     /// strokes snap to.
     PerspectiveNextGrid,
     PlayPause,
+    /// Play / Pause, the pause staying on the frame it reached instead of
+    /// going back to where playback started.
+    PlayPauseHere,
     FramePrev,
     FrameNext,
     KeyJumpPrev,
@@ -70,6 +73,8 @@ pub enum Action {
     LayerPick8,
     LayerPick9,
     FadeOthersToggle,
+    /// Pin the colour wheel (see `AppState::set_wheel_pinned`). Unbound.
+    WheelPinToggle,
     LayerClipToggle,
     LayerAlphaLockToggle,
     /// Link the active layer's key jumps to the nearest drawing layer below
@@ -115,6 +120,11 @@ pub enum Action {
     SelModeAdd,
     SelModeSubtract,
     SelModeIntersect,
+    // The Fill tool's lasso, the same way: held as its outline is drawn or
+    // closed, on the selection modes' combos, which only the Lasso reads.
+    FillLassoErase,
+    FillLassoEnclose,
+    FillPolygonSnap,
     // Timeline tracks: the drawings selected there.
     TrackClear,
     TrackCloseGap,
@@ -142,6 +152,8 @@ pub enum Action {
     CameraKeyAdd,
     CameraKeyDelete,
     CameraLookThrough,
+    CameraKeyPrev,
+    CameraKeyNext,
 }
 
 impl Action {
@@ -160,6 +172,7 @@ impl Action {
         Action::TogglePerspectiveSnap,
         Action::PerspectiveNextGrid,
         Action::PlayPause,
+        Action::PlayPauseHere,
         Action::FramePrev,
         Action::FrameNext,
         Action::KeyJumpPrev,
@@ -190,6 +203,7 @@ impl Action {
         Action::LayerPick8,
         Action::LayerPick9,
         Action::FadeOthersToggle,
+        Action::WheelPinToggle,
         Action::LayerClipToggle,
         Action::LayerAlphaLockToggle,
         Action::LayerKeyLinkBelow,
@@ -229,6 +243,9 @@ impl Action {
         Action::SelModeAdd,
         Action::SelModeSubtract,
         Action::SelModeIntersect,
+        Action::FillLassoErase,
+        Action::FillLassoEnclose,
+        Action::FillPolygonSnap,
         Action::TrackClear,
         Action::TrackCloseGap,
         Action::SaveProject,
@@ -248,6 +265,8 @@ impl Action {
         Action::CameraKeyAdd,
         Action::CameraKeyDelete,
         Action::CameraLookThrough,
+        Action::CameraKeyPrev,
+        Action::CameraKeyNext,
     ];
 
     pub fn label(self) -> &'static str {
@@ -266,7 +285,8 @@ impl Action {
             Action::TogglePerspectiveGrid => "Show perspective grids",
             Action::TogglePerspectiveSnap => "Snap strokes to perspective grid",
             Action::PerspectiveNextGrid => "Next perspective grid",
-            Action::PlayPause => "Play / Pause",
+            Action::PlayPause => "Play / Pause (back to the start frame)",
+            Action::PlayPauseHere => "Play / Pause where it stops",
             Action::FramePrev => "Previous frame",
             Action::FrameNext => "Next frame",
             Action::KeyJumpPrev => "Previous drawing key",
@@ -297,6 +317,7 @@ impl Action {
             Action::LayerPick8 => "Select layer 8 (from top)",
             Action::LayerPick9 => "Select layer 9 (from top)",
             Action::FadeOthersToggle => "Fade other layers",
+            Action::WheelPinToggle => "Pin the colour wheel (one colour for every tool)",
             Action::LayerClipToggle => "Clip layer to the one below",
             Action::LayerAlphaLockToggle => "Lock layer alpha",
             Action::LayerKeyLinkBelow => "Toggle key link to layer below",
@@ -336,6 +357,9 @@ impl Action {
             Action::SelModeAdd => "Selection: add to (drag)",
             Action::SelModeSubtract => "Selection: remove from (drag)",
             Action::SelModeIntersect => "Selection: intersect with (drag)",
+            Action::FillLassoErase => "Lasso fill: erase the shape instead (hold)",
+            Action::FillLassoEnclose => "Lasso fill: switch Enclose & fill (hold)",
+            Action::FillPolygonSnap => "Lasso fill: polygon edges in 15° steps (hold)",
             Action::TrackClear => "Timeline: delete drawings (leave blank)",
             Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
             Action::SaveProject => "Save project",
@@ -355,6 +379,8 @@ impl Action {
             Action::CameraKeyAdd => "Add camera key",
             Action::CameraKeyDelete => "Delete camera key",
             Action::CameraLookThrough => "Look through camera",
+            Action::CameraKeyPrev => "Previous camera key",
+            Action::CameraKeyNext => "Next camera key",
         }
     }
 
@@ -382,7 +408,12 @@ impl Action {
         self.hold_drag().is_some()
             || matches!(
                 self,
-                Action::SelModeAdd | Action::SelModeSubtract | Action::SelModeIntersect
+                Action::SelModeAdd
+                    | Action::SelModeSubtract
+                    | Action::SelModeIntersect
+                    | Action::FillLassoErase
+                    | Action::FillLassoEnclose
+                    | Action::FillPolygonSnap
             )
     }
 
@@ -685,6 +716,11 @@ fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
         (Action::SelectionDelete, Action::TrackClear) => Some(
             "drawings selected in the timeline take the press; otherwise the selection does",
         ),
+        (Action::SelModeAdd, Action::FillLassoEnclose)
+        | (Action::SelModeSubtract, Action::FillLassoErase)
+        | (Action::SelModeIntersect, Action::FillPolygonSnap) => {
+            Some("the Lasso tool reads one, the Fill tool's lasso the other")
+        }
         _ => None,
     }
 }
@@ -1017,6 +1053,7 @@ impl Default for ShortcutMap {
         b.insert(Action::FrameDelete, KeyCombo::shift(K::F));
         // Playback / onion.
         b.insert(Action::PlayPause, KeyCombo::plain(K::Space));
+        b.insert(Action::PlayPauseHere, KeyCombo::shift(K::Space));
         b.insert(Action::OnionToggle, KeyCombo::plain(K::O));
         // Layers.
         b.insert(Action::LayerAdd, KeyCombo::plain(K::T));
@@ -1119,6 +1156,11 @@ impl Default for ShortcutMap {
         b.insert(Action::SelModeAdd, KeyCombo::modifier_only(true, true, false));
         b.insert(Action::SelModeSubtract, KeyCombo::modifier_only(true, false, true));
         b.insert(Action::SelModeIntersect, KeyCombo::modifier_only(false, true, true));
+        // The Fill lasso's holds share them: removing is erasing, and the
+        // Lasso tool never sees these, nor the Fill tool those.
+        b.insert(Action::FillLassoErase, KeyCombo::modifier_only(true, false, true));
+        b.insert(Action::FillLassoEnclose, KeyCombo::modifier_only(true, true, false));
+        b.insert(Action::FillPolygonSnap, KeyCombo::modifier_only(false, true, true));
         // Delete shares its key with the pixel selection's erase; a live pixel
         // selection claims the press (see the dispatch loop in `app`).
         b.insert(Action::TrackClear, KeyCombo::plain(K::Delete));
@@ -1151,6 +1193,8 @@ impl Default for ShortcutMap {
         b.insert(Action::CameraKeyAdd, KeyCombo::ctrl(K::K));
         b.insert(Action::CameraKeyDelete, KeyCombo::ctrl_shift(K::K));
         b.insert(Action::CameraLookThrough, KeyCombo::shift(K::V));
+        // CameraKeyPrev / CameraKeyNext start unbound: every key near the
+        // camera binds is taken, and the panel has buttons for them.
         Self {
             bindings: b,
             unbound: BTreeSet::new(),
@@ -1662,7 +1706,7 @@ mod tests {
         for a in ours {
             let c = map.get(a).expect("bound");
             for (&b, &other) in &map.bindings {
-                if b != a {
+                if b != a && shared_on_purpose(a, b).is_none() {
                     assert_ne!(c, other, "{a:?} and {b:?} share {}", c.display());
                 }
             }

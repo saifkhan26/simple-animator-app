@@ -1,9 +1,9 @@
 //! The HSL colour wheel: a disc (hue around, saturation out from the centre)
-//! beside a lightness bar. Three uses: the Color panel with its harmony set,
-//! and the compact picker behind every other colour button in the app.
+//! beside a lightness bar. Two uses: the Brush panel's wheel with its harmony
+//! set, and the compact picker behind every other colour button in the app.
 
 use egui::epaint::Mesh;
-use egui::{pos2, vec2, Color32, Frame, Id, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
+use egui::{pos2, vec2, Color32, Frame, Id, Pos2, Response, Sense, Shape, Stroke, Ui, Vec2};
 
 use crate::app::AppState;
 use crate::color::{fmt_rgb, wrap_hue, Harmony, Hsl};
@@ -15,6 +15,12 @@ const SEGMENTS: usize = 72;
 const RINGS: usize = 8;
 /// Width of the lightness bar.
 pub const BAR_W: f32 = 16.0;
+/// The + that adds the set to the pinned swatches, at the end of its row.
+const SET_ADD_W: f32 = 22.0;
+
+/// The Brush panel's disc at its largest: what its 200-point opening width
+/// leaves for it.
+const DISC_MAX: f32 = 159.0;
 /// How near a dot or tick a press has to land to grab it.
 const GRAB_R: f32 = 10.0;
 /// Disc size in the compact picker.
@@ -99,7 +105,7 @@ pub fn disc(ui: &mut Ui, diameter: f32, l: f32, markers: &[Marker]) -> Option<Di
         }
         let painter = ui.painter_at(rect.expand(GRAB_R));
         painter.add(Shape::mesh(mesh));
-        painter.circle_stroke(center, r, Stroke::new(1.0, theme::STROKE_THIN));
+        painter.circle_stroke(center, r, Stroke::new(1.0, theme::stroke_thin()));
 
         // Spokes first, so the dots sit on top of every line.
         if markers.len() > 1 {
@@ -114,7 +120,7 @@ pub fn disc(ui: &mut Ui, diameter: f32, l: f32, markers: &[Marker]) -> Option<Di
             painter.circle_filled(p, rad, m.hsl.to_color32());
             painter.circle_stroke(p, rad, Stroke::new(1.5, contrast(m.hsl)));
             if m.active {
-                painter.circle_stroke(p, rad + 2.0, Stroke::new(1.5, theme::ACCENT));
+                painter.circle_stroke(p, rad + 2.0, Stroke::new(1.5, theme::accent()));
             }
         }
     }
@@ -179,14 +185,14 @@ pub fn l_bar(ui: &mut Ui, height: f32, h: f32, s: f32, ticks: &[Tick]) -> Option
         }
         let painter = ui.painter_at(rect.expand(4.0));
         painter.add(Shape::mesh(mesh));
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, theme::STROKE_THIN));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, theme::stroke_thin()));
         for t in ticks.iter().filter(|t| !t.active).chain(ticks.iter().filter(|t| t.active)) {
             let y = y_of(t.l);
             let line = [pos2(rect.left() - 3.0, y), pos2(rect.right() + 3.0, y)];
             let edge = contrast(Hsl { h, s, l: t.l });
             if t.active {
                 painter.line_segment(line, Stroke::new(4.0, edge));
-                painter.line_segment(line, Stroke::new(2.0, theme::ACCENT));
+                painter.line_segment(line, Stroke::new(2.0, theme::accent()));
             } else {
                 painter.line_segment(line, Stroke::new(1.5, edge));
             }
@@ -219,17 +225,35 @@ pub fn l_bar(ui: &mut Ui, height: f32, h: f32, s: f32, ticks: &[Tick]) -> Option
     grab.index.map(|i| (i, l))
 }
 
-/// H°, S% and L% as drag fields. Returns the edited colour when one moved.
+/// H°, S% and L% as drag fields sharing the row's width. Returns the
+/// edited colour when one moved. The H, S and L letters go when the row is
+/// too narrow for them; the tooltips still say which is which.
 pub fn hsl_fields(ui: &mut Ui, c: Hsl) -> Option<Hsl> {
     let mut h = c.h.round();
     let mut s = (c.s * 100.0).round();
     let mut l = (c.l * 100.0).round();
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        const GAP: f32 = 4.0;
+        ui.spacing_mut().item_spacing.x = GAP;
+        ui.spacing_mut().button_padding.x = 3.0;
+        let text_w = |ui: &Ui, t: &str, style: egui::TextStyle| {
+            let font = style.resolve(ui.style());
+            ui.fonts(|f| f.layout_no_wrap(t.to_owned(), font, Color32::WHITE).size().x)
+        };
+        // A field must hold "360°".
+        let need = (text_w(ui, "360°", egui::TextStyle::Button) + 6.0).ceil();
+        let letter = text_w(ui, "H", egui::TextStyle::Body).ceil() + GAP;
+        let room = ui.available_width() - 2.0 * GAP;
+        let letters = (room - 3.0 * letter) / 3.0 >= need;
+        let field_w = (((room - if letters { 3.0 * letter } else { 0.0 }) / 3.0).floor()).max(need);
+        let height = ui.spacing().interact_size.y;
         let field = |ui: &mut Ui, v: &mut f32, label: &str, max: f32, suffix: &str, tip: &str| {
-            ui.label(egui::RichText::new(label).color(theme::TEXT_MUTED));
-            ui.add(
+            if letters {
+                ui.label(egui::RichText::new(label).color(theme::text_muted()));
+            }
+            ui.add_sized(
+                [field_w, height],
                 egui::DragValue::new(v)
                     .range(0.0..=max)
                     .speed(0.5)
@@ -253,9 +277,9 @@ fn swatch_button(ui: &mut Ui, rgb: [u8; 3], open: bool) -> Response {
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, 3.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
         let stroke = if open || resp.hovered() {
-            Stroke::new(1.5, theme::ACCENT)
+            Stroke::new(1.5, theme::accent())
         } else {
-            Stroke::new(1.0, theme::STROKE_THIN)
+            Stroke::new(1.0, theme::stroke_thin())
         };
         ui.painter().rect_stroke(rect, 3.0, stroke);
     }
@@ -278,7 +302,13 @@ fn compact_picker(ui: &mut Ui, c: &mut Hsl) -> bool {
             changed = true;
         }
     });
-    if let Some(n) = hsl_fields(ui, *c) {
+    // As wide as the disc and bar: a popup's own width is open-ended, and
+    // the fields fill whatever they're given.
+    let w = POPUP_DISC + ui.spacing().item_spacing.x + BAR_W;
+    let edited = ui
+        .allocate_ui(vec2(w, ui.spacing().interact_size.y), |ui| hsl_fields(ui, *c))
+        .inner;
+    if let Some(n) = edited {
         *c = n;
         changed = true;
     }
@@ -341,27 +371,59 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
     // The brush colour can change from anywhere — eyedropper, a pinned
     // swatch, the swatch pie, Paste, a tool switch. Rather than hook every
     // one, notice the brush no longer matches and rebuild around it.
+    //
+    // Pinned, the set stays put instead: only the wheel's own controls move
+    // it. A colour that is one of the set selects that member; any other
+    // leaves no member lit (`lit`) until one is picked again.
     let brush = {
         let c = state.brush.color;
         [c[0], c[1], c[2]]
     };
-    if state.harmony.active_rgb() != brush {
+    let pinned = state.wheel_pinned();
+    let lit = if state.harmony.active_rgb() == brush {
+        true
+    } else if !pinned {
         state.harmony.rebase(brush);
-    }
+        true
+    } else if let Some(i) = state.harmony.members().iter().position(|m| m.to_rgb() == brush) {
+        state.harmony.pick(i);
+        true
+    } else {
+        false
+    };
 
     let mut changed = false;
     let mut pin = false;
+    let mut toggle_pin = false;
     let set = &mut state.harmony;
 
+    // The scheme, and the pin at the end of its row.
     let mut scheme = set.scheme;
-    egui::ComboBox::from_id_salt("harmony_scheme")
-        .selected_text(scheme.label())
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
-            for h in Harmony::ALL {
-                ui.selectable_value(&mut scheme, h, h.label());
-            }
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let icon = egui::RichText::new(egui_phosphor::regular::PUSH_PIN).size(15.0);
+            let icon = if pinned { icon.color(theme::accent()) } else { icon };
+            toggle_pin = ui
+                .add(egui::Button::new(icon).selected(pinned).min_size(vec2(28.0, 22.0)))
+                .on_hover_text(if pinned {
+                    "Pinned: every tool paints in this colour, and the set leads the swatch pie. \
+                     Click to let each tool keep its own colour again."
+                } else {
+                    "Pin the wheel: every tool paints in this colour, and the set leads the \
+                     swatch pie under the pen"
+                })
+                .clicked();
+            egui::ComboBox::from_id_salt("harmony_scheme")
+                .selected_text(scheme.label())
+                .width(ui.available_width())
+                .truncate()
+                .show_ui(ui, |ui| {
+                    for h in Harmony::ALL {
+                        ui.selectable_value(&mut scheme, h, h.label());
+                    }
+                });
         });
+    });
     if scheme != set.scheme {
         set.set_scheme(scheme);
         changed = true;
@@ -373,29 +435,33 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
     // Monochrome members share hue and saturation, so they are one dot on
     // the disc; what tells them apart is lightness, shown as bar ticks.
     let markers: Vec<Marker> = if mono {
-        vec![Marker { index: active, hsl: members[active], active: true }]
+        vec![Marker { index: active, hsl: members[active], active: lit }]
     } else {
         members
             .iter()
             .enumerate()
-            .map(|(i, &hsl)| Marker { index: i, hsl, active: i == active })
+            .map(|(i, &hsl)| Marker { index: i, hsl, active: lit && i == active })
             .collect()
     };
     let ticks: Vec<Tick> = if mono {
         members
             .iter()
             .enumerate()
-            .map(|(i, m)| Tick { index: i, l: m.l, active: i == active })
+            .map(|(i, m)| Tick { index: i, l: m.l, active: lit && i == active })
             .collect()
     } else {
-        vec![Tick { index: active, l: set.base.l, active: true }]
+        vec![Tick { index: active, l: set.base.l, active: lit }]
     };
 
     ui.add_space(4.0);
     let gap = ui.spacing().item_spacing.x;
-    // Capped so the panel still fits under Brush on a 900 px tall screen.
-    let side = (ui.available_width() - BAR_W - gap).clamp(120.0, 184.0);
+    // As wide as the Brush panel allows up to its opening width, and no
+    // bigger: a wheel that grew with the panel would make widening it
+    // taller too. Centred when there is room to spare.
+    let room = ui.available_width();
+    let side = (room - BAR_W - gap).floor().clamp(100.0, DISC_MAX);
     ui.horizontal(|ui| {
+        ui.add_space(((room - side - gap - BAR_W) / 2.0).floor().max(0.0));
         let cur = members[active];
         if let Some(d) = disc(ui, side, cur.l, &markers) {
             // Bare disc moves the base (in monochrome, the one dot), so what
@@ -410,25 +476,32 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
         }
     });
 
-    // The set as swatches: click to paint with one. The set stays put.
+    // The set as swatches: click to paint with one. The set stays put. The
+    // + at the end adds it to the pinned swatches.
     ui.add_space(4.0);
     let members = set.members();
     let n = members.len() as f32;
-    let w = ((ui.available_width() - gap * (n - 1.0)) / n).min(40.0);
+    // The + as wide as egui will draw it: its padding makes it more than
+    // its minimum, and a row that comes out over widens the panel.
+    let plus = ui.fonts(|f| {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        f.layout_no_wrap("+".to_owned(), font, Color32::WHITE).size().x
+    });
+    let add_w = (plus + 2.0 * ui.spacing().button_padding.x).max(SET_ADD_W).ceil();
+    let w = ((ui.available_width() - add_w - gap * n) / n).floor();
     ui.horizontal(|ui| {
         for (i, m) in members.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
             ui.painter().rect_filled(rect, 3.0, m.to_color32());
-            let stroke = if i == set.active {
-                Stroke::new(2.0, theme::ACCENT)
+            let stroke = if lit && i == set.active {
+                Stroke::new(2.0, theme::accent())
             } else {
-                Stroke::new(1.0, theme::STROKE_THIN)
+                Stroke::new(1.0, theme::stroke_thin())
             };
             ui.painter().rect_stroke(rect, 3.0, stroke);
             if i == set.scheme.base_index() {
-                // The base gets a pip, so a turned set still shows its anchor.
-                let pip = Rect::from_center_size(rect.center_bottom() - vec2(0.0, 4.0), vec2(6.0, 2.0));
-                ui.painter().rect_filled(pip, 1.0, contrast(*m));
+                // The base gets a dot, so a turned set still shows its anchor.
+                ui.painter().circle_filled(rect.center(), 2.5, contrast(*m));
             }
             let base = if i == set.scheme.base_index() { " (base)" } else { "" };
             if resp.on_hover_text(format!("{}{base}", m.fmt())).clicked() {
@@ -436,11 +509,38 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
                 changed = true;
             }
         }
+        pin = ui
+            .add(egui::Button::new("+").min_size(vec2(add_w, 22.0)))
+            .on_hover_text("Add the set to the pinned swatches (the oldest drop past 32)")
+            .clicked();
     });
 
+    // The colour exactly, and Paste at the end of the row. Hovering a set
+    // swatch shows the colour as text.
     ui.add_space(4.0);
     let cur = set.member(set.active);
-    if let Some(n) = hsl_fields(ui, cur) {
+    let mut pasted = None;
+    let mut edited = None;
+    ui.horizontal(|ui| {
+        // Left to right, so fields that can't get any narrower push the
+        // panel's least width out rather than slide under Paste.
+        let icon = egui_phosphor::regular::CLIPBOARD_TEXT;
+        let glyph = ui.fonts(|f| {
+            f.layout_no_wrap(icon.to_owned(), egui::FontId::proportional(15.0), Color32::WHITE).size().x
+        });
+        let paste_w = (glyph + 2.0 * ui.spacing().button_padding.x).max(28.0).ceil();
+        let fields_w = (ui.available_width() - paste_w - ui.spacing().item_spacing.x).floor();
+        edited = ui
+            .allocate_ui(vec2(fields_w, ui.spacing().interact_size.y), |ui| hsl_fields(ui, cur))
+            .inner;
+        // Into the room kept for it, against the right edge under Pin set.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::icon_button(ui, icon, "Paste a colour copied as hsl(…), rgb(…) or #hex").clicked() {
+                pasted = crate::ui::shell::clipboard_color();
+            }
+        });
+    });
+    if let Some(n) = edited {
         let i = set.active;
         if n.l != cur.l {
             set.set_member_lightness(i, n.l);
@@ -450,19 +550,17 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
         changed = true;
     }
 
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(set.member(set.active).fmt()).monospace());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            pin = ui
-                .button("Pin set")
-                .on_hover_text("Add every colour of the set to the pinned swatches (the oldest drop past 32)")
-                .clicked();
-        });
-    });
-
+    if let Some(rgb) = pasted {
+        // The brush takes it; next frame the set rebases around it.
+        state.set_brush_color(rgb);
+        return;
+    }
     if pin {
         let colors: Vec<[u8; 3]> = state.harmony.members().iter().map(|m| m.to_rgb()).collect();
         state.pin_set(&colors);
+    }
+    if toggle_pin {
+        state.set_wheel_pinned(!pinned);
     }
     if changed {
         state.set_brush_color(state.harmony.active_rgb());
@@ -473,6 +571,7 @@ pub fn color_panel(state: &mut AppState, ui: &mut Ui) {
 mod tests {
     use super::*;
     use crate::color::HarmonySet;
+    use egui::Rect;
 
     /// Run one frame of `ui_fn` across a narrow panel-sized screen.
     fn run(ctx: &egui::Context, events: Vec<egui::Event>, ui_fn: impl FnMut(&mut Ui)) -> egui::FullOutput {
@@ -633,11 +732,54 @@ mod tests {
         state.palette = vec![state.harmony.member(0).to_rgb()];
         let ctx = egui::Context::default();
         let out = run(&ctx, vec![], |ui| color_panel(&mut state, ui));
-        let p = text_pos(&out, "Pin set");
+        let p = text_pos(&out, "+");
         run(&ctx, press(p), |ui| color_panel(&mut state, ui));
         run(&ctx, release(p), |ui| color_panel(&mut state, ui));
         let want: Vec<[u8; 3]> = state.harmony.members().iter().map(|m| m.to_rgb()).collect();
         assert_eq!(state.palette, want, "the held base is not pinned twice");
+        assert!(!state.wheel_pinned(), "adding the set doesn't pin the wheel");
+    }
+
+    /// Pinned, colours picked elsewhere (the swatch pie, a swatch) never move
+    /// the set: one of its own selects that member, any other leaves it be.
+    /// Unpinned, it follows the brush again.
+    #[test]
+    fn a_pinned_wheel_keeps_its_set_whatever_picks_a_colour() {
+        let mut state = state_on(Harmony::Complementary, [200, 60, 30]);
+        state.set_wheel_pinned(true);
+        let ctx = egui::Context::default();
+        let set = state.harmony.members();
+        let base = state.harmony.base;
+
+        // The complement, as the pie's inner ring would hand it over.
+        state.set_brush_color(set[1].to_rgb());
+        run(&ctx, vec![], |ui| color_panel(&mut state, ui));
+        assert_eq!(state.harmony.base, base, "the set stays put");
+        assert_eq!(state.harmony.active, 1, "the complement is the one lit");
+
+        // A pinned swatch that isn't in the set.
+        state.set_brush_color([10, 200, 90]);
+        run(&ctx, vec![], |ui| color_panel(&mut state, ui));
+        assert_eq!(state.harmony.base, base);
+        assert_eq!(state.brush.color, [10, 200, 90, 255], "the brush keeps the swatch");
+
+        state.set_wheel_pinned(false);
+        run(&ctx, vec![], |ui| color_panel(&mut state, ui));
+        assert_eq!(state.harmony.active_rgb(), [10, 200, 90], "unpinned, it follows again");
+    }
+
+    #[test]
+    fn the_pin_pins_the_wheel_and_lets_it_go() {
+        let mut state = state_on(Harmony::Complementary, [200, 60, 30]);
+        let ctx = egui::Context::default();
+        let out = run(&ctx, vec![], |ui| color_panel(&mut state, ui));
+        let p = text_pos(&out, egui_phosphor::regular::PUSH_PIN);
+        for want in [true, false] {
+            run(&ctx, press(p), |ui| color_panel(&mut state, ui));
+            run(&ctx, release(p), |ui| color_panel(&mut state, ui));
+            assert_eq!(state.wheel_pinned(), want);
+        }
+        assert!(state.palette.is_empty(), "pinning adds no swatches");
     }
 
     #[test]

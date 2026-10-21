@@ -31,12 +31,26 @@ fn main() -> eframe::Result<()> {
     )
     .init();
 
-    let native_options = eframe::NativeOptions {
+    eframe::run_native(
+        "Animator",
+        native_options(),
+        Box::new(|cc| Ok(Box::new(AppState::new(cc)))),
+    )
+}
+
+fn native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             present_mode: eframe::wgpu::PresentMode::Mailbox,
             ..Default::default()
         },
+        // eframe's defaults, spelled out: `ui::canvas_gpu` draws into egui's
+        // render pass with a pipeline built for no MSAA and no depth buffer,
+        // and dithers as egui does.
+        multisampling: 0,
+        depth_buffer: 0,
+        dithering: ui::canvas_gpu::DITHERING,
         // Always open maximized, so don't let eframe restore the last native
         // window rect — it defaults to true and would fight `with_maximized`.
         // Panel layout is separate (egui memory) and still persists.
@@ -66,11 +80,21 @@ fn main() -> eframe::Result<()> {
         // and the tablet driver's change notices.
         event_loop_builder: Some(Box::new(input::msg_hook::install)),
         ..Default::default()
-    };
+    }
+}
 
-    eframe::run_native(
-        "Animator",
-        native_options,
-        Box::new(|cc| Ok(Box::new(AppState::new(cc)))),
-    )
+#[cfg(test)]
+mod tests {
+    /// `ui::canvas_gpu` draws inside egui's render pass, so its pipeline has
+    /// to match the pass eframe opens. A pipeline that doesn't is a wgpu
+    /// validation error at the first draw — a silent abort in release —
+    /// so changing any of these means changing `canvas_gpu` first.
+    #[test]
+    fn the_window_is_what_the_canvas_pipeline_is_built_for() {
+        let o = super::native_options();
+        assert_eq!(o.multisampling, 0, "canvas_gpu builds for one sample");
+        assert_eq!(o.depth_buffer, 0, "canvas_gpu builds for no depth buffer");
+        assert_eq!(o.stencil_buffer, 0, "canvas_gpu builds for no stencil");
+        assert_eq!(o.dithering, crate::ui::canvas_gpu::DITHERING);
+    }
 }

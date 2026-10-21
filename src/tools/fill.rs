@@ -58,6 +58,9 @@ pub struct FillOptions {
     pub gap: u8,
     /// Recolour only pixels that already have paint, keeping their alpha.
     pub alpha_lock: bool,
+    /// 0..=1. Below 1 the fill goes on over what is there, the way a stroke
+    /// at that opacity does, instead of replacing it.
+    pub opacity: f32,
 }
 
 /// Inclusive pixel bounds, `(min_x, min_y, max_x, max_y)`.
@@ -114,6 +117,7 @@ pub struct FillSession {
     tolerance: u8,
     color: [u8; 4],
     alpha_lock: bool,
+    opacity: f32,
     /// Lines from another layer, already in the cell's pixels — every pixel,
     /// since the flood reads them one by one all press long. `None` reads
     /// the cell's own pixels as they were before the press.
@@ -168,6 +172,7 @@ impl FillSession {
         }
         let boundary = boundary.map(Canvas::into_pixels);
         let target = src_px(boundary.as_deref().unwrap_or(pre), w, x, y);
+        let opacity = opts.opacity.clamp(0.0, 1.0);
         Some(Self {
             w,
             h,
@@ -176,10 +181,11 @@ impl FillSession {
             tolerance: opts.tolerance,
             color: opts.color,
             alpha_lock: opts.alpha_lock,
+            opacity,
             // Without a boundary, filling a region that already *is* the fill
             // colour is a no-op. With one, the sampled colour comes from a
             // different layer, so it says nothing about what is already painted.
-            inert: boundary.is_none() && px_eq(target, opts.color),
+            inert: opacity <= 0.0 || (boundary.is_none() && px_eq(target, opts.color)),
             boundary,
             clip,
             plain: None,
@@ -220,22 +226,21 @@ impl FillSession {
             self.region.as_ref()
         }?;
         let clip = self.clip.as_deref();
+        let ink = Ink {
+            color: self.color,
+            opacity: self.opacity,
+            alpha_lock: self.alpha_lock,
+            behind: false,
+        };
         let r = expand.min(MAX_EXPAND) as i32;
         let bbox = if r > 0 {
             let grown = dilate_window(&region.mask, self.w, self.h, region.bbox, r);
             let b = grown.bbox();
-            paint(canvas, b, |x, y| grown.at(x, y), self.color, self.alpha_lock, clip);
+            paint(canvas, b, |x, y| grown.at(x, y), ink, clip);
             b
         } else {
             let (mask, w) = (&region.mask, self.w);
-            paint(
-                canvas,
-                region.bbox,
-                |x, y| mask[(y * w + x) as usize],
-                self.color,
-                self.alpha_lock,
-                clip,
-            );
+            paint(canvas, region.bbox, |x, y| mask[(y * w + x) as usize], ink, clip);
             region.bbox
         };
         self.written = Some(bbox);
@@ -326,11 +331,20 @@ pub fn flood_clipped(
     }
 }
 
-/// Fill everything `mask` covers with `color` — Fill selection. Fully covered
-/// pixels are replaced, as the bucket does; a feathered edge blends. With
+/// Fill everything `mask` covers with `color` at `opacity` — Fill selection,
+/// and the lasso fill. Fully covered pixels are replaced at full opacity, as
+/// the bucket does; a feathered edge or a lower opacity blends. With
 /// `alpha_lock`, only pixels that already have paint change, and keep their
-/// alpha. Returns whether anything was inside the canvas to fill.
-pub fn fill_masked(canvas: &mut Canvas, mask: &Mask, color: [u8; 4], alpha_lock: bool) -> bool {
+/// alpha. With `behind`, the fill goes under what is there instead (see
+/// [`Ink::behind`]). Returns whether anything was inside the canvas to fill.
+pub fn fill_masked(
+    canvas: &mut Canvas,
+    mask: &Mask,
+    color: [u8; 4],
+    opacity: f32,
+    alpha_lock: bool,
+    behind: bool,
+) -> bool {
     let (x1, y1) = (
         (mask.x + mask.w).min(canvas.width),
         (mask.y + mask.h).min(canvas.height),
@@ -338,55 +352,229 @@ pub fn fill_masked(canvas: &mut Canvas, mask: &Mask, color: [u8; 4], alpha_lock:
     if x1 <= mask.x || y1 <= mask.y {
         return false;
     }
+    let ink = Ink {
+        color,
+        opacity: opacity.clamp(0.0, 1.0),
+        alpha_lock,
+        behind,
+    };
     for y in mask.y..y1 {
         for x in mask.x..x1 {
-            put(canvas, x as i32, y as i32, color, mask.at(x, y), alpha_lock);
+            put(canvas, x as i32, y as i32, ink, mask.at(x, y));
         }
     }
     canvas.mark_dirty(mask.x, mask.y, x1 - mask.x, y1 - mask.y);
     true
 }
 
-/// Write `color` over every pixel of `bbox` that `inside` says belongs to the
+/// What a fill puts down, and how.
+#[derive(Clone, Copy)]
+struct Ink {
+    color: [u8; 4],
+    /// 0..=1, scaling every pixel's coverage.
+    opacity: f32,
+    alpha_lock: bool,
+    /// Go under the paint already there, as if on a layer below: bare
+    /// pixels fill, line art keeps its colour, and its soft edges get the
+    /// fill behind them. Nothing at all under an alpha lock, which forbids
+    /// the only thing behind does — adding paint where there is none.
+    behind: bool,
+}
+
+/// Write `ink` over every pixel of `bbox` that `inside` says belongs to the
 /// fill, held to `clip` when there is one.
 fn paint(
     canvas: &mut Canvas,
     bbox: Bbox,
     inside: impl Fn(i32, i32) -> bool,
-    color: [u8; 4],
-    alpha_lock: bool,
+    ink: Ink,
     clip: Option<&Mask>,
 ) {
     for yi in bbox.1..=bbox.3 {
         for xi in bbox.0..=bbox.2 {
             if inside(xi, yi) {
                 let k = clip.map_or(255, |m| m.at(xi as u32, yi as u32));
-                put(canvas, xi, yi, color, k, alpha_lock);
+                put(canvas, xi, yi, ink, k);
             }
         }
     }
 }
 
-/// Fill one pixel with `color` at coverage `k`: replaced when fully covered,
-/// blended toward it when partly. With `alpha_lock` only the colour moves —
-/// the pixel's alpha stays, and a bare pixel stays bare.
-fn put(canvas: &mut Canvas, x: i32, y: i32, color: [u8; 4], k: u8, alpha_lock: bool) {
-    if k == 0 {
+/// Fill one pixel with `ink` at coverage `k`, scaled by its opacity: replaced
+/// when fully covered at full opacity, otherwise blended toward the colour —
+/// over what is there, as a stroke at that opacity lands. With `alpha_lock`
+/// only the colour moves: the pixel's alpha stays, and a bare pixel stays
+/// bare.
+fn put(canvas: &mut Canvas, x: i32, y: i32, ink: Ink, k: u8) {
+    let t = k as f32 / 255.0 * ink.opacity;
+    if t <= 0.0 {
         return;
     }
-    if alpha_lock {
+    let color = ink.color;
+    if ink.behind {
+        if !ink.alpha_lock {
+            put_behind(canvas, x, y, color, t);
+        }
+        return;
+    }
+    if ink.alpha_lock {
         let p = read_px(canvas, x, y);
         if p[3] == 0 {
             return;
         }
-        let t = k as f32 / 255.0;
         let mix = |c: u8, q: u8| (c as f32 * t + q as f32 * (1.0 - t)).round() as u8;
         write_px(canvas, x, y, [mix(color[0], p[0]), mix(color[1], p[1]), mix(color[2], p[2]), p[3]]);
-    } else if k == 255 {
+    } else if t >= 1.0 {
         write_px(canvas, x, y, color);
     } else {
-        blend_toward(canvas, x, y, color, k as f32 / 255.0);
+        blend_toward(canvas, x, y, color, t);
     }
+}
+
+/// `color` at strength `t` slid under pixel `(x, y)`: what is there composited
+/// over it.
+fn put_behind(canvas: &mut Canvas, x: i32, y: i32, color: [u8; 4], t: f32) {
+    let p = read_px(canvas, x, y);
+    let a_d = p[3] as f32 / 255.0;
+    let a_s = t * color[3] as f32 / 255.0 * (1.0 - a_d);
+    let a = a_d + a_s;
+    if a_s <= 0.0 || a <= 0.0 {
+        return;
+    }
+    let mix = |d: u8, s: u8| ((d as f32 * a_d + s as f32 * a_s) / a).round().clamp(0.0, 255.0) as u8;
+    write_px(
+        canvas,
+        x,
+        y,
+        [
+            mix(p[0], color[0]),
+            mix(p[1], color[1]),
+            mix(p[2], color[2]),
+            (a * 255.0).round().clamp(0.0, 255.0) as u8,
+        ],
+    );
+}
+
+/// Enclose and fill: paint every area the lines shut in inside `lasso`, and
+/// nothing the lasso only cuts across — lasso round a drawing and each of
+/// its closed shapes fills, while the space between the drawing and the
+/// lasso stays bare.
+///
+/// A line is paint over half opaque in `boundary` (another layer's line
+/// art, already in this cell's pixels), or without one in `pre`, the cell
+/// as it was. A break up to `opts.gap` wide counts as shut, as for the
+/// bucket, and each area grows by `opts.expand` to tuck under its lines.
+/// The canvas edge shuts nothing in. `clip` holds the paint to a selection.
+/// Returns the pixels changed, marked dirty.
+pub fn enclose_fill(
+    canvas: &mut Canvas,
+    pre: &[u8],
+    boundary: Option<&[u8]>,
+    lasso: &Mask,
+    opts: &FillOptions,
+    behind: bool,
+    clip: Option<&Mask>,
+) -> Option<DirtyRect> {
+    const CLEAR: [u8; 4] = [0; 4];
+    let (w, h) = (canvas.width as i32, canvas.height as i32);
+    if pre.len() != canvas.byte_len() || boundary.is_some_and(|b| b.len() != pre.len()) || lasso.w == 0 {
+        return None;
+    }
+    let src = boundary.unwrap_or(pre);
+    let tol = opts.tolerance;
+    let open = |x: i32, y: i32| matches_target(src, w, x, y, CLEAR, tol);
+    let inside =
+        |x: i32, y: i32| x > 0 && y > 0 && x < w - 1 && y < h - 1 && lasso.at(x as u32, y as u32) > 0;
+    // Shut in: every pixel of it inside the lasso.
+    let held = |mask: &[bool], b: Bbox| {
+        (b.1..=b.3).all(|y| (b.0..=b.2).all(|x| !mask[(y * w + x) as usize] || inside(x, y)))
+    };
+    // Nothing that reaches past the lasso can be shut in it, so the floods
+    // stop a little way out: far enough that every wall a gap fill inside
+    // needs is still seen, and anything at the edge is plainly outside.
+    let reach = ((opts.gap.div_ceil(2) as u32 + 1).next_power_of_two().max(16)) as i32;
+    let (lx0, ly0, lw, lh) = (lasso.x as i32, lasso.y as i32, lasso.w as i32, lasso.h as i32);
+    let win = (
+        (lx0 - reach - 2).max(0),
+        (ly0 - reach - 2).max(0),
+        (lx0 + lw + reach + 1).min(w - 1),
+        (ly0 + lh + reach + 1).min(h - 1),
+    );
+    let in_win = |x: i32, y: i32| x >= win.0 && y >= win.1 && x <= win.2 && y <= win.3;
+    let ink = Ink {
+        color: opts.color,
+        opacity: opts.opacity.clamp(0.0, 1.0),
+        alpha_lock: opts.alpha_lock,
+        behind,
+    };
+    if ink.opacity <= 0.0 {
+        return None;
+    }
+    let r = opts.expand.min(MAX_EXPAND) as i32;
+    let mut done: Option<Bbox> = None;
+    let mut fill_area = |canvas: &mut Canvas, mask: &[bool], b: Bbox| {
+        let painted = if r > 0 {
+            let grown = dilate_window(mask, w, h, b, r);
+            let gb = grown.bbox();
+            paint(canvas, gb, |x, y| grown.at(x, y), ink, clip);
+            gb
+        } else {
+            paint(canvas, b, |x, y| mask[(y * w + x) as usize], ink, clip);
+            b
+        };
+        done = Some(done.map_or(painted, |d| join(d, painted)));
+    };
+    // Marks over the lasso's box: pixels already part of an area worked out.
+    let see = |seen: &mut [bool], mask: &[bool], b: Bbox| {
+        for y in b.1.max(ly0)..=b.3.min(ly0 + lh - 1) {
+            for x in b.0.max(lx0)..=b.2.min(lx0 + lw - 1) {
+                if mask[(y * w + x) as usize] {
+                    seen[((y - ly0) * lw + x - lx0) as usize] = true;
+                }
+            }
+        }
+    };
+    let mut seen = vec![false; (lw * lh) as usize];
+    for y in ly0..ly0 + lh {
+        for x in lx0..lx0 + lw {
+            if seen[((y - ly0) * lw + x - lx0) as usize] || !inside(x, y) || !open(x, y) {
+                continue;
+            }
+            let (plain, pb) = span_flood(w, h, (x, y), |a, b| in_win(a, b) && open(a, b));
+            see(&mut seen, &plain, pb);
+            if held(&plain, pb) {
+                fill_area(canvas, &plain, pb);
+                continue;
+            }
+            if opts.gap == 0 {
+                continue;
+            }
+            // Open to the outside, perhaps only through gaps: the pieces of
+            // it that shutting them leaves inside.
+            let field = wall_distance(src, w, h, pb, reach, CLEAR, tol);
+            let mut taken = vec![false; (lw * lh) as usize];
+            for py in pb.1.max(ly0)..=pb.3.min(ly0 + lh - 1) {
+                for px in pb.0.max(lx0)..=pb.2.min(lx0 + lw - 1) {
+                    let k = ((py - ly0) * lw + px - lx0) as usize;
+                    if taken[k] || !plain[(py * w + px) as usize] || !inside(px, py) {
+                        continue;
+                    }
+                    taken[k] = true;
+                    let (piece, gb) = gap_flood(&field, &plain, w, h, (px, py), opts.gap);
+                    if gb.2 < gb.0 {
+                        continue;
+                    }
+                    see(&mut taken, &piece, gb);
+                    if held(&piece, gb) {
+                        fill_area(canvas, &piece, gb);
+                    }
+                }
+            }
+        }
+    }
+    let rect = to_rect(done?);
+    mark(canvas, rect);
+    Some(rect)
 }
 
 /// Copy `bbox` of `pre` back over `canvas`, row by row.
@@ -909,6 +1097,105 @@ mod tests {
 
     const RED: [u8; 4] = [255, 0, 0, 255];
 
+    /// A 40x40 canvas with two black squares drawn as 1px outlines: one
+    /// closed, x 5..=15, and one with a 2px break in its top edge, x 22..=32.
+    fn two_boxes() -> Canvas {
+        let mut c = Canvas::new(40, 40);
+        let black = [0, 0, 0, 255];
+        for (x0, gap) in [(5, false), (22, true)] {
+            for i in 0..=10 {
+                let top_open = gap && (4..6).contains(&i);
+                if !top_open {
+                    write_px(&mut c, x0 + i, 10, black);
+                }
+                write_px(&mut c, x0 + i, 20, black);
+                write_px(&mut c, x0, 10 + i, black);
+                write_px(&mut c, x0 + 10, 10 + i, black);
+            }
+        }
+        c
+    }
+
+    /// A lasso box from `(x0, y0)` to `(x1, y1)`, fully covered.
+    fn lasso_box(x0: u32, y0: u32, x1: u32, y1: u32) -> Mask {
+        let (w, h) = (x1 - x0, y1 - y0);
+        Mask { x: x0, y: y0, w, h, cov: vec![255; (w * h) as usize] }
+    }
+
+    #[test]
+    fn enclose_fills_only_what_the_lines_shut_in() {
+        let mut c = two_boxes();
+        let pre = c.pixels().into_owned();
+        // Round both boxes, with room to spare.
+        let lasso = lasso_box(1, 3, 38, 30);
+        assert!(enclose_fill(&mut c, &pre, None, &lasso, &opts(0), false, None).is_some());
+        assert!(filled_at(&c, 10, 15), "the closed box fills");
+        assert!(!filled_at(&c, 27, 15), "the open one leaks to outside, so stays bare");
+        assert!(!filled_at(&c, 2, 5), "between the drawing and the lasso stays bare");
+        assert_eq!(read_px(&c, 5, 10), [0, 0, 0, 255], "the lines are left alone");
+
+        // With the gap shut, the broken box fills too, and still not round it.
+        let mut c = two_boxes();
+        let o = FillOptions { gap: 4, ..opts(0) };
+        enclose_fill(&mut c, &pre, None, &lasso, &o, false, None);
+        assert!(filled_at(&c, 10, 15) && filled_at(&c, 27, 15));
+        assert!(!filled_at(&c, 2, 5) && !filled_at(&c, 27, 5));
+    }
+
+    #[test]
+    fn enclose_leaves_a_shape_the_lasso_cuts_through() {
+        let mut c = two_boxes();
+        let pre = c.pixels().into_owned();
+        // Through the middle of the closed box.
+        let lasso = lasso_box(1, 3, 10, 30);
+        assert!(enclose_fill(&mut c, &pre, None, &lasso, &opts(0), false, None).is_none());
+        assert!(!filled_at(&c, 7, 15));
+    }
+
+    #[test]
+    fn enclose_reads_another_layer_s_lines_and_keeps_to_the_selection() {
+        let lines = two_boxes();
+        let mut c = Canvas::new(40, 40);
+        let pre = c.pixels().into_owned();
+        let lasso = lasso_box(1, 3, 38, 30);
+        let clip = lasso_box(0, 0, 10, 40);
+        let src = lines.pixels().into_owned();
+        enclose_fill(&mut c, &pre, Some(&src), &lasso, &opts(0), false, Some(&clip));
+        assert!(filled_at(&c, 7, 15), "inside the box and the selection");
+        assert!(!filled_at(&c, 12, 15), "inside the box, outside the selection");
+    }
+
+    #[test]
+    fn a_fill_behind_keeps_the_lines_and_fills_round_them() {
+        let mut c = Canvas::new(16, 16);
+        write_px(&mut c, 3, 3, [0, 0, 0, 255]);
+        write_px(&mut c, 4, 3, [0, 0, 0, 128]);
+        let all = lasso_box(0, 0, 16, 16);
+        assert!(fill_masked(&mut c, &all, RED, 1.0, false, true));
+        assert_eq!(read_px(&c, 3, 3), [0, 0, 0, 255], "solid line untouched");
+        assert_eq!(read_px(&c, 0, 0), RED, "bare pixels fill");
+        let soft = read_px(&c, 4, 3);
+        assert_eq!(soft[3], 255, "a soft edge gets the fill behind it");
+        assert!(soft[0] > 100 && soft[0] < 160, "half line, half fill: {soft:?}");
+
+        // An alpha lock forbids the only thing behind does.
+        let mut c = Canvas::new(16, 16);
+        write_px(&mut c, 4, 3, [0, 0, 0, 128]);
+        fill_masked(&mut c, &all, RED, 1.0, true, true);
+        assert_eq!(read_px(&c, 4, 3), [0, 0, 0, 128]);
+        assert_eq!(read_px(&c, 0, 0), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn masks_intersect_by_coverage() {
+        let a = lasso_box(0, 0, 10, 10);
+        let b = Mask { x: 5, y: 5, w: 10, h: 10, cov: vec![128; 100] };
+        let m = a.intersect(&b).expect("they overlap");
+        assert_eq!((m.x, m.y, m.w, m.h), (5, 5, 5, 5));
+        assert_eq!(m.at(6, 6), 128);
+        assert!(a.intersect(&lasso_box(20, 20, 30, 30)).is_none());
+    }
+
     fn opts(expand: u8) -> FillOptions {
         FillOptions {
             tolerance: 24,
@@ -916,6 +1203,7 @@ mod tests {
             expand,
             gap: 0,
             alpha_lock: false,
+            opacity: 1.0,
         }
     }
 
@@ -1054,7 +1342,7 @@ mod tests {
         // Fill selection obeys it too.
         let mut t2 = Canvas::new(16, 16);
         write_px(&mut t2, 2, 2, [90, 90, 90, 60]);
-        assert!(fill_masked(&mut t2, &left_half(255), RED, true));
+        assert!(fill_masked(&mut t2, &left_half(255), RED, 1.0, true, false));
         assert_eq!(read_px(&t2, 2, 2), [255, 0, 0, 60]);
         assert_eq!(read_px(&t2, 3, 3)[3], 0);
     }
@@ -1089,9 +1377,112 @@ mod tests {
     #[test]
     fn fill_selection_paints_only_the_mask() {
         let mut target = Canvas::new(16, 16);
-        assert!(fill_masked(&mut target, &left_half(255), RED, false));
+        assert!(fill_masked(&mut target, &left_half(255), RED, 1.0, false, false));
         assert!(filled_at(&target, 0, 0) && filled_at(&target, 7, 15));
         assert_eq!(read_px(&target, 8, 0)[3], 0);
+    }
+
+    // --- Opacity ---
+
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+
+    fn half(expand: u8) -> FillOptions {
+        FillOptions {
+            opacity: 0.5,
+            ..opts(expand)
+        }
+    }
+
+    fn solid(w: u32, h: u32, rgba: [u8; 4]) -> Canvas {
+        let mut c = Canvas::new(w, h);
+        for px in c.pixels_mut().chunks_exact_mut(4) {
+            px.copy_from_slice(&rgba);
+        }
+        c
+    }
+
+    fn near(a: [u8; 4], b: [u8; 4]) -> bool {
+        a.iter().zip(&b).all(|(&x, &y)| (x as i32 - y as i32).abs() <= 1)
+    }
+
+    #[test]
+    fn a_half_opacity_fill_goes_on_over_what_is_there() {
+        // Bare canvas: the fill's own colour at half alpha.
+        let mut bare = Canvas::new(16, 16);
+        flood(&mut bare, None, 2, 8, half(0));
+        assert!(near(read_px(&bare, 2, 8), [255, 0, 0, 128]), "{:?}", read_px(&bare, 2, 8));
+        // Opaque blue, walled by lines on another layer: half-way and still
+        // opaque, as an Ink stroke at 0.5 lands.
+        let mut blue = solid(16, 16, BLUE);
+        flood(&mut blue, Some(&walled()), 2, 8, half(0));
+        assert!(near(read_px(&blue, 2, 8), [128, 0, 128, 255]), "{:?}", read_px(&blue, 2, 8));
+        assert_eq!(read_px(&blue, 8, 8), BLUE, "past the wall");
+    }
+
+    #[test]
+    fn an_alpha_locked_half_fill_moves_the_colour_half_way() {
+        let mut target = Canvas::new(16, 16);
+        for y in 4..8 {
+            for x in 4..8 {
+                write_px(&mut target, x, y, [0, 0, 255, 100]);
+            }
+        }
+        let o = FillOptions {
+            alpha_lock: true,
+            ..half(0)
+        };
+        flood(&mut target, None, 5, 5, o);
+        assert_eq!(read_px(&target, 5, 5), [128, 0, 128, 100]);
+        flood(&mut target, None, 0, 0, o);
+        assert_eq!(read_px(&target, 0, 0)[3], 0, "bare stays bare");
+    }
+
+    #[test]
+    fn a_half_opacity_drag_never_builds_up() {
+        let b = lines(64, 64, box_outline(16, 16, 48, 48, 30, 4));
+        let mut canvas = solid(64, 64, BLUE);
+        let pre = canvas.pixels().into_owned();
+        let o = half(0);
+        let mut s = FillSession::new(&pre, (64, 64), (32, 32), &o, Some(b.clone()), None).unwrap();
+        for (gap, expand) in [(0, 0), (4, 0), (4, 3), (4, 0), (4, 0)] {
+            s.apply(&mut canvas, &pre, gap, expand).unwrap();
+            let mut fresh = solid(64, 64, BLUE);
+            flood(&mut fresh, Some(&b), 32, 32, FillOptions { gap, expand, ..o });
+            assert!(canvas.pixels() == fresh.pixels(), "gap {gap}, expand {expand}");
+        }
+        assert!(near(read_px(&canvas, 32, 32), [128, 0, 128, 255]));
+        s.revert(&mut canvas, &pre).unwrap();
+        assert!(canvas.pixels() == pre);
+    }
+
+    #[test]
+    fn a_zero_opacity_fill_does_nothing() {
+        let mut canvas = Canvas::new(8, 8);
+        let pre = canvas.pixels().into_owned();
+        let o = FillOptions {
+            opacity: 0.0,
+            ..opts(0)
+        };
+        let mut s = FillSession::new(&pre, (8, 8), (1, 1), &o, None, None).unwrap();
+        assert!(s.apply(&mut canvas, &pre, 0, 2).is_none());
+        assert!(s.touched().is_none());
+        assert!(canvas.pixels() == pre);
+    }
+
+    #[test]
+    fn fill_selection_takes_the_opacity_too() {
+        let mut target = Canvas::new(16, 16);
+        assert!(fill_masked(&mut target, &left_half(255), RED, 0.5, false, false));
+        assert!(near(read_px(&target, 3, 3), [255, 0, 0, 128]), "{:?}", read_px(&target, 3, 3));
+        assert_eq!(read_px(&target, 8, 3)[3], 0);
+        // A feathered edge and the opacity multiply.
+        let mut soft = Canvas::new(16, 16);
+        fill_masked(&mut soft, &left_half(128), RED, 0.5, false, false);
+        assert!(near(read_px(&soft, 3, 3), [255, 0, 0, 64]), "{:?}", read_px(&soft, 3, 3));
+        // The bucket held to the same selection lands the same.
+        let mut clipped = Canvas::new(16, 16);
+        flood_clipped(&mut clipped, None, 2, 8, half(0), Some(&left_half(128)));
+        assert_eq!(read_px(&clipped, 3, 3), read_px(&soft, 3, 3));
     }
 
     // --- Gap closing ---

@@ -4,7 +4,9 @@
 use egui::{Align, Color32, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as ic;
 
-use crate::app::{AppState, CameraFraming, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
+use crate::app::{
+    AppState, CameraFraming, ExportKind, FillMode, LassoHeld, NavKind, PanelId, SelGesture, MP4_PRESETS,
+};
 use crate::color::{fmt_rgb, parse_color};
 use crate::doc::camera::{Ease, Fill};
 use crate::doc::canvas::DirtyRect;
@@ -19,6 +21,7 @@ use crate::tools::fill;
 use crate::tools::select_mask::{self, SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, ShapeKind, Smoothing, StrokeCap};
+use crate::ui::theme::Scheme;
 use crate::ui::{color_wheel, expr, theme};
 
 /// Tooltip text including the currently-bound shortcut (e.g. "Pencil  (Q)").
@@ -65,8 +68,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         menu_window(state, ctx);
         // Left: tools + brush.  Right: layers / onion / x-sheet.  Bottom: timeline.
         panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, resized);
-        panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 232.0, true, resized);
-        panel_window(state, ctx, PanelId::Color, [12.0, COLOR_PANEL_Y], 232.0, true, resized);
+        panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 200.0, true, resized);
         panel_window(state, ctx, PanelId::Layers, [1004.0, 48.0], 252.0, true, resized);
         panel_window(state, ctx, PanelId::Onion, [1004.0, 300.0], 252.0, false, resized);
         panel_window(state, ctx, PanelId::Camera, [1004.0, 400.0], 252.0, false, resized);
@@ -137,13 +139,20 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             } else {
                 None
             };
+            // The Fill lasso's holds, read the same way and only by it.
+            let lasso_fill = state.tool == ActiveTool::Fill && state.fill_mode == FillMode::Lasso;
+            let lasso_held = if lasso_fill {
+                ui.input(|i| held_lasso(state, i))
+            } else {
+                LassoHeld::default()
+            };
             // What the middle or right button does, when one of those — not
             // the left, which always uses the tool — is what went down.
             let (middle, right) = (state.middle_drag, state.right_drag);
             let (held, button) = ui.input(|i| {
                 // A held key or modifiers (configurable in Settings) turn a
                 // drag into a gesture instead of a stroke.
-                let g = if held_op.is_some() {
+                let g = if held_op.is_some() || lasso_held != LassoHeld::default() {
                     None
                 } else {
                     state
@@ -243,6 +252,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             // not to the layer under it. The cursor, not pen
                             // packets — a selection edge has no pressure.
                             state.select_down(canvas_to_doc(pos), held_op);
+                        } else if lasso_fill {
+                            // So does a lasso fill, until it lands.
+                            state.fill_lasso_down(canvas_to_doc(pos), lasso_held);
                         } else {
                             // Decided once, here: see `AppState::stroke_from_pen`.
                             let ppp = ui.ctx().pixels_per_point();
@@ -384,6 +396,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                                 state.select_move(canvas_to_doc(pos));
                             }
                         }
+                        None if lasso_fill => {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                state.fill_lasso_move(canvas_to_doc(pos), lasso_held);
+                            }
+                        }
                         // Screen points, not canvas: a drag step is the same
                         // length of pen travel at any zoom.
                         None if state.fill_dragging() => {
@@ -433,6 +450,17 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             {
                 state.polygon_finish();
             }
+            // And a polygon fill, when both presses landed on one spot. A
+            // double-click soon after the last corner's tap counts as a triple.
+            if state.fill_polygon_active()
+                && resp.hovered()
+                && ui.input(|i| {
+                    let p = egui::PointerButton::Primary;
+                    i.pointer.button_double_clicked(p) || i.pointer.button_triple_clicked(p)
+                })
+            {
+                state.fill_lasso_double_click();
+            }
 
             // Tool cursor preview — only while drawing (not during nav gestures),
             // when the pointer is over the canvas and not over a floating panel.
@@ -457,7 +485,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 }
             }
             if let Some(d) = state.button_drag.filter(|d| d.kind == ButtonDrag::SwatchPie) {
-                draw_swatch_pie(ctx, &state.palette, &d, state.brush.color);
+                let (colors, cap) = state.pie_colors();
+                draw_swatch_pie(ctx, &colors, cap, &d, state.brush.color);
             }
             } // end: if !state.screen_pick
         });
@@ -665,7 +694,7 @@ fn wheel_map(state: &mut AppState, ctx: &egui::Context) {
         return;
     };
     let over_canvas = layer.order == egui::Order::Background;
-    let over_timeline = layer.id == egui::Id::new(panel_key(PanelId::Timeline));
+    let over_timeline = layer.id == panel_area(state, PanelId::Timeline);
     if !(over_canvas || over_timeline || layer.id == egui::Id::new("mini_timeline")) {
         return;
     }
@@ -782,10 +811,6 @@ fn zoom_view_at(state: &mut AppState, canvas_rect: Rect, at: egui::Pos2, factor:
 /// Trackpad scroll (in points) that counts as one wheel notch.
 const POINTS_PER_SCRUB_NOTCH: f32 = 24.0;
 
-/// Default top of the Color panel: just under Brush in the left column,
-/// clear of the timeline, which starts further right.
-const COLOR_PANEL_Y: f32 = 546.0;
-
 /// Stable egui Id for a panel window. Without this the Id is hashed from the
 /// window's title — which embeds a phosphor glyph — so bumping the icon font or
 /// editing a title in `panel_meta` would silently orphan every saved position.
@@ -806,15 +831,22 @@ fn panel_key(id: PanelId) -> &'static str {
 fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, id: PanelId) {
     match id {
         PanelId::Tools => tools_content(state, ui),
-        PanelId::Brush => brush_content(state, ui),
+        PanelId::Brush | PanelId::Color => brush_content(state, ui),
         PanelId::Layers => layers_content(state, ui),
         PanelId::Onion => onion_content(state, ui),
         PanelId::Xsheet => xsheet_content(state, ui),
         PanelId::Timeline => timeline_content(state, ctx, ui),
         PanelId::Camera => camera_content(state, ui),
-        PanelId::Color => color_wheel::color_panel(state, ui),
     }
 }
+
+/// The Layers panel's starting height, in points: its two toolbars and
+/// opacity slider, three rows of list and the folded sections under it.
+const LAYERS_DEFAULT_H: f32 = 496.0;
+
+/// The X-sheet panel's starting height, in points: its toolbar and about
+/// ten frames of sheet, what the sheet's old 260-point cap came to.
+const XSHEET_DEFAULT_H: f32 = 330.0;
 
 /// Render a panel as a draggable floating window.
 ///
@@ -829,9 +861,15 @@ fn panel_window(
     open: bool,
     resized: Option<Rect>,
 ) {
+    if !state.panel_shown(id) {
+        return;
+    }
     let (icon, title) = panel_meta(id);
+    let area = panel_area(state, id);
+    let mut shown = true;
     let mut window = egui::Window::new(theme::icon_text(icon, title))
-        .id(egui::Id::new(panel_key(id)))
+        .id(area)
+        .open(&mut shown)
         .default_pos(default_pos)
         .default_width(width)
         .default_open(open)
@@ -839,14 +877,44 @@ fn panel_window(
         .collapsible(true)
         .frame(floating_frame());
     if let Some(old) = resized {
-        if let Some(pos) = resticked_pos(ctx, panel_key(id), old, ctx.screen_rect()) {
+        if let Some(pos) = resticked_pos(ctx, area, old, ctx.screen_rect()) {
             window = window.current_pos(pos);
+        }
+    }
+    // The layer list and the sheet fill whatever height their panel has, so
+    // those panels need one to start at.
+    let start_h = match id {
+        PanelId::Layers => Some(LAYERS_DEFAULT_H),
+        PanelId::Xsheet => Some(XSHEET_DEFAULT_H),
+        _ => None,
+    };
+    if let Some(h) = start_h {
+        window = window.default_height(h);
+    }
+    // The toolbar row can't wrap, so it is the timeline's narrowest: without
+    // this a drag could pull the panel under it until the drag ends.
+    if id == PanelId::Timeline {
+        if let Some(w) = ctx.data(|d| d.get_temp::<f32>(timeline_bar_id())) {
+            window = window.min_width(w);
         }
     }
     window.show(ctx, |ui| {
         drag_by_title_only(ui);
         panel_content(state, ctx, ui, id)
     });
+    if !shown {
+        state.set_panel_shown(id, false);
+    }
+}
+
+/// The egui id a panel's window is kept under: its key, plus the layout
+/// generation once Reset panel layout has been used.
+fn panel_area(state: &AppState, id: PanelId) -> egui::Id {
+    let key = egui::Id::new(panel_key(id));
+    match state.panel_layout_gen {
+        0 => key,
+        g => key.with(g),
+    }
 }
 
 /// Make a window move by its title bar only.
@@ -886,8 +954,8 @@ pub(crate) fn drag_by_title_only(ui: &mut egui::Ui) {
 /// Each axis is handled independently and keeps the panel's gap from whichever
 /// edge it was nearest — a right-hand panel tracks the right edge, a bottom one
 /// tracks the bottom. `None` means leave it alone.
-fn resticked_pos(ctx: &egui::Context, key: &str, old: Rect, new: Rect) -> Option<[f32; 2]> {
-    let st = egui::AreaState::load(ctx, egui::Id::new(key))?;
+fn resticked_pos(ctx: &egui::Context, area: egui::Id, old: Rect, new: Rect) -> Option<[f32; 2]> {
+    let st = egui::AreaState::load(ctx, area)?;
     // `size` is `None` until the area has been laid out once (and it is
     // deliberately not persisted by egui). Without it `rect()` reports a
     // zero-sized box and every gap below would be nonsense.
@@ -945,10 +1013,14 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 tool_toggle(ui, state, ActiveTool::Ink, ic::PEN_NIB, &i);
                 tool_toggle(ui, state, ActiveTool::Eraser, ic::ERASER, &e);
                 ui.add_space(6.0);
-                let f = tip(state, Action::ToolFill, "Fill");
+                let f = tip(state, Action::ToolFill, "Fill — press again for bucket / lasso");
                 let g = tip(state, Action::ToolShape, "Shape");
                 let l = tip(state, Action::ToolLasso, "Lasso select");
-                tool_toggle(ui, state, ActiveTool::Fill, ic::PAINT_BUCKET, &f);
+                let fill_icon = match state.fill_mode {
+                    FillMode::Bucket => ic::PAINT_BUCKET,
+                    FillMode::Lasso => ic::SCRIBBLE_LOOP,
+                };
+                tool_toggle(ui, state, ActiveTool::Fill, fill_icon, &f);
                 tool_toggle(ui, state, ActiveTool::Shape, ic::SHAPES, &g);
                 tool_toggle(ui, state, ActiveTool::Lasso, ic::LASSO, &l);
                 let tr = tip(state, Action::ToolTracker, "Tracker (stabilize)");
@@ -971,47 +1043,61 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
 
             // Tool-specific options only — keeps this panel about tools alone.
             if state.tool == ActiveTool::Fill {
-                ui.add(
-                    egui::Slider::new(&mut state.brush.fill_tolerance, 0..=128).text("Tolerance"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut state.brush.fill_expand, 0..=fill::MAX_EXPAND)
-                        .text("Expand (px)"),
-                )
-                .on_hover_text(
-                    "Grow the fill by this many pixels so the colour tucks under \
-                     anti-aliased lines instead of leaving a halo. Meant for the \
-                     'lines from' workflow — on a same-layer fill it eats into \
-                     your own strokes.\n\nOr press on the canvas and drag up / down.",
-                );
-                ui.add(
-                    // Logarithmic, so the small gaps line art mostly needs
-                    // keep most of the track.
-                    egui::Slider::new(&mut state.brush.fill_gap, 0..=fill::MAX_GAP)
-                        .logarithmic(true)
-                        .smallest_positive(1.0)
-                        .text("Gap (px)"),
-                )
-                .on_hover_text(
-                    "Treat breaks in the lines up to this wide as closed, so the \
-                     colour doesn't pour out through them.\n\nOr press on the \
-                     canvas and drag left / right.",
-                );
-                ui.checkbox(&mut state.brush.fill_all_visible, "Read all visible layers")
-                    .on_hover_text(
-                        "Stop at lines on any visible layer, not only this layer or \
-                         the one it takes its lines from.",
+                fill_mode_toggles(state, ui);
+                let lasso = state.fill_mode == FillMode::Lasso;
+                ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Opacity"))
+                    .on_hover_text("Fill selection uses this opacity too.");
+                if lasso {
+                    lasso_fill_options(state, ui);
+                }
+                // The bucket's settings; the lasso's Enclose & fill floods
+                // too, so it takes them all but the tolerance.
+                let floods = !lasso || state.fill_enclose;
+                if !lasso {
+                    ui.add(
+                        egui::Slider::new(&mut state.brush.fill_tolerance, 0..=128).text("Tolerance"),
                     );
-                // The boundary source is a per-layer link, set in the Layers
-                // panel — surface it here so the coupling is visible.
-                let hint = match state.fill_boundary_name() {
-                    _ if state.brush.fill_all_visible => {
-                        "Lines from: all visible layers".to_string()
-                    }
-                    Some(name) => format!("Lines from: {name}"),
-                    None => "Lines from: this layer — set it in the Layers panel".to_string(),
-                };
-                ui.label(egui::RichText::new(hint).color(theme::TEXT_MUTED).size(11.0));
+                }
+                if floods {
+                    ui.add(
+                        egui::Slider::new(&mut state.brush.fill_expand, 0..=fill::MAX_EXPAND)
+                            .text("Expand (px)"),
+                    )
+                    .on_hover_text(
+                        "Grow the fill by this many pixels so the colour tucks under \
+                         anti-aliased lines instead of leaving a halo. Meant for the \
+                         'lines from' workflow — on a same-layer fill it eats into \
+                         your own strokes.\n\nWith the bucket, or press on the canvas and drag up / down.",
+                    );
+                    ui.add(
+                        // Logarithmic, so the small gaps line art mostly needs
+                        // keep most of the track.
+                        egui::Slider::new(&mut state.brush.fill_gap, 0..=fill::MAX_GAP)
+                            .logarithmic(true)
+                            .smallest_positive(1.0)
+                            .text("Gap (px)"),
+                    )
+                    .on_hover_text(
+                        "Treat breaks in the lines up to this wide as closed, so the \
+                         colour doesn't pour out through them.\n\nWith the bucket, or \
+                         press on the canvas and drag left / right.",
+                    );
+                    ui.checkbox(&mut state.brush.fill_all_visible, "Read all visible layers")
+                        .on_hover_text(
+                            "Stop at lines on any visible layer, not only this layer or \
+                             the one it takes its lines from.",
+                        );
+                    // The boundary source is a per-layer link, set in the Layers
+                    // panel — surface it here so the coupling is visible.
+                    let hint = match state.fill_boundary_name() {
+                        _ if state.brush.fill_all_visible => {
+                            "Lines from: all visible layers".to_string()
+                        }
+                        Some(name) => format!("Lines from: {name}"),
+                        None => "Lines from: this layer — set it in the Layers panel".to_string(),
+                    };
+                    ui.label(egui::RichText::new(hint).color(theme::text_muted()).size(11.0));
+                }
             } else if state.tool == ActiveTool::Shape {
                 ui.horizontal(|ui| {
                     shape_kind_toggle(ui, state, ShapeKind::Line, ic::LINE_SEGMENT, "Line");
@@ -1024,7 +1110,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                         egui::RichText::new(format!(
                             "On perspective grid {n} — Shift once dragging: square / circle"
                         ))
-                        .color(theme::TEXT_MUTED)
+                        .color(theme::text_muted())
                         .size(11.0),
                     );
                 }
@@ -1034,13 +1120,20 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 } else {
                     "Thickness"
                 };
-                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=64.0).text(label));
+                // Same range as the pens' Size: the slider clamps whatever it
+                // shows, so a narrower one would cut a big pen down.
+                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=128.0).text(label))
+                    .on_hover_text(format!(
+                        "Shared with the {}, the pen you used last: change one and the \
+                         other follows.",
+                        tool_name(state.last_pen)
+                    ));
             } else if state.tool == ActiveTool::Tracker {
                 ui.label(
                     egui::RichText::new(
                         "Click the same feature on each frame — the view advances a frame per point. Re-click a frame to fix a miss.",
                     )
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .size(11.0),
                 );
                 let two_before = state.tracker_two_points;
@@ -1058,14 +1151,14 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 if state.tracker_pending_b == Some(state.project.current_frame) {
                     ui.label(
                         egui::RichText::new("Now click point B…")
-                            .color(theme::ACCENT)
+                            .color(theme::accent())
                             .size(11.0),
                     );
                 }
                 let count = state.tracked_point_count();
                 ui.label(
                     egui::RichText::new(format!("Tracked frames: {count}"))
-                        .color(theme::TEXT_MUTED)
+                        .color(theme::text_muted())
                         .size(11.0),
                 );
                 ui.horizontal(|ui| {
@@ -1106,6 +1199,55 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
 
 /// "Lock brush to screen size" toggle, shared by the freehand and Shape size
 /// sliders (both of which relabel themselves when it is on).
+/// The Fill tool's two modes, side by side.
+fn fill_mode_toggles(state: &mut AppState, ui: &mut egui::Ui) {
+    let key = combo_text(state, Action::ToolFill);
+    ui.horizontal(|ui| {
+        for (m, icon, name, what) in [
+            (FillMode::Bucket, ic::PAINT_BUCKET, "Bucket", "Fill the area a press lands in"),
+            (
+                FillMode::Lasso,
+                ic::SCRIBBLE_LOOP,
+                "Lasso",
+                "Drag round what to fill, or tap it out corner by corner",
+            ),
+        ] {
+            let on = state.fill_mode == m;
+            if ui
+                .add(egui::SelectableLabel::new(on, theme::icon_text(icon, name)))
+                .on_hover_text(format!("{what}. {key} again swaps the two."))
+                .clicked()
+            {
+                state.set_fill_mode(m);
+            }
+        }
+    });
+}
+
+/// The lasso fill's switches and how to draw one.
+fn lasso_fill_options(state: &mut AppState, ui: &mut egui::Ui) {
+    let enclose_key = combo_text(state, Action::FillLassoEnclose);
+    let erase_key = combo_text(state, Action::FillLassoErase);
+    let snap_key = combo_text(state, Action::FillPolygonSnap);
+    ui.checkbox(&mut state.fill_enclose, "Enclose & fill").on_hover_text(format!(
+        "Fill only the areas the lines inside the lasso shut in, not the \
+         space between them and the lasso. Holding {enclose_key} as it lands \
+         does the other."
+    ));
+    ui.checkbox(&mut state.fill_behind, "Behind existing paint").on_hover_text(
+        "The fill goes under what is already on the drawing, as if on a \
+         layer below: line art keeps its colour and its soft edges.",
+    );
+    ui.label(
+        egui::RichText::new(format!(
+            "Drag round it, or tap corners and tap the first, double-click or \
+             Enter to fill. {erase_key}: erase. {snap_key}: 15° edges."
+        ))
+        .color(theme::text_muted())
+        .size(11.0),
+    );
+}
+
 fn brush_size_lock(state: &mut AppState, ui: &mut egui::Ui) {
     ui.checkbox(&mut state.lock_brush_to_view, "Lock brush to screen size")
         .on_hover_text(
@@ -1136,9 +1278,9 @@ fn swatch_strip(state: &mut AppState, ui: &mut egui::Ui) {
             // The active colour is called out with an accent ring, so a palette
             // of near-identical greys still tells you where you are.
             let stroke = if rgb == cur {
-                Stroke::new(2.0, theme::ACCENT)
+                Stroke::new(2.0, theme::accent())
             } else {
-                Stroke::new(1.0, theme::STROKE_THIN)
+                Stroke::new(1.0, theme::stroke_thin())
             };
             ui.painter().rect_stroke(rect, 3.0, stroke);
             if resp.clicked() {
@@ -1177,95 +1319,107 @@ fn swatch_strip(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
-    {
-            theme::section_header(ui, ic::PALETTE, "Color");
-            ui.horizontal(|ui| {
-                let c = state.brush.color;
-                let mut rgb = [c[0], c[1], c[2]];
-                if color_wheel::hsl_edit_button(ui, &mut rgb).changed() {
-                    state.set_brush_color(rgb);
-                }
-                ui.label(fmt_rgb(rgb));
-                if paste_button(ui) {
-                    if let Some(rgb) = clipboard_color() {
-                        state.set_brush_color(rgb);
-                    }
-                }
-            });
-            swatch_strip(state, ui);
+    // The colour wheel and its harmony set, then the pinned swatches.
+    color_wheel::color_panel(state, ui);
+    ui.add_space(4.0);
+    swatch_strip(state, ui);
 
-            ui.add_space(6.0);
-            if ui
-                .add_sized(
-                    [ui.available_width(), 24.0],
-                    egui::Button::new(theme::icon_text(ic::SLIDERS, "Brush settings…")),
-                )
-                .on_hover_text("Presets, dab shape, paper grain, pressure and tilt, smoothing.")
-                .clicked()
-            {
-                state.show_brush_settings = true;
-            }
+    ui.add_space(6.0);
+    // The brush settings, and how the pen is getting through as an icon
+    // beside them: three states, not two. A driver whose context opens but
+    // never reports is the failure worth seeing at a glance — it draws
+    // exactly like a mouse, and "Tablet active" would be a lie about it.
+    let (icon, color, tip) = tablet_status(state);
+    ui.horizontal(|ui| {
+        let w = (ui.available_width() - TABLET_ICON_W - ui.spacing().item_spacing.x).floor();
+        if ui
+            .add_sized([w, 24.0], egui::Button::new(theme::icon_text(ic::SLIDERS, "Brush settings…")).truncate())
+            .on_hover_text("Presets, dab shape, paper grain, pressure and tilt, smoothing.")
+            .clicked()
+        {
+            state.show_brush_settings = true;
+        }
+        ui.add_sized(
+            [TABLET_ICON_W, 24.0],
+            egui::Label::new(egui::RichText::new(icon).size(15.0).color(color)),
+        )
+        .on_hover_text(tip);
+    });
+}
 
-            // Canvas backdrop + input status — collapsed by default so the panel
-            // stays compact, expandable when needed.
-            ui.add_space(6.0);
-            egui::CollapsingHeader::new(theme::icon_text(ic::IMAGE, "Backdrop"))
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Slider::new(&mut state.bg_opacity, 0.0..=1.0).text("Opacity"));
-                        color_wheel::hsl_edit_button_f32(ui, &mut state.bg_color);
-                    });
-                    ui.checkbox(&mut state.show_checker, "Checker backdrop");
-                    ui.horizontal(|ui| {
-                        let rgb = state.bg_color.map(|c| (c * 255.0).round() as u8);
-                        ui.label(egui::RichText::new(fmt_rgb(rgb)).color(theme::TEXT_MUTED));
-                        if paste_button(ui) {
-                            if let Some(rgb) = clipboard_color() {
-                                state.bg_color = rgb.map(|c| c as f32 / 255.0);
-                            }
-                        }
-                    });
-                });
+/// Room for the tablet status icon beside Brush settings.
+const TABLET_ICON_W: f32 = 18.0;
 
-            ui.add_space(2.0);
-            // Three states, not two. A driver whose context opens but never
-            // reports is the failure worth being able to see at a glance —
-            // it draws exactly like a mouse, and "Tablet active" would be a
-            // lie about the interesting case.
-            let (icon, text, color, tip): (&str, &str, _, &str) = match (
-                state.pen.is_active(),
-                state.pen.pen_active(),
-            ) {
-                (_, true) => (
-                    ic::PEN,
-                    "Tablet active",
-                    theme::ACCENT,
-                    "Pen packets are arriving: pressure, tilt and sub-pixel positions are live.",
-                ),
-                (true, false) => (
-                    ic::WARNING,
-                    "Tablet idle",
-                    theme::TEXT_MUTED,
-                    "A tablet context is open but no packets have arrived recently. \
-                     Normal while the pen is away from the tablet; if it persists \
-                     while drawing, the driver is not sending Wintab data and \
-                     strokes fall back to the mouse.",
-                ),
-                (false, _) => (
-                    ic::CURSOR,
-                    "Mouse mode",
-                    theme::TEXT_MUTED,
-                    "No tablet driver was found, so pressure is fixed and tilt reports none.",
-                ),
-            };
-            ui.label(
-                egui::RichText::new(format!("{icon}  {text}"))
-                    .color(color)
-                    .size(11.0),
-            )
-            .on_hover_text(tip);
+/// The tablet's state as an icon, its colour, and what it means.
+fn tablet_status(state: &AppState) -> (&'static str, Color32, &'static str) {
+    match (state.pen.is_active(), state.pen.pen_active()) {
+        (_, true) => (
+            ic::PEN,
+            theme::accent(),
+            "Tablet active: pen packets are arriving, so pressure, tilt and \
+             sub-pixel positions are live.",
+        ),
+        (true, false) => (
+            ic::WARNING,
+            theme::text_muted(),
+            "Tablet idle: a tablet context is open but no packets have arrived \
+             recently. Normal while the pen is away from the tablet; if it \
+             persists while drawing, the driver is not sending Wintab data and \
+             strokes fall back to the mouse.",
+        ),
+        (false, _) => (
+            ic::CURSOR,
+            theme::text_muted(),
+            "Mouse mode: no tablet driver was found, so pressure is fixed and \
+             tilt reports none.",
+        ),
     }
+}
+
+/// The canvas backdrop: its colour and opacity (below 1 the desktop shows
+/// through the window), and the checker. A view setting, so it sits in
+/// Settings with the colour schemes.
+fn backdrop_settings(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.label(egui::RichText::new(theme::icon_text(ic::IMAGE, "Canvas backdrop")).strong());
+    ui.horizontal(|ui| {
+        color_wheel::hsl_edit_button_f32(ui, &mut state.bg_color);
+        let rgb = state.bg_color.map(|c| (c * 255.0).round() as u8);
+        ui.label(egui::RichText::new(fmt_rgb(rgb)).color(theme::text_muted()));
+        if paste_button(ui) {
+            if let Some(rgb) = clipboard_color() {
+                state.bg_color = rgb.map(|c| c as f32 / 255.0);
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        fit_sliders(ui, "Opacity", 0.0);
+        ui.add(egui::Slider::new(&mut state.bg_opacity, 0.0..=1.0).text("Opacity"))
+            .on_hover_text("Below 1 the desktop shows through the window behind the canvas.");
+    });
+    ui.checkbox(&mut state.show_checker, "Checker backdrop");
+}
+
+/// Narrow the sliders laid out next in `ui` so that one, with its value box
+/// and `label`, fits the width left (less `extra` for what follows it on the
+/// row). Laid out at the theme's slider width instead, a narrow panel widens
+/// to fit it the first time it shows, and egui never narrows it back. Never
+/// wider than the theme's width.
+fn fit_sliders(ui: &mut egui::Ui, label: &str, extra: f32) {
+    let style = ui.style().clone();
+    let width = |text: &str, ts: egui::TextStyle| {
+        ui.fonts(|f| f.layout_no_wrap(text.to_owned(), ts.resolve(&style), Color32::WHITE).size().x)
+    };
+    let s = &style.spacing;
+    let value = (width("0.000", egui::TextStyle::Button) + s.button_padding.x * 2.0).max(s.interact_size.x);
+    // Rounded up, with a margin: a row even a fraction too wide grows the
+    // panel a point a frame until the slider stops shrinking.
+    let fixed = (value.ceil() + width(label, egui::TextStyle::Body).ceil() + s.item_spacing.x * 2.0 + extra).ceil() + 2.0;
+    ui.spacing_mut().slider_width = (ui.available_width() - fixed).floor().clamp(40.0, s.slider_width);
+}
+
+/// Where the timeline toolbar leaves its full width for the panel.
+fn timeline_bar_id() -> egui::Id {
+    egui::Id::new("timeline_bar_width")
 }
 
 fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -1283,11 +1437,13 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
         } else {
             ic::PLAY
         };
-        let play_base = if state.playback.playing { "Pause" } else { "Play" };
-        let play_tip = tip(state, Action::PlayPause, play_base);
-        if theme::icon_button(ui, play_icon, &play_tip).clicked() {
+        if play_button(state, ui, play_icon).clicked() {
             let now = ctx.input(|i| i.time);
-            state.playback.toggle(now);
+            if ui.input(|i| i.modifiers.shift) {
+                state.play_pause_here(Some(now));
+            } else {
+                state.play_pause(Some(now));
+            }
         }
         if loop_toggle(ui, state).clicked() {
             state.loop_timeline = !state.loop_timeline;
@@ -1402,7 +1558,8 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
         // measure from where the edit started, not from a value the edit has
         // already moved.
         let base = cur as f64;
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let left_w = ui.min_rect().width();
+        let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add(
                 egui::DragValue::new(&mut state.project.fps)
                     .range(1.0..=60.0)
@@ -1412,7 +1569,7 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
             )
             .on_hover_text("Playback speed");
             gap(ui);
-            ui.label(egui::RichText::new(format!("/ {count}")).color(theme::TEXT_MUTED));
+            ui.label(egui::RichText::new(format!("/ {count}")).color(theme::text_muted()));
             let field = ui
                 .add(
                     egui::DragValue::new(&mut cur)
@@ -1429,8 +1586,18 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
             if field.changed() {
                 state.project.goto(cur);
             }
-            ui.label(egui::RichText::new(ic::CLOCK).color(theme::TEXT_MUTED).size(13.0));
+            ui.label(egui::RichText::new(ic::CLOCK).color(theme::text_muted()).size(13.0));
         });
+        // A right-to-left child that runs out of room keeps going left, over
+        // the buttons, and adds nothing to the row's width — so the panel
+        // could shrink under it. The row claims both groups instead, and the
+        // panel takes that as its narrowest (see `panel_window`).
+        let need = left_w + ui.spacing().item_spacing.x + right.response.rect.width();
+        // Not `set_min_width`: that measures from the cursor, which is past
+        // the right-hand group by now.
+        let row = ui.min_rect();
+        ui.expand_to_include_rect(Rect::from_min_size(row.min, egui::vec2(need, row.height())));
+        ctx.data_mut(|d| d.insert_temp(timeline_bar_id(), need));
     });
 
     ui.add_space(6.0);
@@ -1453,10 +1620,17 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
 /// exactly the size dragged.
 fn title_bar_shortfall(ctx: &egui::Context, id: PanelId) -> f32 {
     let (icon, title) = panel_meta(id);
+    title_shortfall(ctx, &theme::icon_text(icon, title))
+}
+
+/// [`title_bar_shortfall`] for any window, by its title. A window whose body
+/// fills the height it is given (a scroll list set not to shrink) leaves
+/// this much of it unused, or a sideways drag grows it taller.
+pub(crate) fn title_shortfall(ctx: &egui::Context, title: &str) -> f32 {
     let style = ctx.style();
     // Measured exactly as `Window` measures its title: a plain `RichText`,
     // which `Window::new` falls back to the Heading style.
-    let text = egui::RichText::new(theme::icon_text(icon, title)).text_style(egui::TextStyle::Heading);
+    let text = egui::RichText::new(title).text_style(egui::TextStyle::Heading);
     let budget = ctx.fonts(|f| text.font_height(f, &style));
     (style.spacing.interact_size.y - budget).max(0.0)
 }
@@ -1541,7 +1715,7 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new("Tilt needs a tablet — mouse input reports none.")
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
     }
 }
@@ -1552,13 +1726,13 @@ fn krita_notes(state: &AppState, ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new("Size and Opacity work as Krita's own sliders.")
             .small()
-            .color(theme::TEXT_MUTED),
+            .color(theme::text_muted()),
     );
     if !state.pen.pen_active() {
         ui.label(
             egui::RichText::new("Tilt needs a tablet — mouse input reports none.")
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
     }
 }
@@ -1566,14 +1740,10 @@ fn krita_notes(state: &AppState, ui: &mut egui::Ui) {
 /// One `key   value` line of the tablet readout.
 fn diag_row(ui: &mut egui::Ui, key: &str, value: String) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(key).color(theme::TEXT_MUTED).size(11.0));
+        ui.label(egui::RichText::new(key).color(theme::text_muted()).size(11.0));
         ui.label(egui::RichText::new(value).monospace().size(11.0));
     });
 }
-
-/// Colour for a diagnostic reading that is out of range. Local because the
-/// theme has no warning colour and one readout does not justify adding to it.
-pub(crate) const DIAG_BAD: Color32 = Color32::from_rgb(232, 138, 96);
 
 /// The screens, and where the tablet driver puts the pen on them. The usual
 /// cause of a pen that covers only part of the window is a driver work area
@@ -1585,7 +1755,7 @@ fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnosti
     let note = |ui: &mut egui::Ui, text: &str, bad: bool| {
         ui.label(
             egui::RichText::new(text)
-                .color(if bad { DIAG_BAD } else { theme::TEXT_MUTED })
+                .color(if bad { theme::warn() } else { theme::text_muted() })
                 .size(11.0),
         );
     };
@@ -1677,7 +1847,7 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
         if state.pen_record.is_some() {
             ui.label(
                 egui::RichText::new("recording — sweep the pen over the tablet, edge to edge")
-                    .color(DIAG_BAD)
+                    .color(theme::warn())
                     .size(11.0),
             );
         } else if ui
@@ -1695,10 +1865,10 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
     });
     match &state.pen_record_saved {
         Some(Ok(path)) => {
-            ui.label(egui::RichText::new(format!("saved {}", path.display())).color(theme::TEXT_MUTED).size(11.0));
+            ui.label(egui::RichText::new(format!("saved {}", path.display())).color(theme::text_muted()).size(11.0));
         }
         Some(Err(e)) => {
-            ui.label(egui::RichText::new(format!("couldn't save: {e}")).color(DIAG_BAD).size(11.0));
+            ui.label(egui::RichText::new(format!("couldn't save: {e}")).color(theme::warn()).size(11.0));
         }
         None => {}
     }
@@ -1714,7 +1884,7 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
         } else if let Some(wait) = d.retry_in {
             text.push_str(&format!(" Trying again in {:.0} s.", wait.as_secs_f32().ceil()));
         }
-        ui.label(egui::RichText::new(text).color(theme::TEXT_MUTED).size(11.0));
+        ui.label(egui::RichText::new(text).color(theme::text_muted()).size(11.0));
         return;
     }
 
@@ -1825,7 +1995,7 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
     if d.queue_overflowed {
         ui.label(
             egui::RichText::new("packet queue has overflowed")
-                .color(DIAG_BAD)
+                .color(theme::warn())
                 .size(11.0),
         );
     }
@@ -1841,7 +2011,7 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
                 egui::RichText::new(format!("pen - cursor: {dx:+.1}, {dy:+.1} pt"))
                     .monospace()
                     .size(11.0)
-                    .color(if bad { DIAG_BAD } else { theme::ACCENT }),
+                    .color(if bad { theme::warn() } else { theme::accent() }),
             )
             .on_hover_text(
                 "Move the pen around the screen with this open. Both numbers should \
@@ -1955,6 +2125,21 @@ fn stabilizer_controls(state: &mut AppState, ui: &mut egui::Ui) {
 /// The Loop toggle shared by both timeline windows. One flag covers playback,
 /// wheel scrub and the frame step actions, so "loop off" means the same thing
 /// however the playhead is being moved.
+/// The Timeline's and the mini timeline's Play / Pause button. Shift-click
+/// pauses where the playhead is instead of going back to the start frame.
+fn play_button(state: &AppState, ui: &mut egui::Ui, icon: &str) -> egui::Response {
+    let base = if state.playback.playing {
+        format!(
+            "Pause, back on the frame playback started on. Shift-click, or {}, to stay where it stops",
+            combo_text(state, Action::PlayPauseHere)
+        )
+    } else {
+        "Play".to_string()
+    };
+    let tip = tip(state, Action::PlayPause, &base);
+    theme::icon_button(ui, icon, &tip)
+}
+
 fn loop_toggle(ui: &mut egui::Ui, state: &AppState) -> egui::Response {
     let tip = if state.loop_timeline {
         "Loop on — playback repeats, and stepping wraps at both ends"
@@ -1963,6 +2148,10 @@ fn loop_toggle(ui: &mut egui::Ui, state: &AppState) -> egui::Response {
     };
     theme::icon_toggle(ui, ic::REPEAT, tip, state.loop_timeline)
 }
+
+/// The mini bar's slot for the active layer's name, in points: room for
+/// the 18 characters it cuts a name to.
+const MINI_BAR_NAME_W: f32 = 140.0;
 
 fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
     egui::Window::new("mini_timeline")
@@ -1979,11 +2168,13 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 } else {
                     ic::PLAY
                 };
-                let play_base = if state.playback.playing { "Pause" } else { "Play" };
-                let play_tip = tip(state, Action::PlayPause, play_base);
-                if theme::icon_button(ui, play_icon, &play_tip).clicked() {
+                if play_button(state, ui, play_icon).clicked() {
                     let now = ctx.input(|i| i.time);
-                    state.playback.toggle(now);
+                    if ui.input(|i| i.modifiers.shift) {
+                        state.play_pause_here(Some(now));
+                    } else {
+                        state.play_pause(Some(now));
+                    }
                 }
                 if loop_toggle(ui, state).clicked() {
                     state.loop_timeline = !state.loop_timeline;
@@ -2023,18 +2214,26 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 )
                 .on_hover_text("Step size (move / insert)");
                 ui.separator();
+                // The bar sits centred, so anything that changes its width
+                // moves every button on it. The counter gets a slot wide
+                // enough for four-digit counts, the name below a fixed one.
                 let n = state.project.frame_count.max(1);
-                ui.label(
-                    egui::RichText::new(format!("{} / {}", state.project.current_frame + 1, n))
-                        .monospace()
-                        .color(theme::TEXT),
-                );
+                let digits = n.to_string().len().max(4);
+                let counter = egui::RichText::new(format!(
+                    "{:>digits$} / {n:<digits$}",
+                    state.project.current_frame + 1
+                ))
+                .monospace()
+                .color(theme::text());
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                let slot = ui.fonts(|f| f.glyph_width(&font, '0')) * (digits * 2 + 3) as f32;
+                ui.add_sized([slot, ui.spacing().interact_size.y], egui::Label::new(counter));
                 ui.separator();
                 // Active tool icon + brush colour swatch.
                 ui.label(
                     egui::RichText::new(tool_icon(state.tool))
                         .size(15.0)
-                        .color(theme::TEXT),
+                        .color(theme::text()),
                 )
                 .on_hover_text(tool_name(state.tool));
                 let c = state.brush.color;
@@ -2045,10 +2244,11 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                     Color32::from_rgb(c[0], c[1], c[2]),
                 );
                 ui.painter()
-                    .rect_stroke(rect, 3.0, Stroke::new(1.0, theme::STROKE_THIN));
+                    .rect_stroke(rect, 3.0, Stroke::new(1.0, theme::stroke_thin()));
                 // Which layer the layer keys landed on — the Layers panel is
-                // hidden whenever this bar is up. Long names are cut short so
-                // the bar keeps its width.
+                // hidden whenever this bar is up. Long names are cut short,
+                // and wide glyphs further, in a slot of their own, so the bar
+                // keeps its width.
                 if let Some(l) = state.project.layers.get(state.project.current_layer) {
                     ui.separator();
                     let name: String = if l.name.chars().count() > 18 {
@@ -2056,10 +2256,17 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                     } else {
                         l.name.clone()
                     };
-                    ui.label(
-                        egui::RichText::new(format!("{} {name}", ic::STACK)).color(theme::TEXT),
-                    )
-                    .on_hover_text(format!("Active layer: {}", l.name));
+                    let size = egui::vec2(MINI_BAR_NAME_W, ui.spacing().interact_size.y);
+                    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(Align::Center), |ui| {
+                        ui.set_min_size(size);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{} {name}", ic::STACK)).color(theme::text()),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(format!("Active layer: {}", l.name));
+                    });
                 }
             });
             ui.add_space(3.0);
@@ -2115,72 +2322,72 @@ fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui) {
     let height = 16.0;
     let view_w = 320.0_f32;
 
-    egui::ScrollArea::horizontal()
-        .max_width(view_w)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            let total_w = (n as f32 * dot_step).max(view_w);
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(total_w, height), Sense::click_and_drag());
-            let painter = ui.painter_at(rect);
-            let cy = rect.center().y;
+    // Room for the scroll bar whether it shows or not: it turning up on a
+    // long scene made the whole bar taller.
+    let full = height + ui.spacing().scroll.allocated_width();
+    ui.scope(|ui| {
+        ui.set_min_height(full);
+        egui::ScrollArea::horizontal()
+            .max_width(view_w)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let total_w = (n as f32 * dot_step).max(view_w);
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(total_w, height), Sense::click_and_drag());
+                let painter = ui.painter_at(rect);
+                let cy = rect.center().y;
 
-            for i in 0..n {
-                let center = egui::pos2(rect.min.x + (i as f32 + 0.5) * dot_step, cy);
-                if i == cur {
-                    painter.circle_filled(center, 4.0, theme::ACCENT);
-                    painter.circle_stroke(center, 5.5, Stroke::new(1.0, theme::ACCENT));
-                } else {
-                    let in_loop = i >= state.project.loop_start && i < state.project.loop_end;
-                    let col = if in_loop { theme::TEXT_MUTED } else { theme::BG_HOVER };
-                    painter.circle_filled(center, 2.6, col);
+                for i in 0..n {
+                    let center = egui::pos2(rect.min.x + (i as f32 + 0.5) * dot_step, cy);
+                    if i == cur {
+                        painter.circle_filled(center, 4.0, theme::accent());
+                        painter.circle_stroke(center, 5.5, Stroke::new(1.0, theme::accent()));
+                    } else {
+                        let in_loop = i >= state.project.loop_start && i < state.project.loop_end;
+                        let col = if in_loop { theme::text_muted() } else { theme::bg_hover() };
+                        painter.circle_filled(center, 2.6, col);
+                    }
+                    // Keyed frames get a tick under the dot — the layer, the
+                    // active grid and the camera, side by side when they share a
+                    // frame, in the colours the full timeline uses.
+                    let ty = rect.max.y - 1.5;
+                    let ticks: Vec<Color32> = [
+                        (layer_keys[i], theme::key_layer()),
+                        (grid_keys[i], grid_color.unwrap_or(theme::key_layer())),
+                        (camera_keys[i], theme::key_camera()),
+                    ]
+                    .into_iter()
+                    .filter_map(|(on, c)| on.then_some(c))
+                    .collect();
+                    let x0 = center.x - (ticks.len() as f32 - 1.0) * 2.5;
+                    for (k, c) in ticks.into_iter().enumerate() {
+                        painter.circle_filled(egui::pos2(x0 + k as f32 * 5.0, ty), 1.5, c);
+                    }
                 }
-                // Keyed frames get a tick under the dot — the layer, the
-                // active grid and the camera, side by side when they share a
-                // frame, in the colours the full timeline uses.
-                let ty = rect.max.y - 1.5;
-                let ticks: Vec<Color32> = [
-                    (layer_keys[i], KEY_LAYER),
-                    (grid_keys[i], grid_color.unwrap_or(KEY_LAYER)),
-                    (camera_keys[i], KEY_CAMERA),
-                ]
-                .into_iter()
-                .filter_map(|(on, c)| on.then_some(c))
-                .collect();
-                let x0 = center.x - (ticks.len() as f32 - 1.0) * 2.5;
-                for (k, c) in ticks.into_iter().enumerate() {
-                    painter.circle_filled(egui::pos2(x0 + k as f32 * 5.0, ty), 1.5, c);
-                }
-            }
 
-            // Auto-scroll to the active dot only when the frame changes, so the
-            // user can still scroll freely the rest of the time.
-            let mem_id = ui.id().with("mini_dots_frame");
-            let last: Option<usize> = ui.data(|d| d.get_temp(mem_id));
-            if last != Some(cur) {
-                let active = egui::Rect::from_center_size(
-                    egui::pos2(rect.min.x + (cur as f32 + 0.5) * dot_step, cy),
-                    egui::vec2(dot_step * 3.0, height),
-                );
-                ui.scroll_to_rect(active, Some(Align::Center));
-                ui.data_mut(|d| d.insert_temp(mem_id, cur));
-            }
-
-            if resp.dragged() || resp.clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let rel = ((pos.x - rect.min.x) / dot_step).floor() as isize;
-                    let idx = rel.clamp(0, n as isize - 1) as usize;
-                    state.project.goto(idx);
+                // Auto-scroll to the active dot only when the frame changes, so the
+                // user can still scroll freely the rest of the time.
+                let mem_id = ui.id().with("mini_dots_frame");
+                let last: Option<usize> = ui.data(|d| d.get_temp(mem_id));
+                if last != Some(cur) {
+                    let active = egui::Rect::from_center_size(
+                        egui::pos2(rect.min.x + (cur as f32 + 0.5) * dot_step, cy),
+                        egui::vec2(dot_step * 3.0, height),
+                    );
+                    ui.scroll_to_rect(active, Some(Align::Center));
+                    ui.data_mut(|d| d.insert_temp(mem_id, cur));
                 }
-            }
-        });
+
+                if resp.dragged() || resp.clicked() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let rel = ((pos.x - rect.min.x) / dot_step).floor() as isize;
+                        let idx = rel.clamp(0, n as isize - 1) as usize;
+                        state.project.goto(idx);
+                    }
+                }
+            });
+    });
 }
-
-/// Marker colour for active-layer transform keys — same blue as the layer
-/// bounds outline on the canvas.
-pub(crate) const KEY_LAYER: Color32 = Color32::from_rgb(120, 160, 220);
-/// Marker colour for camera keys — same amber as the camera-edit guide.
-pub(crate) const KEY_CAMERA: Color32 = Color32::from_rgb(255, 190, 90);
 
 /// The active grid's keyed frames and its colour, while grids are on show —
 /// the perspective tool is up, or "Show grids" is on — and it has keys.
@@ -2275,7 +2482,7 @@ fn onion_offset_chips(state: &mut AppState, ui: &mut egui::Ui) {
                 // The current frame. Painted: the UI font has no bullet glyph.
                 let (rect, resp) =
                     ui.allocate_exact_size(egui::vec2(CHIP.y * 0.5, CHIP.y), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 2.5, theme::TEXT_MUTED);
+                ui.painter().circle_filled(rect.center(), 2.5, theme::text_muted());
                 resp.on_hover_text("The current frame");
                 future(ui, onion);
             });
@@ -2314,10 +2521,10 @@ fn offset_chip(
         if luma > 150.0 { Color32::BLACK } else { Color32::WHITE }
     } else {
         painter.rect_stroke(rect, 3.0, Stroke::new(1.0, tint.gamma_multiply(0.6)));
-        theme::TEXT_MUTED
+        theme::text_muted()
     };
     if resp.hovered() {
-        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::TEXT));
+        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::text()));
     }
     painter.text(
         rect.center(),
@@ -2346,14 +2553,11 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
     let Some(layer) = state.project.layers.get_mut(li) else {
         return;
     };
-    ui.label(
-        egui::RichText::new(format!(
-            "Pins on \u{201c}{}\u{201d} show while it's the active layer.",
-            layer.name
-        ))
-        .color(theme::TEXT_MUTED)
-        .size(10.5),
-    );
+    // The name on a line of its own, cut to fit: wrapped into the sentence,
+    // a long one took more lines, which grew the panel for good.
+    let muted = |text: String| egui::RichText::new(text).color(theme::text_muted()).size(10.5);
+    ui.add(egui::Label::new(muted(format!("Pins on \u{201c}{}\u{201d}", layer.name))).truncate());
+    ui.label(muted("show while it's the active layer.".into()));
 
     // The frame to pin: a scratch value, kept in egui memory rather than in
     // the state. Numbered like the timeline, from 0.
@@ -2412,7 +2616,7 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
     if !state.onion.enabled && !layer.onion_pins.is_empty() {
         ui.label(
             egui::RichText::new("Onion skin is off — pins show when it's enabled.")
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(10.5),
         );
     }
@@ -2483,7 +2687,7 @@ fn camera_size_ui(state: &mut AppState, ui: &mut egui::Ui) {
             canvas.0, canvas.1
         )
     };
-    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(10.5));
+    ui.label(egui::RichText::new(note).color(theme::text_muted()).size(10.5));
 }
 
 /// How many passes of the animation the camera's move lasts, and what the
@@ -2522,7 +2726,7 @@ fn camera_loops_ui(state: &mut AppState, ui: &mut egui::Ui) {
             len as f32 / p.fps.max(1.0)
         )
     };
-    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(10.5));
+    ui.label(egui::RichText::new(note).color(theme::text_muted()).size(10.5));
 }
 
 /// Camera panel — what the export sees, and how that moves over time.
@@ -2532,7 +2736,7 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
             "The camera frames the exported video. Layers can sit outside it — park a \
              character off to the side, then key the camera to pan over.",
         )
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
     ui.add_space(6.0);
@@ -2558,7 +2762,7 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
              outside a corner rolls. Or use your canvas gesture keys: pan-key = move the \
              camera, zoom-key = push in, rotate-key = roll.",
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
     ui.add_space(4.0);
@@ -2636,11 +2840,31 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
             if here { " — keyed on this frame" } else { "" }
         )
     };
-    ui.label(
-        egui::RichText::new(status)
-            .color(theme::TEXT_MUTED)
-            .size(10.5),
-    );
+    // Key to key, beside the count. Resolved first, as on the timeline:
+    // `add_enabled_ui` holds `state` while it runs.
+    let key_prev = state.project.prev_camera_key();
+    let key_next = state.project.next_camera_key();
+    let prev_tip = tip(state, Action::CameraKeyPrev, "Previous camera key");
+    let next_tip = tip(state, Action::CameraKeyNext, "Next camera key");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.add_enabled_ui(key_prev.is_some(), |ui| {
+            if theme::icon_button(ui, ic::CARET_LINE_LEFT, &prev_tip).clicked() {
+                state.project.goto(key_prev.unwrap_or_default());
+            }
+        });
+        ui.add_enabled_ui(key_next.is_some(), |ui| {
+            if theme::icon_button(ui, ic::CARET_LINE_RIGHT, &next_tip).clicked() {
+                state.project.goto(key_next.unwrap_or_default());
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(status)
+                .color(theme::text_muted())
+                .size(10.5),
+        );
+    });
 
     // Ease of the key on this frame. It shapes the segment running *from* this
     // key to the next, which is why it lives on the key rather than the pair.
@@ -2738,20 +2962,206 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
                  expand the layer canvas and start zoomed out.",
                 state.project.camera.zoom, ow, oh
             ))
-            .color(theme::TEXT_MUTED)
+            .color(theme::text_muted())
             .size(10.5),
         );
     }
 }
 
-/// How tall the layer list may grow before it starts scrolling, in points.
-/// Each row is three lines — name, opacity, fill-boundary link — so this is
-/// roughly four layers, which is enough to reorder against without the panel
-/// running off the bottom of a laptop screen.
-const LAYER_LIST_MAX_H: f32 = 320.0;
+/// The shortest the layer list gets when the sections under it want the
+/// room, in points: about one row (name, fill-boundary link, key link).
+/// Past this the panel grows instead.
+const LAYER_LIST_MIN_H: f32 = 96.0;
 
 /// Drag-and-drop payload for a layer row: the dragged layer's index.
 struct LayerDrag(usize);
+
+/// Width of the ⋮ button at a layer row's top right.
+const ROW_DOTS_W: f32 = 22.0;
+
+/// What a layer row's ⋮ menu picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowCmd {
+    Rename,
+    GroupSelected,
+    Krita,
+    Ungroup,
+    MergeGroup,
+    DeleteGroup,
+}
+
+/// What a layer row's menu needs to know about the row.
+struct RowMenu<'a> {
+    header: bool,
+    grp_key: &'a str,
+    krita_label: &'static str,
+    /// Not a reference or `-x` layer, which never go to Krita.
+    krita_ok: bool,
+}
+
+/// A layer row's menu, behind its ⋮ and a right-click on its name: what
+/// the toolbars over the list and the row itself don't already show.
+fn layer_row_menu(ui: &mut egui::Ui, m: &RowMenu, out: &mut Option<RowCmd>) {
+    let mut item = |ui: &mut egui::Ui, resp: egui::Response, cmd: RowCmd| {
+        if resp.clicked() {
+            *out = Some(cmd);
+            ui.close_menu();
+        }
+    };
+    let r = ui.button(theme::icon_text(ic::PENCIL_SIMPLE, "Rename")).on_hover_text("Or double-click the name");
+    item(ui, r, RowCmd::Rename);
+    if m.header {
+        let r = ui.button(theme::icon_text(ic::FOLDER_OPEN, "Ungroup"));
+        item(ui, r, RowCmd::Ungroup);
+        let r = ui
+            .button(theme::icon_text(ic::ARROWS_MERGE, "Merge group into one layer"))
+            .on_hover_text(
+                "Its layers as they show, at the group's opacity. \
+                 Hidden and reference layers stay as they are.",
+            );
+        item(ui, r, RowCmd::MergeGroup);
+        let r = ui.button(theme::icon_text(ic::TRASH, "Delete group"));
+        item(ui, r, RowCmd::DeleteGroup);
+        return;
+    }
+    let r = ui.button(theme::icon_text(
+        ic::FOLDER_SIMPLE_PLUS,
+        &format!("Group selected layers ({})", m.grp_key),
+    ));
+    item(ui, r, RowCmd::GroupSelected);
+    ui.separator();
+    let r = ui
+        .add_enabled(m.krita_ok, egui::Button::new(theme::icon_text(ic::PAINT_BRUSH, m.krita_label)))
+        .on_hover_text(
+            "Opens just this layer in Krita. The other layers stay \
+             here, and a save there only changes this layer (and \
+             any layer added in Krita).",
+        )
+        .on_disabled_hover_text("Reference layers and layers named …-x stay here");
+    item(ui, r, RowCmd::Krita);
+}
+
+/// A caption in a layer row, as wide as the widest of them so the
+/// dropdowns after them line up.
+fn row_caption(ui: &mut egui::Ui, text: &str) {
+    let rich = |t: &str| egui::RichText::new(t).color(theme::text_muted()).size(11.0);
+    let w = ["lines from", "keys with"]
+        .iter()
+        .map(|t| {
+            egui::WidgetText::from(rich(t))
+                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    let h = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(egui::vec2(w, h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.label(rich(text));
+    });
+}
+
+/// An icon button that stays lit while `on`, sized like
+/// [`theme::icon_button`] so it sits in the same row.
+fn icon_button_on(ui: &mut egui::Ui, icon: &str, tooltip: &str, on: bool) -> egui::Response {
+    let text = egui::RichText::new(icon).size(15.0);
+    let text = if on { text.color(theme::accent()) } else { text };
+    ui.add(egui::Button::new(text).selected(on).min_size(egui::vec2(28.0, 22.0)))
+        .on_hover_text(tooltip)
+}
+
+/// The Layers panel's second toolbar and its opacity slider: what acts on
+/// the active layer and every layer picked with it.
+fn layer_selection_actions(state: &mut AppState, ui: &mut egui::Ui) {
+    let sel = state.selected_layer_indices();
+    let cur = state.project.current_layer;
+    let many = sel.len() > 1;
+    let which = if many { "the selected layers" } else { "this layer" };
+    ui.horizontal(|ui| {
+        // Seven buttons in a 252-point panel: tighter than the row above.
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.spacing_mut().button_padding.x = 4.0;
+        let paintable = sel.iter().any(|&i| {
+            let p = &state.project;
+            if p.is_group(i) {
+                p.children(i).any(|c| p.paintable(c))
+            } else {
+                p.paintable(i)
+            }
+        });
+        let mut orient = None;
+        ui.add_enabled_ui(paintable, |ui| {
+            for (o, _, icon, name) in ORIENT_ART {
+                let tip = format!("{name}: every drawing on {which}, about the canvas centre");
+                if theme::icon_button(ui, icon, &tip)
+                    .on_disabled_hover_text("Locked and reference layers stay as they are")
+                    .clicked()
+                {
+                    orient = Some(o);
+                }
+            }
+        });
+        if let Some(o) = orient {
+            state.orient_selected_layers(o);
+        }
+        ui.separator();
+        // Lit by the active layer: a mixed pick all goes the other way.
+        let lead = sel.iter().copied().find(|&i| i == cur && !state.project.is_group(i))
+            .or_else(|| sel.iter().copied().find(|&i| !state.project.is_group(i)));
+        let (clip_on, lock_on) = lead.map_or((false, false), |i| {
+            let l = &state.project.layers[i];
+            (l.clip, l.alpha_lock)
+        });
+        let clip_key = combo_text(state, Action::LayerClipToggle);
+        let lock_key = combo_text(state, Action::LayerAlphaLockToggle);
+        ui.add_enabled_ui(lead.is_some(), |ui| {
+            if icon_button_on(
+                ui,
+                ic::ARROW_BEND_LEFT_DOWN,
+                &format!(
+                    "Clip to layer below ({clip_key}): show {which} only where the first \
+                     unclipped layer under it has paint"
+                ),
+                clip_on,
+            )
+            .clicked()
+            {
+                state.toggle_selected_clip();
+            }
+            if icon_button_on(
+                ui,
+                ic::CHECKERBOARD,
+                &format!("Lock alpha ({lock_key}): painting on {which} only changes pixels that already have paint"),
+                lock_on,
+            )
+            .clicked()
+            {
+                state.toggle_selected_alpha_lock();
+            }
+        });
+    });
+
+    // Opacity: the active layer's, set on every picked layer at once. One
+    // undo step per drag; a double-click puts it back to full.
+    let Some(mut v) = state.project.layers.get(cur).map(|l| l.opacity) else { return };
+    let label = if many { format!("opacity ×{}", sel.len()) } else { "opacity".to_string() };
+    fit_sliders(ui, &label, 0.0);
+    let resp = ui
+        .add(egui::Slider::new(&mut v, 0.0..=1.0).text(&label))
+        .on_hover_text(if many {
+            "Every selected layer takes this opacity. Double-click for 100%."
+        } else {
+            "The active layer's opacity. Double-click for 100%."
+        });
+    if resp.double_clicked() {
+        v = 1.0;
+    }
+    if (v - state.project.layers[cur].opacity).abs() > f32::EPSILON || (resp.changed() && many) {
+        state.set_selected_opacity(v);
+    }
+    if !resp.dragged() && !resp.has_focus() {
+        state.commit_layer_opacity();
+    }
+}
 
 fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
@@ -2799,6 +3209,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                     state.fade_others = !state.fade_others;
                 }
             });
+            layer_selection_actions(state, ui);
             // How faint the other layers go. Dragging either slider switches
             // the fade on — adjusting an amount you can't see is guesswork.
             // Folded away with the rest: the toggle above is what gets used.
@@ -2806,6 +3217,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 .id_salt("layers_fade")
                 .default_open(false)
                 .show(ui, |ui| {
+                    fit_sliders(ui, "fade above", 0.0);
                     let fade_help = "How visible the other layers stay while faded. \
                                      View only: layer opacity and export are unaffected.";
                     let above = ui
@@ -2827,27 +3239,19 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut start_rename: Option<usize> = None;
             let mut rename_commit = false;
             let mut rename_cancel = false;
-            let mut krita_edit: Option<usize> = None;
-            let mut toggle_clip: Option<usize> = None;
-            let mut toggle_alpha_lock: Option<usize> = None;
-            let mut orient_layer: Option<(usize, crate::doc::orient::Orient)> = None;
             // A layer's key-jump link set (`Some(uid)`) or cleared (`None`),
             // and a cleanup layer to add over a rough.
             let mut set_key_link: Option<(usize, Option<u64>)> = None;
             let mut cleanup_of: Option<usize> = None;
             let mut drop: Option<(usize, usize, bool)> = None;
-            // Group rows' own commands, and Ctrl/Shift-click picks.
+            // Group rows' fold, a row's ⋮ menu pick, and Ctrl/Shift-click picks.
             let mut toggle_fold: Option<usize> = None;
-            let mut ungroup: Option<usize> = None;
-            let mut merge_group: Option<usize> = None;
-            let mut delete_group: Option<usize> = None;
-            let mut group_now = false;
+            let mut menu_pick: Option<(usize, RowCmd)> = None;
             let mut pick: Option<(usize, bool)> = None;
             let rows = state.project.panel_rows();
             let picked = state.selected_layers.clone();
             let grp_key = combo_text(state, Action::LayerGroup);
-            let krita_label = krita_menu_label(state);
-            let clip_key = combo_text(state, Action::LayerClipToggle);
+            let krita_label = krita_menu_label(state, true);
             let lock_key = combo_text(state, Action::LayerAlphaLockToggle);
             // What each clipped layer clips to — `None` for one clipped with
             // nothing under it to clip to.
@@ -2868,6 +3272,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             // Where each layer's key jumps are linked to, resolved.
             let key_links: Vec<Option<usize>> = (0..n).map(|i| state.project.key_link(i)).collect();
             let layer_in_group: Vec<bool> = state.project.layers.iter().map(|l| l.in_group).collect();
+            // Reference and `-x` layers never go to Krita.
+            let krita_stays: Vec<bool> =
+                (0..n).map(|i| crate::krita_link::stays_here_at(&state.project, i)).collect();
             let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);
             // The rows scroll rather than growing the window: each one is three
             // lines tall, so a stack of them would otherwise push the Transform
@@ -2875,13 +3282,23 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             // the toolbar above and Transform below stay put, which is what
             // makes reordering a layer while looking at its transform possible.
             //
-            // `auto_shrink` vertically so one or two layers do not reserve the
-            // full height as blank space, but never horizontally: the rows
-            // should keep the panel's width.
-            egui::ScrollArea::vertical()
+            // The list takes the panel's height, less what the sections under
+            // it took last frame, whatever the number of rows. Sized to its
+            // rows instead, each new layer grew the panel, and egui never
+            // shrinks a window below what its content once asked for. Floored:
+            // a fraction over the panel's height would ratchet it up a hair
+            // every frame. See `title_shortfall` for the rest.
+            let below_id = ui.id().with("layers_below_h");
+            let below_h = ui.data(|d| d.get_temp::<f32>(below_id)).unwrap_or(0.0);
+            let shortfall = title_bar_shortfall(ui.ctx(), PanelId::Layers);
+            let list_h = (ui.available_height() - below_h - shortfall)
+                .floor()
+                .max(LAYER_LIST_MIN_H);
+            let list = egui::ScrollArea::vertical()
                 .id_salt("layer_rows")
-                .max_height(LAYER_LIST_MAX_H)
-                .auto_shrink([false, true])
+                .max_height(list_h)
+                .min_scrolled_height(list_h)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for i in rows.iter().copied() {
                         let layer = &mut layers[i];
@@ -2890,15 +3307,22 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
 
                         let row = Frame::none()
                             .fill(if selected {
-                                theme::ACCENT_DIM
+                                theme::accent_dim()
                             } else if picked.contains(&layer.uid) {
-                                theme::white_alpha(14)
+                                theme::tint(14)
                             } else {
                                 Color32::TRANSPARENT
                             })
                             .rounding(egui::Rounding::same(6.0))
                             .inner_margin(Margin::symmetric(6.0, 4.0))
                             .show(ui, |ui| {
+                                // A frame hugs what's in it; the row's fill
+                                // should span the list.
+                                ui.set_min_width(ui.available_width());
+                                // A long name (a cleanup of a cleanup is
+                                // "… clean clean") is cut short rather than
+                                // widening the panel for good.
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                                 ui.horizontal(|ui| {
                                     // A group's layers sit indented under it.
                                     if layer.in_group {
@@ -2915,7 +3339,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             toggle_fold = Some(i);
                                         }
                                         let folder = if layer.collapsed { ic::FOLDER_SIMPLE } else { ic::FOLDER_OPEN };
-                                        ui.label(egui::RichText::new(folder).size(16.0).color(theme::TEXT_MUTED));
+                                        ui.label(egui::RichText::new(folder).size(16.0).color(theme::text_muted()));
                                     }
                                     // A clipped layer sits indented, an arrow
                                     // pointing down at its base.
@@ -2923,11 +3347,11 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         ui.add_space(8.0);
                                         let (tint, tip) = match bases[i] {
                                             Some(b) => (
-                                                theme::ACCENT,
+                                                theme::accent(),
                                                 format!("Clipped to {}", names[b]),
                                             ),
                                             None => (
-                                                theme::TEXT_MUTED,
+                                                theme::text_muted(),
                                                 "Clipped, but there is nothing under it to clip to"
                                                     .to_string(),
                                             ),
@@ -2960,9 +3384,9 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                     // Reference / light-table toggle. Not for a
                                     // group, which has no drawings to show dim.
                                     let ref_color = if layer.reference {
-                                        theme::ACCENT
+                                        theme::accent()
                                     } else {
-                                        theme::TEXT_MUTED
+                                        theme::text_muted()
                                     };
                                     if !header
                                         && ui
@@ -3003,13 +3427,40 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         // still renames. One widget senses both:
                                         // a drag-only one laid over the label
                                         // would win the hit test and eat clicks.
+                                        //
+                                        // What follows the name keeps its
+                                        // room: the alpha-lock mark, the
+                                        // opacity when under full, and the ⋮.
+                                        let badge = (layer.opacity < 0.995).then(|| {
+                                            egui::RichText::new(format!("{:.0}%", layer.opacity * 100.0))
+                                                .size(11.0)
+                                                .color(theme::text_muted())
+                                        });
+                                        let room = ui.available_width();
+                                        let gap = ui.spacing().item_spacing.x;
+                                        let badge_w = badge.clone().map_or(0.0, |b| {
+                                            let w = egui::WidgetText::from(b)
+                                                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+                                                .size()
+                                                .x;
+                                            w + gap
+                                        });
+                                        let lock_w = if layer.alpha_lock { 14.0 + gap } else { 0.0 };
+                                        let name_w = (room - badge_w - lock_w - ROW_DOTS_W - gap).max(0.0);
                                         let resp = ui
-                                            .add(egui::SelectableLabel::new(
-                                                selected,
-                                                egui::RichText::new(&layer.name).strong(),
-                                            ))
+                                            .scope(|ui| {
+                                                ui.set_max_width(name_w);
+                                                ui.add(egui::SelectableLabel::new(
+                                                    selected,
+                                                    egui::RichText::new(&layer.name).strong(),
+                                                ))
+                                            })
+                                            .inner
                                             .interact(Sense::click_and_drag())
-                                            .on_hover_text("Double-click to rename, drag to reorder");
+                                            .on_hover_text(format!(
+                                                "{}\nDouble-click to rename, drag to reorder",
+                                                layer.name
+                                            ));
                                         resp.dnd_set_drag_payload(LayerDrag(i));
                                         if resp.dragged() {
                                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -3032,200 +3483,126 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             ui.label(
                                                 egui::RichText::new(ic::CHECKERBOARD)
                                                     .size(14.0)
-                                                    .color(theme::ACCENT),
+                                                    .color(theme::accent()),
                                             )
                                             .on_hover_text(format!(
                                                 "Alpha locked ({lock_key}): painting only \
                                                  changes pixels that already have paint"
                                             ));
                                         }
-                                        // The key-jump link, shown only while there is one.
-                                        if let Some(s) = key_links[i] {
-                                            let chip = ui
-                                                .add(
-                                                    egui::Button::new(
-                                                        egui::RichText::new(format!("{} {}", ic::LINK, names[s]))
-                                                            .size(11.0)
-                                                            .color(theme::ACCENT),
-                                                    )
-                                                    .frame(false),
-                                                )
-                                                .on_hover_text(format!(
-                                                    "Key jumps here also stop at {}'s drawings. Click to unlink.",
-                                                    names[s]
-                                                ));
-                                            if chip.clicked() {
-                                                set_key_link = Some((i, None));
-                                            }
-                                        }
-                                        resp.context_menu(|ui| {
-                                            if header {
-                                                if ui.button(theme::icon_text(ic::FOLDER_OPEN, "Ungroup")).clicked() {
-                                                    ungroup = Some(i);
-                                                    ui.close_menu();
-                                                }
-                                                if ui
-                                                    .button(theme::icon_text(ic::ARROWS_MERGE, "Merge group into one layer"))
-                                                    .on_hover_text(
-                                                        "Its layers as they show, at the group's opacity. \
-                                                         Hidden and reference layers stay as they are.",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    merge_group = Some(i);
-                                                    ui.close_menu();
-                                                }
-                                                if ui.button(theme::icon_text(ic::TRASH, "Delete group")).clicked() {
-                                                    delete_group = Some(i);
-                                                    ui.close_menu();
-                                                }
-                                                ui.separator();
-                                                ui.add_enabled_ui(!layer.locked, |ui| {
-                                                    for (o, _, icon, name, _) in ORIENT_ART {
-                                                        if ui
-                                                            .button(theme::icon_text(icon, &format!("{name} (whole group)")))
-                                                            .on_hover_text("Every drawing of every layer in the group")
-                                                            .clicked()
-                                                        {
-                                                            orient_layer = Some((i, o));
-                                                            ui.close_menu();
-                                                        }
-                                                    }
-                                                });
-                                                return;
-                                            }
-                                            if ui
-                                                .button(theme::icon_text(
-                                                    ic::FOLDER_SIMPLE_PLUS,
-                                                    &format!("Group selected layers ({grp_key})"),
-                                                ))
-                                                .clicked()
-                                            {
-                                                group_now = true;
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            if ui
-                                                .selectable_label(
-                                                    layer.clip,
-                                                    format!("Clip to layer below ({clip_key})"),
-                                                )
-                                                .on_hover_text(
-                                                    "Show this layer only where the first \
-                                                     unclipped layer under it has paint",
-                                                )
-                                                .clicked()
-                                            {
-                                                toggle_clip = Some(i);
-                                                ui.close_menu();
-                                            }
-                                            if ui
-                                                .selectable_label(
-                                                    layer.alpha_lock,
-                                                    format!("Lock alpha ({lock_key})"),
-                                                )
-                                                .on_hover_text(
-                                                    "Painting only changes pixels that already \
-                                                     have paint",
-                                                )
-                                                .clicked()
-                                            {
-                                                toggle_alpha_lock = Some(i);
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            ui.menu_button(theme::icon_text(ic::LINK, "Jump keys with"), |ui| {
-                                                if ui.selectable_label(key_links[i].is_none(), "— none —").clicked() {
-                                                    set_key_link = Some((i, None));
-                                                    ui.close_menu();
-                                                }
-                                                // Top of the stack first, as the panel lists them.
-                                                for j in (0..names.len()).rev() {
-                                                    if j == i || headers[j] {
-                                                        continue;
-                                                    }
-                                                    if ui.selectable_label(key_links[i] == Some(j), &names[j]).clicked() {
-                                                        set_key_link = Some((i, Some(uids[j])));
-                                                        ui.close_menu();
-                                                    }
-                                                }
-                                            })
-                                            .response
-                                            .on_hover_text(
-                                                "Shift+A / Shift+S, the jump buttons and the wheel on \
-                                                 this layer also stop at that layer's drawings — for \
-                                                 redrawing a rough on a layer over it",
+                                        if let Some(b) = badge {
+                                            ui.label(b).on_hover_text(
+                                                "Layer opacity. Set it with the slider over the list.",
                                             );
-                                            if ui
-                                                .button(theme::icon_text(ic::STACK_PLUS, "New cleanup layer"))
-                                                .on_hover_text(
-                                                    "A layer over this one to redraw it on, its key \
-                                                     jumps following this layer's drawings",
-                                                )
-                                                .clicked()
-                                            {
-                                                cleanup_of = Some(i);
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            ui.add_enabled_ui(!layer.locked && !layer.reference, |ui| {
-                                                for (o, _, icon, _, text) in ORIENT_ART {
-                                                    if ui
-                                                        .button(theme::icon_text(icon, text))
-                                                        .on_hover_text(
-                                                            "Every drawing on this layer, about the \
-                                                             canvas centre",
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        orient_layer = Some((i, o));
-                                                        ui.close_menu();
-                                                    }
-                                                }
-                                            });
-                                            ui.separator();
-                                            if ui
-                                                .button(theme::icon_text(ic::PAINT_BRUSH, krita_label))
-                                                .on_hover_text("Opens the project in Krita with this layer selected")
-                                                .clicked()
-                                            {
-                                                krita_edit = Some(i);
-                                                ui.close_menu();
-                                            }
+                                        }
+                                        // The rest of what the layer offers: the
+                                        // ⋮ at the row's top right, and the same
+                                        // menu on a right-click of the name.
+                                        let menu = RowMenu {
+                                            header,
+                                            grp_key: &grp_key,
+                                            krita_label,
+                                            krita_ok: !krita_stays[i],
+                                        };
+                                        let mut cmd = None;
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let dots = egui::Button::new(
+                                                egui::RichText::new(ic::DOTS_THREE_VERTICAL).size(15.0),
+                                            )
+                                            .frame(false)
+                                            .min_size(egui::vec2(ROW_DOTS_W, 22.0));
+                                            egui::menu::menu_custom_button(ui, dots, |ui| layer_row_menu(ui, &menu, &mut cmd))
+                                                .response
+                                                .on_hover_text("Layer options");
                                         });
+                                        resp.context_menu(|ui| layer_row_menu(ui, &menu, &mut cmd));
+                                        if let Some(c) = cmd {
+                                            menu_pick = Some((i, c));
+                                        }
                                     }
                                 });
-                                ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).text("opacity"));
                                 // Flood fill on this layer reads its boundaries from
                                 // the linked layer — line art above, colour below.
+                                // Both dropdowns end where the cleanup
+                                // button starts, so they line up.
+                                let combo_w = |ui: &egui::Ui| (ui.available_width() - ui.spacing().item_spacing.x - 36.0).max(48.0);
                                 if !header {
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("lines from")
-                                                .color(theme::TEXT_MUTED)
-                                                .size(11.0),
-                                        );
+                                        row_caption(ui, "lines from");
                                         let current = match layer.lines_from {
                                             Some(s) => names.get(s).map(String::as_str).unwrap_or("—"),
                                             None => "— none —",
                                         };
-                                        egui::ComboBox::from_id_salt(("lines_from", i))
-                                            .selected_text(egui::RichText::new(current).size(11.0))
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(&mut layer.lines_from, None, "— none —");
-                                                for (j, name) in names.iter().enumerate() {
-                                                    if j == i || headers[j] {
-                                                        continue;
+                                        let w = combo_w(ui);
+                                        ui.scope(|ui| {
+                                            ui.set_max_width(w);
+                                            egui::ComboBox::from_id_salt(("lines_from", i))
+                                                .selected_text(egui::RichText::new(current).size(11.0))
+                                                .width(w)
+                                                .truncate()
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut layer.lines_from, None, "— none —");
+                                                    for (j, name) in names.iter().enumerate() {
+                                                        if j == i || headers[j] {
+                                                            continue;
+                                                        }
+                                                        ui.selectable_value(&mut layer.lines_from, Some(j), name);
                                                     }
-                                                    ui.selectable_value(&mut layer.lines_from, Some(j), name);
-                                                }
-                                            });
+                                                });
+                                        });
                                     })
                                     .response
                                     .on_hover_text(
                                         "Flood fill on this layer stops at the linked layer's strokes, \
                                          so colour can be painted under line art.",
                                     );
+                                    // Key jumps on this layer also stop at the
+                                    // linked layer's drawings; the button adds a
+                                    // layer over this one, already linked to it.
+                                    ui.horizontal(|ui| {
+                                        row_caption(ui, "keys with");
+                                        let current = key_links[i].map_or("— none —", |s| names[s].as_str());
+                                        let mut link = key_links[i].map(|s| uids[s]);
+                                        let was = link;
+                                        let w = combo_w(ui);
+                                        ui.scope(|ui| {
+                                            ui.set_max_width(w);
+                                            egui::ComboBox::from_id_salt(("keys_with", i))
+                                                .selected_text(egui::RichText::new(current).size(11.0))
+                                                .width(w)
+                                                .truncate()
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut link, None, "— none —");
+                                                    // Top of the stack first, as the panel lists them.
+                                                    for j in (0..names.len()).rev() {
+                                                        if j == i || headers[j] {
+                                                            continue;
+                                                        }
+                                                        ui.selectable_value(&mut link, Some(uids[j]), &names[j]);
+                                                    }
+                                                })
+                                        })
+                                        .inner
+                                        .response
+                                            .on_hover_text(
+                                                "Shift+A / Shift+S, the jump buttons and the wheel on this \
+                                                 layer also stop at that layer's drawings — for redrawing a \
+                                                 rough on a layer over it",
+                                            );
+                                        if link != was {
+                                            set_key_link = Some((i, link));
+                                        }
+                                        if theme::icon_button(
+                                            ui,
+                                            ic::STACK_PLUS,
+                                            "New cleanup layer: a layer over this one to redraw it on, \
+                                             its key jumps following this layer's drawings",
+                                        )
+                                        .clicked()
+                                        {
+                                            cleanup_of = Some(i);
+                                        }
+                                    });
                                 }
                             })
                             .response;
@@ -3253,7 +3630,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                 let inside = (header && !above && !headers[from.0]) || layer_in_group[i];
                                 let x = row.rect.x_range();
                                 let x = if inside { egui::Rangef::new(x.min + 14.0, x.max) } else { x };
-                                ui.painter().hline(x, y, Stroke::new(2.0, theme::ACCENT));
+                                ui.painter().hline(x, y, Stroke::new(2.0, theme::accent()));
                             }
                             if row.dnd_release_payload::<LayerDrag>().is_some() {
                                 drop = Some((from.0, i, above));
@@ -3312,19 +3689,20 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                     }
                 }
             }
-            if let Some(g) = ungroup {
-                state.project.current_layer = g;
-                state.ungroup_active();
-            }
-            if let Some(g) = merge_group {
-                state.merge_group(g);
-            }
-            if let Some(g) = delete_group {
-                state.structural_edit(false, |p| p.delete_block(g));
-                state.selected_layers.clear();
-            }
-            if group_now {
-                state.group_selected_layers();
+            match menu_pick {
+                Some((i, RowCmd::Rename)) => start_rename = Some(i),
+                Some((_, RowCmd::GroupSelected)) => state.group_selected_layers(),
+                Some((i, RowCmd::Krita)) => state.edit_in_krita(i, Some(i)),
+                Some((g, RowCmd::Ungroup)) => {
+                    state.project.current_layer = g;
+                    state.ungroup_active();
+                }
+                Some((g, RowCmd::MergeGroup)) => state.merge_group(g),
+                Some((g, RowCmd::DeleteGroup)) => {
+                    state.structural_edit(false, |p| p.delete_block(g));
+                    state.selected_layers.clear();
+                }
+                None => {}
             }
             if rename_cancel {
                 state.layer_rename = None;
@@ -3349,15 +3727,6 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                 state.project.current_layer = i;
                 state.selected_layers.clear();
             }
-            if let Some(i) = krita_edit {
-                state.edit_in_krita(i);
-            }
-            if let Some(l) = toggle_clip.and_then(|i| state.project.layers.get_mut(i)) {
-                l.clip = !l.clip;
-            }
-            if let Some(l) = toggle_alpha_lock.and_then(|i| state.project.layers.get_mut(i)) {
-                l.alpha_lock = !l.alpha_lock;
-            }
             if let Some((i, uid)) = set_key_link {
                 if let Some(l) = state.project.layers.get_mut(i) {
                     l.keys_from = uid;
@@ -3366,31 +3735,44 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             if let Some(i) = cleanup_of {
                 state.add_cleanup_layer(i);
             }
-            if let Some((i, o)) = orient_layer {
-                let layers: Vec<usize> = if state.project.is_group(i) {
-                    state.project.children(i).collect()
-                } else {
-                    vec![i]
-                };
-                state.orient_layers(&layers, o);
+
+            // The sections under the list, laid out in a child that claims no
+            // room by itself. Opening one makes it taller than last frame's
+            // height, which the list made room for. Claiming the overflow
+            // would grow the panel for good, so the overflow is only claimed
+            // once the list is as short as it goes. Otherwise it's clipped for
+            // the frame until the list shrinks next frame.
+            let squeezable = list_h > LAYER_LIST_MIN_H;
+            let bottom = ui.max_rect().bottom() - shortfall;
+            let mut below = ui.new_child(egui::UiBuilder::new().id_salt("layers_below"));
+            if squeezable {
+                let mut clip = below.clip_rect();
+                clip.max.y = clip.max.y.min(bottom);
+                below.set_clip_rect(clip);
             }
+            {
+                let ui = &mut below;
+                // --- Layer transform ---
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new(theme::icon_text(ic::RECTANGLE, "Transform"))
+                    .id_salt("layers_transform")
+                    .default_open(false)
+                    .show(ui, |ui| layer_transform_section(state, ui));
 
-            // --- Layer transform ---
-            ui.add_space(6.0);
-            egui::CollapsingHeader::new(theme::icon_text(ic::RECTANGLE, "Transform"))
-                .id_salt("layers_transform")
-                .default_open(false)
-                .show(ui, |ui| layer_transform_section(state, ui));
-
-            // --- Layer canvas ---
-            //
-            // Strokes are clipped to the cell buffer, so a layer parked off to
-            // the side of the camera still only gets a frame-sized sheet to
-            // draw on until it's expanded here.
-            egui::CollapsingHeader::new(theme::icon_text(ic::FRAME_CORNERS, "Layer canvas"))
-                .id_salt("layers_canvas")
-                .default_open(false)
-                .show(ui, |ui| layer_canvas_section(state, ui));
+                // --- Layer canvas ---
+                //
+                // Strokes are clipped to the cell buffer, so a layer parked off to
+                // the side of the camera still only gets a frame-sized sheet to
+                // draw on until it's expanded here.
+                egui::CollapsingHeader::new(theme::icon_text(ic::FRAME_CORNERS, "Layer canvas"))
+                    .id_salt("layers_canvas")
+                    .default_open(false)
+                    .show(ui, |ui| layer_canvas_section(state, ui));
+            }
+            let r = below.min_rect();
+            ui.data_mut(|d| d.insert_temp(below_id, r.bottom() - list.inner_rect.bottom()));
+            let claim = if squeezable { r.bottom().min(bottom).max(r.top()) } else { r.bottom() };
+            ui.advance_cursor_after_rect(Rect::from_min_max(r.min, egui::pos2(r.max.x, claim)));
     }
 }
 
@@ -3411,7 +3793,7 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
         egui::RichText::new(format!(
             "Toggle ({toggle}), then drag with your canvas gesture keys: zoom-key = scale, pan-key = move, rotate-key = rotate the active layer.",
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
     ui.add_space(4.0);
@@ -3427,7 +3809,7 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
                 "Moves, turns and scales its {n} {what} together, about their middle. \
                  Keyed layers move on every frame — or, with auto-key, get a key here."
             ))
-            .color(theme::TEXT_MUTED)
+            .color(theme::text_muted())
             .size(11.0),
         );
         return;
@@ -3474,7 +3856,7 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
         };
         ui.label(
             egui::RichText::new(status)
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(10.5),
         );
     }
@@ -3514,7 +3896,9 @@ fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui) {
         });
     });
 
-    ui.horizontal(|ui| {
+    // Wider than the panel's default width: wrapped, rather than widening
+    // the panel for good the first time the section opens.
+    ui.horizontal_wrapped(|ui| {
         let add = combo_text(state, Action::TransformKeyAdd);
         if ui
             .button(theme::icon_text(ic::PLUS_SQUARE, &format!("Add key ({add})")))
@@ -3584,13 +3968,13 @@ fn layer_canvas_section(state: &mut AppState, ui: &mut egui::Ui) {
         egui::RichText::new(format!(
             "now {cur_w}×{cur_h} · {cells} cell(s) · resize costs {mb:.0} MB"
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(10.5),
     );
     if ew == max || eh == max {
         ui.label(
             egui::RichText::new(format!("GPU limit: {max} px per side"))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(10.5),
         );
     }
@@ -3669,15 +4053,23 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
             // columns follow it marked, and a folded group's are left out.
             let cols: Vec<usize> = state.project.panel_rows().into_iter().rev().collect();
 
+            // The sheet takes the panel's height, whatever the frame and
+            // layer counts. Sized to its rows, every frame added grew the
+            // panel, and so did the scroll bar appearing; egui never shrinks
+            // a window back. Floored, and see `title_shortfall`, so the
+            // panel holds still frame to frame and on a sideways drag.
+            let shortfall = title_bar_shortfall(ui.ctx(), PanelId::Xsheet);
             egui::ScrollArea::both()
-                .auto_shrink([false, true])
-                .max_height(260.0)
+                .auto_shrink([false, false])
+                .max_height((ui.available_height() - shortfall).floor().max(0.0))
                 .show(ui, |ui| {
+                    // Striped by hand: egui stripes a grid only as wide as
+                    // its columns add up to, which stops short of the panel
+                    // edge when there are few layers.
                     egui::Grid::new("xsheet_grid")
-                        .striped(true)
                         .min_col_width(28.0)
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Fr").color(theme::TEXT_MUTED).strong());
+                            ui.label(egui::RichText::new("Fr").color(theme::text_muted()).strong());
                             for &li in &cols {
                                 let l = &state.project.layers[li];
                                 let name = if l.is_group() {
@@ -3687,20 +4079,29 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                                 } else {
                                     l.name.clone()
                                 };
-                                ui.label(egui::RichText::new(name).color(theme::TEXT_MUTED).strong());
+                                ui.label(egui::RichText::new(name).color(theme::text_muted()).strong());
                             }
                             ui.end_row();
 
                             for f in 0..frame_count {
+                                let stripe = (f % 2 == 0).then(|| ui.painter().add(egui::Shape::Noop));
                                 let active_f = f == state.project.current_frame;
                                 let lbl = if active_f {
                                     egui::RichText::new(format!("{}  {f}", ic::CARET_RIGHT))
-                                        .color(theme::ACCENT)
+                                        .color(theme::accent())
                                         .strong()
                                 } else {
-                                    egui::RichText::new(format!("{f}")).color(theme::TEXT_MUTED)
+                                    egui::RichText::new(format!("{f}")).color(theme::text_muted())
                                 };
                                 let fr_resp = ui.button(lbl);
+                                if let Some(idx) = stripe {
+                                    let clip = ui.clip_rect();
+                                    let rect = Rect::from_x_y_ranges(clip.x_range(), fr_resp.rect.y_range());
+                                    ui.painter().set(
+                                        idx,
+                                        egui::Shape::rect_filled(rect, 2.0, ui.visuals().faint_bg_color),
+                                    );
+                                }
                                 if fr_resp.clicked() {
                                     state.project.goto(f);
                                 }
@@ -3759,7 +4160,9 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
         return;
     }
     let mut open = state.show_brush_settings;
-    egui::Window::new(theme::icon_text(ic::PAINT_BRUSH, "Brush settings"))
+    let title = theme::icon_text(ic::PAINT_BRUSH, "Brush settings");
+    let shortfall = title_shortfall(ctx, &title);
+    egui::Window::new(title)
         // Pinned, for the same reason as the Settings window: egui derives a
         // window's persisted position from its title, so a rename would strand
         // it off-screen.
@@ -3772,30 +4175,33 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             drag_by_title_only(ui);
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                theme::section_header(ui, ic::PEN_NIB, "Preset");
-                crate::ui::brush_picker::brush_grid(state, ui);
-                if ui
-                    .small_button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import from Krita…"))
-                    .on_hover_text("Copy brushes from your Krita into this app")
-                    .clicked()
-                {
-                    state.open_krita_import();
-                }
+            // Taller than the window, the list fills it; see `title_shortfall`.
+            egui::ScrollArea::vertical()
+                .max_height((ui.available_height() - shortfall).max(0.0))
+                .show(ui, |ui| {
+                    theme::section_header(ui, ic::PEN_NIB, "Preset");
+                    crate::ui::brush_picker::brush_grid(state, ui);
+                    if ui
+                        .small_button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import from Krita…"))
+                        .on_hover_text("Copy brushes from your Krita into this app")
+                        .clicked()
+                    {
+                        state.open_krita_import();
+                    }
 
-                ui.add_space(6.0);
-                theme::section_header(ui, ic::SLIDERS, "Dynamics");
-                brush_dynamics(state, ui);
+                    ui.add_space(6.0);
+                    theme::section_header(ui, ic::SLIDERS, "Dynamics");
+                    brush_dynamics(state, ui);
 
-                ui.add_space(6.0);
-                theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
-                smoothing_controls(state, ui);
+                    ui.add_space(6.0);
+                    theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
+                    smoothing_controls(state, ui);
 
-                ui.add_space(6.0);
-                egui::CollapsingHeader::new(theme::icon_text(ic::PEN, "Tablet"))
-                    .default_open(false)
-                    .show(ui, |ui| tablet_diagnostics(state, ui));
-            });
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new(theme::icon_text(ic::PEN, "Tablet"))
+                        .default_open(false)
+                        .show(ui, |ui| tablet_diagnostics(state, ui));
+                });
         });
     state.show_brush_settings = open;
 }
@@ -3805,7 +4211,9 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
         return;
     }
     let mut open = state.show_settings;
-    egui::Window::new(theme::icon_text(ic::GEAR, "Settings"))
+    let title = theme::icon_text(ic::GEAR, "Settings");
+    let shortfall = title_shortfall(ctx, &title);
+    egui::Window::new(title)
         // Pinned: without it the window's persisted position is derived from
         // its title, so renaming it would strand the window off-screen.
         .id(egui::Id::new("window_settings"))
@@ -3817,6 +4225,9 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             drag_by_title_only(ui);
+            appearance_section(state, ui);
+            ui.add_space(6.0);
+            theme::section_header(ui, ic::MOUSE, "Input");
             ui.checkbox(&mut state.invert_timeline_scroll, "Invert timeline scroll")
                 .on_hover_text(
                     "Which way the wheel goes through the timeline, for the wheel \
@@ -3856,7 +4267,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                     egui::RichText::new(
                         "Click a binding, then press a new key combo. Esc = cancel.",
                     )
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .size(11.0),
                 );
             });
@@ -3868,7 +4279,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                         ic::KEYBOARD,
                         action.label()
                     ))
-                    .color(theme::TEXT)
+                    .color(theme::text())
                     .strong(),
                 );
             }
@@ -3914,10 +4325,10 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
             });
             match &state.shortcuts_file_note {
                 Some(Ok(note)) => {
-                    ui.label(egui::RichText::new(note).color(theme::TEXT_MUTED).size(11.0));
+                    ui.label(egui::RichText::new(note).color(theme::text_muted()).size(11.0));
                 }
                 Some(Err(e)) => {
-                    ui.label(egui::RichText::new(e).color(DIAG_BAD).size(11.0));
+                    ui.label(egui::RichText::new(e).color(theme::warn()).size(11.0));
                 }
                 None => {}
             }
@@ -3930,7 +4341,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                          them (defaults stand in): {}",
                         lines.join(", ")
                     ))
-                    .color(DIAG_BAD)
+                    .color(theme::warn())
                     .size(11.0),
                 );
             }
@@ -3951,7 +4362,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                     };
                     ui.label(
                         egui::RichText::new(theme::icon_text(ic::WARNING, &what))
-                            .color(DIAG_BAD)
+                            .color(theme::warn())
                             .strong(),
                     );
                     ui.checkbox(&mut state.shortcut_clashes_only, "Show only these");
@@ -3963,6 +4374,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
+                .max_height((ui.available_height() - shortfall).max(0.0))
                 .show(ui, |ui| {
                     // Pressed, then held: a hold binding is read while a
                     // canvas drag starts, and can be bare modifiers.
@@ -3977,7 +4389,7 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                                      combo, or bare Shift / Ctrl / Alt; letting go ends the \
                                      gesture.",
                                 )
-                                .color(theme::TEXT_MUTED)
+                                .color(theme::text_muted())
                                 .size(11.0),
                             );
                         }
@@ -4007,6 +4419,112 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
     state.show_settings = open;
 }
 
+/// Settings > Appearance: the colour scheme, and the five colours of a
+/// custom one. Changes show at once.
+fn appearance_section(state: &mut AppState, ui: &mut egui::Ui) {
+    use crate::ui::theme::Palette;
+    theme::section_header(ui, ic::PALETTE, "Appearance");
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for s in Scheme::ALL {
+            let p = s.palette(state.custom_colors);
+            if scheme_card(ui, s, &p, state.color_scheme == s).clicked() && state.color_scheme != s {
+                state.color_scheme = s;
+                changed = true;
+            }
+        }
+    });
+    if state.color_scheme == Scheme::Custom {
+        ui.add_space(4.0);
+        egui::Grid::new("custom_colors")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                let c = &mut state.custom_colors;
+                for (label, rgb) in [
+                    ("Background", &mut c.bg),
+                    ("Panels", &mut c.panel),
+                    ("Buttons and fields", &mut c.widget),
+                    ("Text", &mut c.text),
+                    ("Accent", &mut c.accent),
+                ] {
+                    ui.label(label);
+                    changed |= color_wheel::hsl_edit_button(ui, rgb).changed();
+                    ui.end_row();
+                }
+            });
+        ui.menu_button(theme::icon_text(ic::COPY, "Start from…"), |ui| {
+            for s in Scheme::PRESETS {
+                if ui.button(s.label()).clicked() {
+                    state.custom_colors = s.palette(state.custom_colors).base();
+                    changed = true;
+                    ui.close_menu();
+                }
+            }
+        })
+        .response
+        .on_hover_text("Replace the five colours with a preset's, to tweak from there");
+        // Only says something when there is something wrong.
+        let p = Palette::derive(state.custom_colors);
+        let c = theme::contrast(p.text, Color32::from_rgb(
+            state.custom_colors.panel[0],
+            state.custom_colors.panel[1],
+            state.custom_colors.panel[2],
+        ));
+        if c < 4.5 {
+            ui.label(
+                egui::RichText::new(theme::icon_text(
+                    ic::WARNING,
+                    &format!("Text is hard to read on these panels ({c:.1}:1, 4.5 reads well)"),
+                ))
+                .color(theme::warn())
+                .size(11.0),
+            );
+        }
+    }
+    if changed {
+        state.apply_scheme(ui.ctx());
+    }
+    ui.add_space(8.0);
+    backdrop_settings(state, ui);
+}
+
+/// A clickable preview of a scheme: its panel on its background, a line of
+/// its text and a dab of its accent, with the name under it.
+fn scheme_card(ui: &mut egui::Ui, s: Scheme, p: &crate::ui::theme::Palette, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(80.0, 54.0), Sense::click());
+    let painter = ui.painter();
+    let card = Rect::from_min_size(rect.min, egui::vec2(rect.width(), 36.0));
+    painter.rect_filled(card, 6.0, p.bg_base);
+    let panel = card.shrink(5.0);
+    painter.rect_filled(panel, 4.0, p.bg_panel);
+    painter.text(
+        panel.left_center() + egui::vec2(7.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "Aa",
+        egui::FontId::proportional(13.0),
+        p.text,
+    );
+    let dab = Rect::from_center_size(panel.right_center() - egui::vec2(15.0, 0.0), egui::vec2(18.0, 8.0));
+    painter.rect_filled(dab, 4.0, p.accent);
+    let stroke = if selected {
+        Stroke::new(2.0, theme::accent())
+    } else if resp.hovered() {
+        Stroke::new(1.0, theme::accent_hover())
+    } else {
+        Stroke::new(1.0, theme::stroke_thin())
+    };
+    painter.rect_stroke(card, 6.0, stroke);
+    painter.text(
+        egui::pos2(card.center().x, card.max.y + 9.0),
+        egui::Align2::CENTER_CENTER,
+        s.label(),
+        egui::FontId::proportional(11.5),
+        if selected { theme::text() } else { theme::text_muted() },
+    );
+    resp
+}
+
 /// The wheel map in Settings: a picker per modifier. A change goes into
 /// shortcuts.toml in place, like a rebind.
 fn wheel_rows(state: &mut AppState, ui: &mut egui::Ui) {
@@ -4018,7 +4536,7 @@ fn wheel_rows(state: &mut AppState, ui: &mut egui::Ui) {
             "Over the canvas, the Timeline and the mini timeline. Two modifiers at once do \
              nothing.",
         )
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(11.0),
     );
     egui::Grid::new("wheel_grid")
@@ -4061,7 +4579,7 @@ fn shortcut_row(
     let tint = |t: String| {
         let t = egui::RichText::new(t);
         if bad {
-            t.color(DIAG_BAD)
+            t.color(theme::warn())
         } else {
             t
         }
@@ -4119,9 +4637,9 @@ fn clash_cell(ui: &mut egui::Ui, action: Action, flags: Option<&Vec<Clash>>) {
         })
         .collect();
     let (icon, color) = if flags.iter().any(|c| c.is_conflict()) {
-        (ic::WARNING, DIAG_BAD)
+        (ic::WARNING, theme::warn())
     } else {
-        (ic::INFO, theme::TEXT_MUTED)
+        (ic::INFO, theme::text_muted())
     };
     ui.label(egui::RichText::new(icon).color(color))
         .on_hover_text(lines.join("\n"));
@@ -4136,16 +4654,11 @@ fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3]) {
 
 pub(crate) fn floating_frame() -> Frame {
     Frame::window(&egui::Style::default())
-        .fill(theme::BG_PANEL)
-        .stroke(Stroke::new(1.0, theme::STROKE_THIN))
+        .fill(theme::bg_panel())
+        .stroke(Stroke::new(1.0, theme::stroke_thin()))
         .inner_margin(Margin::same(10.0))
         .rounding(egui::Rounding::same(10.0))
-        .shadow(egui::Shadow {
-            offset: egui::vec2(0.0, 8.0),
-            blur: 28.0,
-            spread: 0.0,
-            color: Color32::from_black_alpha(120),
-        })
+        .shadow(theme::window_shadow())
 }
 
 /// Perspective tool options: the switches every grid shares, and the grid
@@ -4160,7 +4673,7 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
              the eye level or its round knobs to tilt it, just outside a corner to rotate \
              (hold Shift once dragging for 15° steps), inside to move.",
         )
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(11.0),
     );
     let show = combo_text(state, Action::TogglePerspectiveGrid);
@@ -4208,7 +4721,7 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
             .and_then(|w| cfg.index_of(w.parent))
             .map(|p| p + 1);
         Frame::none()
-            .fill(if selected { theme::ACCENT_DIM } else { Color32::TRANSPARENT })
+            .fill(if selected { theme::accent_dim() } else { Color32::TRANSPARENT })
             .rounding(egui::Rounding::same(6.0))
             .inner_margin(Margin::symmetric(6.0, 2.0))
             .show(ui, |ui| {
@@ -4320,7 +4833,9 @@ fn grid_settings_window(state: &mut AppState, ctx: &egui::Context) {
     };
     let title = format!("Grid {} settings", state.perspective.active + 1);
     let mut open = true;
-    egui::Window::new(theme::icon_text(ic::GEAR, &title))
+    let title = theme::icon_text(ic::GEAR, &title);
+    let shortfall = title_shortfall(ctx, &title);
+    egui::Window::new(title)
         // Pinned: egui keys a window's remembered position on its title, and
         // this one's changes with the grid.
         .id(egui::Id::new("window_grid_settings"))
@@ -4332,7 +4847,10 @@ fn grid_settings_window(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             drag_by_title_only(ui);
-            egui::ScrollArea::vertical().show(ui, |ui| grid_settings(state, ui));
+            // Taller than the window, the body fills it; see `title_shortfall`.
+            egui::ScrollArea::vertical()
+                .max_height((ui.available_height() - shortfall).max(0.0))
+                .show(ui, |ui| grid_settings(state, ui));
         });
     state.show_grid_settings &= open;
 }
@@ -4549,7 +5067,7 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
                     "Stands on grid {p}'s {} edge",
                     EDGE_NAMES[link.edge as usize & 3].to_lowercase()
                 ))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
             );
             let unlink = theme::icon_button(ui, ic::LINK_BREAK, "Unlink: a free grid from here on");
@@ -4564,7 +5082,7 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
     if wall {
         ui.label(
             egui::RichText::new("A wall moves with its floor.")
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
         );
     } else {
@@ -4606,7 +5124,7 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
             0 => "No keys: the grid holds still".to_string(),
             n => format!("{n} key(s){}", if here { " — keyed on this frame" } else { "" }),
         };
-        ui.label(egui::RichText::new(status).color(theme::TEXT_MUTED).size(10.5));
+        ui.label(egui::RichText::new(status).color(theme::text_muted()).size(10.5));
         // Ease of the key on this frame: it shapes the segment running from
         // it to the next, as on camera keys.
         let mut ease = g.key_at(frame).map(|k| k.ease).unwrap_or_default();
@@ -4716,7 +5234,7 @@ fn liquify_options(state: &mut AppState, ui: &mut egui::Ui) {
              Ctrl+Z takes back a stroke; the warp lands when you press Enter or \
              change tool, frame or layer.",
         )
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(11.0),
     );
 }
@@ -4767,7 +5285,7 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
         let what = if n == 1 { "drawing" } else { "drawings" };
         ui.label(
             egui::RichText::new(format!("Applies to {n} {what} on this layer"))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
         );
     }
@@ -4792,7 +5310,7 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
         {
             state.deselect();
         }
-        let fill = tip(state, Action::SelectionFill, "Fill with brush colour");
+        let fill = tip(state, Action::SelectionFill, "Fill with brush colour at the Fill tool's opacity");
         if ui
             .add_enabled(
                 state.sel_mask.is_some(),
@@ -4805,6 +5323,8 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
             state.fill_selection();
         }
     });
+    ui.add(egui::Slider::new(state.fill_opacity_mut(), 0.0..=1.0).text("Fill opacity"))
+        .on_hover_text("Shared with the Fill tool.");
     ui.horizontal(|ui| {
         let on = state.sel_mask.is_some();
         ui.add(
@@ -4825,7 +5345,7 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
     // Flip and turn the pixels — the view flip leaves them alone.
     ui.horizontal(|ui| {
         let scope = orient_scope(state);
-        for (o, action, icon, name, _) in ORIENT_ART {
+        for (o, action, icon, name) in ORIENT_ART {
             let text = tip(state, action, &format!("{name}: {scope}"));
             if theme::icon_button(ui, icon, &text).clicked() {
                 state.orient_art(o);
@@ -4845,28 +5365,27 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
              {del} erases inside it - {cut} / {copy} / {paste} move it between \
              frames and layers.",
         ))
-        .color(theme::TEXT_MUTED)
+        .color(theme::text_muted())
         .size(11.0),
     );
 }
 
-/// The art flips and turns, as the Lasso panel, the Edit menu and a layer's
-/// menu list them: what it does, its shortcut, its icon, and its name on the
-/// selection-or-drawing commands and on the whole-layer ones.
-const ORIENT_ART: [(crate::doc::orient::Orient, Action, &str, &str, &str); 5] = {
+/// The art flips and turns, as the Lasso panel, the Edit menu and the Layers
+/// panel's toolbar list them: what it does, its shortcut, its icon and its
+/// name.
+const ORIENT_ART: [(crate::doc::orient::Orient, Action, &str, &str); 5] = {
     use crate::doc::orient::Orient;
     [
-        (Orient::FLIP_H, Action::ArtFlipH, ic::FLIP_HORIZONTAL, "Flip horizontally", "Flip layer horizontally"),
-        (Orient::FLIP_V, Action::ArtFlipV, ic::FLIP_VERTICAL, "Flip vertically", "Flip layer vertically"),
-        (Orient::CW, Action::ArtRotateCw, ic::ARROW_CLOCKWISE, "Rotate 90° clockwise", "Rotate layer 90° clockwise"),
+        (Orient::FLIP_H, Action::ArtFlipH, ic::FLIP_HORIZONTAL, "Flip horizontally"),
+        (Orient::FLIP_V, Action::ArtFlipV, ic::FLIP_VERTICAL, "Flip vertically"),
+        (Orient::CW, Action::ArtRotateCw, ic::ARROW_CLOCKWISE, "Rotate 90° clockwise"),
         (
             Orient::CCW,
             Action::ArtRotateCcw,
             ic::ARROW_COUNTER_CLOCKWISE,
             "Rotate 90° anticlockwise",
-            "Rotate layer 90° anticlockwise",
         ),
-        (Orient::HALF, Action::ArtRotate180, ic::ARROWS_CLOCKWISE, "Rotate 180°", "Rotate layer 180°"),
+        (Orient::HALF, Action::ArtRotate180, ic::ARROWS_CLOCKWISE, "Rotate 180°"),
     ]
 };
 
@@ -4986,7 +5505,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         };
         let t = state.display_transform(cur_layer, frame);
         let lc = layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
-        image_quad(&painter, tex.id(), lc, theme::white_alpha(a));
+        canvas_quad(&painter, state, tex.id(), lc, theme::white_alpha(a));
     };
     let draw_onion = || {
         // Pins at the bottom: they're references, usually far off. Then the
@@ -5017,8 +5536,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             if let Some((t, lc)) = tex.and_then(|t| Some((t, tex_corners(li, id, t.rect)?))) {
                 let dim = (layer.opacity * 0.45).clamp(0.0, 1.0);
                 let a = (dim * 255.0) as u8;
-                image_quad(
+                canvas_quad(
                     &painter,
+                    state,
                     t.tex.id(),
                     lc,
                     theme::white_alpha(a),
@@ -5050,7 +5570,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                         xf.doc_to_screen(x0, y1),
                     ];
                     let op = layer.opacity * state.layer_view_alpha(li);
-                    image_quad(&painter, tex.id(), q, theme::white_alpha((op.clamp(0.0, 1.0) * 255.0) as u8));
+                    canvas_quad(&painter, state, tex.id(), q, theme::white_alpha((op.clamp(0.0, 1.0) * 255.0) as u8));
                 }
             }
             continue;
@@ -5075,8 +5595,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             if let Some(lc) = tex_corners(li, id, rect) {
                 let op = layer.opacity * group_op * state.layer_view_alpha(li);
                 let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
-                image_quad(
+                canvas_quad(
                     &painter,
+                    state,
                     tex.id(),
                     lc,
                     theme::white_alpha(a),
@@ -5104,7 +5625,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // same feature. Doc-space points map straight through the view transform.
     if state.tool == crate::tools::ActiveTool::Tracker {
         if let Some(layer) = state.project.layers.get(cur_layer) {
-            let a_col = theme::ACCENT;
+            let a_col = theme::accent();
             let b_col = Color32::from_rgb(255, 170, 60);
             let draw_marker = |p: [f32; 2], col: Color32, alpha: u8, label: &str| {
                 let col = theme::premul(col.r(), col.g(), col.b(), alpha);
@@ -5290,8 +5811,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             .map(|&(x, y)| cell_to_screen(x, y))
             .collect();
         if let Some(tex) = &state.selection_tex {
-            image_quad(
+            canvas_quad(
                 &painter,
+                state,
                 tex.id(),
                 [box_pts[0], box_pts[1], box_pts[2], box_pts[3]],
                 Color32::WHITE,
@@ -5433,8 +5955,38 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 let close = crate::tools::selection::HANDLE_PX * 1.5;
                 if let (Some(first), Some(h)) = (pts.first().map(to_screen), hover) {
                     if pts.len() >= 3 && first.distance(h) <= close {
-                        painter.circle_stroke(first, close, Stroke::new(1.5, theme::ACCENT));
+                        painter.circle_stroke(first, close, Stroke::new(1.5, theme::accent()));
                     }
+                }
+            }
+        }
+    }
+
+    // A lasso fill being drawn, the same way.
+    if let Some(l) = state.fill_lasso() {
+        let to_screen = |&(x, y): &(f32, f32)| xf.doc_to_screen(x, y);
+        let mut path: Vec<egui::Pos2> = l.pts.iter().map(to_screen).collect();
+        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+        if l.polygon {
+            // Between taps the next edge rubber-bands to the pointer,
+            // turned to its 15° step while that is held.
+            if let (false, Some(h)) = (l.pressed, hover) {
+                let snap = ui.input(|i| held_lasso(state, i).snap);
+                let (x, y) = xf.screen_to_doc(h);
+                let (x, y) = state.fill_corner_at((x, y), snap);
+                path.push(xf.doc_to_screen(x, y));
+            }
+        }
+        gesture_path(&painter, &path, true);
+        if l.polygon {
+            for p in l.pts.iter().map(to_screen) {
+                painter.circle_filled(p, 2.5, Color32::WHITE);
+                painter.circle_stroke(p, 2.5, Stroke::new(1.0, Color32::from_black_alpha(200)));
+            }
+            let close = crate::tools::selection::HANDLE_PX * 1.5;
+            if let (Some(first), Some(h)) = (l.pts.first().map(to_screen), hover) {
+                if l.pts.len() >= 3 && first.distance(h) <= close {
+                    painter.circle_stroke(first, close, Stroke::new(1.5, theme::accent()));
                 }
             }
         }
@@ -6120,6 +6672,22 @@ impl Xform {
     }
 }
 
+/// Draw artwork — a cell, ghost, group or lifted selection — as
+/// `image_quad` does, but through `ui::canvas_gpu` when there is one, which
+/// mixes texels in gamma space: egui's own sampler mixes them in linear
+/// light, and light ink gets a bright rim wherever a screen pixel falls
+/// between two texels. A texture egui hasn't made yet, or re-filled whole
+/// this frame, draws as before.
+fn canvas_quad(painter: &egui::Painter, state: &AppState, tex: egui::TextureId, corners: [egui::Pos2; 4], tint: Color32) {
+    let gpu = state.canvas_gpu.as_ref().filter(|_| !state.fresh_full.contains(&tex));
+    match gpu.and_then(|g| g.quad(painter.clip_rect(), tex, corners, tint)) {
+        Some(shape) => {
+            painter.add(shape);
+        }
+        None => image_quad(painter, tex, corners, tint),
+    }
+}
+
 /// Draw a texture onto an arbitrary (possibly rotated) quad given its 4 screen
 /// corners in TL, TR, BR, BL order. `tint` multiplies the sampled texels.
 fn image_quad(painter: &egui::Painter, tex: egui::TextureId, corners: [egui::Pos2; 4], tint: Color32) {
@@ -6186,6 +6754,16 @@ fn gesture_path(painter: &egui::Painter, pts: &[egui::Pos2], closing: bool) {
     }
 }
 
+/// What the Fill lasso's held combos ask for right now.
+pub(crate) fn held_lasso(state: &AppState, i: &egui::InputState) -> LassoHeld {
+    let on = |a| state.shortcuts.get(a).is_some_and(|c| c.held(i));
+    LassoHeld {
+        erase: on(Action::FillLassoErase),
+        enclose: on(Action::FillLassoEnclose),
+        snap: on(Action::FillPolygonSnap),
+    }
+}
+
 /// The selection mode a held combo asks for, if any.
 pub(crate) fn held_sel_op(state: &AppState, i: &egui::InputState) -> Option<SelOp> {
     [
@@ -6210,9 +6788,10 @@ fn finish_canvas_drag(state: &mut AppState) {
     } else if state.cam_drag.is_some() {
         state.camera_frame_up();
     } else if state.nav_drag.is_none() {
-        // Both are no-ops when idle, so a tool change mid-drag
-        // cannot strand either.
+        // All no-ops when idle, so a tool change mid-drag cannot strand
+        // any of them.
         state.select_up();
+        state.fill_lasso_up();
         state.pointer_up();
     }
     state.nav_drag = None;
@@ -6273,6 +6852,7 @@ fn draw_readout(painter: &egui::Painter, pos: egui::Pos2, text: String) {
 fn draw_swatch_pie(
     ctx: &egui::Context,
     palette: &[[u8; 3]],
+    cap: usize,
     d: &crate::app::ButtonDragState,
     current: [u8; 4],
 ) {
@@ -6282,7 +6862,7 @@ fn draw_swatch_pie(
         egui::Id::new("swatch_pie"),
     ));
     let c = d.anchor;
-    let (inner, outer) = pie_rings(palette.len());
+    let (inner, outer) = pie_rings(palette.len(), cap);
     let edge = if outer > 0 { PIE_OUTER } else { PIE_RING };
     painter.circle_filled(c, edge + 4.0, theme::premul(20, 20, 22, 210));
     let quiet = Stroke::new(1.0, theme::premul(0, 0, 0, 160));
@@ -6626,20 +7206,20 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
                     painter.line_segment([a, b], Stroke::new(w, col));
                 }
             }
-            painter.circle_stroke(pos, gap, Stroke::new(1.0, theme::ACCENT));
+            painter.circle_stroke(pos, gap, Stroke::new(1.0, theme::accent()));
         }
     }
 }
 
 /// The Paste button beside a colour readout.
-fn paste_button(ui: &mut egui::Ui) -> bool {
+pub(crate) fn paste_button(ui: &mut egui::Ui) -> bool {
     ui.button("Paste")
         .on_hover_text("Paste a colour copied as hsl(…), rgb(…) or #hex")
         .clicked()
 }
 
 /// The colour on the clipboard, in any form [`parse_color`] reads.
-fn clipboard_color() -> Option<[u8; 3]> {
+pub(crate) fn clipboard_color() -> Option<[u8; 3]> {
     let text = arboard::Clipboard::new().ok()?.get_text().ok()?;
     parse_color(&text)
 }
@@ -6877,7 +7457,7 @@ fn menu_window(state: &mut AppState, ctx: &egui::Context) {
                     egui::Align2::CENTER_CENTER,
                     ic::DOTS_SIX_VERTICAL,
                     egui::FontId::proportional(15.0),
-                    theme::TEXT_MUTED,
+                    theme::text_muted(),
                 );
                 if resp.hovered() {
                     ctx.set_cursor_icon(egui::CursorIcon::Grab);
@@ -6930,7 +7510,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.separator();
         ui.menu_button(theme::icon_text(ic::FLIP_HORIZONTAL, "Flip / rotate"), |ui| {
             let scope = orient_scope(state);
-            for (o, action, icon, name, _) in ORIENT_ART {
+            for (o, action, icon, name) in ORIENT_ART {
                 let key = state.shortcuts.get(action).map(|c| format!("  ({})", c.display()));
                 if ui
                     .button(theme::icon_text(icon, &format!("{name}{}", key.unwrap_or_default())))
@@ -6945,11 +7525,11 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.separator();
         let shortcuts = if n_conflicts > 0 {
             ui.button(
-                egui::RichText::new(theme::icon_text(ic::WARNING, "Shortcuts…")).color(DIAG_BAD),
+                egui::RichText::new(theme::icon_text(ic::WARNING, "Settings…")).color(theme::warn()),
             )
             .on_hover_text("Some shortcuts clash. They are flagged in the list.")
         } else {
-            ui.button(theme::icon_text(ic::GEAR, "Shortcuts…"))
+            ui.button(theme::icon_text(ic::GEAR, "Settings…"))
         };
         if shortcuts.clicked() {
             state.show_settings = true;
@@ -6961,7 +7541,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
     if n_conflicts > 0 {
         let r = edit.response.rect;
         ui.painter()
-            .circle_filled(r.right_top() + egui::vec2(-3.0, 3.0), 3.0, DIAG_BAD);
+            .circle_filled(r.right_top() + egui::vec2(-3.0, 3.0), 3.0, theme::warn());
     }
     ui.menu_button(theme::icon_text(ic::FOLDER, "File"), |ui| {
         if ui
@@ -6986,18 +7566,22 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         // Name the file Save is about to overwrite — it no longer prompts, so
         // this is where you check what you are clobbering.
+        // A long name is cut in the middle rather than wrapped: the menu
+        // keeps its width and the shortcut stays on the line.
         let save_label = match state.project_path.as_ref().and_then(|p| p.file_name()) {
             Some(name) => format!(
                 "Save  {}    {}",
-                name.to_string_lossy(),
+                ellipsize_middle(&name.to_string_lossy(), 28),
                 combo_text(state, Action::SaveProject)
             ),
             None => format!("Save project…    {}", combo_text(state, Action::SaveProject)),
         };
-        if ui
-            .button(theme::icon_text(ic::FLOPPY_DISK, &save_label))
-            .clicked()
-        {
+        let save = ui.button(theme::icon_text(ic::FLOPPY_DISK, &save_label));
+        let save = match &state.project_path {
+            Some(p) => save.on_hover_text(p.display().to_string()),
+            None => save,
+        };
+        if save.clicked() {
             state.save_project();
             ui.close_menu();
         }
@@ -7014,7 +7598,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         ui.separator();
         if ui
-            .button(theme::icon_text(ic::PAINT_BRUSH, krita_menu_label(state)))
+            .button(theme::icon_text(ic::PAINT_BRUSH, krita_menu_label(state, false)))
             .on_hover_text(
                 "Opens the project in Krita as an animation. Each time you save \
                  there, the drawings, timing and layers you changed come back \
@@ -7023,7 +7607,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             )
             .clicked()
         {
-            state.edit_in_krita(state.project.current_layer);
+            state.edit_in_krita(state.project.current_layer, None);
             ui.close_menu();
         }
         if state.krita_linked()
@@ -7087,6 +7671,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         for (icon, label, kind) in [
             (ic::IMAGES, "Export PNG sequence…", ExportKind::PngSequence),
             (ic::FILM_REEL, "Export animated GIF…", ExportKind::Gif),
+            (ic::FILE_IMAGE, "Export animated WebP…", ExportKind::Webp),
             (ic::FILM_STRIP, "Export MP4…", ExportKind::Mp4),
             (ic::GRID_FOUR, "Export sprite sheet…", ExportKind::SpriteSheet),
         ] {
@@ -7144,6 +7729,13 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             ui.close_menu();
         }
         if ui
+            .button(theme::icon_text(ic::FILE_IMAGE, "Import WebP…"))
+            .clicked()
+        {
+            state.open_webp_import();
+            ui.close_menu();
+        }
+        if ui
             .button(theme::icon_text(ic::FILE_ARROW_DOWN, "Import .kra…"))
             .on_hover_text("Adds the Krita document's paint layers under the active layer")
             .clicked()
@@ -7162,6 +7754,33 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.separator();
         if ui.button(theme::icon_text(ic::SIGN_OUT, "Quit")).clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    });
+    ui.menu_button(theme::icon_text(ic::SQUARES_FOUR, "Panels"), |ui| {
+        for id in PanelId::ALL {
+            let (icon, title) = panel_meta(id);
+            let mut shown = state.panel_shown(id);
+            if ui.checkbox(&mut shown, theme::icon_text(icon, title)).changed() {
+                state.set_panel_shown(id, shown);
+            }
+        }
+        ui.separator();
+        ui.menu_button(theme::icon_text(ic::PALETTE, "Color scheme"), |ui| {
+            for s in Scheme::ALL {
+                if ui.radio(state.color_scheme == s, s.label()).clicked() {
+                    state.color_scheme = s;
+                    state.apply_scheme(ctx);
+                    ui.close_menu();
+                }
+            }
+        });
+        if ui
+            .button(theme::icon_text(ic::ARROW_COUNTER_CLOCKWISE, "Reset panel layout"))
+            .on_hover_text("Every panel shown, back where it first opened and at its first size")
+            .clicked()
+        {
+            state.reset_panel_layout();
+            ui.close_menu();
         }
     });
 }
@@ -7288,7 +7907,7 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
             if presets.is_empty() {
                 ui.label(
                     egui::RichText::new("Name the size above and save it to reuse it.")
-                        .color(theme::TEXT_MUTED)
+                        .color(theme::text_muted())
                         .size(11.0),
                 );
             }
@@ -7299,9 +7918,9 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
                     for (i, p) in presets.iter().enumerate() {
                         ui.horizontal(|ui| {
                             let star_color = if p.is_default {
-                                theme::ACCENT
+                                theme::accent()
                             } else {
-                                theme::TEXT_MUTED
+                                theme::text_muted()
                             };
                             let tip = if p.is_default {
                                 "New project opens on this preset. Click to stop."
@@ -7525,7 +8144,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                             state.project.camera_opts.fill.label()
                         ))
                         .small()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                     );
                 }
                 ui.add_enabled(
@@ -7535,7 +8154,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                         "Ping-pong (forward, then back)",
                     ),
                 );
-                // A GIF repeats forever by itself; only files with an end
+                // A GIF or WebP repeats by itself; only files with an end
                 // need a length.
                 if matches!(kind, ExportKind::Mp4 | ExportKind::PngSequence) {
                     ui.horizontal(|ui| {
@@ -7552,7 +8171,25 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new("Rounds up to whole loops, so it repeats seamlessly.")
                             .small()
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
+                    );
+                }
+                if kind == ExportKind::Webp {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut state.export_cfg.webp_stop, "Stop after");
+                        let plays = state.export_cfg.webp_plays;
+                        ui.add_enabled(
+                            state.export_cfg.webp_stop,
+                            egui::DragValue::new(&mut state.export_cfg.webp_plays)
+                                .range(1..=u16::MAX)
+                                .speed(0.1)
+                                .suffix(if plays == 1 { " play" } else { " plays" }),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new("Off, it repeats forever, like a GIF.")
+                            .small()
+                            .color(theme::text_muted()),
                     );
                 }
             }
@@ -7571,7 +8208,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                             "Lower = better quality, larger file. 18 is visually lossless.",
                         )
                         .small()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                     );
                     ui.add_space(6.0);
                     egui::ComboBox::from_label("Preset")
@@ -7590,7 +8227,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new("Slower preset = smaller file, longer encode.")
                             .small()
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
                     );
                 }
                 ExportKind::SpriteSheet => {
@@ -7661,7 +8298,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
             };
             ui.label(
                 egui::RichText::new(summary)
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .size(11.0),
             );
 
@@ -7686,7 +8323,7 @@ fn export_dialog(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
-/// Start/end frame-range picker for video / GIF import (dual-knob slider plus
+/// Start/end frame-range picker for video / GIF / WebP import (dual-knob slider plus
 /// exact numeric inputs, with live previews of the start/end frames). The active
 /// layer is untouched; the chosen range is laid onto a new layer from frame 0.
 fn import_range_dialog(state: &mut AppState, ctx: &egui::Context) {
@@ -7724,7 +8361,7 @@ fn import_range_dialog(state: &mut AppState, ctx: &egui::Context) {
                 egui::RichText::new(format!(
                     "{total} source frames. Pick the range — frames map onto the timeline starting at frame 0.",
                 ))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
             );
             ui.add_space(8.0);
@@ -7741,7 +8378,7 @@ fn import_range_dialog(state: &mut AppState, ctx: &egui::Context) {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(format!("{count} frame(s) will be imported."))
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .size(11.0),
             );
 
@@ -7775,7 +8412,7 @@ fn preview_box(ui: &mut egui::Ui, label: &str, idx: usize, tex: &Option<egui::Te
     ui.vertical(|ui| {
         ui.label(
             egui::RichText::new(format!("{label}: frame {idx}"))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .size(11.0),
         );
         let target_w = 170.0;
@@ -7805,11 +8442,11 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
             .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
-                    .fill(theme::BG_PANEL)
+                    .fill(theme::bg_panel())
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(14.0));
-                            ui.label(egui::RichText::new("Saving…").color(theme::TEXT));
+                            ui.label(egui::RichText::new("Saving…").color(theme::text()));
                         });
                     });
             });
@@ -7835,28 +8472,52 @@ fn save_toast(state: &mut AppState, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
-                .fill(fade(theme::BG_PANEL))
+                .fill(fade(theme::bg_panel()))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(ic::CHECK_CIRCLE)
-                                .color(fade(theme::ACCENT))
+                                .color(fade(theme::accent()))
                                 .size(15.0),
                         );
                         ui.label(
-                            egui::RichText::new(msg).color(fade(theme::TEXT)),
+                            egui::RichText::new(msg).color(fade(theme::text())),
                         );
                     });
                 });
         });
 }
 
+/// `name` cut to `max` characters by dropping the middle of its stem, so the
+/// start and the end — the extension, and a version or shot number before
+/// it — still show.
+fn ellipsize_middle(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && name.len() - i <= 8 => name.split_at(i),
+        _ => (name, ""),
+    };
+    let keep = max.saturating_sub(ext.chars().count() + 1);
+    let tail = keep / 3;
+    let head = keep - tail;
+    let n = stem.chars().count();
+    let mut out: String = stem.chars().take(head).collect();
+    out.push('…');
+    out.extend(stem.chars().skip(n - tail));
+    out.push_str(ext);
+    out
+}
+
 /// "Edit in Krita" until a link is live, then what the click does instead.
-fn krita_menu_label(state: &AppState) -> &'static str {
-    if state.krita_linked() {
-        "Send to Krita again"
-    } else {
-        "Edit in Krita"
+/// `layer`: the layer menu's, which sends that layer alone.
+fn krita_menu_label(state: &AppState, layer: bool) -> &'static str {
+    match (state.krita_linked(), layer) {
+        (true, false) => "Send to Krita again",
+        (false, false) => "Edit in Krita",
+        (true, true) => "Send layer to Krita again",
+        (false, true) => "Edit layer in Krita",
     }
 }
 
@@ -7876,7 +8537,7 @@ fn krita_toast(state: &mut AppState, ctx: &egui::Context) {
     let (icon, tint) = if warn {
         (ic::WARNING, Color32::from_rgb(232, 176, 72))
     } else {
-        (ic::PAINT_BRUSH, theme::ACCENT)
+        (ic::PAINT_BRUSH, theme::accent())
     };
     egui::Area::new(egui::Id::new("krita_toast"))
         .order(egui::Order::Foreground)
@@ -7884,13 +8545,13 @@ fn krita_toast(state: &mut AppState, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -64.0))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
-                .fill(fade(theme::BG_PANEL))
+                .fill(fade(theme::bg_panel()))
                 .show(ui, |ui| {
                     ui.set_max_width(520.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(icon).color(fade(tint)).size(15.0));
                         ui.add(
-                            egui::Label::new(egui::RichText::new(msg).color(fade(theme::TEXT))).wrap(),
+                            egui::Label::new(egui::RichText::new(msg).color(fade(theme::text()))).wrap(),
                         );
                     });
                 });
@@ -7913,7 +8574,7 @@ fn save_error_dialog(state: &mut AppState, ctx: &egui::Context) {
         .frame(floating_frame())
         .show(ctx, |ui| {
             ui.set_max_width(420.0);
-            ui.label(egui::RichText::new(&msg).color(theme::TEXT));
+            ui.label(egui::RichText::new(&msg).color(theme::text()));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.button("Save As…").clicked() {
@@ -7940,12 +8601,12 @@ fn busy_overlay(ctx: &egui::Context, label: &str) {
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
-                .fill(theme::BG_PANEL)
+                .fill(theme::bg_panel())
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new());
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new(label).color(theme::TEXT));
+                        ui.label(egui::RichText::new(label).color(theme::text()));
                     });
                 });
         });
@@ -8957,40 +9618,46 @@ mod layers_panel_tests {
         (state, ctx, shapes)
     }
 
-    /// Whether any text painted inside the Layers panel contains `glyph`.
-    fn panel_shows(
+    /// How many texts painted inside the Layers panel contain `glyph`.
+    fn panel_count(
         ctx: &egui::Context,
         shapes: &[egui::epaint::ClippedShape],
         glyph: &str,
-    ) -> bool {
-        fn find(shape: &egui::Shape, glyph: &str, panel: Rect) -> bool {
+    ) -> usize {
+        fn find(shape: &egui::Shape, glyph: &str, panel: Rect) -> usize {
             match shape {
-                egui::Shape::Vec(v) => v.iter().any(|s| find(s, glyph, panel)),
+                egui::Shape::Vec(v) => v.iter().map(|s| find(s, glyph, panel)).sum(),
                 egui::Shape::Text(t) => {
-                    t.galley.text().contains(glyph) && panel.contains_rect(t.visual_bounding_rect())
+                    usize::from(t.galley.text().contains(glyph) && panel.contains_rect(t.visual_bounding_rect()))
                 }
-                _ => false,
+                _ => 0,
             }
         }
         let panel = egui::AreaState::load(ctx, egui::Id::new(panel_key(PanelId::Layers)))
             .expect("Layers panel laid out")
             .rect();
-        shapes.iter().any(|s| find(&s.shape, glyph, panel))
+        shapes.iter().map(|s| find(&s.shape, glyph, panel)).sum()
+    }
+
+    /// Whether any text painted inside the Layers panel contains `glyph`.
+    fn panel_shows(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], glyph: &str) -> bool {
+        panel_count(ctx, shapes, glyph) > 0
     }
 
     #[test]
     fn clipped_and_alpha_locked_layers_are_marked_in_the_panel() {
+        // Once each in the toolbar, as the buttons; a row's mark adds one.
         let (mut state, ctx, shapes) = setup();
-        assert!(!panel_shows(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN));
-        assert!(!panel_shows(&ctx, &shapes, ic::CHECKERBOARD));
+        assert_eq!(panel_count(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN), 1);
+        assert_eq!(panel_count(&ctx, &shapes, ic::CHECKERBOARD), 1);
         state.project.layers[1].clip = true;
         state.project.layers[2].alpha_lock = true;
         let mut shapes = Vec::new();
         for _ in 0..2 {
             shapes = frame(&ctx, &mut state, vec![]);
         }
-        assert!(panel_shows(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN));
-        assert!(panel_shows(&ctx, &shapes, ic::CHECKERBOARD));
+        assert_eq!(panel_count(&ctx, &shapes, ic::ARROW_BEND_LEFT_DOWN), 2);
+        assert_eq!(panel_count(&ctx, &shapes, ic::CHECKERBOARD), 2);
     }
 
     fn names(state: &AppState) -> Vec<&str> {
@@ -9178,6 +9845,101 @@ mod layers_panel_tests {
         );
     }
 
+    /// Every text painted anywhere containing `text`, top first.
+    fn text_rects(shapes: &[egui::epaint::ClippedShape], text: &str) -> Vec<Rect> {
+        fn find(shape: &egui::Shape, text: &str, clip: Rect, out: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| find(s, text, clip, out)),
+                egui::Shape::Text(t) if t.galley.text().contains(text) => {
+                    let r = t.visual_bounding_rect();
+                    if clip.intersects(r) {
+                        out.push(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            find(&s.shape, text, s.clip_rect, &mut out);
+        }
+        out.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        out
+    }
+
+    /// Press and let go at `at`, a frame each, then settle a frame.
+    fn click(ctx: &egui::Context, state: &mut AppState, at: Pos2) -> Vec<egui::epaint::ClippedShape> {
+        frame(ctx, state, vec![egui::Event::PointerMoved(at), button(at, true)]);
+        frame(ctx, state, vec![button(at, false)]);
+        frame(ctx, state, vec![])
+    }
+
+    /// The `glyph` painted on the same line as layer `name`'s label.
+    fn on_row(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], name: &str, glyph: &str) -> Pos2 {
+        let y = name_rect(ctx, shapes, name).center().y;
+        text_rects(shapes, glyph)
+            .into_iter()
+            .find(|r| (r.center().y - y).abs() < 8.0)
+            .unwrap_or_else(|| panic!("no {glyph:?} on {name}'s row"))
+            .center()
+    }
+
+    /// The toolbar's clip button works on every picked layer, and turns
+    /// them all the same way.
+    #[test]
+    fn the_toolbar_clips_every_picked_layer() {
+        let (mut state, ctx, shapes) = setup();
+        state.project.layers[1].clip = true;
+        state.selected_layers.extend(state.project.layers.iter().map(|l| l.uid));
+        let clip = text_rects(&shapes, ic::ARROW_BEND_LEFT_DOWN)[0].center();
+        click(&ctx, &mut state, clip);
+        assert!(state.project.layers.iter().all(|l| l.clip), "all on, from the active one being off");
+        click(&ctx, &mut state, clip);
+        assert!(state.project.layers.iter().all(|l| !l.clip));
+    }
+
+    /// A layer under full opacity says how far under, on its row.
+    #[test]
+    fn a_faded_layer_shows_its_opacity_on_its_row() {
+        let (mut state, ctx, shapes) = setup();
+        assert!(text_rects(&shapes, "40%").is_empty());
+        state.project.layers[0].opacity = 0.4;
+        frame(&ctx, &mut state, vec![]);
+        let shapes = frame(&ctx, &mut state, vec![]);
+        on_row(&ctx, &shapes, "Alpha", "40%");
+    }
+
+    /// The ⋮ on a row opens the layer's menu, and its Rename opens the
+    /// rename box on that row.
+    #[test]
+    fn the_dots_open_the_layer_menu() {
+        let (mut state, ctx, shapes) = setup();
+        let dots = on_row(&ctx, &shapes, "Alpha", ic::DOTS_THREE_VERTICAL);
+        let shapes = click(&ctx, &mut state, dots);
+        let rename = text_rects(&shapes, "Rename").first().expect("the menu is open").center();
+        click(&ctx, &mut state, rename);
+        assert!(state.layer_rename.as_ref().is_some_and(|r| r.index == 0));
+    }
+
+    /// The cleanup button on a row adds the cleanup over that layer, already
+    /// following its keys; the row says so in its "keys with" dropdown.
+    #[test]
+    fn the_row_s_cleanup_button_adds_a_linked_layer() {
+        let (mut state, ctx, shapes) = setup();
+        assert_eq!(text_rects(&shapes, "keys with").len(), 3, "a dropdown on every row");
+        let alpha = state.project.layers[0].uid;
+        let y = name_rect(&ctx, &shapes, "Alpha").bottom();
+        let plus = text_rects(&shapes, ic::STACK_PLUS)
+            .into_iter()
+            .find(|r| r.top() > y)
+            .expect("Alpha's cleanup button, under its name")
+            .center();
+        let shapes = click(&ctx, &mut state, plus);
+        let clean = state.project.layers.iter().position(|l| l.name == "Alpha clean").expect("added");
+        assert_eq!(state.project.layers[clean].keys_from, Some(alpha));
+        assert!(!text_rects(&shapes, "Alpha").is_empty());
+    }
+
     #[test]
     fn the_folded_sections_still_draw() {
         let (mut state, ctx, _) = setup();
@@ -9320,6 +10082,104 @@ mod fill_tests {
         frame(&ctx, &mut state, vec![]);
         assert!(!state.fill_dragging());
         assert_eq!(state.history.undo_len(), 1);
+    }
+
+    /// The Fill tool in lasso mode, red, with the panels out of the way.
+    fn lasso_state() -> (AppState, egui::Context) {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolFill);
+        state.dispatch(Action::ToolFill);
+        assert_eq!(state.fill_mode, FillMode::Lasso, "Fill again swaps to the lasso");
+        state.brush.color = RED;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        (state, ctx)
+    }
+
+    fn at(state: &AppState, x: f32, y: f32) -> Pos2 {
+        Xform::new(state, SCREEN).doc_to_screen(x, y)
+    }
+
+    /// A press and its release, a frame each.
+    fn click(ctx: &egui::Context, state: &mut AppState, p: Pos2) {
+        frame(ctx, state, vec![egui::Event::PointerMoved(p), button(p, true)]);
+        frame(ctx, state, vec![button(p, false)]);
+    }
+
+    /// A click, then a second of frames (each a 60th): an unhurried tap,
+    /// clear of egui's double- and triple-click times, 0.3 s and 0.6 s.
+    fn tap(ctx: &egui::Context, state: &mut AppState, p: Pos2) {
+        click(ctx, state, p);
+        for _ in 0..60 {
+            frame(ctx, state, vec![]);
+        }
+    }
+
+    /// Corners tapped fast, under egui's double-click time, don't close the
+    /// polygon: only two presses on one spot do.
+    #[test]
+    fn quick_taps_on_different_spots_are_not_a_double_click() {
+        let (mut state, ctx) = lasso_state();
+        for &(x, y) in &[(100.0, 100.0), (300.0, 100.0), (200.0, 300.0)] {
+            let p = at(&state, x, y);
+            click(&ctx, &mut state, p);
+        }
+        assert!(state.fill_polygon_active(), "still being tapped out");
+        assert_eq!(state.fill_lasso().map(|l| l.pts.len()), Some(3));
+    }
+
+    #[test]
+    fn a_lasso_drag_fills_what_it_goes_round() {
+        let (mut state, ctx) = lasso_state();
+        let pts = [(100.0, 100.0), (300.0, 100.0), (300.0, 300.0), (100.0, 300.0)];
+        let first = at(&state, pts[0].0, pts[0].1);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(first), button(first, true)]);
+        for &(x, y) in &pts[1..] {
+            let p = at(&state, x, y);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+        }
+        let end = at(&state, 100.0, 300.0);
+        frame(&ctx, &mut state, vec![button(end, false)]);
+        frame(&ctx, &mut state, vec![]);
+        assert_eq!(px(&state, 200, 200), RED);
+        assert_eq!(px(&state, 50, 50)[3], 0, "nothing outside");
+        assert_eq!(state.history.undo_len(), 1);
+        assert!(state.fill_lasso().is_none());
+    }
+
+    #[test]
+    fn taps_make_a_polygon_that_fills_on_the_first_corner() {
+        let (mut state, ctx) = lasso_state();
+        let corners = [(100.0, 100.0), (300.0, 100.0), (200.0, 300.0)];
+        for &(x, y) in &corners {
+            let p = at(&state, x, y);
+            tap(&ctx, &mut state, p);
+        }
+        assert!(state.fill_polygon_active());
+        assert_eq!(px(&state, 200, 150)[3], 0, "nothing yet");
+        let first = at(&state, 100.0, 100.0);
+        tap(&ctx, &mut state, first);
+        frame(&ctx, &mut state, vec![]);
+        assert!(!state.fill_polygon_active());
+        assert_eq!(px(&state, 200, 150), RED, "inside the triangle");
+        assert_eq!(px(&state, 120, 280)[3], 0, "outside it");
+    }
+
+    #[test]
+    fn a_double_click_closes_a_polygon_fill() {
+        let (mut state, ctx) = lasso_state();
+        for &(x, y) in &[(100.0, 100.0), (300.0, 100.0)] {
+            let p = at(&state, x, y);
+            tap(&ctx, &mut state, p);
+        }
+        let last = at(&state, 200.0, 300.0);
+        click(&ctx, &mut state, last);
+        click(&ctx, &mut state, last);
+        frame(&ctx, &mut state, vec![]);
+        assert!(!state.fill_polygon_active());
+        assert_eq!(px(&state, 200, 150), RED);
     }
 }
 
@@ -9867,6 +10727,22 @@ mod button_drag_tests {
         frame(&ctx, &mut state, vec![]);
     }
 
+    /// Shape's Thickness slider shows a big pen's size without cutting it
+    /// down: an egui slider clamps whatever it shows to its range.
+    #[test]
+    fn the_shape_panel_keeps_a_big_pen_size() {
+        let mut state = state();
+        state.brush.radius = 100.0;
+        state.set_tool(ActiveTool::Shape);
+        state.show_panels = true;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        frame(&ctx, &mut state, vec![]);
+        assert_eq!(state.brush.radius, 100.0);
+        state.set_tool(ActiveTool::Pencil);
+        assert_eq!(state.brush.radius, 100.0);
+    }
+
     #[test]
     fn the_lasso_mode_hold_still_wins_on_the_lasso() {
         let mut state = state();
@@ -9935,7 +10811,7 @@ mod shortcut_clash_tests {
     fn edit_dot(shapes: &[egui::Shape]) -> bool {
         shapes
             .iter()
-            .any(|s| matches!(s, egui::Shape::Circle(c) if c.fill == DIAG_BAD && c.radius == 3.0))
+            .any(|s| matches!(s, egui::Shape::Circle(c) if c.fill == theme::warn() && c.radius == 3.0))
     }
 
     /// Settings open on the defaults, minus their known F clashes. The test
@@ -10468,8 +11344,10 @@ mod color_panel_layout_tests {
     use super::*;
     use egui::{pos2, Pos2};
 
+    /// The Brush panel, wheel and all, opens under Tools and clear of the
+    /// Timeline on a 1080p screen, with no Color panel of its own.
     #[test]
-    fn the_color_panel_opens_under_brush_on_a_1080p_screen() {
+    fn the_brush_panel_holds_the_wheel_and_fits_a_1080p_screen() {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let mut state = AppState::for_test();
@@ -10486,10 +11364,14 @@ mod color_panel_layout_tests {
                 .expect("panel laid out")
                 .rect()
         };
-        let (brush, color) = (rect(PanelId::Brush), rect(PanelId::Color));
-        assert!(color.top() >= brush.bottom(), "{brush:?} vs {color:?}");
-        assert!(color.bottom() <= 1080.0, "{color:?}");
-        assert!(!color.intersects(rect(PanelId::Timeline)), "{color:?}");
+        let (tools, brush) = (rect(PanelId::Tools), rect(PanelId::Brush));
+        assert!(brush.top() >= tools.bottom(), "{tools:?} vs {brush:?}");
+        assert!(brush.bottom() <= 1080.0, "{brush:?}");
+        assert!(!brush.intersects(rect(PanelId::Timeline)), "{brush:?}");
+        assert!(egui::AreaState::load(&ctx, egui::Id::new(panel_key(PanelId::Color))).is_none());
+        assert!(!PanelId::ALL.contains(&PanelId::Color), "not in the Panels menu");
+        // 200 points inside, 20 of frame: no row may push it wider.
+        assert!((brush.width() - 220.0).abs() < 0.5, "{brush:?}");
     }
 }
 
@@ -10557,6 +11439,27 @@ mod camera_panel_tests {
         crate::ui::theme::install(&ctx);
         frame(&ctx, &mut state, vec![]);
         (ctx, state)
+    }
+
+    #[test]
+    fn the_panel_jumps_from_camera_key_to_camera_key() {
+        let (ctx, mut state) = setup();
+        state.project.ensure_frame_count(10);
+        for f in [3, 7] {
+            state.project.set_camera_key(f, crate::doc::camera::Camera::default());
+        }
+        click(&ctx, &mut state, ic::CARET_LINE_RIGHT);
+        assert_eq!(state.project.current_frame, 3);
+        click(&ctx, &mut state, ic::CARET_LINE_RIGHT);
+        assert_eq!(state.project.current_frame, 7);
+        click(&ctx, &mut state, ic::CARET_LINE_LEFT);
+        assert_eq!(state.project.current_frame, 3);
+        // Same through the shortcut actions, which start unbound.
+        assert!(state.shortcuts.get(Action::CameraKeyNext).is_none());
+        state.dispatch(Action::CameraKeyNext);
+        assert_eq!(state.project.current_frame, 7);
+        state.dispatch(Action::CameraKeyPrev);
+        assert_eq!(state.project.current_frame, 3);
     }
 
     #[test]
@@ -10865,5 +11768,558 @@ mod camera_frame_drag_tests {
         drag(&ctx, &mut state, from, vec2(60.0, 0.0));
         assert!(painted(&state, id) > 20, "painted {}", painted(&state, id));
         assert!(state.project.camera.is_identity());
+    }
+}
+
+/// Single windows through the real egui window, with the app's theme, at
+/// widths their content has to keep up with.
+#[cfg(test)]
+mod window_layout_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1400.0, 900.0));
+
+    type Shapes = Vec<egui::epaint::ClippedShape>;
+
+    fn setup() -> (egui::Context, AppState) {
+        let mut state = AppState::for_test();
+        state.load_project(crate::doc::project::Project::new(1920, 1080, 24.0), None);
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        (ctx, state)
+    }
+
+    fn run(ctx: &egui::Context, events: Vec<egui::Event>, show: &mut dyn FnMut(&egui::Context)) -> Shapes {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| show(ctx)).shapes
+    }
+
+    fn settle(ctx: &egui::Context, show: &mut dyn FnMut(&egui::Context)) -> Shapes {
+        let mut shapes = Vec::new();
+        for _ in 0..4 {
+            shapes = run(ctx, vec![], show);
+        }
+        shapes
+    }
+
+    fn window(ctx: &egui::Context, id: egui::Id) -> Rect {
+        egui::AreaState::load(ctx, id).expect("window laid out").rect()
+    }
+
+    /// Drag a window's right edge to `x`, over several frames.
+    fn drag_right_edge(ctx: &egui::Context, id: egui::Id, x: f32, show: &mut dyn FnMut(&egui::Context)) {
+        let r = window(ctx, id);
+        let from = pos2(r.max.x - 1.0, r.center().y);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(ctx, vec![egui::Event::PointerMoved(from)], show);
+        run(ctx, vec![button(from, true)], show);
+        for i in 1..=12 {
+            let p = pos2(from.x + (x - from.x) * (i as f32 / 12.0), from.y);
+            run(ctx, vec![egui::Event::PointerMoved(p)], show);
+        }
+        run(ctx, vec![button(pos2(x, from.y), false)], show);
+        settle(ctx, show);
+    }
+
+    /// Every piece of text drawn, with its bounds.
+    fn texts(shapes: &Shapes) -> Vec<(String, Rect)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, Rect)>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.visual_bounding_rect())),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// Every filled rectangle of colour `fill`.
+    fn fills(shapes: &Shapes, fill: Color32) -> Vec<Rect> {
+        fn walk(shape: &egui::Shape, fill: Color32, out: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, out)),
+                egui::Shape::Rect(r) if r.fill == fill => out.push(r.rect),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            walk(&s.shape, fill, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn a_narrowed_timeline_keeps_its_frame_counter_off_the_buttons() {
+        let (ctx, mut state) = setup();
+        let id = egui::Id::new(panel_key(PanelId::Timeline));
+        let mut show =
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Timeline, [20.0, 300.0], 640.0, true, None);
+        settle(&ctx, &mut show);
+        let left = window(&ctx, id).min.x;
+        drag_right_edge(&ctx, id, left + 300.0, &mut show);
+        let shapes = settle(&ctx, &mut show);
+        let t = texts(&shapes);
+        let at = |s: &str| t.iter().find(|(x, _)| x == s).unwrap_or_else(|| panic!("no {s:?} drawn")).1;
+        let last_button = at(ic::ARROWS_IN_LINE_HORIZONTAL);
+        let clock = at(ic::CLOCK);
+        assert!(clock.min.x > last_button.max.x, "counter {clock:?} over the buttons {last_button:?}");
+        assert!(window(&ctx, id).width() > 300.0, "the panel stopped at the toolbar");
+    }
+
+    #[test]
+    fn a_layer_row_spans_a_widened_layers_panel() {
+        let (ctx, mut state) = setup();
+        let id = egui::Id::new(panel_key(PanelId::Layers));
+        let mut show =
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Layers, [20.0, 20.0], 252.0, true, None);
+        settle(&ctx, &mut show);
+        let left = window(&ctx, id).min.x;
+        drag_right_edge(&ctx, id, left + 420.0, &mut show);
+        let shapes = settle(&ctx, &mut show);
+        let panel = window(&ctx, id);
+        let rows = fills(&shapes, theme::accent_dim());
+        let row = rows.first().expect("the selected row is filled");
+        assert!(row.max.x > panel.max.x - 14.0, "row {row:?} stops short of {panel:?}");
+        assert!((panel.width() - 420.0).abs() < 2.0, "{panel:?}");
+    }
+
+    #[test]
+    fn x_sheet_stripes_reach_the_panel_edge() {
+        let (ctx, mut state) = setup();
+        for _ in 0..6 {
+            state.project.add_frame();
+        }
+        let id = egui::Id::new(panel_key(PanelId::Xsheet));
+        let mut show =
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Xsheet, [20.0, 20.0], 252.0, true, None);
+        settle(&ctx, &mut show);
+        let left = window(&ctx, id).min.x;
+        drag_right_edge(&ctx, id, left + 400.0, &mut show);
+        let shapes = settle(&ctx, &mut show);
+        let panel = window(&ctx, id);
+        let stripes = fills(&shapes, ctx.style().visuals.faint_bg_color);
+        assert!(stripes.len() >= 3, "{} stripes", stripes.len());
+        for s in &stripes {
+            assert!(s.max.x > panel.max.x - 14.0, "stripe {s:?} stops short of {panel:?}");
+        }
+    }
+
+    #[test]
+    fn dragging_settings_sideways_keeps_its_height() {
+        let (ctx, mut state) = setup();
+        state.show_settings = true;
+        let id = egui::Id::new("window_settings");
+        let mut show = |ctx: &egui::Context| settings_window(&mut state, ctx);
+        settle(&ctx, &mut show);
+        let before = window(&ctx, id);
+        drag_right_edge(&ctx, id, before.max.x + 80.0, &mut show);
+        let wide = window(&ctx, id);
+        assert!((wide.width() - (before.width() + 80.0)).abs() < 2.0, "{before:?} → {wide:?}");
+        assert!((wide.height() - before.height()).abs() < 1.0, "{before:?} → {wide:?}");
+        // Back again: it opens at its content's narrowest, so this is as far
+        // as it goes.
+        drag_right_edge(&ctx, id, before.max.x, &mut show);
+        let back = window(&ctx, id);
+        assert!((back.width() - before.width()).abs() < 2.0, "{before:?} → {back:?}");
+        assert!((back.height() - before.height()).abs() < 1.0, "{before:?} → {back:?}");
+    }
+
+    /// The middle of the × egui paints at the right of a window's title bar.
+    fn close_x(shapes: &Shapes, win: Rect) -> Pos2 {
+        fn walk(shape: &egui::Shape, out: &mut Vec<Pos2>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::LineSegment { points: [a, b], .. } => out.push(pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)),
+                _ => {}
+            }
+        }
+        let mut mids = Vec::new();
+        for s in shapes {
+            walk(&s.shape, &mut mids);
+        }
+        mids.into_iter()
+            .filter(|c| win.contains(*c) && c.y < win.min.y + 36.0)
+            .max_by(|a, b| a.x.total_cmp(&b.x))
+            .expect("a close × in the title bar")
+    }
+
+    #[test]
+    fn a_panel_closes_from_its_title_bar_and_the_reset_brings_it_back_fresh() {
+        let (ctx, mut state) = setup();
+        state.show_panels = true;
+        let titled = |shapes: &Shapes| texts(shapes).iter().any(|(t, _)| t.ends_with(" Layers"));
+        let shapes = settle(&ctx, &mut |ctx| draw(&mut state, ctx));
+        assert!(titled(&shapes));
+        let area = panel_area(&state, PanelId::Layers);
+        let at = close_x(&shapes, window(&ctx, area));
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&ctx, vec![egui::Event::PointerMoved(at), button(true)], &mut |ctx| draw(&mut state, ctx));
+        run(&ctx, vec![button(false)], &mut |ctx| draw(&mut state, ctx));
+        assert!(!state.panel_shown(PanelId::Layers), "the × hides it");
+        let shapes = settle(&ctx, &mut |ctx| draw(&mut state, ctx));
+        assert!(!titled(&shapes), "and nothing of it is drawn");
+
+        state.reset_panel_layout();
+        assert!(state.panel_shown(PanelId::Layers));
+        assert_ne!(panel_area(&state, PanelId::Layers), area, "a fresh window, at its first spot");
+        let shapes = settle(&ctx, &mut |ctx| draw(&mut state, ctx));
+        assert!(titled(&shapes));
+        assert!(egui::AreaState::load(&ctx, panel_area(&state, PanelId::Layers)).is_some());
+    }
+
+    #[test]
+    fn picking_a_scheme_in_settings_restyles_the_app() {
+        use crate::ui::theme::Palette;
+        let (ctx, mut state) = setup();
+        state.show_settings = true;
+        let mut show = |state: &mut AppState, events| run(&ctx, events, &mut |ctx| settings_window(state, ctx));
+        let card = |shapes: &Shapes, name: &str| {
+            let label = texts(shapes)
+                .into_iter()
+                .find(|(t, _)| t == name)
+                .unwrap_or_else(|| panic!("no {name} card"))
+                .1;
+            // The card sits right above its name.
+            label.center() - egui::vec2(0.0, 27.0)
+        };
+        let click = |state: &mut AppState, show: &mut dyn FnMut(&mut AppState, Vec<egui::Event>) -> Shapes, at| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            show(state, vec![egui::Event::PointerMoved(at), button(true)]);
+            show(state, vec![button(false)]);
+            show(state, vec![])
+        };
+        let mut shapes = Shapes::new();
+        for _ in 0..3 {
+            shapes = show(&mut state, vec![]);
+        }
+        assert!(!texts(&shapes).iter().any(|(t, _)| t == "Buttons and fields"), "no pickers off Custom");
+        let at = card(&shapes, "Paper");
+        let shapes = click(&mut state, &mut show, at);
+        assert_eq!(state.color_scheme, Scheme::Paper);
+        assert_eq!(ctx.style().visuals.window_fill, Palette::PAPER.bg_panel);
+        assert_eq!(theme::text(), Palette::PAPER.text);
+
+        let at = card(&shapes, "Custom");
+        let shapes = click(&mut state, &mut show, at);
+        assert_eq!(state.color_scheme, Scheme::Custom);
+        assert!(texts(&shapes).iter().any(|(t, _)| t == "Buttons and fields"), "the five pickers");
+        assert_eq!(ctx.style().visuals.window_fill, Palette::derive(state.custom_colors).bg_panel);
+        assert!(
+            !texts(&shapes).iter().any(|(t, _)| t.contains("hard to read")),
+            "the Graphite five read fine"
+        );
+        // Unreadable text is called out.
+        state.custom_colors.text = state.custom_colors.panel;
+        let shapes = show(&mut state, vec![]);
+        assert!(texts(&shapes).iter().any(|(t, _)| t.contains("hard to read")));
+        theme::apply(&ctx, Palette::GRAPHITE);
+    }
+
+    #[test]
+    fn a_long_file_name_is_cut_in_the_middle() {
+        assert_eq!(ellipsize_middle("short.anim", 28), "short.anim");
+        let cut = ellipsize_middle("my_very_long_project_name_shot_04.anim", 28);
+        assert_eq!(cut, "my_very_long_pr…shot_04.anim");
+        assert_eq!(cut.chars().count(), 28);
+        // No extension: the stem's own end is kept instead.
+        let bare = ellipsize_middle("a_name_with_no_extension_at_all_here", 20);
+        assert_eq!(bare.chars().count(), 20);
+        assert!(bare.starts_with("a_name") && bare.ends_with("_here"), "{bare}");
+        // Counted in characters, not bytes.
+        let wide = ellipsize_middle("アニメーションのとても長い名前のファイル.anim", 12);
+        assert_eq!(wide.chars().count(), 12);
+        assert!(wide.ends_with(".anim"), "{wide}");
+    }
+
+    fn settle_layers(ctx: &egui::Context, state: &mut AppState) -> Shapes {
+        settle(ctx, &mut |ctx| panel_window(state, ctx, PanelId::Layers, [20.0, 20.0], 252.0, true, None))
+    }
+
+    /// Each cleanup layer is one more row, and a cleanup of a cleanup is a
+    /// longer name ("Body clean clean") with a longer link chip. Neither may
+    /// grow the panel: the list scrolls and the names are cut short.
+    #[test]
+    fn cleanup_layers_leave_the_layers_panel_its_size() {
+        let (ctx, mut state) = setup();
+        state.project.layers[0].name = "Body".into();
+        let id = egui::Id::new(panel_key(PanelId::Layers));
+        settle_layers(&ctx, &mut state);
+        let before = window(&ctx, id);
+        let mut shapes = Shapes::new();
+        for _ in 0..6 {
+            state.add_cleanup_layer(state.project.current_layer);
+            shapes = settle_layers(&ctx, &mut state);
+            let now = window(&ctx, id);
+            assert!(
+                (now.size() - before.size()).length() < 0.5,
+                "{before:?} → {now:?} at {} layers",
+                state.project.layers.len()
+            );
+        }
+        // Seven rows don't fit: the bottom one, the rough, is scrolled away.
+        let panel = window(&ctx, id);
+        let shown = |name: &str| texts(&shapes).iter().any(|(t, r)| t == name && panel.contains_rect(*r));
+        assert!(shown(&state.project.layers[6].name), "the new top row is in view");
+        assert!(!shown("Body"), "the rough is scrolled out of view");
+    }
+}
+
+#[cfg(test)]
+#[path = "sweep_tests.rs"]
+mod sweep_tests;
+
+#[cfg(test)]
+mod canvas_gpu_tests {
+    use super::*;
+    use crate::doc::canvas::Canvas;
+    use crate::timeline::onion::OnionPin;
+    use crate::tools::select_mask::SelShape;
+    use crate::ui::canvas_gpu::{CanvasGpu, Recorded};
+    use egui::{pos2, Pos2};
+    use std::sync::Arc;
+
+    /// One painted quad, however it was painted, or anything else.
+    #[derive(Debug, PartialEq)]
+    enum Token {
+        Quad {
+            tex: egui::TextureId,
+            corners: [Pos2; 4],
+            tint: Color32,
+            clip: Rect,
+        },
+        Other,
+    }
+
+    fn tokens(shapes: &[egui::epaint::ClippedShape]) -> Vec<Token> {
+        shapes
+            .iter()
+            .map(|c| match &c.shape {
+                egui::Shape::Mesh(m) if m.indices == [0, 1, 2, 0, 2, 3] && m.vertices.len() == 4 => Token::Quad {
+                    tex: m.texture_id,
+                    corners: std::array::from_fn(|i| m.vertices[i].pos),
+                    tint: m.vertices[0].color,
+                    clip: c.clip_rect,
+                },
+                egui::Shape::Callback(cb) => {
+                    let r = cb.callback.downcast_ref::<Recorded>().expect("a canvas quad");
+                    assert_eq!(cb.rect, c.clip_rect, "the callback covers its clip");
+                    Token::Quad {
+                        tex: r.tex,
+                        corners: r.corners,
+                        tint: r.tint,
+                        clip: c.clip_rect,
+                    }
+                }
+                _ => Token::Other,
+            })
+            .collect()
+    }
+
+    /// A drawing with a block of `rgba` in it.
+    fn block(st: &AppState, (x0, y0, x1, y1): (u32, u32, u32, u32), rgba: [u8; 4]) -> Canvas {
+        let (w, h) = (st.project.width, st.project.height);
+        let mut c = Canvas::new(w, h);
+        let px = c.pixels_mut();
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&rgba);
+            }
+        }
+        c
+    }
+
+    /// Every kind of artwork the canvas paints, at once: a reference layer, a
+    /// group drawn merged below full opacity, a plain layer with past, future
+    /// and pinned ghosts, a layer clipped to it, and a floating selection.
+    /// Returns the state and the layers' indices: reference, group, plain,
+    /// clipped.
+    fn scene() -> (AppState, [usize; 4]) {
+        let mut st = AppState::for_test();
+        st.show_panels = false;
+        st.show_mini_timeline = false;
+        for _ in 0..4 {
+            st.project.add_layer();
+        }
+        let blocks = [
+            ((40, 40, 300, 200), [10, 20, 30, 255]),
+            ((100, 300, 400, 500), [200, 30, 30, 255]),
+            ((350, 320, 700, 600), [30, 200, 30, 180]),
+            ((600, 100, 900, 400), [246, 240, 226, 255]),
+            ((650, 150, 1200, 700), [20, 20, 220, 255]),
+        ];
+        for (li, (r, rgba)) in blocks.into_iter().enumerate() {
+            let c = block(&st, r, rgba);
+            let id = st.project.cells.len();
+            st.project.cells.push(Arc::new(c));
+            st.project.layers[li].set_key(0, id);
+        }
+        let cells: Vec<CellId> = (0..5).map(|li| st.project.layers[li].resolve(0).unwrap()).collect();
+        st.project.layers[0].reference = true;
+        let g = st.project.group_layers(&[1, 2]).expect("grouped");
+        st.project.layers[g].opacity = 0.6;
+        let find = |st: &AppState, cell: CellId| {
+            (0..st.project.layers.len())
+                .find(|&li| st.project.layers[li].resolve(0) == Some(cell))
+                .expect("layer")
+        };
+        let (reference, plain, clipped) = (find(&st, cells[0]), find(&st, cells[3]), find(&st, cells[4]));
+        assert_eq!(clipped, plain + 1, "clipped sits right above its base");
+        st.project.layers[clipped].clip = true;
+
+        // Ghosts: four more frames of the plain layer, the playhead on 2.
+        st.project.current_layer = plain;
+        st.onion.enabled = true;
+        st.onion.prev = 1;
+        st.onion.next = 1;
+        for _ in 0..4 {
+            st.structural_edit(false, |p| {
+                p.add_frame();
+                p.insert_blank_key_here();
+            });
+        }
+        st.project.layers[plain].onion_pins = vec![OnionPin { frame: 4, tint: [0, 200, 0], visible: true }];
+        st.project.goto(2);
+        let cur = st.project.layers[plain].resolve(2).unwrap();
+        st.project.cells[cur] = Arc::new(block(&st, (600, 100, 900, 400), [246, 240, 226, 255]));
+        st.mark_dirty(cur);
+
+        // A selection lifted off it and moved.
+        st.set_tool(ActiveTool::Lasso);
+        st.sel_shape = SelShape::Rect;
+        let drag = |st: &mut AppState, a: (f32, f32), b: (f32, f32)| {
+            st.select_down(a, None);
+            for i in 1..=8 {
+                let t = i as f32 / 8.0;
+                st.select_move((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+            }
+            st.select_up();
+        };
+        drag(&mut st, (620.0, 120.0), (760.0, 260.0));
+        drag(&mut st, (700.0, 200.0), (740.0, 230.0));
+        assert!(st.selection.is_some(), "floating");
+        (st, [reference, g, plain, clipped])
+    }
+
+    /// Two passes, the second past `GHOST_REST` so ghosts get built; the
+    /// second's shapes.
+    fn paint(st: &mut AppState) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        let mut shapes = Vec::new();
+        for time in [0.0, 1.0] {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+                time: Some(time),
+                max_texture_side: Some(8192),
+                ..Default::default()
+            };
+            shapes = ctx
+                .run(raw, |ctx| {
+                    st.sync_textures(ctx);
+                    draw(st, ctx);
+                })
+                .shapes;
+        }
+        shapes
+    }
+
+    /// Drawing through the canvas pipeline paints exactly what the mesh path
+    /// paints: every quad, in the same order among everything else, at the
+    /// same corners, tint and clip. And none of the artwork is left to the
+    /// mesh path.
+    #[test]
+    fn gpu_path_draws_what_the_mesh_path_draws() {
+        let (mut mesh, _) = scene();
+        let (mut gpu, [reference, g, plain, clipped]) = scene();
+        gpu.canvas_gpu = Some(CanvasGpu::recording());
+        let by_mesh = paint(&mut mesh);
+        let by_gpu = paint(&mut gpu);
+        assert!(
+            !by_mesh.iter().any(|c| matches!(c.shape, egui::Shape::Callback(_))),
+            "without a GPU nothing goes to the pipeline"
+        );
+        assert_eq!(tokens(&by_mesh), tokens(&by_gpu));
+
+        let recorded: Vec<egui::TextureId> = by_gpu
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Callback(cb) => cb.callback.downcast_ref::<Recorded>().map(|r| r.tex),
+                _ => None,
+            })
+            .collect();
+        let cell_tex = |li: usize| {
+            let id = gpu.project.layers[li].resolve(gpu.project.current_frame).unwrap();
+            gpu.cell_textures.get(&id).expect("cell texture").tex.id()
+        };
+        let ghost = |f: usize| {
+            let id = gpu.project.layers[plain].resolve(f).unwrap();
+            gpu.ghost_textures.get(&id).expect("ghost built").1.id()
+        };
+        let wanted = [
+            ("reference", cell_tex(reference)),
+            ("merged group", gpu.group_texture(g).expect("group image").0.id()),
+            ("plain layer", cell_tex(plain)),
+            ("clipped layer", gpu.layer_texture(clipped).expect("clip texture").1.id()),
+            ("past ghost", ghost(1)),
+            ("future ghost", ghost(3)),
+            ("pinned ghost", ghost(4)),
+            ("floating selection", gpu.selection_tex.as_ref().expect("selection texture").id()),
+        ];
+        for (name, tex) in wanted {
+            assert!(recorded.contains(&tex), "the {name} went through the canvas pipeline");
+        }
+    }
+
+    /// A texture re-filled whole this frame still holds its old image on the
+    /// GPU while the frame is built, so it draws as a mesh, once.
+    #[test]
+    fn a_texture_refilled_whole_draws_as_a_mesh_that_frame() {
+        let (mut st, [_, _, plain, _]) = scene();
+        st.canvas_gpu = Some(CanvasGpu::recording());
+        let _ = paint(&mut st);
+        let tex = {
+            let id = st.project.layers[plain].resolve(st.project.current_frame).unwrap();
+            st.cell_textures.get(&id).unwrap().tex.id()
+        };
+        st.fresh_full.insert(tex);
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+            ..Default::default()
+        };
+        let shapes = ctx.run(raw, |ctx| draw(&mut st, ctx)).shapes;
+        let as_mesh = shapes
+            .iter()
+            .any(|c| matches!(&c.shape, egui::Shape::Mesh(m) if m.texture_id == tex));
+        let as_callback = shapes.iter().any(|c| match &c.shape {
+            egui::Shape::Callback(cb) => cb.callback.downcast_ref::<Recorded>().is_some_and(|r| r.tex == tex),
+            _ => false,
+        });
+        assert!(as_mesh && !as_callback);
     }
 }

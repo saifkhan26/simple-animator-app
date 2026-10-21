@@ -957,6 +957,9 @@ pub struct Round {
     pub stage: Stage,
     /// The layer Krita should open on.
     pub selected: usize,
+    /// Send only this layer ([`Layer::uid`]: the pull ahead of the send can
+    /// move it); `None` = the whole project.
+    pub only: Option<u64>,
     /// Krita to start if it has to be (no helper answered, Krita closed).
     pub launch: Option<PathBuf>,
     /// The helper said it's ready, so it will reload the file itself.

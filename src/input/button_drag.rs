@@ -116,12 +116,14 @@ pub const FLIP_PX_PER_KEY: f32 = 24.0;
 pub const PIE_HOLE: f32 = 26.0;
 pub const PIE_RING: f32 = 78.0;
 pub const PIE_OUTER: f32 = 128.0;
-/// Swatches on the inner ring.
+/// Swatches on the inner ring, usually. A pinned colour wheel puts its
+/// set there instead, however many that is.
 pub const PIE_INNER: usize = 8;
 
-/// How the `n` swatches split between the inner and the outer ring.
-pub fn pie_rings(n: usize) -> (usize, usize) {
-    let inner = n.min(PIE_INNER);
+/// How the `n` swatches split between the inner ring, which takes up to
+/// `cap`, and the outer ring.
+pub fn pie_rings(n: usize, cap: usize) -> (usize, usize) {
+    let inner = n.min(cap);
     (inner, n - inner)
 }
 
@@ -140,12 +142,12 @@ fn wedge(heading: f32, n: usize) -> usize {
 /// The swatch under a pen `off` from the pie's centre, out of `n`, or `None`
 /// over the cancel spot. Past the rings still counts, by heading alone, so a
 /// quick flick picks as well as a careful aim.
-pub fn pie_slot(n: usize, off: [f32; 2]) -> Option<usize> {
+pub fn pie_slot(n: usize, cap: usize, off: [f32; 2]) -> Option<usize> {
     let d = off[0].hypot(off[1]);
     if n == 0 || d < PIE_HOLE {
         return None;
     }
-    let (inner, outer) = pie_rings(n);
+    let (inner, outer) = pie_rings(n, cap);
     let heading = pie_heading(off);
     if outer == 0 || d < PIE_RING {
         Some(wedge(heading, inner))
@@ -160,9 +162,9 @@ mod tests {
 
     #[test]
     fn the_hole_cancels_and_an_empty_pie_picks_nothing() {
-        assert_eq!(pie_slot(8, [0.0, 0.0]), None);
-        assert_eq!(pie_slot(8, [10.0, -10.0]), None);
-        assert_eq!(pie_slot(0, [0.0, -60.0]), None);
+        assert_eq!(pie_slot(8, PIE_INNER, [0.0, 0.0]), None);
+        assert_eq!(pie_slot(8, PIE_INNER, [10.0, -10.0]), None);
+        assert_eq!(pie_slot(0, PIE_INNER, [0.0, -60.0]), None);
     }
 
     #[test]
@@ -171,25 +173,33 @@ mod tests {
         let right = [50.0, 0.0];
         let down = [0.0, 50.0];
         let left = [-50.0, 0.0];
-        assert_eq!(pie_slot(8, up), Some(0));
-        assert_eq!(pie_slot(8, right), Some(2));
-        assert_eq!(pie_slot(8, down), Some(4));
-        assert_eq!(pie_slot(8, left), Some(6));
+        assert_eq!(pie_slot(8, PIE_INNER, up), Some(0));
+        assert_eq!(pie_slot(8, PIE_INNER, right), Some(2));
+        assert_eq!(pie_slot(8, PIE_INNER, down), Some(4));
+        assert_eq!(pie_slot(8, PIE_INNER, left), Some(6));
         // Wedge 0 straddles the top: a little left of up is still 0.
-        assert_eq!(pie_slot(8, [-5.0, -50.0]), Some(0));
+        assert_eq!(pie_slot(8, PIE_INNER, [-5.0, -50.0]), Some(0));
         // Fewer swatches, wider wedges.
-        assert_eq!(pie_slot(3, right), Some(1));
+        assert_eq!(pie_slot(3, PIE_INNER, right), Some(1));
     }
 
     #[test]
     fn the_outer_ring_holds_the_rest_and_a_flick_past_it_still_counts() {
         // 20 swatches: 8 inside, 12 outside.
-        assert_eq!(pie_rings(20), (8, 12));
-        assert_eq!(pie_slot(20, [0.0, -100.0]), Some(8));
-        assert_eq!(pie_slot(20, [100.0, 0.0]), Some(8 + 3));
-        assert_eq!(pie_slot(20, [400.0, 0.0]), Some(8 + 3));
+        assert_eq!(pie_rings(20, PIE_INNER), (8, 12));
+        assert_eq!(pie_slot(20, PIE_INNER, [0.0, -100.0]), Some(8));
+        assert_eq!(pie_slot(20, PIE_INNER, [100.0, 0.0]), Some(8 + 3));
+        assert_eq!(pie_slot(20, PIE_INNER, [400.0, 0.0]), Some(8 + 3));
         // With no outer ring, far out still means the inner ring.
-        assert_eq!(pie_slot(5, [0.0, -300.0]), Some(0));
+        assert_eq!(pie_slot(5, PIE_INNER, [0.0, -300.0]), Some(0));
+    }
+
+    #[test]
+    fn a_smaller_cap_moves_the_rest_out() {
+        // A pinned wheel's pair inside, three swatches round them.
+        assert_eq!(pie_rings(5, 2), (2, 3));
+        assert_eq!(pie_slot(5, 2, [0.0, 50.0]), Some(1));
+        assert_eq!(pie_slot(5, 2, [0.0, -100.0]), Some(2));
     }
 
     #[test]

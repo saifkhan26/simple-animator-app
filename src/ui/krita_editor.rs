@@ -48,7 +48,7 @@ pub fn krita_editor(state: &mut AppState, ui: &mut egui::Ui) {
     let id = state.brush.krita_id.clone().unwrap_or_else(|| BUILT_IN.to_owned());
     let lib = &state.brush_library;
     let (Some(base), Some(cur)) = (lib.preset(&id), lib.edited_preset(&id, &state.brush.krita_overrides)) else {
-        ui.label(RichText::new("This brush's preset can't be read, so it can't be edited.").small().color(theme::TEXT_MUTED));
+        ui.label(RichText::new("This brush's preset can't be read, so it can't be edited.").small().color(theme::text_muted()));
         return;
     };
     let name = lib.entry(&id).map(|e| e.name.clone()).unwrap_or_default();
@@ -60,7 +60,7 @@ pub fn krita_editor(state: &mut AppState, ui: &mut egui::Ui) {
     let head = ui.horizontal(|ui| {
         let r = ui.label(RichText::new(format!("Krita · {name}")).strong());
         if !o.is_empty() {
-            ui.label(RichText::new("edited").small().color(theme::ACCENT));
+            ui.label(RichText::new("edited").small().color(theme::accent()));
         }
         r
     });
@@ -69,13 +69,13 @@ pub fn krita_editor(state: &mut AppState, ui: &mut egui::Ui) {
             head.inner.on_hover_text(crate::ui::brush_picker::describe(b).join("\n"));
         }
         Err(why) => {
-            ui.label(RichText::new(format!("This change can't paint, so the brush paints unchanged: {why}")).small().color(theme::ACCENT_HOVER));
+            ui.label(RichText::new(format!("This change can't paint, so the brush paints unchanged: {why}")).small().color(theme::accent_hover()));
         }
     }
     save_row(ui, &name, &mut o, &mut save_as);
     let error_id = egui::Id::new("krita-save-error");
     if let Some(e) = ui.data(|d| d.get_temp::<String>(error_id)) {
-        ui.label(RichText::new(e).small().color(theme::ACCENT_HOVER));
+        ui.label(RichText::new(e).small().color(theme::accent_hover()));
     }
 
     let wash = painting(ui, &base, &cur, &mut o);
@@ -376,7 +376,7 @@ fn texture(ui: &mut egui::Ui, base: &Preset, cur: &Preset, o: &mut Vec<(String, 
 /// curve of the one picked.
 fn option(ui: &mut egui::Ui, base: &Preset, cur: &Preset, o: &mut Vec<(String, String)>, spec: &OptionSpec, label: &str, strength: bool) {
     let Ok(mut d) = cur.option_data(spec) else {
-        ui.label(RichText::new(format!("{label}: can't be edited")).small().color(theme::TEXT_MUTED));
+        ui.label(RichText::new(format!("{label}: can't be edited")).small().color(theme::text_muted()));
         return;
     };
     let before = d.clone();

@@ -145,6 +145,24 @@ impl Project {
         self.camera_keys.retain(|k| k.frame != frame);
     }
 
+    /// Frame of the nearest camera key strictly before the current frame,
+    /// like [`Project::prev_key_frame`] for drawings. Keys left past the end
+    /// by a frame delete don't count: the jump couldn't land on them.
+    pub fn prev_camera_key(&self) -> Option<usize> {
+        let here = self.current_frame.min(self.frame_count);
+        self.camera_keys.iter().rev().map(|k| k.frame).find(|&f| f < here)
+    }
+
+    /// Frame of the nearest camera key strictly after the current frame. See
+    /// [`Project::prev_camera_key`].
+    pub fn next_camera_key(&self) -> Option<usize> {
+        self.camera_keys
+            .iter()
+            .map(|k| k.frame)
+            .find(|&f| f > self.current_frame)
+            .filter(|&f| f < self.frame_count)
+    }
+
     /// Move the camera key on `from` to `to` — or, with `copy`, leave it and
     /// put a copy there. It keeps its ease and takes the place of any key
     /// already on `to`. `false`, with nothing changed, when there is no key on
@@ -1641,6 +1659,39 @@ mod tests {
         p.current_frame = 10;
         assert_eq!(p.next_key_frame(), None, "past the last key either");
         assert_eq!(p.prev_key_frame(), Some(8));
+    }
+
+    /// Camera keys on 2 and 7 of a 10-frame timeline, plus one left past the
+    /// end the way a frame delete leaves it.
+    fn camera_keyed() -> Project {
+        let mut p = Project::new(4, 4, 12.0);
+        p.ensure_frame_count(10);
+        for f in [2, 7, 14] {
+            p.set_camera_key(f, crate::doc::camera::Camera::default());
+        }
+        p
+    }
+
+    #[test]
+    fn camera_key_jump_is_strict_and_clamps() {
+        let mut p = camera_keyed();
+        p.current_frame = 5;
+        assert_eq!((p.prev_camera_key(), p.next_camera_key()), (Some(2), Some(7)));
+        p.current_frame = 2;
+        assert_eq!((p.prev_camera_key(), p.next_camera_key()), (None, Some(7)), "moves off a key");
+        p.current_frame = 0;
+        assert_eq!(p.prev_camera_key(), None);
+    }
+
+    /// A key past the last frame isn't somewhere the jump can land, so the
+    /// button greys out instead of doing nothing.
+    #[test]
+    fn camera_key_jump_ignores_keys_past_the_end() {
+        let mut p = camera_keyed();
+        p.current_frame = 7;
+        assert_eq!(p.next_camera_key(), None);
+        p.current_frame = 9;
+        assert_eq!(p.prev_camera_key(), Some(7));
     }
 
     /// The jump reads the *active* layer only. A fresh `Project` keys its

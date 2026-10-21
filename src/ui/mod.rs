@@ -1,6 +1,7 @@
 //! egui-side UI: top bar, side panels, central canvas viewport.
 
 pub mod brush_picker;
+pub mod canvas_gpu;
 pub mod color_wheel;
 pub mod curve_editor;
 pub mod expr;

@@ -31,7 +31,7 @@ fn tile(ui: &mut egui::Ui, thumb: Option<&egui::TextureHandle>, name: &str, sele
     }
     let p = ui.painter_at(rect);
     let bg = if selected {
-        theme::ACCENT_DIM
+        theme::accent_dim()
     } else if enabled && resp.hovered() {
         ui.visuals().widgets.hovered.weak_bg_fill
     } else {
@@ -39,7 +39,7 @@ fn tile(ui: &mut egui::Ui, thumb: Option<&egui::TextureHandle>, name: &str, sele
     };
     p.rect_filled(rect, 4.0, bg);
     if selected {
-        p.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme::ACCENT));
+        p.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme::accent()));
     }
     let fade = if enabled { egui::Color32::WHITE } else { theme::white_alpha(70) };
     let well = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 4.0 + TILE / 2.0), Vec2::splat(TILE));
@@ -50,7 +50,7 @@ fn tile(ui: &mut egui::Ui, thumb: Option<&egui::TextureHandle>, name: &str, sele
         let img = egui::Rect::from_center_size(well.center(), Vec2::new(w as f32 * s, h as f32 * s));
         p.image(t.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), fade);
     }
-    let color = if enabled { ui.visuals().text_color() } else { theme::TEXT_MUTED };
+    let color = if enabled { ui.visuals().text_color() } else { theme::text_muted() };
     let galley = ui.painter().layout(name.to_owned(), egui::FontId::proportional(10.0), color, TILE_W - 4.0);
     let at = egui::pos2(rect.center().x - galley.size().x / 2.0, well.bottom() + 3.0);
     p.galley(at, galley, color);
