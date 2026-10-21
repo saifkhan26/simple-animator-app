@@ -45,6 +45,26 @@ impl Mask {
         self.cov[((y - self.y) * self.w + (x - self.x)) as usize]
     }
 
+    /// Where both masks cover, each pixel's coverage the product of the
+    /// two — a lasso held to a selection. `None` where they don't meet.
+    pub fn intersect(&self, other: &Mask) -> Option<Mask> {
+        let (x0, y0) = (self.x.max(other.x), self.y.max(other.y));
+        let x1 = (self.x + self.w).min(other.x + other.w);
+        let y1 = (self.y + self.h).min(other.y + other.h);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let (w, h) = (x1 - x0, y1 - y0);
+        let mut cov = Vec::with_capacity((w * h) as usize);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let k = self.at(x, y) as u32 * other.at(x, y) as u32;
+                cov.push(((k + 127) / 255) as u8);
+            }
+        }
+        Some(Mask { x: x0, y: y0, w, h, cov })
+    }
+
     /// True where the mask actually covers something — the hit test for
     /// "did the user press inside the selection".
     pub fn contains(&self, x: i32, y: i32) -> bool {

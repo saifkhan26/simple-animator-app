@@ -4,7 +4,9 @@
 use egui::{Align, Color32, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as ic;
 
-use crate::app::{AppState, CameraFraming, ExportKind, NavKind, PanelId, SelGesture, MP4_PRESETS};
+use crate::app::{
+    AppState, CameraFraming, ExportKind, FillMode, LassoHeld, NavKind, PanelId, SelGesture, MP4_PRESETS,
+};
 use crate::color::{fmt_rgb, parse_color};
 use crate::doc::camera::{Ease, Fill};
 use crate::doc::canvas::DirtyRect;
@@ -137,13 +139,20 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             } else {
                 None
             };
+            // The Fill lasso's holds, read the same way and only by it.
+            let lasso_fill = state.tool == ActiveTool::Fill && state.fill_mode == FillMode::Lasso;
+            let lasso_held = if lasso_fill {
+                ui.input(|i| held_lasso(state, i))
+            } else {
+                LassoHeld::default()
+            };
             // What the middle or right button does, when one of those — not
             // the left, which always uses the tool — is what went down.
             let (middle, right) = (state.middle_drag, state.right_drag);
             let (held, button) = ui.input(|i| {
                 // A held key or modifiers (configurable in Settings) turn a
                 // drag into a gesture instead of a stroke.
-                let g = if held_op.is_some() {
+                let g = if held_op.is_some() || lasso_held != LassoHeld::default() {
                     None
                 } else {
                     state
@@ -243,6 +252,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             // not to the layer under it. The cursor, not pen
                             // packets — a selection edge has no pressure.
                             state.select_down(canvas_to_doc(pos), held_op);
+                        } else if lasso_fill {
+                            // So does a lasso fill, until it lands.
+                            state.fill_lasso_down(canvas_to_doc(pos), lasso_held);
                         } else {
                             // Decided once, here: see `AppState::stroke_from_pen`.
                             let ppp = ui.ctx().pixels_per_point();
@@ -384,6 +396,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                                 state.select_move(canvas_to_doc(pos));
                             }
                         }
+                        None if lasso_fill => {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                state.fill_lasso_move(canvas_to_doc(pos), lasso_held);
+                            }
+                        }
                         // Screen points, not canvas: a drag step is the same
                         // length of pen travel at any zoom.
                         None if state.fill_dragging() => {
@@ -432,6 +449,17 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
             {
                 state.polygon_finish();
+            }
+            // And a polygon fill, when both presses landed on one spot. A
+            // double-click soon after the last corner's tap counts as a triple.
+            if state.fill_polygon_active()
+                && resp.hovered()
+                && ui.input(|i| {
+                    let p = egui::PointerButton::Primary;
+                    i.pointer.button_double_clicked(p) || i.pointer.button_triple_clicked(p)
+                })
+            {
+                state.fill_lasso_double_click();
             }
 
             // Tool cursor preview — only while drawing (not during nav gestures),
@@ -984,10 +1012,14 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 tool_toggle(ui, state, ActiveTool::Ink, ic::PEN_NIB, &i);
                 tool_toggle(ui, state, ActiveTool::Eraser, ic::ERASER, &e);
                 ui.add_space(6.0);
-                let f = tip(state, Action::ToolFill, "Fill");
+                let f = tip(state, Action::ToolFill, "Fill — press again for bucket / lasso");
                 let g = tip(state, Action::ToolShape, "Shape");
                 let l = tip(state, Action::ToolLasso, "Lasso select");
-                tool_toggle(ui, state, ActiveTool::Fill, ic::PAINT_BUCKET, &f);
+                let fill_icon = match state.fill_mode {
+                    FillMode::Bucket => ic::PAINT_BUCKET,
+                    FillMode::Lasso => ic::SCRIBBLE_LOOP,
+                };
+                tool_toggle(ui, state, ActiveTool::Fill, fill_icon, &f);
                 tool_toggle(ui, state, ActiveTool::Shape, ic::SHAPES, &g);
                 tool_toggle(ui, state, ActiveTool::Lasso, ic::LASSO, &l);
                 let tr = tip(state, Action::ToolTracker, "Tracker (stabilize)");
@@ -1010,49 +1042,61 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
 
             // Tool-specific options only — keeps this panel about tools alone.
             if state.tool == ActiveTool::Fill {
+                fill_mode_toggles(state, ui);
+                let lasso = state.fill_mode == FillMode::Lasso;
                 ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Opacity"))
                     .on_hover_text("Fill selection uses this opacity too.");
-                ui.add(
-                    egui::Slider::new(&mut state.brush.fill_tolerance, 0..=128).text("Tolerance"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut state.brush.fill_expand, 0..=fill::MAX_EXPAND)
-                        .text("Expand (px)"),
-                )
-                .on_hover_text(
-                    "Grow the fill by this many pixels so the colour tucks under \
-                     anti-aliased lines instead of leaving a halo. Meant for the \
-                     'lines from' workflow — on a same-layer fill it eats into \
-                     your own strokes.\n\nOr press on the canvas and drag up / down.",
-                );
-                ui.add(
-                    // Logarithmic, so the small gaps line art mostly needs
-                    // keep most of the track.
-                    egui::Slider::new(&mut state.brush.fill_gap, 0..=fill::MAX_GAP)
-                        .logarithmic(true)
-                        .smallest_positive(1.0)
-                        .text("Gap (px)"),
-                )
-                .on_hover_text(
-                    "Treat breaks in the lines up to this wide as closed, so the \
-                     colour doesn't pour out through them.\n\nOr press on the \
-                     canvas and drag left / right.",
-                );
-                ui.checkbox(&mut state.brush.fill_all_visible, "Read all visible layers")
-                    .on_hover_text(
-                        "Stop at lines on any visible layer, not only this layer or \
-                         the one it takes its lines from.",
+                if lasso {
+                    lasso_fill_options(state, ui);
+                }
+                // The bucket's settings; the lasso's Enclose & fill floods
+                // too, so it takes them all but the tolerance.
+                let floods = !lasso || state.fill_enclose;
+                if !lasso {
+                    ui.add(
+                        egui::Slider::new(&mut state.brush.fill_tolerance, 0..=128).text("Tolerance"),
                     );
-                // The boundary source is a per-layer link, set in the Layers
-                // panel — surface it here so the coupling is visible.
-                let hint = match state.fill_boundary_name() {
-                    _ if state.brush.fill_all_visible => {
-                        "Lines from: all visible layers".to_string()
-                    }
-                    Some(name) => format!("Lines from: {name}"),
-                    None => "Lines from: this layer — set it in the Layers panel".to_string(),
-                };
-                ui.label(egui::RichText::new(hint).color(theme::text_muted()).size(11.0));
+                }
+                if floods {
+                    ui.add(
+                        egui::Slider::new(&mut state.brush.fill_expand, 0..=fill::MAX_EXPAND)
+                            .text("Expand (px)"),
+                    )
+                    .on_hover_text(
+                        "Grow the fill by this many pixels so the colour tucks under \
+                         anti-aliased lines instead of leaving a halo. Meant for the \
+                         'lines from' workflow — on a same-layer fill it eats into \
+                         your own strokes.\n\nWith the bucket, or press on the canvas and drag up / down.",
+                    );
+                    ui.add(
+                        // Logarithmic, so the small gaps line art mostly needs
+                        // keep most of the track.
+                        egui::Slider::new(&mut state.brush.fill_gap, 0..=fill::MAX_GAP)
+                            .logarithmic(true)
+                            .smallest_positive(1.0)
+                            .text("Gap (px)"),
+                    )
+                    .on_hover_text(
+                        "Treat breaks in the lines up to this wide as closed, so the \
+                         colour doesn't pour out through them.\n\nWith the bucket, or \
+                         press on the canvas and drag left / right.",
+                    );
+                    ui.checkbox(&mut state.brush.fill_all_visible, "Read all visible layers")
+                        .on_hover_text(
+                            "Stop at lines on any visible layer, not only this layer or \
+                             the one it takes its lines from.",
+                        );
+                    // The boundary source is a per-layer link, set in the Layers
+                    // panel — surface it here so the coupling is visible.
+                    let hint = match state.fill_boundary_name() {
+                        _ if state.brush.fill_all_visible => {
+                            "Lines from: all visible layers".to_string()
+                        }
+                        Some(name) => format!("Lines from: {name}"),
+                        None => "Lines from: this layer — set it in the Layers panel".to_string(),
+                    };
+                    ui.label(egui::RichText::new(hint).color(theme::text_muted()).size(11.0));
+                }
             } else if state.tool == ActiveTool::Shape {
                 ui.horizontal(|ui| {
                     shape_kind_toggle(ui, state, ShapeKind::Line, ic::LINE_SEGMENT, "Line");
@@ -1154,6 +1198,55 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
 
 /// "Lock brush to screen size" toggle, shared by the freehand and Shape size
 /// sliders (both of which relabel themselves when it is on).
+/// The Fill tool's two modes, side by side.
+fn fill_mode_toggles(state: &mut AppState, ui: &mut egui::Ui) {
+    let key = combo_text(state, Action::ToolFill);
+    ui.horizontal(|ui| {
+        for (m, icon, name, what) in [
+            (FillMode::Bucket, ic::PAINT_BUCKET, "Bucket", "Fill the area a press lands in"),
+            (
+                FillMode::Lasso,
+                ic::SCRIBBLE_LOOP,
+                "Lasso",
+                "Drag round what to fill, or tap it out corner by corner",
+            ),
+        ] {
+            let on = state.fill_mode == m;
+            if ui
+                .add(egui::SelectableLabel::new(on, theme::icon_text(icon, name)))
+                .on_hover_text(format!("{what}. {key} again swaps the two."))
+                .clicked()
+            {
+                state.set_fill_mode(m);
+            }
+        }
+    });
+}
+
+/// The lasso fill's switches and how to draw one.
+fn lasso_fill_options(state: &mut AppState, ui: &mut egui::Ui) {
+    let enclose_key = combo_text(state, Action::FillLassoEnclose);
+    let erase_key = combo_text(state, Action::FillLassoErase);
+    let snap_key = combo_text(state, Action::FillPolygonSnap);
+    ui.checkbox(&mut state.fill_enclose, "Enclose & fill").on_hover_text(format!(
+        "Fill only the areas the lines inside the lasso shut in, not the \
+         space between them and the lasso. Holding {enclose_key} as it lands \
+         does the other."
+    ));
+    ui.checkbox(&mut state.fill_behind, "Behind existing paint").on_hover_text(
+        "The fill goes under what is already on the drawing, as if on a \
+         layer below: line art keeps its colour and its soft edges.",
+    );
+    ui.label(
+        egui::RichText::new(format!(
+            "Drag round it, or tap corners and tap the first, double-click or \
+             Enter to fill. {erase_key}: erase. {snap_key}: 15° edges."
+        ))
+        .color(theme::text_muted())
+        .size(11.0),
+    );
+}
+
 fn brush_size_lock(state: &mut AppState, ui: &mut egui::Ui) {
     ui.checkbox(&mut state.lock_brush_to_view, "Lock brush to screen size")
         .on_hover_text(
@@ -5870,6 +5963,36 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
+    // A lasso fill being drawn, the same way.
+    if let Some(l) = state.fill_lasso() {
+        let to_screen = |&(x, y): &(f32, f32)| xf.doc_to_screen(x, y);
+        let mut path: Vec<egui::Pos2> = l.pts.iter().map(to_screen).collect();
+        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+        if l.polygon {
+            // Between taps the next edge rubber-bands to the pointer,
+            // turned to its 15° step while that is held.
+            if let (false, Some(h)) = (l.pressed, hover) {
+                let snap = ui.input(|i| held_lasso(state, i).snap);
+                let (x, y) = xf.screen_to_doc(h);
+                let (x, y) = state.fill_corner_at((x, y), snap);
+                path.push(xf.doc_to_screen(x, y));
+            }
+        }
+        gesture_path(&painter, &path, true);
+        if l.polygon {
+            for p in l.pts.iter().map(to_screen) {
+                painter.circle_filled(p, 2.5, Color32::WHITE);
+                painter.circle_stroke(p, 2.5, Stroke::new(1.0, Color32::from_black_alpha(200)));
+            }
+            let close = crate::tools::selection::HANDLE_PX * 1.5;
+            if let (Some(first), Some(h)) = (l.pts.first().map(to_screen), hover) {
+                if l.pts.len() >= 3 && first.distance(h) <= close {
+                    painter.circle_stroke(first, close, Stroke::new(1.5, theme::accent()));
+                }
+            }
+        }
+    }
+
     // --- Camera guide + layer bounds ---
     //
     // The document rect is no longer "the drawable area" — it is just where a
@@ -6632,6 +6755,16 @@ fn gesture_path(painter: &egui::Painter, pts: &[egui::Pos2], closing: bool) {
     }
 }
 
+/// What the Fill lasso's held combos ask for right now.
+pub(crate) fn held_lasso(state: &AppState, i: &egui::InputState) -> LassoHeld {
+    let on = |a| state.shortcuts.get(a).is_some_and(|c| c.held(i));
+    LassoHeld {
+        erase: on(Action::FillLassoErase),
+        enclose: on(Action::FillLassoEnclose),
+        snap: on(Action::FillPolygonSnap),
+    }
+}
+
 /// The selection mode a held combo asks for, if any.
 pub(crate) fn held_sel_op(state: &AppState, i: &egui::InputState) -> Option<SelOp> {
     [
@@ -6656,9 +6789,10 @@ fn finish_canvas_drag(state: &mut AppState) {
     } else if state.cam_drag.is_some() {
         state.camera_frame_up();
     } else if state.nav_drag.is_none() {
-        // Both are no-ops when idle, so a tool change mid-drag
-        // cannot strand either.
+        // All no-ops when idle, so a tool change mid-drag cannot strand
+        // any of them.
         state.select_up();
+        state.fill_lasso_up();
         state.pointer_up();
     }
     state.nav_drag = None;
@@ -9888,9 +10022,20 @@ mod fill_tests {
     const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
     const RED: [u8; 4] = [255, 0, 0, 255];
 
+    thread_local! {
+        /// Each test's clock, a 60th of a second a frame. Without one egui's
+        /// time stands still, and every click after the first is a double.
+        static CLOCK: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    }
+
     fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        let time = CLOCK.with(|c| {
+            c.set(c.get() + 1.0 / 60.0);
+            c.get()
+        });
         let raw = egui::RawInput {
             screen_rect: Some(SCREEN),
+            time: Some(time),
             events,
             ..Default::default()
         };
@@ -9948,6 +10093,103 @@ mod fill_tests {
         frame(&ctx, &mut state, vec![]);
         assert!(!state.fill_dragging());
         assert_eq!(state.history.undo_len(), 1);
+    }
+
+    /// The Fill tool in lasso mode, red, with the panels out of the way.
+    fn lasso_state() -> (AppState, egui::Context) {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolFill);
+        state.dispatch(Action::ToolFill);
+        assert_eq!(state.fill_mode, FillMode::Lasso, "Fill again swaps to the lasso");
+        state.brush.color = RED;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        (state, ctx)
+    }
+
+    fn at(state: &AppState, x: f32, y: f32) -> Pos2 {
+        Xform::new(state, SCREEN).doc_to_screen(x, y)
+    }
+
+    /// A press and its release, a frame each.
+    fn click(ctx: &egui::Context, state: &mut AppState, p: Pos2) {
+        frame(ctx, state, vec![egui::Event::PointerMoved(p), button(p, true)]);
+        frame(ctx, state, vec![button(p, false)]);
+    }
+
+    /// A click, then a second of frames: an unhurried tap.
+    fn tap(ctx: &egui::Context, state: &mut AppState, p: Pos2) {
+        click(ctx, state, p);
+        for _ in 0..60 {
+            frame(ctx, state, vec![]);
+        }
+    }
+
+    /// Corners tapped fast, under egui's double-click time, don't close the
+    /// polygon: only two presses on one spot do.
+    #[test]
+    fn quick_taps_on_different_spots_are_not_a_double_click() {
+        let (mut state, ctx) = lasso_state();
+        for &(x, y) in &[(100.0, 100.0), (300.0, 100.0), (200.0, 300.0)] {
+            let p = at(&state, x, y);
+            click(&ctx, &mut state, p);
+        }
+        assert!(state.fill_polygon_active(), "still being tapped out");
+        assert_eq!(state.fill_lasso().map(|l| l.pts.len()), Some(3));
+    }
+
+    #[test]
+    fn a_lasso_drag_fills_what_it_goes_round() {
+        let (mut state, ctx) = lasso_state();
+        let pts = [(100.0, 100.0), (300.0, 100.0), (300.0, 300.0), (100.0, 300.0)];
+        let first = at(&state, pts[0].0, pts[0].1);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(first), button(first, true)]);
+        for &(x, y) in &pts[1..] {
+            let p = at(&state, x, y);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+        }
+        let end = at(&state, 100.0, 300.0);
+        frame(&ctx, &mut state, vec![button(end, false)]);
+        frame(&ctx, &mut state, vec![]);
+        assert_eq!(px(&state, 200, 200), RED);
+        assert_eq!(px(&state, 50, 50)[3], 0, "nothing outside");
+        assert_eq!(state.history.undo_len(), 1);
+        assert!(state.fill_lasso().is_none());
+    }
+
+    #[test]
+    fn taps_make_a_polygon_that_fills_on_the_first_corner() {
+        let (mut state, ctx) = lasso_state();
+        let corners = [(100.0, 100.0), (300.0, 100.0), (200.0, 300.0)];
+        for &(x, y) in &corners {
+            let p = at(&state, x, y);
+            tap(&ctx, &mut state, p);
+        }
+        assert!(state.fill_polygon_active());
+        assert_eq!(px(&state, 200, 150)[3], 0, "nothing yet");
+        let first = at(&state, 100.0, 100.0);
+        tap(&ctx, &mut state, first);
+        frame(&ctx, &mut state, vec![]);
+        assert!(!state.fill_polygon_active());
+        assert_eq!(px(&state, 200, 150), RED, "inside the triangle");
+        assert_eq!(px(&state, 120, 280)[3], 0, "outside it");
+    }
+
+    #[test]
+    fn a_double_click_closes_a_polygon_fill() {
+        let (mut state, ctx) = lasso_state();
+        for &(x, y) in &[(100.0, 100.0), (300.0, 100.0)] {
+            let p = at(&state, x, y);
+            tap(&ctx, &mut state, p);
+        }
+        let last = at(&state, 200.0, 300.0);
+        click(&ctx, &mut state, last);
+        click(&ctx, &mut state, last);
+        frame(&ctx, &mut state, vec![]);
+        assert!(!state.fill_polygon_active());
+        assert_eq!(px(&state, 200, 150), RED);
     }
 }
 

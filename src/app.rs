@@ -3,11 +3,13 @@
 mod button_drag;
 mod grids;
 mod groups;
+mod lasso_fill;
 mod liquify;
 mod orient;
 mod select;
 
 pub use button_drag::ButtonDragState;
+pub use lasso_fill::{FillMode, LassoHeld};
 pub use select::SelGesture;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -412,6 +414,11 @@ struct UiPrefs {
     /// takes. Workspace preferences, like the tool brushes.
     sel_shape: SelShape,
     sel_amount: u32,
+    /// The Fill tool's mode and its lasso's two switches. Workspace
+    /// preferences, like the selection shape.
+    fill_mode: FillMode,
+    fill_enclose: bool,
+    fill_behind: bool,
     /// Dim everything outside the selection. The switch persists, like the
     /// other view guides.
     tint_outside: bool,
@@ -527,6 +534,9 @@ impl Default for UiPrefs {
             project_presets: Vec::new(),
             sel_shape: SelShape::Freehand,
             sel_amount: 4,
+            fill_mode: FillMode::Bucket,
+            fill_enclose: false,
+            fill_behind: false,
             tint_outside: false,
             bg_color: DEFAULT_BG_COLOR,
             bg_opacity: 1.0,
@@ -1119,6 +1129,14 @@ pub struct AppState {
     pub sel_all_frames: bool,
     /// What a selection drag draws.
     pub sel_shape: SelShape,
+    /// Whether a Fill press floods or draws a lasso.
+    pub fill_mode: FillMode,
+    /// A lasso fill fills only what its lines shut in.
+    pub fill_enclose: bool,
+    /// A lasso fill goes under the paint already there.
+    pub fill_behind: bool,
+    /// The lasso fill being drawn.
+    fill_lasso: Option<lasso_fill::FillLasso>,
     /// Pixels a Grow / Shrink / Feather takes.
     pub sel_amount: u32,
     /// Dim everything outside the selection.
@@ -1586,6 +1604,10 @@ impl AppState {
             sel_op: SelOp::Replace,
             sel_all_frames: false,
             sel_shape: prefs.sel_shape,
+            fill_mode: prefs.fill_mode,
+            fill_enclose: prefs.fill_enclose,
+            fill_behind: prefs.fill_behind,
+            fill_lasso: None,
             sel_amount: prefs.sel_amount.max(1),
             tint_outside: prefs.tint_outside,
             sel_tint: None,
@@ -5740,6 +5762,8 @@ impl AppState {
             Action::ToolPencil => self.set_tool(ActiveTool::Pencil),
             Action::ToolInk => self.set_tool(ActiveTool::Ink),
             Action::ToolEraser => self.set_tool(ActiveTool::Eraser),
+            // Again while Fill is the tool, it swaps the bucket and the lasso.
+            Action::ToolFill if self.tool == ActiveTool::Fill => self.toggle_fill_mode(),
             Action::ToolFill => self.set_tool(ActiveTool::Fill),
             // Retired: the in-canvas eyedropper was folded into PickScreenColor,
             // which samples the canvas as well as everything behind the window.
@@ -5929,7 +5953,10 @@ impl AppState {
             | Action::HoldSwatchPie
             | Action::SelModeAdd
             | Action::SelModeSubtract
-            | Action::SelModeIntersect => {}
+            | Action::SelModeIntersect
+            | Action::FillLassoErase
+            | Action::FillLassoEnclose
+            | Action::FillPolygonSnap => {}
             Action::LayerTransformToggle => self.layer_xform = !self.layer_xform,
             Action::TransformKeyAdd => self.add_transform_key(),
             Action::TransformKeyDelete => self.delete_transform_key(),
@@ -6107,7 +6134,7 @@ impl AppState {
         // polygon loses its newest corner, a warp its last stroke, and
         // floating pixels go back where they were picked up — nothing about
         // any of them is recorded yet.
-        if self.polygon_back() || self.liquify_step_back() {
+        if self.polygon_back() || self.fill_lasso_back() || self.liquify_step_back() {
             return;
         }
         self.cancel_gesture();
@@ -6216,13 +6243,13 @@ impl AppState {
                 let tracks_own_delete = !self.track_sel.is_empty();
                 // Backspace takes back a polygon corner while one is being
                 // placed, rather than clearing the drawing under it.
-                let polygon = self.polygon_active();
+                let polygon = self.polygon_active() || self.fill_polygon_active();
                 for a in actions {
                     match a {
                         Action::TrackClear if !tracks_own_delete => continue,
                         Action::SelectionDelete if tracks_own_delete => continue,
                         Action::ClearCell if polygon => {
-                            self.polygon_back();
+                            let _ = self.polygon_back() || self.fill_lasso_back();
                             continue;
                         }
                         _ => {}
@@ -6239,6 +6266,8 @@ impl AppState {
                 if enter {
                     if self.polygon_active() {
                         self.polygon_finish();
+                    } else if self.fill_polygon_active() {
+                        self.fill_lasso_finish();
                     } else {
                         self.land_float();
                     }
@@ -6357,6 +6386,9 @@ impl eframe::App for AppState {
                 krita_path: self.krita_path.clone(),
                 project_presets: self.project_presets.clone(),
                 sel_shape: self.sel_shape,
+                fill_mode: self.fill_mode,
+                fill_enclose: self.fill_enclose,
+                fill_behind: self.fill_behind,
                 sel_amount: self.sel_amount,
                 tint_outside: self.tint_outside,
                 bg_color: self.bg_color,

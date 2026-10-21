@@ -118,6 +118,11 @@ pub enum Action {
     SelModeAdd,
     SelModeSubtract,
     SelModeIntersect,
+    // The Fill tool's lasso, the same way: held as its outline is drawn or
+    // closed, on the selection modes' combos, which only the Lasso reads.
+    FillLassoErase,
+    FillLassoEnclose,
+    FillPolygonSnap,
     // Timeline tracks: the drawings selected there.
     TrackClear,
     TrackCloseGap,
@@ -235,6 +240,9 @@ impl Action {
         Action::SelModeAdd,
         Action::SelModeSubtract,
         Action::SelModeIntersect,
+        Action::FillLassoErase,
+        Action::FillLassoEnclose,
+        Action::FillPolygonSnap,
         Action::TrackClear,
         Action::TrackCloseGap,
         Action::SaveProject,
@@ -345,6 +353,9 @@ impl Action {
             Action::SelModeAdd => "Selection: add to (drag)",
             Action::SelModeSubtract => "Selection: remove from (drag)",
             Action::SelModeIntersect => "Selection: intersect with (drag)",
+            Action::FillLassoErase => "Lasso fill: erase the shape instead (hold)",
+            Action::FillLassoEnclose => "Lasso fill: switch Enclose & fill (hold)",
+            Action::FillPolygonSnap => "Lasso fill: polygon edges in 15° steps (hold)",
             Action::TrackClear => "Timeline: delete drawings (leave blank)",
             Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
             Action::SaveProject => "Save project",
@@ -393,7 +404,12 @@ impl Action {
         self.hold_drag().is_some()
             || matches!(
                 self,
-                Action::SelModeAdd | Action::SelModeSubtract | Action::SelModeIntersect
+                Action::SelModeAdd
+                    | Action::SelModeSubtract
+                    | Action::SelModeIntersect
+                    | Action::FillLassoErase
+                    | Action::FillLassoEnclose
+                    | Action::FillPolygonSnap
             )
     }
 
@@ -696,6 +712,11 @@ fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
         (Action::SelectionDelete, Action::TrackClear) => Some(
             "drawings selected in the timeline take the press; otherwise the selection does",
         ),
+        (Action::SelModeAdd, Action::FillLassoEnclose)
+        | (Action::SelModeSubtract, Action::FillLassoErase)
+        | (Action::SelModeIntersect, Action::FillPolygonSnap) => {
+            Some("the Lasso tool reads one, the Fill tool's lasso the other")
+        }
         _ => None,
     }
 }
@@ -1131,6 +1152,11 @@ impl Default for ShortcutMap {
         b.insert(Action::SelModeAdd, KeyCombo::modifier_only(true, true, false));
         b.insert(Action::SelModeSubtract, KeyCombo::modifier_only(true, false, true));
         b.insert(Action::SelModeIntersect, KeyCombo::modifier_only(false, true, true));
+        // The Fill lasso's holds share them: removing is erasing, and the
+        // Lasso tool never sees these, nor the Fill tool those.
+        b.insert(Action::FillLassoErase, KeyCombo::modifier_only(true, false, true));
+        b.insert(Action::FillLassoEnclose, KeyCombo::modifier_only(true, true, false));
+        b.insert(Action::FillPolygonSnap, KeyCombo::modifier_only(false, true, true));
         // Delete shares its key with the pixel selection's erase; a live pixel
         // selection claims the press (see the dispatch loop in `app`).
         b.insert(Action::TrackClear, KeyCombo::plain(K::Delete));
@@ -1676,7 +1702,7 @@ mod tests {
         for a in ours {
             let c = map.get(a).expect("bound");
             for (&b, &other) in &map.bindings {
-                if b != a {
+                if b != a && shared_on_purpose(a, b).is_none() {
                     assert_ne!(c, other, "{a:?} and {b:?} share {}", c.display());
                 }
             }
