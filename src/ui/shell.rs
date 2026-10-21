@@ -68,7 +68,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         menu_window(state, ctx);
         // Left: tools + brush.  Right: layers / onion / x-sheet.  Bottom: timeline.
         panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, resized);
-        panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 232.0, true, resized);
+        panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 200.0, true, resized);
         panel_window(state, ctx, PanelId::Layers, [1004.0, 48.0], 252.0, true, resized);
         panel_window(state, ctx, PanelId::Onion, [1004.0, 300.0], 252.0, false, resized);
         panel_window(state, ctx, PanelId::Camera, [1004.0, 400.0], 252.0, false, resized);
@@ -1318,88 +1318,84 @@ fn swatch_strip(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn brush_content(state: &mut AppState, ui: &mut egui::Ui) {
-    {
-            // The colour wheel and its harmony set, then the pinned swatches.
-            theme::section_header(ui, ic::PALETTE, "Color");
-            color_wheel::color_panel(state, ui);
-            ui.add_space(4.0);
-            swatch_strip(state, ui);
+    // The colour wheel and its harmony set, then the pinned swatches.
+    color_wheel::color_panel(state, ui);
+    ui.add_space(4.0);
+    swatch_strip(state, ui);
 
-            ui.add_space(6.0);
-            if ui
-                .add_sized(
-                    [ui.available_width(), 24.0],
-                    egui::Button::new(theme::icon_text(ic::SLIDERS, "Brush settings…")),
-                )
-                .on_hover_text("Presets, dab shape, paper grain, pressure and tilt, smoothing.")
-                .clicked()
-            {
-                state.show_brush_settings = true;
-            }
+    ui.add_space(6.0);
+    // The brush settings, and how the pen is getting through as an icon
+    // beside them: three states, not two. A driver whose context opens but
+    // never reports is the failure worth seeing at a glance — it draws
+    // exactly like a mouse, and "Tablet active" would be a lie about it.
+    let (icon, color, tip) = tablet_status(state);
+    ui.horizontal(|ui| {
+        let w = (ui.available_width() - TABLET_ICON_W - ui.spacing().item_spacing.x).floor();
+        if ui
+            .add_sized([w, 24.0], egui::Button::new(theme::icon_text(ic::SLIDERS, "Brush settings…")).truncate())
+            .on_hover_text("Presets, dab shape, paper grain, pressure and tilt, smoothing.")
+            .clicked()
+        {
+            state.show_brush_settings = true;
+        }
+        ui.add_sized(
+            [TABLET_ICON_W, 24.0],
+            egui::Label::new(egui::RichText::new(icon).size(15.0).color(color)),
+        )
+        .on_hover_text(tip);
+    });
+}
 
-            // Canvas backdrop + input status — collapsed by default so the panel
-            // stays compact, expandable when needed.
-            ui.add_space(6.0);
-            egui::CollapsingHeader::new(theme::icon_text(ic::IMAGE, "Backdrop"))
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // Room for the colour button after it.
-                        let button = ui.spacing().interact_size.y + ui.spacing().button_padding.x * 2.0;
-                        fit_sliders(ui, "Opacity", button + ui.spacing().item_spacing.x);
-                        ui.add(egui::Slider::new(&mut state.bg_opacity, 0.0..=1.0).text("Opacity"));
-                        color_wheel::hsl_edit_button_f32(ui, &mut state.bg_color);
-                    });
-                    ui.checkbox(&mut state.show_checker, "Checker backdrop");
-                    ui.horizontal(|ui| {
-                        let rgb = state.bg_color.map(|c| (c * 255.0).round() as u8);
-                        ui.label(egui::RichText::new(fmt_rgb(rgb)).color(theme::text_muted()));
-                        if paste_button(ui) {
-                            if let Some(rgb) = clipboard_color() {
-                                state.bg_color = rgb.map(|c| c as f32 / 255.0);
-                            }
-                        }
-                    });
-                });
+/// Room for the tablet status icon beside Brush settings.
+const TABLET_ICON_W: f32 = 18.0;
 
-            ui.add_space(2.0);
-            // Three states, not two. A driver whose context opens but never
-            // reports is the failure worth being able to see at a glance —
-            // it draws exactly like a mouse, and "Tablet active" would be a
-            // lie about the interesting case.
-            let (icon, text, color, tip): (&str, &str, _, &str) = match (
-                state.pen.is_active(),
-                state.pen.pen_active(),
-            ) {
-                (_, true) => (
-                    ic::PEN,
-                    "Tablet active",
-                    theme::accent(),
-                    "Pen packets are arriving: pressure, tilt and sub-pixel positions are live.",
-                ),
-                (true, false) => (
-                    ic::WARNING,
-                    "Tablet idle",
-                    theme::text_muted(),
-                    "A tablet context is open but no packets have arrived recently. \
-                     Normal while the pen is away from the tablet; if it persists \
-                     while drawing, the driver is not sending Wintab data and \
-                     strokes fall back to the mouse.",
-                ),
-                (false, _) => (
-                    ic::CURSOR,
-                    "Mouse mode",
-                    theme::text_muted(),
-                    "No tablet driver was found, so pressure is fixed and tilt reports none.",
-                ),
-            };
-            ui.label(
-                egui::RichText::new(format!("{icon}  {text}"))
-                    .color(color)
-                    .size(11.0),
-            )
-            .on_hover_text(tip);
+/// The tablet's state as an icon, its colour, and what it means.
+fn tablet_status(state: &AppState) -> (&'static str, Color32, &'static str) {
+    match (state.pen.is_active(), state.pen.pen_active()) {
+        (_, true) => (
+            ic::PEN,
+            theme::accent(),
+            "Tablet active: pen packets are arriving, so pressure, tilt and \
+             sub-pixel positions are live.",
+        ),
+        (true, false) => (
+            ic::WARNING,
+            theme::text_muted(),
+            "Tablet idle: a tablet context is open but no packets have arrived \
+             recently. Normal while the pen is away from the tablet; if it \
+             persists while drawing, the driver is not sending Wintab data and \
+             strokes fall back to the mouse.",
+        ),
+        (false, _) => (
+            ic::CURSOR,
+            theme::text_muted(),
+            "Mouse mode: no tablet driver was found, so pressure is fixed and \
+             tilt reports none.",
+        ),
     }
+}
+
+/// The canvas backdrop: its colour and opacity (below 1 the desktop shows
+/// through the window), and the checker. A view setting, so it sits in
+/// Settings with the colour schemes.
+fn backdrop_settings(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.label(egui::RichText::new(theme::icon_text(ic::IMAGE, "Canvas backdrop")).strong());
+    ui.horizontal(|ui| {
+        color_wheel::hsl_edit_button_f32(ui, &mut state.bg_color);
+        let rgb = state.bg_color.map(|c| (c * 255.0).round() as u8);
+        ui.label(egui::RichText::new(fmt_rgb(rgb)).color(theme::text_muted()));
+        if paste_button(ui) {
+            if let Some(rgb) = clipboard_color() {
+                state.bg_color = rgb.map(|c| c as f32 / 255.0);
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        fit_sliders(ui, "Opacity", 0.0);
+        ui.add(egui::Slider::new(&mut state.bg_opacity, 0.0..=1.0).text("Opacity"))
+            .on_hover_text("Below 1 the desktop shows through the window behind the canvas.");
+    });
+    ui.checkbox(&mut state.show_checker, "Checker backdrop");
 }
 
 /// Narrow the sliders laid out next in `ui` so that one, with its value box
@@ -4488,6 +4484,8 @@ fn appearance_section(state: &mut AppState, ui: &mut egui::Ui) {
     if changed {
         state.apply_scheme(ui.ctx());
     }
+    ui.add_space(8.0);
+    backdrop_settings(state, ui);
 }
 
 /// A clickable preview of a scheme: its panel on its background, a line of

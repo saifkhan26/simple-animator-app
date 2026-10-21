@@ -87,7 +87,8 @@ fn all() -> Vec<Win> {
 /// The width `draw` gives each panel.
 fn panel_width(id: PanelId) -> f32 {
     match id {
-        PanelId::Tools | PanelId::Brush | PanelId::Color => 232.0,
+        PanelId::Brush | PanelId::Color => 200.0,
+        PanelId::Tools => 232.0,
         PanelId::Timeline => 640.0,
         _ => 252.0,
     }
@@ -649,4 +650,99 @@ fn the_whole_ui_fits_common_screens() {
         }
     }
     report(findings);
+}
+
+
+/// What `rig` draws, painted on the CPU into an image cropped to its window:
+/// egui's meshes over the theme background, at `ppp` pixels a point. For
+/// looking at a layout without starting the app, which would share the
+/// real config folder.
+fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage {
+    rig.ctx.set_pixels_per_point(ppp);
+    rig.settle();
+    let raw = egui::RawInput {
+        screen_rect: Some(SCREEN),
+        ..Default::default()
+    };
+    let (win, state) = (rig.win, &mut rig.state);
+    let out = rig.ctx.run(raw, |ctx| win.show(state, ctx));
+    let prims = rig.ctx.tessellate(out.shapes, out.pixels_per_point);
+    let font = rig.ctx.fonts(|f| f.image());
+    let (fw, fh) = (font.width(), font.height());
+    let tex: Vec<Color32> = font.srgba_pixels(None).collect();
+    let win_r = rig.rect().expand(4.0);
+    let (x0, y0) = ((win_r.min.x * ppp).floor() as i32, (win_r.min.y * ppp).floor() as i32);
+    let (w, h) = ((win_r.width() * ppp).ceil() as i32, (win_r.height() * ppp).ceil() as i32);
+    let bg = theme::palette().bg_base;
+    let mut px: Vec<[f32; 4]> = vec![
+        [bg.r() as f32 / 255.0, bg.g() as f32 / 255.0, bg.b() as f32 / 255.0, 1.0];
+        (w * h) as usize
+    ];
+    for p in prims {
+        let egui::epaint::Primitive::Mesh(m) = p.primitive else { continue };
+        let textured = m.texture_id == egui::TextureId::default();
+        let clip = p.clip_rect;
+        for t in m.indices.chunks(3) {
+            let v = [&m.vertices[t[0] as usize], &m.vertices[t[1] as usize], &m.vertices[t[2] as usize]];
+            let q = v.map(|v| (v.pos.x * ppp - x0 as f32, v.pos.y * ppp - y0 as f32));
+            let area = (q[1].0 - q[0].0) * (q[2].1 - q[0].1) - (q[2].0 - q[0].0) * (q[1].1 - q[0].1);
+            if area.abs() < 1e-6 {
+                continue;
+            }
+            let lo_x = q.iter().map(|p| p.0).fold(f32::MAX, f32::min).max(clip.min.x * ppp - x0 as f32).max(0.0) as i32;
+            let hi_x = q.iter().map(|p| p.0).fold(f32::MIN, f32::max).min(clip.max.x * ppp - x0 as f32).min(w as f32 - 1.0) as i32;
+            let lo_y = q.iter().map(|p| p.1).fold(f32::MAX, f32::min).max(clip.min.y * ppp - y0 as f32).max(0.0) as i32;
+            let hi_y = q.iter().map(|p| p.1).fold(f32::MIN, f32::max).min(clip.max.y * ppp - y0 as f32).min(h as f32 - 1.0) as i32;
+            for y in lo_y..=hi_y {
+                for x in lo_x..=hi_x {
+                    let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let edge = |a: (f32, f32), b: (f32, f32)| ((b.0 - a.0) * (cy - a.1) - (b.1 - a.1) * (cx - a.0)) / area;
+                    let b = [edge(q[1], q[2]), edge(q[2], q[0]), edge(q[0], q[1])];
+                    if b.iter().any(|&k| k < -1e-4) {
+                        continue;
+                    }
+                    let mut c = [0f32; 4];
+                    for (k, vert) in v.iter().enumerate() {
+                        let a = vert.color.to_array();
+                        for i in 0..4 {
+                            c[i] += b[k] * a[i] as f32 / 255.0;
+                        }
+                    }
+                    if textured {
+                        let u = (b[0] * v[0].uv.x + b[1] * v[1].uv.x + b[2] * v[2].uv.x) * fw as f32;
+                        let vv = (b[0] * v[0].uv.y + b[1] * v[1].uv.y + b[2] * v[2].uv.y) * fh as f32;
+                        let s = tex[(vv as usize).min(fh - 1) * fw + (u as usize).min(fw - 1)].to_array();
+                        for i in 0..4 {
+                            c[i] *= s[i] as f32 / 255.0;
+                        }
+                    }
+                    // Premultiplied, over what is there.
+                    let d = &mut px[(y * w + x) as usize];
+                    for i in 0..4 {
+                        d[i] = c[i] + d[i] * (1.0 - c[3]);
+                    }
+                }
+            }
+        }
+    }
+    let bytes: Vec<u8> = px.iter().flat_map(|p| p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)).collect();
+    image::RgbaImage::from_raw(w as u32, h as u32, bytes).expect("sized to fit")
+}
+
+/// Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a
+/// look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots`
+#[test]
+#[ignore]
+fn snapshots() {
+    let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let mut rig = Rig::new(Win::Panel(PanelId::Brush));
+    rig.state.palette = vec![[250, 200, 40], [10, 10, 10], [24, 32, 30], [30, 52, 40], [230, 215, 190], [90, 90, 90], [245, 240, 230]];
+    rig.state.set_brush_color([83, 63, 4]);
+    snapshot(&mut rig, 2.0).save(dir.join("brush.png")).unwrap();
+    rig.drag_right_edge(-400.0);
+    snapshot(&mut rig, 2.0).save(dir.join("brush_narrowest.png")).unwrap();
+    let mut rig = Rig::new(Win::Settings);
+    snapshot(&mut rig, 1.5).save(dir.join("settings.png")).unwrap();
 }

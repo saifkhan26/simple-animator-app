@@ -366,12 +366,14 @@ wheel shows every colour of the set as a dot:
 Click a swatch under the wheel to paint with it; the set stays where it is.
 Drag the base dot (or press bare disc) to move the whole set; drag a side dot
 of Analogous or Tetradic to widen or narrow it. H / S / L fields set the
-current colour exactly, and **Pin set** adds the whole set to your swatches.
+current colour exactly, and the pin beside the scheme (**Pin set**) adds the
+whole set to your swatches.
 The set rebuilds around the brush colour whenever it changes elsewhere
 (eyedropper, a swatch, Paste). The scheme is remembered; the set is not.
 
 Every colour button in the app opens the same wheel. Colours show as
-`hsl(h, s%, l%)`, and **Paste** takes `hsl(…)`, `rgb(…)` or `#hex`.
+`hsl(h, s%, l%)` (hover a swatch), and **Paste** — the clipboard button at the
+end of the H / S / L row — takes `hsl(…)`, `rgb(…)` or `#hex`.
 
 ## Onion skin
 
@@ -445,11 +447,12 @@ Linux / macOS tablet support is not wired in yet (see Roadmap).
 
 ## Window background
 
-The **Bg α** slider in the Tools window drives the window clear-color
-alpha. Drop it to 0 to make the entire app background transparent. The
-floating windows stay semi-translucent so they remain readable.
+**Settings → Appearance → Canvas backdrop** sets the colour behind the
+canvas and its **Opacity**, which drives the window clear-color alpha. Drop it
+to 0 to make the entire app background transparent. The floating windows stay
+semi-translucent so they remain readable.
 
-Toggle **Checker backdrop** to render a Krita-style checker behind the
+Tick **Checker backdrop** there to render a Krita-style checker behind the
 canvas image — useful when working in transparent mode.
 
 ## Export
