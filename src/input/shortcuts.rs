@@ -151,6 +151,7 @@ pub enum Action {
     TransformKeyDelete,
     // Camera.
     CameraEditToggle,
+    CameraBoxToggle,
     CameraKeyAdd,
     CameraKeyDelete,
     CameraLookThrough,
@@ -263,6 +264,7 @@ impl Action {
         Action::TransformKeyAdd,
         Action::TransformKeyDelete,
         Action::CameraEditToggle,
+        Action::CameraBoxToggle,
         Action::CameraKeyAdd,
         Action::CameraKeyDelete,
         Action::CameraLookThrough,
@@ -377,6 +379,7 @@ impl Action {
             Action::TransformKeyAdd => "Add transform key",
             Action::TransformKeyDelete => "Delete transform key",
             Action::CameraEditToggle => "Camera edit mode",
+            Action::CameraBoxToggle => "Draw camera box",
             Action::CameraKeyAdd => "Add camera key",
             Action::CameraKeyDelete => "Delete camera key",
             Action::CameraLookThrough => "Look through camera",
@@ -1193,8 +1196,9 @@ impl Default for ShortcutMap {
         b.insert(Action::CameraKeyAdd, KeyCombo::ctrl(K::K));
         b.insert(Action::CameraKeyDelete, KeyCombo::ctrl_shift(K::K));
         b.insert(Action::CameraLookThrough, KeyCombo::shift(K::V));
-        // CameraKeyPrev / CameraKeyNext start unbound: every key near the
-        // camera binds is taken, and the panel has buttons for them.
+        // CameraBoxToggle, CameraKeyPrev and CameraKeyNext start unbound:
+        // every key near the camera binds is taken, and the panel has a
+        // checkbox or a button for each.
         Self {
             bindings: b,
             unbound: BTreeSet::new(),

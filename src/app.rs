@@ -323,6 +323,20 @@ pub struct CamDrag {
     pub start: Camera,
 }
 
+/// How far, in screen pixels, a press in Draw camera mode may wander and
+/// still be a tap — the selection lasso's allowance.
+const CAMERA_TAP_PX: f32 = 3.0;
+
+/// A box being dragged out in Draw camera mode: where the press landed and
+/// where the drag has got to, in document space, and whether it has ever
+/// gone past a tap.
+#[derive(Clone, Copy, Debug)]
+pub struct CamBox {
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+    pub moved: bool,
+}
+
 /// A camera key picked up off the timeline ruler: the frame it is keyed on,
 /// and the frame the drag has reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1413,6 +1427,12 @@ pub struct AppState {
     camera_drag_before: Option<undo::TimelineState>,
     /// The camera's frame, while a handle of it is being dragged.
     pub cam_drag: Option<CamDrag>,
+    /// Draw camera mode: every canvas drag draws a new frame for the camera
+    /// and keys it on this frame. Never on with `camera_edit` — both claim
+    /// the plain drag.
+    pub camera_box: bool,
+    /// The box, while one is being dragged out.
+    pub cam_box: Option<CamBox>,
     /// A camera key, while it is being dragged along the timeline ruler.
     pub cam_key_drag: Option<CamKeyDrag>,
     /// Where the camera is, as a time in frames, while a move stretched over
@@ -1717,6 +1737,8 @@ impl AppState {
             nav_to_camera: false,
             camera_drag_before: None,
             cam_drag: None,
+            camera_box: false,
+            cam_box: None,
             cam_key_drag: None,
             shot_cam: None,
             play_from: None,
@@ -1829,6 +1851,8 @@ impl AppState {
         self.nav_to_camera = false;
         self.camera_drag_before = None;
         self.cam_drag = None;
+        self.camera_box = false;
+        self.cam_box = None;
         self.cam_key_drag = None;
         self.shot_cam = None;
         self.cam_sync_last = None;
@@ -3327,6 +3351,105 @@ impl AppState {
         } else {
             self.commit_camera_drag();
         }
+    }
+
+    /// Turn Draw camera mode on or off. On, it puts camera edit mode out:
+    /// both want the plain drag.
+    pub fn set_camera_box(&mut self, on: bool) {
+        self.camera_box = on;
+        if on {
+            self.camera_edit = false;
+        }
+    }
+
+    /// A press at document point `p` in Draw camera mode: start a box there.
+    /// `false`, with nothing started, when the mode is off — or while
+    /// playing, when no frame holds still to key.
+    pub fn camera_box_down(&mut self, p: (f32, f32)) -> bool {
+        if !self.camera_box || self.playback.playing {
+            return false;
+        }
+        self.cam_box = Some(CamBox {
+            from: p,
+            to: p,
+            moved: false,
+        });
+        true
+    }
+
+    /// The box's drag has reached document point `p`.
+    pub fn camera_box_move(&mut self, p: (f32, f32)) {
+        let tap = CAMERA_TAP_PX / self.view_scale.max(1e-6);
+        if let Some(b) = &mut self.cam_box {
+            b.to = p;
+            b.moved |= (p.0 - b.from.0).hypot(p.1 - b.from.1) > tap;
+        }
+    }
+
+    /// The camera the box being dragged out gives: what its preview shows
+    /// and what letting go keys. `None` while it is still a tap, or brought
+    /// back to one.
+    pub fn camera_box_camera(&self) -> Option<Camera> {
+        let b = self.cam_box.filter(|b| b.moved)?;
+        let tap = CAMERA_TAP_PX / self.view_scale.max(1e-6);
+        if (b.to.0 - b.from.0).hypot(b.to.1 - b.from.1) <= tap {
+            return None;
+        }
+        let cam = self
+            .project
+            .camera
+            .boxed(b.from, b.to, self.canvas_size(), self.camera_frame_size());
+        Some(self.project.held_inside(cam))
+    }
+
+    /// Let go of the box: key its camera on this frame. A tap keys the
+    /// camera as it was, centred where it landed. A box dragged back to
+    /// nothing is let go of, and keys nothing.
+    pub fn camera_box_up(&mut self) {
+        let boxed = self.camera_box_camera();
+        let Some(b) = self.cam_box.take() else {
+            return;
+        };
+        let cam = match boxed {
+            Some(cam) => cam,
+            None if !b.moved => {
+                let cam = self.project.camera.centred_on(b.from, self.canvas_size());
+                self.project.held_inside(cam)
+            }
+            None => return,
+        };
+        self.key_drawn_camera(cam);
+    }
+
+    /// Key `cam` on this frame, as Draw camera mode does: over the key
+    /// here, or as a new one that eases in and out. A camera with no keys
+    /// yet is first keyed as it was on frame 0, so there is a move from it
+    /// into the new key. One undo step.
+    fn key_drawn_camera(&mut self, cam: Camera) {
+        self.structural_edit(false, |p| {
+            let f = p.current_frame;
+            let mut fresh = Vec::new();
+            if p.camera_keys.is_empty() && f > 0 {
+                let was = p.camera;
+                p.set_camera_key(0, was);
+                fresh.push(0);
+            }
+            if !p.has_camera_key(f) {
+                fresh.push(f);
+            }
+            p.set_camera_key(f, cam);
+            for k in p.camera_keys.iter_mut().filter(|k| fresh.contains(&k.frame)) {
+                k.ease = Ease::Both;
+            }
+            p.camera = cam;
+        });
+    }
+
+    /// Where the camera comes from, for Draw camera mode's ghost: the
+    /// camera on the last key before this frame, if there is one.
+    pub fn camera_ghost(&self) -> Option<Camera> {
+        let f = self.project.prev_camera_key()?;
+        Some(self.project.resolve_camera(f))
     }
 
     fn canvas_size(&self) -> (f32, f32) {
@@ -6020,8 +6143,10 @@ impl AppState {
                 // one can be live at a time.
                 if self.camera_edit {
                     self.layer_xform = false;
+                    self.camera_box = false;
                 }
             }
+            Action::CameraBoxToggle => self.set_camera_box(!self.camera_box),
             Action::CameraKeyAdd => self.add_camera_key(),
             Action::CameraKeyDelete => self.delete_camera_key(),
             Action::CameraLookThrough => self.camera_look_through = !self.camera_look_through,
@@ -6178,6 +6303,7 @@ impl AppState {
         self.nav_to_camera = false;
         self.camera_drag_before = None;
         self.cam_drag = None;
+        self.cam_box = None;
         self.cam_key_drag = None;
         self.shot_cam = None;
     }

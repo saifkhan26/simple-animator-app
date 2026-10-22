@@ -8,7 +8,7 @@ use crate::app::{
     AppState, CameraFraming, ExportKind, FillMode, LassoHeld, NavKind, PanelId, SelGesture, MP4_PRESETS,
 };
 use crate::color::{fmt_rgb, parse_color};
-use crate::doc::camera::{Ease, Fill};
+use crate::doc::camera::{Camera, Ease, Fill};
 use crate::doc::canvas::DirtyRect;
 use crate::doc::layer::CellId;
 use crate::input::button_drag::{self, ButtonDrag};
@@ -234,7 +234,14 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     // One complaint per stroke, not one per frame.
                     state.pen_outlier_logged = false;
                     if let Some(pos) = resp.interact_pointer_pos() {
-                        if state.camera_frame_down(canvas_to_doc(pos)) {
+                        if state.camera_box {
+                            // Draw camera mode has every press: a new box,
+                            // inside the frame or out — and while playing,
+                            // none, and no stroke either.
+                            if !state.camera_box_down(canvas_to_doc(pos)) {
+                                state.drag_inert = true;
+                            }
+                        } else if state.camera_frame_down(canvas_to_doc(pos)) {
                             // In camera edit mode a press on the camera's
                             // frame takes hold of it; anywhere else, and
                             // always with the mode off, the tool has it.
@@ -385,6 +392,14 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                                 state.camera_frame_move(canvas_to_doc(pos));
                             }
                         }
+                        None if state.cam_box.is_some() => {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                state.camera_box_move(canvas_to_doc(pos));
+                                // The box was painted before this step of it:
+                                // show it now, not on the pen's next move.
+                                ctx.request_repaint();
+                            }
+                        }
                         None if state.tool == ActiveTool::Perspective => {
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 let (x, y) = canvas_to_doc(pos);
@@ -465,7 +480,11 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             // size can be judged against the drawing under it; the swatch pie
             // shows the pointer instead.
             let pie = state.button_drag.is_some_and(|d| d.kind == ButtonDrag::SwatchPie);
-            if state.nav_drag.is_none() && !pie && (resp.hovered() || resp.dragged()) {
+            // Draw camera mode draws no stroke, so it shows no brush.
+            let boxing = state.camera_box && state.button_drag.is_none();
+            if boxing && state.nav_drag.is_none() && (resp.hovered() || resp.dragged()) {
+                ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            } else if state.nav_drag.is_none() && !pie && (resp.hovered() || resp.dragged()) {
                 let pos = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
                 if let Some(pos) = pos {
                     if canvas_rect.contains(pos) {
@@ -2766,7 +2785,9 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     ui.add_space(4.0);
     ui.separator();
 
-    ui.checkbox(&mut state.camera_edit, "Camera edit mode");
+    if ui.checkbox(&mut state.camera_edit, "Camera edit mode").changed() && state.camera_edit {
+        state.camera_box = false;
+    }
     let toggle = combo_text(state, Action::CameraEditToggle);
     ui.label(
         egui::RichText::new(format!(
@@ -2774,6 +2795,24 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
              outside a corner rolls. Or use your canvas gesture keys: pan-key = move the \
              camera, zoom-key = push in, rotate-key = roll.",
         ))
+        .color(theme::text_muted())
+        .size(10.5),
+    );
+    ui.add_space(4.0);
+    let mut boxing = state.camera_box;
+    let box_tip = tip(state, Action::CameraBoxToggle, "Draw camera box");
+    if ui
+        .checkbox(&mut boxing, "Draw camera box")
+        .on_hover_text(box_tip)
+        .changed()
+    {
+        state.set_camera_box(boxing);
+    }
+    ui.label(
+        egui::RichText::new(
+            "Drag a box on the canvas: the camera frames it, keyed on this frame, and moves \
+             into it from the key before (the dashed frame). Tap to centre the camera there.",
+        )
         .color(theme::text_muted())
         .size(10.5),
     );
@@ -5999,7 +6038,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         if state.dim_outside_camera {
             fill_outside_quad(&painter, rect, cam_corners, Color32::from_black_alpha(110));
         }
-        let accent = if state.camera_edit {
+        let accent = if state.camera_edit || state.camera_box {
             Color32::from_rgb(255, 190, 90)
         } else {
             Color32::from_rgb(235, 235, 245)
@@ -6039,6 +6078,30 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             let handle = egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 2.0));
             painter.rect_filled(handle, 1.0, Color32::from_rgb(255, 190, 90));
             painter.rect_stroke(handle, 1.0, Stroke::new(1.0, Color32::from_black_alpha(200)));
+        }
+    }
+
+    // Draw camera mode: where the camera comes from — its frame on the key
+    // before this one — faint, and the box being dragged out, bright.
+    if state.camera_box {
+        let frame_corners = |c: Camera| {
+            layer_screen_corners(&xf, c.as_frame_transform(), ow as f32, oh as f32, pw, ph)
+        };
+        if let Some(ghost) = state.camera_ghost() {
+            let q = frame_corners(ghost);
+            let ring = [q[0], q[1], q[2], q[3], q[0]];
+            painter.extend(egui::Shape::dashed_line(
+                &ring,
+                Stroke::new(1.0, theme::white_alpha(130)),
+                6.0,
+                4.0,
+            ));
+        }
+        if let Some(c) = state.camera_box_camera() {
+            let q = frame_corners(c).to_vec();
+            let (under, over) = (Color32::from_black_alpha(150), Color32::from_rgb(255, 190, 90));
+            painter.add(egui::Shape::closed_line(q.clone(), Stroke::new(2.6, under)));
+            painter.add(egui::Shape::closed_line(q, Stroke::new(1.2, over)));
         }
     }
 
@@ -6755,6 +6818,8 @@ fn finish_canvas_drag(state: &mut AppState) {
         state.end_button_drag();
     } else if state.cam_drag.is_some() {
         state.camera_frame_up();
+    } else if state.cam_box.is_some() {
+        state.camera_box_up();
     } else if state.nav_drag.is_none() {
         // All no-ops when idle, so a tool change mid-drag cannot strand
         // any of them.
@@ -11728,6 +11793,197 @@ mod camera_frame_drag_tests {
         let from = Xform::new(&state, state.canvas_rect).doc_to_screen(80.0, 80.0);
         drag(&ctx, &mut state, from, vec2(60.0, 0.0));
         assert!(painted(&state, id) > 20, "painted {}", painted(&state, id));
+        assert!(state.project.camera.is_identity());
+    }
+
+    /// The frame (TL, BR) of the camera keyed on `frame`, in the document.
+    fn keyed_box(state: &AppState, frame: usize) -> ((f32, f32), (f32, f32)) {
+        let cam = state.project.camera_keys.iter().find(|k| k.frame == frame).unwrap().camera;
+        let t = cam.as_frame_transform();
+        let at = |u, v| t.cell_to_doc(u, v, 640.0, 360.0, 1280.0, 720.0);
+        (at(0.0, 0.0), at(640.0, 360.0))
+    }
+
+    fn near(a: (f32, f32), b: (f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0
+    }
+
+    /// The whole ask: an untouched camera, a box drawn on frame 12 inside
+    /// its frame. The old camera is keyed on frame 0, the box on 12, both
+    /// easing, in one undo step, and nothing is painted.
+    #[test]
+    fn a_box_drawn_inside_the_frame_keys_the_camera_into_it() {
+        let (ctx, mut state, id) = setup();
+        state.dispatch(Action::CameraBoxToggle);
+        assert!(state.camera_box);
+        state.project.ensure_frame_count(48);
+        state.project.goto(12);
+        run(&ctx, &mut state, vec![]);
+        let before = state.project.camera;
+        let xf = Xform::new(&state, state.canvas_rect);
+        let from = xf.doc_to_screen(600.0, 320.0);
+        let by = xf.doc_to_screen(760.0, 360.0) - from;
+        drag(&ctx, &mut state, from, by);
+
+        assert_eq!(painted(&state, id), 0, "nothing was drawn");
+        let keys: Vec<usize> = state.project.camera_keys.iter().map(|k| k.frame).collect();
+        assert_eq!(keys, vec![0, 12]);
+        assert!(state.project.camera_keys.iter().all(|k| k.ease == Ease::Both));
+        assert_eq!(state.project.camera_keys[0].camera, before);
+        let (tl, br) = keyed_box(&state, 12);
+        assert!(near(tl, (600.0, 320.0)) && near(br, (760.0, 410.0)), "{tl:?} {br:?}");
+        assert_eq!(state.project.camera, state.project.camera_keys[1].camera);
+        assert_eq!(state.history.undo_len(), 1, "one step for the box");
+        assert!(state.cam_box.is_none());
+
+        // Halfway there, the camera is on its way between the two.
+        let mid = state.project.resolve_camera(6);
+        assert!(mid.zoom > before.zoom && mid.zoom < state.project.camera.zoom, "{mid:?}");
+
+        state.undo();
+        assert!(state.project.camera_keys.is_empty());
+        assert_eq!(state.project.camera, before);
+    }
+
+    /// On a frame that has a key, a box replaces it and keeps its ease;
+    /// on one that has none, it adds just the one key.
+    #[test]
+    fn a_box_over_a_key_replaces_it() {
+        let (ctx, mut state, _) = setup();
+        state.project.ensure_frame_count(48);
+        state.project.goto(12);
+        state.add_camera_key();
+        state.set_camera_key_ease(Ease::In);
+        state.set_camera_box(true);
+        let xf = Xform::new(&state, state.canvas_rect);
+        let from = xf.doc_to_screen(400.0, 200.0);
+        drag(&ctx, &mut state, from, xf.doc_to_screen(560.0, 290.0) - from);
+        assert_eq!(state.project.camera_keys.len(), 1);
+        assert_eq!(state.project.camera_keys[0].ease, Ease::In);
+        let (tl, br) = keyed_box(&state, 12);
+        assert!(near(tl, (400.0, 200.0)) && near(br, (560.0, 290.0)), "{tl:?} {br:?}");
+
+        state.project.goto(30);
+        run(&ctx, &mut state, vec![]);
+        assert_eq!(state.camera_ghost(), Some(state.project.camera_keys[0].camera));
+        let xf = Xform::new(&state, state.canvas_rect);
+        let from = xf.doc_to_screen(700.0, 400.0);
+        drag(&ctx, &mut state, from, xf.doc_to_screen(860.0, 490.0) - from);
+        let keys: Vec<usize> = state.project.camera_keys.iter().map(|k| k.frame).collect();
+        assert_eq!(keys, vec![12, 30], "no frame-0 key once there are keys");
+        assert_eq!(state.project.camera_keys[1].ease, Ease::Both);
+    }
+
+    /// A tap centres the camera where it lands, the size it was; a drag
+    /// brought back to where it began keys nothing.
+    #[test]
+    fn a_tap_centres_and_a_box_brought_back_does_nothing() {
+        let (ctx, mut state, id) = setup();
+        state.set_camera_box(true);
+        let xf = Xform::new(&state, state.canvas_rect);
+        let at = xf.doc_to_screen(300.0, 250.0);
+        drag(&ctx, &mut state, at, vec2(0.0, 0.0));
+        let cam = state.project.camera;
+        assert!(near((cam.tx, cam.ty), (300.0 - 640.0, 250.0 - 360.0)), "{cam:?}");
+        assert!((cam.zoom - 1.0).abs() < 1e-6);
+        assert_eq!(state.project.camera_keys.len(), 1);
+        assert_eq!(state.history.undo_len(), 1);
+
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&ctx, &mut state, vec![egui::Event::PointerMoved(at), button(at, true)]);
+        run(&ctx, &mut state, vec![egui::Event::PointerMoved(at + vec2(80.0, 40.0))]);
+        assert!(state.camera_box_camera().is_some(), "a box is showing");
+        run(&ctx, &mut state, vec![egui::Event::PointerMoved(at)]);
+        assert!(state.camera_box_camera().is_none(), "brought back to nothing");
+        run(&ctx, &mut state, vec![button(at, false)]);
+        run(&ctx, &mut state, vec![]);
+        assert_eq!(state.project.camera, cam);
+        assert_eq!(state.history.undo_len(), 1, "no second step");
+        assert_eq!(painted(&state, id), 0);
+    }
+
+    /// Closed four-cornered paths (frames) and line segments painted on one
+    /// frame of the app.
+    fn tally(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) -> (usize, usize) {
+        fn walk(shape: &egui::Shape, out: &mut (usize, usize)) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Path(p) if p.closed && p.points.len() == 4 => out.0 += 1,
+                egui::Shape::LineSegment { .. } => out.1 += 1,
+                _ => {}
+            }
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let mut out = (0, 0);
+        for s in &ctx.run(raw, |ctx| draw(state, ctx)).shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// The mode shows the frame the camera comes from, dashed, and while a
+    /// box is being dragged out, the box.
+    #[test]
+    fn the_ghost_and_the_box_are_drawn() {
+        let (ctx, mut state, _) = setup();
+        state.project.ensure_frame_count(48);
+        state.project.goto(12);
+        state.add_camera_key();
+        state.project.goto(30);
+        let (frames, segments) = tally(&ctx, &mut state, vec![]);
+        state.set_camera_box(true);
+        let (frames_on, segments_on) = tally(&ctx, &mut state, vec![]);
+        assert_eq!(frames_on, frames);
+        assert!(segments_on > segments + 8, "dashed: {segments} -> {segments_on}");
+
+        let xf = Xform::new(&state, state.canvas_rect);
+        let at = xf.doc_to_screen(300.0, 250.0);
+        let press = egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        tally(&ctx, &mut state, vec![egui::Event::PointerMoved(at), press]);
+        tally(&ctx, &mut state, vec![egui::Event::PointerMoved(at + vec2(90.0, 30.0))]);
+        assert!(state.camera_box_camera().is_some(), "{:?}", state.cam_box);
+        // Overlays are painted under the canvas's input, so a step of the
+        // drag shows on the next frame.
+        let (frames_drag, _) = tally(&ctx, &mut state, vec![]);
+        assert_eq!(frames_drag, frames + 2, "the box, two-tone");
+    }
+
+    /// The two modes that claim the plain drag put each other out.
+    #[test]
+    fn draw_camera_and_camera_edit_put_each_other_out() {
+        let (_, mut state, _) = setup();
+        state.dispatch(Action::CameraEditToggle);
+        state.dispatch(Action::CameraBoxToggle);
+        assert!(state.camera_box && !state.camera_edit);
+        state.dispatch(Action::CameraEditToggle);
+        assert!(state.camera_edit && !state.camera_box);
+    }
+
+    /// While playing, a press in Draw camera mode neither boxes nor paints.
+    #[test]
+    fn while_playing_a_press_in_draw_camera_mode_does_nothing() {
+        let (ctx, mut state, id) = setup();
+        state.set_camera_box(true);
+        state.playback.playing = true;
+        let from = Xform::new(&state, state.canvas_rect).doc_to_screen(560.0, 360.0);
+        drag(&ctx, &mut state, from, vec2(120.0, 40.0));
+        state.playback.playing = false;
+        assert_eq!(painted(&state, id), 0);
+        assert!(state.project.camera_keys.is_empty());
         assert!(state.project.camera.is_identity());
     }
 }

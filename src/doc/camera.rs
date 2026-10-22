@@ -351,6 +351,40 @@ impl Camera {
         cam
     }
 
+    /// The camera whose frame is the box dragged out from document point
+    /// `from` to `to`: kept to the shape of a frame `out` and to this
+    /// camera's roll, with the pressed corner staying put. Whichever way the
+    /// drag went further, for the frame's shape, sets the size; a box past
+    /// the zoom limits grows or shrinks about the pressed corner to them.
+    pub fn boxed(self, from: (f32, f32), to: (f32, f32), canvas: (f32, f32), out: (f32, f32)) -> Camera {
+        let (s, c) = self.rot.sin_cos();
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        // The drag along the frame's own axes, as `grab_at` measures it.
+        let (u, v) = (dx * c + dy * s, dy * c - dx * s);
+        let aspect = out.0 / out.1.max(1e-6);
+        let w = u.abs().max(v.abs() * aspect).max(1e-6);
+        let zoom = (out.0 / w).clamp(Self::ZOOM_MIN, Self::ZOOM_MAX);
+        // From the pressed corner to the middle, along the frame's axes,
+        // then back into the document.
+        let (mu, mv) = ((out.0 / zoom * 0.5).copysign(u), (out.1 / zoom * 0.5).copysign(v));
+        let (cx, cy) = (from.0 + mu * c - mv * s, from.1 + mu * s + mv * c);
+        Camera {
+            tx: cx - canvas.0 * 0.5,
+            ty: cy - canvas.1 * 0.5,
+            zoom,
+            rot: self.rot,
+        }
+    }
+
+    /// This camera with the middle of its frame on document point `at`.
+    pub fn centred_on(self, at: (f32, f32), canvas: (f32, f32)) -> Camera {
+        Camera {
+            tx: at.0 - canvas.0 * 0.5,
+            ty: at.1 - canvas.1 * 0.5,
+            ..self
+        }
+    }
+
     /// The camera's frame rect expressed as a transform placing a "cell" the
     /// size of the frame into document space. Lets the editor reuse the
     /// cell-corner helpers to draw the camera guide.
@@ -623,6 +657,83 @@ mod tests {
         let now = corner(&after);
         approx(now.0, to.0);
         approx(now.1, to.1);
+    }
+
+    /// Where a point of the frame, in its own pixels, is in the document.
+    fn frame_at(cam: &Camera, u: f32, v: f32) -> (f32, f32) {
+        cam.as_frame_transform().cell_to_doc(u, v, FRAME.0, FRAME.1, CANVAS.0, CANVAS.1)
+    }
+
+    /// A box dragged corner to corner is the frame: the pressed corner where
+    /// the press was, the far one where the drag went, the shape the frame's.
+    /// Whichever way the drag goes, and whichever side it goes further along,
+    /// the same box gives the same camera.
+    #[test]
+    fn a_dragged_box_is_the_new_frame() {
+        let cam = Camera::default();
+        let boxed = cam.boxed((100.0, 50.0), (180.0, 70.0), CANVAS, FRAME);
+        approx(boxed.zoom, 1.25);
+        let (tl, br) = (frame_at(&boxed, 0.0, 0.0), frame_at(&boxed, FRAME.0, FRAME.1));
+        approx(tl.0, 100.0);
+        approx(tl.1, 50.0);
+        approx(br.0, 180.0);
+        approx(br.1, 90.0);
+
+        let back = cam.boxed((180.0, 90.0), (100.0, 80.0), CANVAS, FRAME);
+        let tall = cam.boxed((100.0, 50.0), (110.0, 90.0), CANVAS, FRAME);
+        for other in [back, tall] {
+            approx(other.tx, boxed.tx);
+            approx(other.ty, boxed.ty);
+            approx(other.zoom, boxed.zoom);
+        }
+    }
+
+    /// A rolled camera's box is drawn along its own axes, and keeps the roll.
+    #[test]
+    fn a_rolled_cameras_box_keeps_its_roll() {
+        let cam = Camera {
+            tx: 30.0,
+            ty: -10.0,
+            zoom: 0.7,
+            rot: 0.6,
+        };
+        let (s, c) = cam.rot.sin_cos();
+        let from = (120.0, 60.0);
+        let to = (from.0 + 80.0 * c - 40.0 * s, from.1 + 80.0 * s + 40.0 * c);
+        let boxed = cam.boxed(from, to, CANVAS, FRAME);
+        approx(boxed.rot, cam.rot);
+        approx(boxed.zoom, 1.25);
+        let (tl, br) = (frame_at(&boxed, 0.0, 0.0), frame_at(&boxed, FRAME.0, FRAME.1));
+        approx(tl.0, from.0);
+        approx(tl.1, from.1);
+        approx(br.0, to.0);
+        approx(br.1, to.1);
+    }
+
+    /// Past the closest the camera goes, the box is as small as it can be,
+    /// still from the pressed corner.
+    #[test]
+    fn a_tiny_box_stops_at_the_zoom_limit() {
+        let boxed = Camera::default().boxed((100.0, 50.0), (99.5, 49.9), CANVAS, FRAME);
+        approx(boxed.zoom, Camera::ZOOM_MAX);
+        let br = frame_at(&boxed, FRAME.0, FRAME.1);
+        approx(br.0, 100.0);
+        approx(br.1, 50.0);
+    }
+
+    #[test]
+    fn centring_moves_only_the_middle() {
+        let cam = Camera {
+            tx: 30.0,
+            ty: -10.0,
+            zoom: 2.0,
+            rot: 0.4,
+        };
+        let moved = cam.centred_on((50.0, 160.0), CANVAS);
+        let mid = frame_at(&moved, FRAME.0 * 0.5, FRAME.1 * 0.5);
+        approx(mid.0, 50.0);
+        approx(mid.1, 160.0);
+        assert_eq!((moved.zoom, moved.rot), (cam.zoom, cam.rot));
     }
 
     fn key(frame: usize, tx: f32, ty: f32, ease: Ease) -> CameraKey {
