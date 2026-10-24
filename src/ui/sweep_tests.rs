@@ -778,4 +778,40 @@ fn snapshots() {
     snapshot(&mut rig, 2.0).save(dir.join("brush_narrowest.png")).unwrap();
     let mut rig = Rig::new(Win::Settings);
     snapshot(&mut rig, 1.5).save(dir.join("settings.png")).unwrap();
+
+    // The onion strip: off, then on with a bar dragged and an offset soloed.
+    let mut rig = Rig::new(Win::Panel(PanelId::Onion));
+    snapshot(&mut rig, 2.0).save(dir.join("onion.png")).unwrap();
+    rig.state.onion.enabled = true;
+    rig.state.onion.toggle_shown(5, OnionDirection::Prev);
+    rig.state.onion.set_opacity(2, OnionDirection::Next, 0.3);
+    snapshot(&mut rig, 2.0).save(dir.join("onion_on.png")).unwrap();
+    rig.state.onion.solo(2, OnionDirection::Next);
+    snapshot(&mut rig, 2.0).save(dir.join("onion_solo.png")).unwrap();
+    rig.state.onion.solo(2, OnionDirection::Next);
+    // Two pins at their own opacities, and the panel dragged taller.
+    let li = rig.state.project.current_layer;
+    rig.state.project.layers[li].onion_pins = vec![
+        OnionPin { frame: 0, tint: PIN_TINTS[0], visible: true, opacity: 0.6 },
+        OnionPin { frame: 0, tint: PIN_TINTS[1], visible: true, opacity: 0.25 },
+    ];
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("onion_pins.png")).unwrap();
+    rig.drag_bottom_edge(120.0);
+    snapshot(&mut rig, 2.0).save(dir.join("onion_tall.png")).unwrap();
+    rig.drag_right_edge(-400.0);
+    snapshot(&mut rig, 2.0).save(dir.join("onion_narrowest.png")).unwrap();
+
+    // The per-layer onion toggles: layer 2 kept on, layer 3 active.
+    for win in [Win::Panel(PanelId::Layers), Win::Panel(PanelId::Timeline)] {
+        let mut rig = Rig::new(win);
+        while rig.state.project.layers.len() < 3 {
+            rig.state.project.add_layer();
+        }
+        rig.state.project.layers[1].onion = true;
+        rig.state.project.current_layer = 2;
+        rig.settle();
+        let name = if matches!(win, Win::Panel(PanelId::Layers)) { "layers.png" } else { "timeline.png" };
+        snapshot(&mut rig, 2.0).save(dir.join(name)).unwrap();
+    }
 }

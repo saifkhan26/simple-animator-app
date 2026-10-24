@@ -808,7 +808,8 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
 
         let eye = Rect::from_center_size(pos2(row.min.x + 20.0, row.center().y), vec2(20.0, 20.0));
         let lock = eye.translate(vec2(21.0, 0.0));
-        let name = Rect::from_min_max(pos2(lock.max.x + 5.0, row.min.y), pos2(row.max.x - 6.0, row.max.y));
+        let onion = lock.translate(vec2(21.0, 0.0));
+        let name = Rect::from_min_max(pos2(onion.max.x + 5.0, row.min.y), pos2(row.max.x - 6.0, row.max.y));
         // A group's layers sit indented; a group shows a folder that folds it.
         let (is_group, folded) = {
             let l = &state.project.layers[layer];
@@ -834,7 +835,7 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
                 .then(|| ui.interact(r, id.with((salt, layer)), Sense::click()))
         };
         let l = &state.project.layers[layer];
-        let (visible, locked, reference) = (l.visible, l.locked, l.reference);
+        let (visible, locked, reference, onion_on) = (l.visible, l.locked, l.reference, l.onion);
         let name_text = l.name.clone();
 
         // Resting states are quiet; the unusual one (hidden, locked) stands
@@ -869,6 +870,31 @@ fn header_ui(state: &mut AppState, ui: &mut egui::Ui, g: &Geo, header: Rect, id:
             icon(lock, glyph, locked, r.hovered());
             if r.clicked() {
                 state.project.layers[layer].locked = !locked;
+            }
+        }
+        // Onion skin kept on while another layer is active. A group has no
+        // drawings to ghost.
+        if let Some(r) = (!is_group).then(|| hit(onion, "onion")).flatten() {
+            let r = r.on_hover_text(crate::ui::shell::layer_onion_tip(onion_on));
+            if r.hovered() {
+                painter.rect_filled(onion, 4.0, theme::bg_hover());
+            }
+            let color = if onion_on {
+                theme::accent()
+            } else if r.hovered() {
+                theme::text()
+            } else {
+                theme::text_muted().gamma_multiply(0.6)
+            };
+            painter.text(
+                onion.center(),
+                egui::Align2::CENTER_CENTER,
+                ic::CIRCLES_THREE,
+                egui::FontId::proportional(13.0),
+                color,
+            );
+            if r.clicked() {
+                state.project.layers[layer].onion = !onion_on;
             }
         }
         if let Some(r) = fold.and_then(|f| hit(f, "fold").map(|r| (f, r))) {

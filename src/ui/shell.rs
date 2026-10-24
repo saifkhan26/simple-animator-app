@@ -16,7 +16,7 @@ use crate::input::shortcuts::{Action, Clash};
 use crate::input::tablet::PenPacket;
 use crate::io::frame_order::shot_len;
 use crate::io::{composite, png_import, png_save, project_file};
-use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, PIN_TINTS};
+use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, ONION_RANGE, PIN_TINTS};
 use crate::tools::fill;
 use crate::tools::select_mask::{self, SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
@@ -864,6 +864,10 @@ const LAYERS_DEFAULT_H: f32 = 496.0;
 /// ten frames of sheet, what the sheet's old 260-point cap came to.
 const XSHEET_DEFAULT_H: f32 = 330.0;
 
+/// The Onion panel's starting height, in points: the strip with its bars
+/// at their shortest, the settings under it and the pin controls.
+const ONION_DEFAULT_H: f32 = 210.0;
+
 /// Render a panel as a draggable floating window.
 ///
 /// `resized` carries the previous viewport rect on frames where the window
@@ -902,6 +906,7 @@ fn panel_window(
     let start_h = match id {
         PanelId::Layers => Some(LAYERS_DEFAULT_H),
         PanelId::Xsheet => Some(XSHEET_DEFAULT_H),
+        PanelId::Onion => Some(ONION_DEFAULT_H),
         _ => None,
     };
     if let Some(h) = start_h {
@@ -2454,123 +2459,280 @@ fn key_flags(state: &AppState, n: usize) -> (Vec<bool>, Vec<bool>) {
 }
 
 fn onion_content(state: &mut AppState, ui: &mut egui::Ui) {
-    {
-            ui.checkbox(&mut state.onion.enabled, "Enabled");
-            ui.checkbox(&mut state.onion.by_key, "Step by drawings")
-                .on_hover_text(
-                    "Count distinct drawings instead of frames, so on twos and \
-                     threes Prev = 2 reaches the two previous drawings rather \
-                     than two frames of the same held one.\n\nOff: steps frame \
-                     by frame, and a hold simply shows fewer ghosts.",
-                );
-            ui.add_space(4.0);
-            ui.add(egui::Slider::new(&mut state.onion.prev, 0..=8).text("Prev"));
-            ui.add(egui::Slider::new(&mut state.onion.next, 0..=8).text("Next"));
-            onion_offset_chips(state, ui);
-            ui.add(egui::Slider::new(&mut state.onion.max_alpha, 0.0..=1.0).text("Max α"));
-            ui.add(egui::Slider::new(&mut state.onion.falloff, 0.5..=4.0).text("Falloff"));
-            ui.add_space(4.0);
-            theme::section_header(ui, ic::PALETTE, "Tints");
-            color_picker_u8(ui, "Prev", &mut state.onion.prev_tint);
-            color_picker_u8(ui, "Next", &mut state.onion.next_tint);
+    let key = state.shortcuts.get(Action::OnionToggle).map(|c| c.display());
+    // The bars take the height the panel has beyond everything under them,
+    // as tall as that was last frame: drag the panel taller and they grow.
+    // Never shorter than `STRIP_BAR_H`; past that the panel grows instead.
+    // Floored, and less the title-bar shortfall, so it can't creep. Before
+    // the rest has been measured once, the shortest.
+    let below_id = ui.id().with("onion_below_h");
+    let shortfall = title_bar_shortfall(ui.ctx(), PanelId::Onion);
+    let bar_h = ui.data(|d| d.get_temp::<f32>(below_id)).map_or(STRIP_BAR_H, |below| {
+        (ui.available_height() - STRIP_NUM_H - STRIP_GAP - below - shortfall)
+            .floor()
+            .max(STRIP_BAR_H)
+    });
+    onion_strip(&mut state.onion, key.as_deref(), bar_h, ui);
+    let strip_bottom = ui.min_rect().bottom();
+
+    // Everything else, in a child that claims no room by itself — the
+    // Layers list's rule. A pin added makes it taller than the bars made
+    // room for; claiming that would grow the panel for good, so while the
+    // bars can still shrink the overflow is clipped for the frame, and the
+    // bars give it room next frame.
+    let squeezable = bar_h > STRIP_BAR_H;
+    let bottom = ui.max_rect().bottom() - shortfall;
+    let mut rest = ui.new_child(egui::UiBuilder::new().id_salt("onion_rest"));
+    if squeezable {
+        let mut clip = rest.clip_rect();
+        clip.max.y = clip.max.y.min(bottom);
+        rest.set_clip_rect(clip);
     }
+    onion_settings(state, &mut rest);
+    let r = rest.min_rect();
+    ui.data_mut(|d| d.insert_temp(below_id, r.bottom() - strip_bottom));
+    let claim = if squeezable { r.bottom().min(bottom).max(r.top()) } else { r.bottom() };
+    ui.advance_cursor_after_rect(Rect::from_min_max(r.min, egui::pos2(r.max.x, claim)));
+}
+
+/// The Onion panel under the strip: stepping, Reset, the tints and the pins.
+fn onion_settings(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut state.onion.by_key, "Step by drawings")
+            .on_hover_text(
+                "Count distinct drawings instead of frames, so on twos and \
+                 threes −2 is the drawing before the previous one rather \
+                 than two frames of the same held one.\n\nOff: steps frame \
+                 by frame, and a hold simply shows fewer ghosts.",
+            );
+        let reset_w = button_width(ui, "Reset", 0.0);
+        pad_to_right(ui, reset_w);
+        let reset = ui
+            .button("Reset")
+            .on_hover_text("Bars back to the default fade, three lit each way");
+        if reset.clicked() {
+            state.onion.reset_bars();
+        }
+    });
+    // Past on the left, future on the right, as in the strip. Right-to-left
+    // inside the row, so it's only as tall as the row; the row above already
+    // keeps the panel wide enough for both.
+    ui.horizontal(|ui| {
+        color_picker_u8(ui, "Prev", &mut state.onion.prev_tint);
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            color_picker_u8(ui, "Next", &mut state.onion.next_tint);
+        });
+    });
     ui.add_space(6.0);
     onion_pins_content(state, ui);
 }
 
-/// Offset chip size, and the gap between chips.
-const CHIP: Vec2 = Vec2::new(18.0, 16.0);
-const CHIP_GAP: f32 = 2.0;
-
-/// One chip per ghost in range, `−prev … −1 • +1 … +next`; clicking one
-/// hides or shows that offset without touching the others. One row when it
-/// fits the panel; otherwise the past on one row and the future under it,
-/// rather than wrapping mid-range or stretching the panel.
-fn onion_offset_chips(state: &mut AppState, ui: &mut egui::Ui) {
-    let onion = &mut state.onion;
-    let (prev, next) = (onion.prev, onion.next);
-    if prev == 0 && next == 0 {
-        return;
-    }
-    let unit = if onion.by_key { "drawing" } else { "frame" };
-    let step = CHIP.x + CHIP_GAP;
-    let one_row = f32::from(prev + next) * step + CHIP.y * 0.5 <= ui.available_width();
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(CHIP_GAP, CHIP_GAP);
-        let past = |ui: &mut egui::Ui, onion: &mut OnionConfig| {
-            for k in (1..=prev).rev() {
-                offset_chip(ui, onion, k, OnionDirection::Prev, unit);
-            }
-        };
-        let future = |ui: &mut egui::Ui, onion: &mut OnionConfig| {
-            for k in 1..=next {
-                offset_chip(ui, onion, k, OnionDirection::Next, unit);
-            }
-        };
-        if one_row {
-            ui.horizontal(|ui| {
-                past(ui, onion);
-                // The current frame. Painted: the UI font has no bullet glyph.
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(CHIP.y * 0.5, CHIP.y), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 2.5, theme::text_muted());
-                resp.on_hover_text("The current frame");
-                future(ui, onion);
-            });
-        } else {
-            if prev > 0 {
-                ui.horizontal(|ui| past(ui, onion));
-            }
-            if next > 0 {
-                ui.horizontal(|ui| future(ui, onion));
-            }
-        }
-    });
-    ui.add_space(2.0);
+/// Width of a button showing `text`, at least `min`.
+fn button_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>, min: f32) -> f32 {
+    let w = text
+        .into()
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button)
+        .size()
+        .x;
+    (w + 2.0 * ui.spacing().button_padding.x).max(min)
 }
 
-fn offset_chip(
-    ui: &mut egui::Ui,
-    onion: &mut OnionConfig,
-    k: u8,
-    dir: OnionDirection,
-    unit: &str,
-) {
-    let shown = !onion.is_hidden(k, dir);
-    let [r, g, b] = onion.tint_rgb(dir);
-    let tint = Color32::from_rgb(r, g, b);
-    let (sign, way) = match dir {
-        OnionDirection::Prev => ('−', "back"),
-        OnionDirection::Next => ('+', "ahead"),
-    };
-    let (rect, resp) = ui.allocate_exact_size(CHIP, Sense::click());
-    let painter = ui.painter();
-    let text = if shown {
-        painter.rect_filled(rect, 3.0, tint);
-        // Dark or light label, whichever reads on the tint.
-        let luma = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
-        if luma > 150.0 { Color32::BLACK } else { Color32::WHITE }
-    } else {
-        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, tint.gamma_multiply(0.6)));
-        theme::text_muted()
-    };
-    if resp.hovered() {
-        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::text()));
+/// Space a row out so a `w`-wide widget added next ends at its right edge,
+/// floored and a pixel short. In place of a right-to-left layout, which on a
+/// narrow panel overlaps what's before it rather than keeping the panel wide
+/// enough; and a row a hair too wide grows the panel a little every frame.
+fn pad_to_right(ui: &mut egui::Ui, w: f32) {
+    let pad = (ui.available_width() - w.ceil() - 1.0).floor();
+    if pad > 0.0 {
+        ui.add_space(pad);
     }
-    painter.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        format!("{sign}{k}"),
-        egui::FontId::proportional(10.0),
-        text,
+}
+
+/// Tooltip of a layer's onion toggle, in the Layers panel and the tracks.
+pub(crate) fn layer_onion_tip(on: bool) -> &'static str {
+    if on {
+        "Onion skin on: this layer's ghosts show even while another layer is \
+         active. Click to show them only while it's the active layer."
+    } else {
+        "Onion skin follows the active layer: ghosts show while this one is \
+         selected. Click to keep them on while another layer is active."
+    }
+}
+
+/// Onion strip heights: the offset numbers, the gap, and the bars at their
+/// shortest. A taller panel makes the bars taller.
+const STRIP_NUM_H: f32 = 16.0;
+const STRIP_GAP: f32 = 3.0;
+const STRIP_BAR_H: f32 = 46.0;
+
+/// The offset a strip column stands for: `−8 … −1`, then 0 (`None`), then
+/// `1 … 8`.
+fn strip_offset(i: usize) -> Option<(u8, OnionDirection)> {
+    let r = usize::from(ONION_RANGE);
+    match i.cmp(&r) {
+        std::cmp::Ordering::Less => Some(((r - i) as u8, OnionDirection::Prev)),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(((i - r) as u8, OnionDirection::Next)),
+    }
+}
+
+/// The Krita-style strip, `−8 … 0 … 8`. A lit number shows that ghost and
+/// its bar sets how strongly; Alt-click shows only that one, and again
+/// brings the rest back. 0 switches the onion skin on and off. One drag
+/// over the bars sets every bar it crosses. The bars are `bar_h` tall.
+fn onion_strip(onion: &mut OnionConfig, key: Option<&str>, bar_h: f32, ui: &mut egui::Ui) {
+    let n = 2 * usize::from(ONION_RANGE) + 1;
+    // Floored, so the strip never asks for a fraction more than the panel
+    // has — that would grow it a hair every frame.
+    let width = ui.available_width().floor().max(n as f32 * 6.0);
+    let col_w = width / n as f32;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(width, STRIP_NUM_H + STRIP_GAP + bar_h),
+        Sense::hover(),
     );
-    let plural = if k == 1 { "" } else { "s" };
-    let state = if shown { "shown — click to hide" } else { "hidden — click to show" };
-    if resp
-        .on_hover_text(format!("{k} {unit}{plural} {way}: {state}"))
-        .clicked()
-    {
-        onion.toggle_hidden(k, dir);
+    let id = ui.id().with("onion_strip");
+    let bars = Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - bar_h), rect.max);
+    let col_x = |i: usize| rect.min.x + i as f32 * col_w;
+    let col_at = |x: f32| (((x - rect.min.x) / col_w).floor().max(0.0) as usize).min(n - 1);
+    let value_at = |y: f32| ((bars.max.y - y) / bars.height()).clamp(0.0, 1.0);
+    let unit = if onion.by_key { "drawing" } else { "frame" };
+
+    // Bars: a press sets the bar under it, and a drag sweeps — every column
+    // between the last pointer position and this one takes the height the
+    // line between them has there, so a fast sweep leaves no gaps.
+    let bar_resp = ui.interact(bars, id.with("bars"), Sense::click_and_drag());
+    let last_id = id.with("last");
+    let mut held_col = None;
+    if bar_resp.is_pointer_button_down_on() {
+        if let Some(p) = bar_resp.interact_pointer_pos() {
+            let a: egui::Pos2 = ui.data(|d| d.get_temp(last_id)).unwrap_or(p);
+            let (ca, cb) = (col_at(a.x), col_at(p.x));
+            for c in ca.min(cb)..=ca.max(cb) {
+                let Some((k, dir)) = strip_offset(c) else {
+                    continue;
+                };
+                // The column the sweep started from was set last frame.
+                if c == ca && ca != cb {
+                    continue;
+                }
+                let y = if c == cb {
+                    p.y
+                } else {
+                    let cx = col_x(c) + col_w / 2.0;
+                    let t = ((cx - a.x) / (p.x - a.x)).clamp(0.0, 1.0);
+                    a.y + t * (p.y - a.y)
+                };
+                onion.set_opacity(k, dir, (value_at(y) * 100.0).round() / 100.0);
+            }
+            ui.data_mut(|d| d.insert_temp(last_id, p));
+            held_col = Some(cb);
+        }
+    } else {
+        ui.data_mut(|d| d.remove::<egui::Pos2>(last_id));
+    }
+    let show_value = held_col.or_else(|| bar_resp.hover_pos().map(|p| col_at(p.x)));
+    bar_resp.on_hover_text(
+        "Drag a bar up or down to set how strongly that ghost shows. \
+         Drag across to set several in one go.",
+    );
+
+    let alt = ui.input(|i| i.modifiers.alt);
+    let painter = ui.painter_at(rect);
+    let font = egui::FontId::proportional(9.5);
+    // Room for the minus sign? On a narrow panel the side says it.
+    let signed = col_w >= 12.5;
+    for i in 0..n {
+        let x0 = col_x(i);
+        let num = Rect::from_min_size(egui::pos2(x0, rect.min.y), egui::vec2(col_w, STRIP_NUM_H))
+            .shrink2(egui::vec2(0.5, 0.0));
+        let slot = Rect::from_min_max(egui::pos2(x0, bars.min.y), egui::pos2(x0 + col_w, bars.max.y))
+            .shrink2(egui::vec2(1.0, 0.0));
+        // Drags too, though a number does nothing with one: egui hands a
+        // near miss on a click-only widget to the panel's move handle, so a
+        // grab a pixel off the top row would drag the panel.
+        let resp = ui.interact(num, id.with(("num", i)), Sense::click_and_drag());
+        let Some((k, dir)) = strip_offset(i) else {
+            // 0: the current frame, and the switch for the whole skin.
+            let on = onion.enabled;
+            let text = if on {
+                painter.rect_filled(num, 3.0, theme::accent());
+                theme::accent_text()
+            } else {
+                painter.rect_stroke(num, 3.0, Stroke::new(1.0, theme::stroke_thin()));
+                theme::text_muted()
+            };
+            if resp.hovered() {
+                painter.rect_stroke(num, 3.0, Stroke::new(1.0, theme::text()));
+            }
+            painter.text(num.center(), egui::Align2::CENTER_CENTER, "0", font.clone(), text);
+            painter.vline(slot.center().x, slot.y_range().shrink(4.0), Stroke::new(1.0, theme::stroke_thin()));
+            let what = if on { "on — click to turn it off" } else { "off — click to turn it on" };
+            let key = key.map_or(String::new(), |k| format!("  ({k})"));
+            if resp.on_hover_text(format!("Onion skin is {what}{key}")).clicked() {
+                onion.enabled = !on;
+            }
+            continue;
+        };
+        let shown = onion.is_shown(k, dir);
+        let [r, g, b] = onion.tint_rgb(dir);
+        // Off, the lit offsets still read as lit, just quieter.
+        let tint = Color32::from_rgb(r, g, b).gamma_multiply(if onion.enabled { 1.0 } else { 0.45 });
+
+        // The number.
+        let text = if shown {
+            painter.rect_filled(num, 3.0, tint);
+            let luma = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+            if luma > 150.0 && onion.enabled { Color32::BLACK } else { Color32::WHITE }
+        } else {
+            theme::text_muted()
+        };
+        if onion.is_soloed(k, dir) {
+            painter.rect_stroke(num, 3.0, Stroke::new(1.5, theme::accent()));
+        } else if resp.hovered() {
+            painter.rect_stroke(num, 3.0, Stroke::new(1.0, theme::text()));
+        }
+        let label = match dir {
+            OnionDirection::Prev if signed => format!("\u{2212}{k}"),
+            _ => k.to_string(),
+        };
+        painter.text(num.center(), egui::Align2::CENTER_CENTER, label, font.clone(), text);
+
+        // The bar.
+        let v = onion.opacity(k, dir);
+        painter.rect_filled(slot, 2.0, theme::well());
+        if v > 0.0 {
+            let h = (v * slot.height()).max(1.0);
+            let fill = Rect::from_min_max(egui::pos2(slot.min.x, slot.max.y - h), slot.max);
+            painter.rect_filled(fill, 2.0, if shown { tint } else { theme::bar() });
+        }
+        if show_value == Some(i) {
+            painter.text(
+                egui::pos2(slot.center().x, slot.min.y + 6.0),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}", v * 100.0),
+                egui::FontId::proportional(8.5),
+                theme::text(),
+            );
+        }
+
+        let way = match dir {
+            OnionDirection::Prev => "back",
+            OnionDirection::Next => "ahead",
+        };
+        let plural = if k == 1 { "" } else { "s" };
+        let state = if shown { "shown — click to hide" } else { "hidden — click to show" };
+        let tip = format!(
+            "{k} {unit}{plural} {way}, {:.0}%: {state}.\nAlt-click to show only this one.",
+            v * 100.0
+        );
+        if resp.on_hover_text(tip).clicked() {
+            if alt {
+                onion.solo(k, dir);
+            } else {
+                onion.toggle_shown(k, dir);
+            }
+        }
     }
 }
 
@@ -2581,6 +2743,7 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
     let count = state.project.frame_count.max(1);
     let cur = state.project.current_frame;
     let li = state.project.current_layer;
+    let start_opacity = state.onion.pin_opacity();
     let Some(layer) = state.project.layers.get_mut(li) else {
         return;
     };
@@ -2588,7 +2751,7 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
     // a long one took more lines, which grew the panel for good.
     let muted = |text: String| egui::RichText::new(text).color(theme::text_muted()).size(10.5);
     ui.add(egui::Label::new(muted(format!("Pins on \u{201c}{}\u{201d}", layer.name))).truncate());
-    ui.label(muted("show while it's the active layer.".into()));
+    ui.label(muted("show while it's active or its onion is on.".into()));
 
     // The frame to pin: a scratch value, kept in egui memory rather than in
     // the state. Numbered like the timeline, from 0.
@@ -2620,6 +2783,7 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
                 frame,
                 tint,
                 visible: true,
+                opacity: start_opacity,
             });
         }
     }
@@ -2634,11 +2798,22 @@ fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui) {
             color_picker_u8(ui, "", &mut pin.tint);
             ui.label("Frame");
             ui.add(egui::DragValue::new(&mut pin.frame).range(0..=count - 1).speed(0.25));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::icon_button(ui, ic::TRASH, "Remove pin").clicked() {
-                    remove = Some(i);
-                }
-            });
+            // In percent; egui keeps the unrounded value while dragging.
+            let mut pct = (pin.opacity * 100.0).round();
+            let field = egui::DragValue::new(&mut pct)
+                .range(0.0..=100.0)
+                .speed(0.5)
+                .fixed_decimals(0)
+                .suffix("%");
+            if ui.add(field).on_hover_text("How strongly this pin's ghost shows").changed() {
+                pin.opacity = pct / 100.0;
+            }
+            // Same size as `theme::icon_button` draws it.
+            let trash_w = button_width(ui, egui::RichText::new(ic::TRASH).size(15.0), 28.0);
+            pad_to_right(ui, trash_w);
+            if theme::icon_button(ui, ic::TRASH, "Remove pin").clicked() {
+                remove = Some(i);
+            }
         });
     }
     if let Some(i) = remove {
@@ -3453,6 +3628,28 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         .clicked()
                                     {
                                         layer.reference = !layer.reference;
+                                    }
+                                    // Onion skin kept on while another layer is
+                                    // active. Not for a group either.
+                                    let onion_color = if layer.onion {
+                                        theme::accent()
+                                    } else {
+                                        theme::text_muted()
+                                    };
+                                    if !header
+                                        && ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(ic::CIRCLES_THREE)
+                                                    .size(16.0)
+                                                    .color(onion_color),
+                                            )
+                                            .min_size(egui::vec2(30.0, 24.0)),
+                                        )
+                                        .on_hover_text(layer_onion_tip(layer.onion))
+                                        .clicked()
+                                    {
+                                        layer.onion = !layer.onion;
                                     }
                                     // Name: click selects, double-click renames inline.
                                     let editing = matches!(rename.as_ref(), Some(r) if r.index == i);
@@ -5517,46 +5714,50 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         ))
     };
 
-    // Onion ghosts of the active layer at nearby frames. Drawn inside the layer
-    // loop so they sit at the active layer's depth, all of them just behind
-    // its cell — never over the lines being drawn.
+    // Onion ghosts of a layer at nearby frames: the active layer's, and those
+    // of every layer with its onion on. Drawn inside the layer loop so they
+    // sit at their layer's depth, all of them just behind its cell — never
+    // over the lines being drawn.
     // Ghosts come from `ghost_textures` — silhouettes already baked in the
     // tint colour. The vertex colour only fades them: multiplying a tint over
     // the plain cell texture leaves black line art black.
-    let draw_ghost = |id: CellId, frame: usize, a: u8| {
+    let onion_layers = state.onion_layers();
+    let draw_ghost = |li: usize, id: CellId, frame: usize, a: u8| {
         let Some((_, tex)) = state.ghost_textures.get(&id) else {
             return;
         };
         let Some(cell) = state.project.cell(id) else {
             return;
         };
-        let t = state.display_transform(cur_layer, frame);
+        let t = state.display_transform(li, frame);
         let lc = layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
         canvas_quad(&painter, state, tex.id(), lc, theme::white_alpha(a));
     };
-    let draw_onion = || {
+    let draw_onion = |li: usize| {
         // Pins at the bottom: they're references, usually far off. Then the
         // range ghosts of both sides, farthest first, so the nearest ones — the
         // most opaque, and what the user is comparing against — sit right
         // under the drawing.
-        let pin_alpha = (state.onion.max_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-        for (pin, id) in state.onion_pin_ghosts() {
-            draw_ghost(id, pin.frame, pin_alpha);
+        for (pin, id) in state.onion_pin_ghosts(li) {
+            draw_ghost(li, id, pin.frame, pin.alpha());
         }
         let dirs = [OnionDirection::Prev, OnionDirection::Next];
         let mut steps: Vec<(OnionStep, OnionDirection)> = dirs
             .into_iter()
-            .flat_map(|dir| state.onion_steps(dir).into_iter().map(move |s| (s, dir)))
+            .flat_map(|dir| state.onion_steps(li, dir).into_iter().map(move |s| (s, dir)))
             .collect();
         steps.sort_by_key(|(s, _)| std::cmp::Reverse(s.k));
         for (step, dir) in steps {
-            draw_ghost(step.cell, step.frame, state.onion.alpha_for(step.k, dir));
+            draw_ghost(li, step.cell, step.frame, state.onion.alpha_for(step.k, dir));
         }
     };
 
     for (li, layer) in state.project.layers.iter().enumerate() {
         if !state.project.shows(li) || !layer.reference {
             continue;
+        }
+        if onion_layers.contains(&li) {
+            draw_onion(li);
         }
         if let Some(id) = layer.resolve(cur_frame) {
             let tex = state.cell_textures.get(&id);
@@ -5580,11 +5781,13 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
         if layer.is_group() {
             // Below full opacity a group draws as one merged image, centred
-            // on the document — group space — at its own opacity. Its active
-            // layer's ghosts go just under it.
+            // on the document — group space — at its own opacity. Its
+            // layers' ghosts go just under it.
             if state.group_drawn_whole(li) {
-                if state.project.group_of(cur_layer) == Some(li) {
-                    draw_onion();
+                for &ol in &onion_layers {
+                    if state.project.group_of(ol) == Some(li) {
+                        draw_onion(ol);
+                    }
                 }
                 if let Some((tex, (gw, gh))) = state.group_texture(li) {
                     let (pw, ph) = (state.project.width as f32, state.project.height as f32);
@@ -5605,10 +5808,10 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         if state.in_group_image(li) {
             continue;
         }
-        // Onion ghosts render at the active layer's depth, just behind its
+        // Onion ghosts render at their layer's depth, just behind its
         // current cell.
-        if li == cur_layer {
-            draw_onion();
+        if onion_layers.contains(&li) {
+            draw_onion(li);
         }
         // A layer of a group below full opacity that isn't drawn merged —
         // "fade other layers" is fading around it — carries the group's
@@ -9093,9 +9296,8 @@ mod onion_tests {
     fn a_pin_gets_a_ghost_in_its_own_colour_and_everything_paints() {
         let mut state = AppState::for_test();
         state.onion.enabled = true;
-        state.onion.prev = 3;
-        state.onion.next = 2;
-        state.onion.toggle_hidden(1, OnionDirection::Prev);
+        state.onion.light(3, 2);
+        state.onion.toggle_shown(1, OnionDirection::Prev);
         for _ in 0..4 {
             state.structural_edit(false, |p| {
                 p.add_frame();
@@ -9106,8 +9308,8 @@ mod onion_tests {
         let green = [0, 200, 0];
         let li = state.project.current_layer;
         state.project.layers[li].onion_pins = vec![
-            OnionPin { frame: 1, tint: green, visible: true },
-            OnionPin { frame: 3, tint: [9, 9, 9], visible: false },
+            OnionPin { frame: 1, tint: green, visible: true, opacity: 0.75 },
+            OnionPin { frame: 3, tint: [9, 9, 9], visible: false, opacity: 0.75 },
         ];
         let cell_on = |f| state.project.layers[li].resolve(f).unwrap();
         let (pinned, plain, hidden) = (cell_on(1), cell_on(2), cell_on(3));
@@ -9140,8 +9342,7 @@ mod onion_tests {
         let mut state = AppState::for_test();
         state.show_panels = false;
         state.onion.enabled = true;
-        state.onion.prev = 1;
-        state.onion.next = 1;
+        state.onion.light(1, 1);
         for _ in 0..4 {
             state.structural_edit(false, |p| {
                 p.add_frame();
@@ -9150,12 +9351,226 @@ mod onion_tests {
         }
         let li = state.project.current_layer;
         state.project.layers[li].onion_pins =
-            vec![OnionPin { frame: 4, tint: [0, 200, 0], visible: true }];
+            vec![OnionPin { frame: 4, tint: [0, 200, 0], visible: true, opacity: 0.4 }];
         state.project.goto(2);
         let cell_on = |f| state.project.layers[li].resolve(f).unwrap();
         let (past, current, future, pinned) = (cell_on(1), cell_on(2), cell_on(3), cell_on(4));
         // A blank drawing paints nothing; give the current one a dot of ink.
         state.project.cell_mut(current).unwrap().pixels_mut()[3] = 255;
+
+        let ctx = egui::Context::default();
+        let mut meshes = Vec::new();
+        for time in [0.0, 1.0] {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0))),
+                time: Some(time),
+                ..Default::default()
+            };
+            let out = ctx.run(raw, |ctx| {
+                state.sync_textures(ctx);
+                draw(&mut state, ctx);
+            });
+            meshes = out
+                .shapes
+                .into_iter()
+                .filter_map(|c| match c.shape {
+                    egui::Shape::Mesh(m) => Some((m.texture_id, m.vertices[0].color.a())),
+                    _ => None,
+                })
+                .collect();
+        }
+        let at = |tex: Option<egui::TextureId>| {
+            let tex = tex.expect("texture built");
+            meshes.iter().position(|&(t, _)| t == tex).expect("painted")
+        };
+        let cell = at(state.cell_textures.get(&current).map(|t| t.tex.id()));
+        for (name, id) in [("past", past), ("future", future), ("pinned", pinned)] {
+            let ghost = at(state.ghost_textures.get(&id).map(|(_, t)| t.id()));
+            assert!(ghost < cell, "{name} ghost painted over the drawing");
+        }
+        // The pin at its own opacity, not the bars'.
+        let pin_mesh = at(state.ghost_textures.get(&pinned).map(|(_, t)| t.id()));
+        assert_eq!(meshes[pin_mesh].1, 102);
+    }
+
+    /// The strip alone in a default-width panel (232px inside), fed `events`
+    /// with Alt held or not. Its rect.
+    fn strip_frame(
+        ctx: &egui::Context,
+        onion: &mut OnionConfig,
+        events: Vec<egui::Event>,
+        alt: bool,
+    ) -> Rect {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0))),
+            modifiers: if alt { egui::Modifiers::ALT } else { egui::Modifiers::NONE },
+            events,
+            ..Default::default()
+        };
+        let mut rect = Rect::NOTHING;
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.allocate_ui(egui::vec2(232.0, 400.0), |ui| {
+                    onion_strip(onion, None, STRIP_BAR_H, ui);
+                    rect = ui.min_rect();
+                });
+            });
+        });
+        rect
+    }
+
+    /// Drives the strip with presses, drags and releases.
+    struct Strip {
+        ctx: egui::Context,
+        onion: OnionConfig,
+        rect: Rect,
+    }
+
+    impl Strip {
+        fn new() -> Self {
+            let ctx = egui::Context::default();
+            let mut onion = OnionConfig::default();
+            let rect = strip_frame(&ctx, &mut onion, vec![], false);
+            Self { ctx, onion, rect }
+        }
+
+        fn col_x(&self, i: usize) -> f32 {
+            let n = 2 * usize::from(ONION_RANGE) + 1;
+            self.rect.min.x + (i as f32 + 0.5) * self.rect.width() / n as f32
+        }
+
+        /// The number at column `i`.
+        fn num(&self, i: usize) -> Pos2 {
+            pos2(self.col_x(i), self.rect.min.y + STRIP_NUM_H / 2.0)
+        }
+
+        /// Column `i`'s bar at height `v`.
+        fn bar(&self, i: usize, v: f32) -> Pos2 {
+            pos2(self.col_x(i), self.rect.max.y - v * STRIP_BAR_H)
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>, alt: bool) {
+            self.rect = strip_frame(&self.ctx, &mut self.onion, events, alt);
+        }
+
+        fn button(pos: Pos2, pressed: bool, alt: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: if alt { egui::Modifiers::ALT } else { egui::Modifiers::NONE },
+            }
+        }
+
+        /// Press at the first point, move through the rest, release at the
+        /// last.
+        fn stroke(&mut self, path: &[Pos2], alt: bool) {
+            let (first, last) = (path[0], path[path.len() - 1]);
+            self.frame(vec![egui::Event::PointerMoved(first), Self::button(first, true, alt)], alt);
+            for &p in &path[1..] {
+                self.frame(vec![egui::Event::PointerMoved(p)], alt);
+            }
+            self.frame(vec![Self::button(last, false, alt)], alt);
+            self.frame(vec![], alt);
+        }
+
+        fn click(&mut self, at: Pos2, alt: bool) {
+            self.stroke(&[at], alt);
+        }
+    }
+
+    /// Column of an offset: −8 is 0, 0 is 8, +8 is 16.
+    fn col(k: i32) -> usize {
+        (k + i32::from(ONION_RANGE)) as usize
+    }
+
+    #[test]
+    fn the_strip_fits_the_default_panel() {
+        let s = Strip::new();
+        assert!(s.rect.width() <= 232.0, "{:?}", s.rect);
+        assert_eq!(s.rect.height(), STRIP_NUM_H + STRIP_GAP + STRIP_BAR_H);
+    }
+
+    #[test]
+    fn numbers_light_offsets_and_zero_switches_the_skin() {
+        let mut s = Strip::new();
+        assert!(!s.onion.enabled);
+        s.click(s.num(col(0)), false);
+        assert!(s.onion.enabled, "0 turns the onion skin on");
+        s.click(s.num(col(-5)), false);
+        assert!(s.onion.is_shown(5, OnionDirection::Prev));
+        s.click(s.num(col(1)), false);
+        assert!(!s.onion.is_shown(1, OnionDirection::Next));
+        // Nothing else moved.
+        assert!(s.onion.is_shown(1, OnionDirection::Prev) && s.onion.is_shown(2, OnionDirection::Next));
+        s.click(s.num(col(0)), false);
+        assert!(!s.onion.enabled, "and off again");
+    }
+
+    #[test]
+    fn alt_click_shows_one_offset_and_again_brings_the_rest_back() {
+        let mut s = Strip::new();
+        let before = (s.onion.prev_shown, s.onion.next_shown);
+        s.click(s.num(col(2)), true);
+        assert_eq!((s.onion.prev_shown, s.onion.next_shown), (0, 0b10));
+        s.click(s.num(col(2)), true);
+        assert_eq!((s.onion.prev_shown, s.onion.next_shown), before);
+    }
+
+    #[test]
+    fn a_press_sets_a_bar_and_a_sweep_sets_every_bar_it_crosses() {
+        let mut s = Strip::new();
+        let prev_before = s.onion.prev_opacity;
+        s.click(s.bar(col(-1), 0.25), false);
+        assert!((s.onion.opacity(1, OnionDirection::Prev) - 0.25).abs() < 0.03, "{:?}", s.onion);
+        // One fast move from +1 high to +8 low: every bar between takes the
+        // line's height there, none skipped.
+        let (from, to) = (s.bar(col(1), 0.9), s.bar(col(8), 0.2));
+        s.stroke(&[from, to], false);
+        let next: Vec<f32> = (1..=ONION_RANGE).map(|k| s.onion.opacity(k, OnionDirection::Next)).collect();
+        assert!((next[0] - 0.9).abs() < 0.03, "{next:?}");
+        assert!((next[7] - 0.2).abs() < 0.03, "{next:?}");
+        assert!(next.windows(2).all(|w| w[0] > w[1]), "a straight falling line: {next:?}");
+        // The sweep didn't touch the other side.
+        assert_eq!(s.onion.prev_opacity[1..], prev_before[1..]);
+    }
+
+    /// A layer with its onion on ghosts while another layer is active, just
+    /// under its own drawing; a layer without it doesn't.
+    #[test]
+    fn a_layer_with_its_onion_on_ghosts_under_its_own_drawing() {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        while state.project.layers.len() < 3 {
+            state.project.add_layer();
+        }
+        for _ in 0..4 {
+            state.structural_edit(false, |p| p.add_frame());
+        }
+        for li in 0..3 {
+            state.project.current_layer = li;
+            for f in 0..5 {
+                state.project.goto(f);
+                state.structural_edit(false, |p| {
+                    p.insert_blank_key_here();
+                });
+            }
+        }
+        state.onion.enabled = true;
+        state.onion.light(1, 1);
+        state.project.layers[0].onion = true;
+        state.project.current_layer = 1;
+        state.project.goto(2);
+        let cells: Vec<Vec<CellId>> = (0..3)
+            .map(|li| (0..5).map(|f| state.project.layers[li].resolve(f).unwrap()).collect())
+            .collect();
+        let cell = |li: usize, f: usize| cells[li][f];
+        // A blank drawing paints nothing: a dot of ink in each current one.
+        for li in 0..3 {
+            let id = cell(li, 2);
+            state.project.cell_mut(id).unwrap().pixels_mut()[3] = 255;
+        }
 
         let ctx = egui::Context::default();
         let mut meshes = Vec::new();
@@ -9182,54 +9597,14 @@ mod onion_tests {
             let tex = tex.expect("texture built");
             meshes.iter().position(|&t| t == tex).expect("painted")
         };
-        let cell = at(state.cell_textures.get(&current).map(|t| t.tex.id()));
-        for (name, id) in [("past", past), ("future", future), ("pinned", pinned)] {
-            let ghost = at(state.ghost_textures.get(&id).map(|(_, t)| t.id()));
-            assert!(ghost < cell, "{name} ghost painted over the drawing");
+        let ghost = |li, f| at(state.ghost_textures.get(&cell(li, f)).map(|(_, t)| t.id()));
+        let drawing = |li| at(state.cell_textures.get(&cell(li, 2)).map(|t| t.tex.id()));
+        for f in [1, 3] {
+            assert!(ghost(0, f) < drawing(0), "layer 0's ghost of {f} under its drawing");
+            assert!(drawing(0) < ghost(1, f), "the active layer's ghosts sit above layer 0");
+            assert!(ghost(1, f) < drawing(1));
+            assert!(state.ghost_textures.get(&cell(2, f)).is_none(), "layer 2's onion is off");
         }
-    }
-
-    /// Size of the chip row laid out `width` wide.
-    fn chip_row(width: f32, prev: u8, next: u8) -> Vec2 {
-        let mut state = AppState::for_test();
-        state.onion.prev = prev;
-        state.onion.next = next;
-        let ctx = egui::Context::default();
-        let mut size = Vec2::ZERO;
-        let raw = egui::RawInput {
-            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0))),
-            ..Default::default()
-        };
-        let _ = ctx.run(raw, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                size = ui
-                    .allocate_ui(egui::vec2(width, 400.0), |ui| {
-                        onion_offset_chips(&mut state, ui);
-                        ui.min_rect().size()
-                    })
-                    .inner;
-            });
-        });
-        size
-    }
-
-    /// Eight each way in the default-width panel (232px inside): past and
-    /// future on a row each, never wrapped mid-range or wider than the panel.
-    #[test]
-    fn a_full_range_splits_into_two_rows_in_a_narrow_panel() {
-        let s = chip_row(232.0, 8, 8);
-        assert!(s.x <= 232.0, "{s:?}");
-        assert!(s.y > 2.0 * CHIP.y && s.y < 3.0 * CHIP.y, "two rows: {s:?}");
-    }
-
-    #[test]
-    fn a_range_that_fits_stays_on_one_compact_row() {
-        let narrow = chip_row(232.0, 3, 3);
-        assert!(narrow.y < 2.0 * CHIP.y, "{narrow:?}");
-        // A wide panel doesn't stretch the chips to fill it.
-        let wide = chip_row(460.0, 8, 8);
-        assert!(wide.y < 2.0 * CHIP.y, "{wide:?}");
-        assert!(wide.x <= 16.0 * (CHIP.x + CHIP_GAP) + CHIP.y, "{wide:?}");
     }
 }
 
@@ -9303,14 +9678,85 @@ mod panel_drag_tests {
     use egui::{pos2, vec2, Pos2};
 
     fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        frame_shapes(ctx, state, events);
+    }
+
+    fn frame_shapes(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::epaint::ClippedShape> {
         let raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
             events,
             ..Default::default()
         };
-        let _ = ctx.run(raw, |ctx| {
+        ctx.run(raw, |ctx| {
             panel_window(state, ctx, PanelId::Onion, [300.0, 200.0], 252.0, true, None);
-        });
+        })
+        .shapes
+    }
+
+    /// Where the Onion panel's Reset button sits — right under the strip,
+    /// so it moves with the bars' height.
+    fn reset_y(ctx: &egui::Context, state: &mut AppState) -> f32 {
+        frame_shapes(ctx, state, vec![])
+            .into_iter()
+            .find_map(|c| match c.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Reset" => Some(t.pos.y),
+                _ => None,
+            })
+            .expect("Reset painted")
+    }
+
+    /// The Onion bars take the panel's height: a taller panel, taller bars,
+    /// and pins added to a tall panel squeeze them rather than growing it.
+    #[test]
+    fn the_onion_bars_grow_with_the_panel_and_pins_squeeze_them() {
+        let mut state = AppState::for_test();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        let before = panel_rect(&ctx);
+        let reset_before = reset_y(&ctx, &mut state);
+        // Drag the bottom edge 80 down.
+        let from = pos2(before.center().x, before.bottom() - 1.0);
+        let to = from + vec2(0.0, 80.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=4 {
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from + (to - from) * (i as f32 / 4.0))]);
+        }
+        frame(&ctx, &mut state, vec![button(to, false)]);
+        for _ in 0..3 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        let tall = panel_rect(&ctx);
+        let grew = tall.height() - before.height();
+        assert!((grew - 80.0).abs() < 2.0, "{before:?} → {tall:?}");
+        let reset_tall = reset_y(&ctx, &mut state);
+        assert!((reset_tall - reset_before - grew).abs() < 1.0, "the bars took the height");
+        // At rest it stays put.
+        for _ in 0..5 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        assert_eq!(panel_rect(&ctx), tall, "creep");
+
+        // Two pins: the panel keeps its height, the bars give up the room.
+        let li = state.project.current_layer;
+        state.project.layers[li].onion_pins =
+            vec![OnionPin { frame: 0, tint: [0, 200, 0], visible: true, opacity: 0.5 }; 2];
+        for _ in 0..5 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        assert_eq!(panel_rect(&ctx).height(), tall.height(), "pins grew the panel");
+        assert!(reset_y(&ctx, &mut state) < reset_tall - 40.0, "the bars shrank for the pins");
     }
 
     fn panel_rect(ctx: &egui::Context) -> Rect {
@@ -9348,7 +9794,7 @@ mod panel_drag_tests {
     #[test]
     fn dragging_the_body_leaves_the_panel_where_it_is() {
         // Offsets from the panel's top-left: the bottom margin, clear of any
-        // control, and beside the "Enabled" checkbox.
+        // control, and a hair above the onion strip's numbers.
         for at in [pos2(40.0, -8.0), pos2(200.0, 50.0)] {
             let mut state = AppState::for_test();
             let ctx = egui::Context::default();
@@ -9380,10 +9826,10 @@ mod panel_drag_tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
-        let was = state.onion.enabled;
+        let was = format!("{:?}", state.onion);
         frame(&ctx, &mut state, vec![egui::Event::PointerMoved(at), button(true)]);
         frame(&ctx, &mut state, vec![button(false)]);
-        assert_ne!(state.onion.enabled, was, "the Enabled checkbox took the click");
+        assert_ne!(format!("{:?}", state.onion), was, "the onion strip took the click");
     }
 
     #[test]
@@ -12412,15 +12858,15 @@ mod canvas_gpu_tests {
         // Ghosts: four more frames of the plain layer, the playhead on 2.
         st.project.current_layer = plain;
         st.onion.enabled = true;
-        st.onion.prev = 1;
-        st.onion.next = 1;
+        st.onion.light(1, 1);
         for _ in 0..4 {
             st.structural_edit(false, |p| {
                 p.add_frame();
                 p.insert_blank_key_here();
             });
         }
-        st.project.layers[plain].onion_pins = vec![OnionPin { frame: 4, tint: [0, 200, 0], visible: true }];
+        st.project.layers[plain].onion_pins =
+            vec![OnionPin { frame: 4, tint: [0, 200, 0], visible: true, opacity: 0.75 }];
         st.project.goto(2);
         let cur = st.project.layers[plain].resolve(2).unwrap();
         st.project.cells[cur] = Arc::new(block(&st, (600, 100, 900, 400), [246, 240, 226, 255]));

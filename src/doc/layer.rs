@@ -59,6 +59,10 @@ pub struct Layer {
     /// shift `track_points`, so a pin stays on its drawing.
     #[serde(skip)]
     pub onion_pins: Vec<OnionPin>,
+    /// Onion skin kept on for this layer while another one is active. The
+    /// active layer ghosts either way. Session-only like `onion_pins`.
+    #[serde(skip)]
+    pub onion: bool,
     /// [`Layer::uid`] of the layer whose drawings this one's key jumps also
     /// stop at — the rough under a cleanup layer. By uid, not index, so it
     /// rides through reorders, undo and the Krita reload untouched; a deleted
@@ -133,6 +137,7 @@ impl Layer {
             transform_keys: Vec::new(),
             lines_from: None,
             onion_pins: Vec::new(),
+            onion: false,
             keys_from: None,
             uid: next_uid(),
             track_points: Vec::new(),

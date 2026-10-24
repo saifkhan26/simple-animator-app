@@ -4336,17 +4336,21 @@ impl AppState {
     /// has rested for `GHOST_REST`, so a scrub past a hundred frames doesn't
     /// build a hundred ghosts on the way.
     fn sync_ghosts(&mut self, ctx: &egui::Context, now: u64) {
-        let ghosts: Vec<(CellId, [u8; 3])> = [OnionDirection::Prev, OnionDirection::Next]
-            .into_iter()
-            .flat_map(|dir| {
+        let mut ghosts: Vec<(CellId, [u8; 3])> = Vec::new();
+        for li in self.onion_layers() {
+            for dir in [OnionDirection::Prev, OnionDirection::Next] {
                 let tint = self.onion.tint_rgb(dir);
-                self.onion_steps(dir)
-                    .into_iter()
-                    .map(move |s| (s.cell, tint))
-            })
-            .chain(self.onion_pin_ghosts().into_iter().map(|(pin, cell)| (cell, pin.tint)))
-            .chain(self.ghost_ahead())
-            .collect();
+                ghosts.extend(self.onion_steps(li, dir).into_iter().map(|s| (s.cell, tint)));
+            }
+            ghosts.extend(self.onion_pin_ghosts(li).into_iter().map(|(pin, cell)| (cell, pin.tint)));
+        }
+        ghosts.extend(self.ghost_ahead());
+        // One silhouette per cell, in the first colour asked for. A drawing
+        // ghosted twice in two colours — exposed both sides of the playhead,
+        // or by two layers sharing it — would otherwise rebuild in one, then
+        // the other, every frame.
+        let mut seen = HashSet::new();
+        ghosts.retain(|&(id, _)| seen.insert(id));
 
         let time = ctx.input(|i| i.time);
         let cur = self.project.current_frame;
@@ -4458,16 +4462,32 @@ impl AppState {
         }
     }
 
-    /// Onion ghosts for the active layer at the current frame. Shared by the
-    /// texture sync and the canvas so both agree on which cells are ghosted.
-    pub fn onion_steps(&self, dir: OnionDirection) -> Vec<OnionStep> {
+    /// The layers whose onion ghosts show, bottom first: the active layer and
+    /// every other one with its onion switched on, of those drawn. None while
+    /// playing or with the onion skin off.
+    pub fn onion_layers(&self) -> Vec<usize> {
         // Ghosts are for judging a pose against its neighbours, which playback
         // already shows; skipping them here also keeps the per-frame silhouette
         // rebuild out of the playback loop.
+        if self.playback.playing || !self.onion.enabled {
+            return Vec::new();
+        }
+        let cur = self.project.current_layer;
+        (0..self.project.layers.len())
+            .filter(|&li| {
+                let l = &self.project.layers[li];
+                (li == cur || l.onion) && !l.is_group() && self.project.shows(li)
+            })
+            .collect()
+    }
+
+    /// Onion ghosts for layer `li` at the current frame. Shared by the
+    /// texture sync and the canvas so both agree on which cells are ghosted.
+    pub fn onion_steps(&self, li: usize, dir: OnionDirection) -> Vec<OnionStep> {
         if self.playback.playing {
             return Vec::new();
         }
-        let Some(layer) = self.project.layers.get(self.project.current_layer) else {
+        let Some(layer) = self.project.layers.get(li) else {
             return Vec::new();
         };
         let mut steps = self.onion.steps(
@@ -4478,19 +4498,19 @@ impl AppState {
         );
         // A pinned drawing is ghosted once, in the pin's colour: the ghost
         // cache holds one tint per cell.
-        let pins = self.onion_pin_ghosts();
+        let pins = self.onion_pin_ghosts(li);
         steps.retain(|s| !pins.iter().any(|&(_, cell)| cell == s.cell));
         steps
     }
 
-    /// Pinned onion ghosts for the active layer at the current frame, under
-    /// the same conditions as [`Self::onion_steps`] — and hidden with the rest
-    /// of the onion skin when it's switched off.
-    pub fn onion_pin_ghosts(&self) -> Vec<(OnionPin, CellId)> {
+    /// Pinned onion ghosts for layer `li` at the current frame, under the
+    /// same conditions as [`Self::onion_steps`] — and hidden with the rest of
+    /// the onion skin when it's switched off.
+    pub fn onion_pin_ghosts(&self, li: usize) -> Vec<(OnionPin, CellId)> {
         if self.playback.playing || !self.onion.enabled {
             return Vec::new();
         }
-        let Some(layer) = self.project.layers.get(self.project.current_layer) else {
+        let Some(layer) = self.project.layers.get(li) else {
             return Vec::new();
         };
         crate::timeline::onion::pin_ghosts(
@@ -4967,7 +4987,9 @@ impl AppState {
     /// first frame of the stroke doesn't build it — on a big 8K drawing,
     /// tens of ms.
     fn ghost_ahead(&self) -> Option<(CellId, [u8; 3])> {
-        let on = self.onion.enabled && self.onion.prev > 0 && !self.playback.playing;
+        let on = self.onion.enabled
+            && self.onion.is_shown(1, OnionDirection::Prev)
+            && !self.playback.playing;
         let id = self.held_for_auto_key().filter(|_| on)?;
         Some((id, self.onion.tint_rgb(OnionDirection::Prev)))
     }
@@ -9573,6 +9595,10 @@ mod tests {
         assert_eq!(prefs.bg_color, want.bg_color);
         assert!(prefs.hidden_panels.is_empty() && prefs.panel_layout_gen == 0, "every panel where it was");
         assert_eq!(prefs.color_scheme, Scheme::Graphite);
+        // The onion sliders it saved (Prev 1, Next 1, Max α 0.75) become the
+        // strip: one lit each way, at 75%.
+        assert_eq!((prefs.onion.prev_shown, prefs.onion.next_shown), (0b1, 0b1));
+        assert_eq!(prefs.onion.alpha_for(1, OnionDirection::Next), 191);
         let brushes = restore_tool_brushes(prefs.tool_brushes);
         assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
         assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
@@ -9840,15 +9866,38 @@ mod tests {
     }
 
     #[test]
-    fn hidden_onion_offsets_round_trip_and_default_to_shown() {
+    fn the_onion_strip_round_trips_and_old_ranges_carry_over() {
         let mut prefs = UiPrefs::default();
-        prefs.onion.toggle_hidden(1, OnionDirection::Prev);
+        prefs.onion.toggle_shown(1, OnionDirection::Prev);
+        prefs.onion.set_opacity(4, OnionDirection::Next, 0.33);
         let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
-        assert!(back.onion.is_hidden(1, OnionDirection::Prev));
-        // Onion prefs saved before the toggles existed show every offset.
+        assert!(!back.onion.is_shown(1, OnionDirection::Prev));
+        assert_eq!(back.onion.opacity(4, OnionDirection::Next), 0.33);
+        // Onion prefs saved before the hide toggles existed: Prev 3 lights
+        // the three back, and Next was 1 then.
         let old: UiPrefs = toml::from_str("[onion]\nprev = 3\n").unwrap();
-        assert_eq!(old.onion.prev, 3);
-        assert_eq!((old.onion.prev_hidden, old.onion.next_hidden), (0, 0));
+        assert_eq!((old.onion.prev_shown, old.onion.next_shown), (0b111, 0b1));
+    }
+
+    /// The active layer and those with their onion on ghost — of those
+    /// drawn, and not while playing or with the skin off.
+    #[test]
+    fn onion_layers_are_the_active_one_and_those_switched_on() {
+        let mut state = AppState::for_test();
+        while state.project.layers.len() < 4 {
+            state.project.add_layer();
+        }
+        state.project.current_layer = 1;
+        assert!(state.onion_layers().is_empty(), "skin off");
+        state.onion.enabled = true;
+        assert_eq!(state.onion_layers(), vec![1]);
+        state.project.layers[3].onion = true;
+        state.project.layers[0].onion = true;
+        assert_eq!(state.onion_layers(), vec![0, 1, 3]);
+        state.project.layers[3].visible = false;
+        assert_eq!(state.onion_layers(), vec![0, 1], "a hidden layer has nothing to compare");
+        state.playback.playing = true;
+        assert!(state.onion_layers().is_empty(), "playing");
     }
 
     /// Put `w`×`h` @ `fps` in the New project dialog and save it as `name`.
@@ -9955,7 +10004,7 @@ mod tests {
     fn a_pinned_drawing_is_ghosted_once_in_the_pin_colour() {
         let mut state = AppState::for_test();
         state.onion.enabled = true;
-        state.onion.prev = 2;
+        state.onion.light(2, 1);
         for _ in 0..3 {
             state.structural_edit(false, |p| {
                 p.add_frame();
@@ -9968,16 +10017,17 @@ mod tests {
             frame: 1,
             tint: [0, 200, 0],
             visible: true,
+            opacity: 0.75,
         });
-        let pins = state.onion_pin_ghosts();
+        let pins = state.onion_pin_ghosts(li);
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].1, pin_cell);
-        let prev = state.onion_steps(OnionDirection::Prev);
+        let prev = state.onion_steps(li, OnionDirection::Prev);
         assert!(prev.iter().all(|s| s.cell != pin_cell), "{prev:?}");
         assert_eq!(prev.len(), 1, "the other ghost in range still shows");
         // Switching the onion skin off hides pins too.
         state.onion.enabled = false;
-        assert!(state.onion_pin_ghosts().is_empty());
+        assert!(state.onion_pin_ghosts(li).is_empty());
     }
 
     /// The fix for the big-layer stalls in one test: moving the timeline
@@ -10538,7 +10588,7 @@ mod tests {
             st.lock_brush_to_view = false;
             // As drawn with: one ghost each side.
             st.onion.enabled = true;
-            (st.onion.prev, st.onion.next) = (1, 1);
+            st.onion.light(1, 1);
             st.tool = ActiveTool::Pencil;
             st.brush.mode = mode;
             st.brush.radius = 30.0;

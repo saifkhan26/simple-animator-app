@@ -2145,6 +2145,7 @@ mod tests {
                 frame,
                 tint: [0, 255, 0],
                 visible: true,
+                opacity: 0.75,
             })
             .collect();
         p
