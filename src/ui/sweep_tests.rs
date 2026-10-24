@@ -117,6 +117,10 @@ impl Win {
                 if state.perspective.grids.is_empty() {
                     state.perspective.grids.push(Default::default());
                 }
+                // Fill canvas on, so the sweeps see its Rays and Ceiling rows.
+                if let Some(g) = state.perspective.active_grid_mut() {
+                    g.fill_canvas = true;
+                }
             }
             Win::KritaImport => {
                 use crate::brush_library::import::{KritaImport, KritaPlaces};
@@ -784,6 +788,9 @@ fn snapshots() {
     snapshot(&mut rig, 2.0).save(dir.join("brush_narrowest.png")).unwrap();
     let mut rig = Rig::new(Win::Settings);
     snapshot(&mut rig, 1.5).save(dir.join("settings.png")).unwrap();
+    // A grid's settings, with Fill canvas's rows showing.
+    let mut rig = Rig::new(Win::GridSettings);
+    snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();
 
     // The Fill tool's options with grain on, bucket then lasso.
     let mut rig = Rig::new(Win::ToolPanel(ActiveTool::Fill));

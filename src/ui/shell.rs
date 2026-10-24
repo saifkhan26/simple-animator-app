@@ -5136,7 +5136,8 @@ fn grid_settings_window(state: &mut AppState, ctx: &egui::Context) {
 /// The body of [`grid_settings_window`], for the active grid.
 fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
     use crate::tools::perspective::{
-        Follow, GridKind, PerspectiveGrid, EDGE_NAMES, MAX_DIVISIONS, MAX_EXTRA_VPS,
+        Follow, GridKind, PerspectiveGrid, CEILING, EDGE_NAMES, FAN_RAYS, MAX_DIVISIONS,
+        MAX_EXTRA_VPS,
     };
 
     // Grids are stored in frame heights; the X / Y fields show document px.
@@ -5256,10 +5257,29 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
             .on_hover_text("Draw every Nth line heavier. 0 or 1: none.");
     });
     if perspective {
-        ui.checkbox(&mut g.infinite, "Infinite floor")
+        ui.add_enabled(!wall, egui::Checkbox::new(&mut g.fill_canvas, "Fill canvas")).on_hover_text(
+            "Cover the whole canvas: rays fanned evenly round each vanishing point, and the \
+             level lines of the floor and of a ceiling. Out of the Grid tool only the lines show.",
+        );
+        let filled = g.fill_canvas && !wall;
+        if filled {
+            ui.indent("fill_canvas", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Rays");
+                    ui.add(egui::DragValue::new(&mut g.fan_rays).range(FAN_RAYS))
+                        .on_hover_text("Rays in each fan, all the way round");
+                });
+                ui.add(egui::Slider::new(&mut g.ceiling, CEILING).logarithmic(true).text("Ceiling height"))
+                    .on_hover_text(
+                        "How far the ceiling sits above eye level, against how far the floor \
+                         sits below it. 1: a mirror of the floor.",
+                    );
+            });
+        }
+        ui.add_enabled(!filled, egui::Checkbox::new(&mut g.infinite, "Infinite floor"))
             .on_hover_text("Keep tiling rows and columns past the grid, out to the horizon");
         let extend = egui::Checkbox::new(&mut g.extend, "Extend lines to vanishing points");
-        ui.add_enabled(!g.infinite, extend);
+        ui.add_enabled(!filled && !g.infinite, extend);
         ui.checkbox(&mut g.diagonals, "Cell diagonals")
             .on_hover_text("Both diagonals of every cell, for finding centres in perspective");
         ui.checkbox(&mut g.centre_lines, "Centre lines");
@@ -6396,7 +6416,9 @@ fn camera_overlay_lines(q: [egui::Pos2; 4]) -> Vec<[egui::Pos2; 2]> {
 /// `grab_at` tests against — and faint outlines where its keys either side
 /// put it.
 fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform, clip: Rect) {
-    use crate::tools::perspective::{clip_line, tile_family, tilt_knobs, vp_rays, Family, Plane, Vp};
+    use crate::tools::perspective::{
+        clip_line, fade_pieces, fan, tile_family, tilt_knobs, vp_rays, Family, Plane, Vp,
+    };
 
     let editing = state.tool == ActiveTool::Perspective;
     if !editing && !state.perspective.show {
@@ -6440,6 +6462,30 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
         let major = |k: i32| g.major_every > 1 && k.rem_euclid(g.major_every as i32) == 0;
         let heavy = Stroke::new(weight + 0.8, color);
         let heavy_faint = Stroke::new(weight * 0.8 + 0.6, tint(alpha / 2));
+        // A grid that covers the canvas is, out of the Grid tool, only its
+        // lines: its quad is something to take hold of, so it shows while
+        // editing, when the lines step back behind it.
+        let fill = g.fill_canvas && !g.kind.rigid() && !g.is_wall();
+        let bare = fill && !editing;
+        let (fill_line, fill_major) = if bare { (thin, heavy) } else { (faint, heavy_faint) };
+        // Which way a fan's first ray points: along the horizon, so the
+        // level and the vertical are among its rays.
+        let fan_base = plane.horizon().map_or([1.0, 0.0], |hz| {
+            let (a, b) = (to_screen(hz.p), to_screen([hz.p[0] + hz.d[0] * 100.0, hz.p[1] + hz.d[1] * 100.0]));
+            [b.x - a.x, b.y - a.y]
+        });
+        // Rays evenly all the way round `v`, out to the canvas edge, fading
+        // in where they crowd together at the point.
+        let draw_fan = |v: egui::Pos2, line: Stroke, line_major: Stroke| {
+            for (i, a, b) in fan([v.x, v.y], fan_base, g.fan_rays, lo, hi) {
+                let s = if major(i as i32) { line_major } else { line };
+                let (a, b) = (pos(a), pos(b));
+                let u = (b - v).normalized();
+                for (r0, r1, k) in fade_pieces((a - v).length(), (b - v).length(), g.fan_rays) {
+                    painter.line_segment([v + u * r0, v + u * r1], Stroke::new(s.width, s.color.gamma_multiply(k)));
+                }
+            }
+        };
 
         // Where the keys either side put it: a dashed outline and the key's
         // frame, so a tween can be seen coming.
@@ -6480,7 +6526,25 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
             painter.add(egui::Shape::closed_line(quad.clone(), Stroke::new(weight + 1.0, color)));
         } else {
             let lines = plane.grid_lines(g.rows, g.cols);
-            if g.infinite {
+            if fill {
+                // A family that runs to a point fans round it; one that stays
+                // parallel — the level lines of a one-point grid — is tiled
+                // over the floor and the ceiling above it.
+                let ceiling = g.ceiling_doc(&space).and_then(Plane::new);
+                for (fam, vp) in [(Family::rows(g.rows), plane.vp_rows), (Family::cols(g.cols), plane.vp_cols)] {
+                    match vp {
+                        Vp::Point(v) => draw_fan(to_screen(v), fill_line, fill_major),
+                        Vp::Dir(_) => {
+                            for p in std::iter::once(&plane).chain(&ceiling) {
+                                for t in tile_family(p, fam, &to_screen_p, lo, hi, 4.0) {
+                                    let s = if major(t.k) { fill_major } else { fill_line };
+                                    painter.line_segment([pos(t.a), pos(t.b)], s);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if g.infinite {
                 // The whole floor, out to the horizon and the canvas edge,
                 // under the quad's own lines.
                 for fam in [Family::rows(g.rows), Family::cols(g.cols)] {
@@ -6523,24 +6587,26 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
                     }
                 }
             }
-            if g.diagonals {
-                for fam in [Family::diag(g.rows, g.cols), Family::anti_diag(g.rows, g.cols)] {
-                    for (_, a, b) in plane.quad_family(fam) {
-                        painter.line_segment([to_screen(a), to_screen(b)], faint);
+            if !bare {
+                if g.diagonals {
+                    for fam in [Family::diag(g.rows, g.cols), Family::anti_diag(g.rows, g.cols)] {
+                        for (_, a, b) in plane.quad_family(fam) {
+                            painter.line_segment([to_screen(a), to_screen(b)], faint);
+                        }
                     }
                 }
-            }
-            for &(a, b, _, k) in &lines {
-                let s = if major(k as i32) { heavy } else { thin };
-                painter.line_segment([to_screen(a), to_screen(b)], s);
-            }
-            if g.centre_lines {
-                for (a, b) in [((0.5, 0.0), (0.5, 1.0)), ((0.0, 0.5), (1.0, 0.5))] {
-                    let ends = [to_screen(plane.h.map(a.0, a.1)), to_screen(plane.h.map(b.0, b.1))];
-                    painter.extend(egui::Shape::dashed_line(&ends, heavy, 8.0, 5.0));
+                for &(a, b, _, k) in &lines {
+                    let s = if major(k as i32) { heavy } else { thin };
+                    painter.line_segment([to_screen(a), to_screen(b)], s);
                 }
+                if g.centre_lines {
+                    for (a, b) in [((0.5, 0.0), (0.5, 1.0)), ((0.0, 0.5), (1.0, 0.5))] {
+                        let ends = [to_screen(plane.h.map(a.0, a.1)), to_screen(plane.h.map(b.0, b.1))];
+                        painter.extend(egui::Shape::dashed_line(&ends, heavy, 8.0, 5.0));
+                    }
+                }
+                painter.add(egui::Shape::closed_line(quad.clone(), Stroke::new(weight + 1.0, color)));
             }
-            painter.add(egui::Shape::closed_line(quad.clone(), Stroke::new(weight + 1.0, color)));
         }
 
         let vp_screen = |vp: Vp| match vp {
@@ -6559,7 +6625,7 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
                 painter.line_segment([at(a, b, t0), at(a, b, t1)], line);
             }
             for v in [plane.vp_rows, plane.vp_cols].into_iter().filter_map(vp_screen) {
-                if clip.contains(v) {
+                if clip.contains(v) && !bare {
                     painter.circle_filled(v, 3.5, color);
                     painter.circle_stroke(v, 3.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
                 }
@@ -6571,7 +6637,12 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
         let extras = g.extra_doc(&space);
         let ray = Stroke::new(weight * 0.8, tint(alpha / 2));
         for (v, &at) in g.extra_vps.iter().zip(&extras) {
-            if v.rays {
+            if !v.rays {
+                continue;
+            }
+            if fill {
+                draw_fan(to_screen(at), ray, Stroke::new(ray.width + 0.6, ray.color));
+            } else {
                 for (a, b) in vp_rays(&corners, at, g.rows.max(g.cols)) {
                     painter.line_segment([to_screen(a), to_screen(b)], ray);
                 }
@@ -6580,7 +6651,7 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
         let handles = editing && active && !g.locked && !g.is_wall();
         for (k, &at) in extras.iter().enumerate() {
             let v = to_screen(at);
-            if !clip.contains(v) || !(g.horizon || handles) {
+            if !clip.contains(v) || !(g.horizon || handles) || bare {
                 continue;
             }
             let r = if handles { handle * 1.4 } else { 4.5 };
@@ -9216,6 +9287,15 @@ mod perspective_tests {
         state.perspective.push(PerspectiveGrid::fresh(GridKind::Flat));
         let iso = state.perspective.push(PerspectiveGrid::fresh(GridKind::Isometric));
         state.set_grid_follow(iso, Follow::Camera);
+        // A room over the whole canvas, its verticals running to a third
+        // point, so its ceiling and the extra point's fan show too.
+        let mut room = PerspectiveGrid::fresh(GridKind::Perspective);
+        room.fill_canvas = true;
+        room.major_every = 4;
+        room.add_extra_vp(&s);
+        room.extra_vps[0].on_horizon = false;
+        room.extra_vps[0].pos[1] -= 1.0;
+        state.perspective.push(room);
         // Keys either side of the frame, so the ghosts show.
         state.perspective.active = 0;
         state.add_grid_key();
@@ -9234,6 +9314,71 @@ mod perspective_tests {
             }
         }
         assert_eq!(state.perspective.grids.iter().filter(|g| g.is_wall()).count(), 2);
+    }
+
+    /// What the grids paint over `SCREEN`, on their own.
+    fn grid_shapes(state: &AppState) -> Vec<egui::Shape> {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            ..Default::default()
+        };
+        let out = ctx.run(raw, |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            draw_perspective_grids(state, &painter, &Xform::new(state, SCREEN), SCREEN);
+        });
+        out.shapes.into_iter().map(|c| c.shape).collect()
+    }
+
+    #[test]
+    fn a_grid_that_fills_the_canvas_is_only_its_lines_out_of_the_grid_tool() {
+        let mut state = state();
+        state.perspective.show = true;
+        {
+            // One-point, vanishing at the middle of the frame.
+            let g = &mut state.perspective.grids[0];
+            g.corners = [[-0.1, 0.1], [0.1, 0.1], [0.3, 0.3], [-0.3, 0.3]];
+            g.fill_canvas = true;
+        }
+        let quad = |shapes: &[egui::Shape]| {
+            shapes.iter().any(|s| matches!(s, egui::Shape::Path(p) if p.closed && p.points.len() == 4))
+        };
+        assert!(quad(&grid_shapes(&state)), "in the Grid tool the quad is there to take hold of");
+        state.dispatch(Action::ToolPencil);
+        let shapes = grid_shapes(&state);
+        assert!(!quad(&shapes), "out of it, only lines");
+
+        let (w, h) = (state.project.width as f32, state.project.height as f32);
+        let vp = Xform::new(&state, SCREEN).doc_to_screen(w / 2.0, h / 2.0);
+        let segs: Vec<[Pos2; 2]> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::LineSegment { points, .. } => Some(*points),
+                _ => None,
+            })
+            .collect();
+        // Level lines on the floor below the horizon and the ceiling above.
+        let level = |above: bool| {
+            segs.iter().any(|p| {
+                (p[0].y - p[1].y).abs() < 0.01 && (p[0].y - vp.y).abs() > 2.0 && (p[0].y < vp.y) == above
+            })
+        };
+        assert!(level(false) && level(true), "floor and ceiling");
+        // An even fan, one ray every 7.5°, that fades out short of the point.
+        let mut dirs = std::collections::BTreeSet::new();
+        for p in &segs {
+            let d = p[1] - p[0];
+            let off = (p[0] - vp).x * d.y - (p[0] - vp).y * d.x;
+            if off.abs() > 0.5 * d.length() || d.y.abs() < 0.01 {
+                continue;
+            }
+            dirs.insert((d.y.atan2(d.x).to_degrees().rem_euclid(360.0) * 10.0).round() as i32);
+            let near = (p[0] - vp).length().min((p[1] - vp).length());
+            assert!(near > 10.0, "a ray reaches {near} px from the point");
+        }
+        // The two level rays, along the horizon, were skipped.
+        assert_eq!(dirs.len(), 46, "{dirs:?}");
+        assert!(dirs.iter().all(|a| a % 75 == 0), "{dirs:?}");
     }
 
     #[test]

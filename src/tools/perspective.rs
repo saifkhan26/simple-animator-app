@@ -466,6 +466,15 @@ pub struct PerspectiveGrid {
     /// Tile rows and columns on past the quad, out to the horizon and the
     /// canvas edge.
     pub infinite: bool,
+    /// Cover the whole canvas: an even fan of rays round each vanishing
+    /// point, and the level lines of the floor and of a ceiling over it.
+    /// Takes over from `infinite` and `extend`.
+    pub fill_canvas: bool,
+    /// Rays in each fan, all the way round.
+    pub fan_rays: u32,
+    /// How far the ceiling sits above eye level, against how far the floor
+    /// sits below it: 1 mirrors the floor.
+    pub ceiling: f32,
     /// Draw every Nth line heavier, counting from the quad's first edge; 0
     /// for none.
     pub major_every: u32,
@@ -485,6 +494,13 @@ pub struct PerspectiveGrid {
 }
 
 pub const MAX_DIVISIONS: u32 = 64;
+
+/// Fewest and most rays a fan may have.
+pub const FAN_RAYS: std::ops::RangeInclusive<u32> = 8..=180;
+
+/// Lowest and highest a ceiling may sit, against the floor's depth below the
+/// eye.
+pub const CEILING: std::ops::RangeInclusive<f32> = 0.25..=4.0;
 
 /// Most vanishing points a grid adds to the two of its own plane, for four in
 /// all.
@@ -537,6 +553,9 @@ impl Default for PerspectiveGrid {
             horizon: true,
             extra_vps: Vec::new(),
             infinite: false,
+            fill_canvas: false,
+            fan_rays: 48,
+            ceiling: 1.0,
             major_every: 0,
             diagonals: false,
             centre_lines: false,
@@ -628,6 +647,30 @@ impl PerspectiveGrid {
                 }
             })
             .collect()
+    }
+
+    /// The ceiling over the grid's floor, in document space: each corner
+    /// carried up its vertical — toward the first extra vanishing point off
+    /// the horizon, or else square to the horizon — to [`Self::ceiling`]
+    /// times its depth below eye level, on the far side of the horizon.
+    /// `None` without a horizon, or when the ceiling would reach round behind
+    /// the viewer.
+    pub fn ceiling_doc(&self, s: &Space) -> Option<[P; 4]> {
+        let c = self.doc_corners(s);
+        let plane = Plane::new(c)?;
+        let hz = plane.horizon()?;
+        let up = floor_up(&plane, centroid(&c))?;
+        let extras = self.extra_doc(s);
+        let v = match self.extra_vps.iter().position(|v| !v.on_horizon) {
+            Some(i) => Vp::Point(extras[i]),
+            None => Vp::Dir(up),
+        };
+        let k = self.ceiling.clamp(*CEILING.start(), *CEILING.end());
+        let mut out = [[0.0; 2]; 4];
+        for (o, &p) in out.iter_mut().zip(&c) {
+            *o = lift(p, hz, v, k)?;
+        }
+        is_convex(&out).then_some(out)
     }
 
     /// Add an extra vanishing point, unless the grid has all it can take. On
@@ -1186,6 +1229,30 @@ fn wall_vertical(parent: &PerspectiveGrid) -> Option<(Vp, bool)> {
     match parent.extra_vps.iter().position(|v| !v.on_horizon) {
         Some(i) => Some((Vp::Point(extras[i]), dot(sub(extras[i], o), up) > 0.0)),
         None => Some((Vp::Dir(up), true)),
+    }
+}
+
+/// Floor point `p` carried along its vertical, through `v`, to the plane `k`
+/// times as far above eye level as the floor is below it: the homology about
+/// the horizon `hz` whose cross-ratio is −k. With parallel verticals that is
+/// a mirror across the horizon, stretched `k` times. `None` where the plane
+/// would pass behind the viewer.
+fn lift(p: P, hz: Line, v: Vp, k: f32) -> Option<P> {
+    let f = intersect(p, v.dir_at(p)?, hz.p, hz.d)?;
+    match v {
+        Vp::Dir(_) => Some(add(f, sub(p, f).map(|x| -k * x))),
+        Vp::Point(vp) => {
+            // Signed distances along the vertical, away from `v`: `a` to the
+            // floor point, `b` from the horizon on to it.
+            let u = normalize(sub(p, vp))?;
+            let a = dot(sub(p, vp), u);
+            let b = dot(sub(p, f), u);
+            let den = a + k * b;
+            if den <= 1e-4 * a {
+                return None;
+            }
+            Some(add(f, u.map(|x| x * -k * b * (a - b) / den)))
+        }
     }
 }
 
@@ -1935,6 +2002,57 @@ pub fn vp_rays(c: &[P; 4], v: P, n: u32) -> Vec<(P, P)> {
             (v, add(v, d.map(|x| x * reach)))
         })
         .collect()
+}
+
+/// Rays fanned evenly all the way round `v`, `n` of them, the first along
+/// `base`: each with its index, as the part of it inside the rect `lo..hi`
+/// — from `v`, or from where it comes in, out to the rect's edge. For a fan
+/// over the whole canvas, worked in screen space.
+pub fn fan(v: P, base: P, n: u32, lo: P, hi: P) -> Vec<(u32, P, P)> {
+    let n = n.clamp(*FAN_RAYS.start(), *FAN_RAYS.end());
+    let Some(base) = normalize(base) else {
+        return Vec::new();
+    };
+    (0..n)
+        .filter_map(|i| {
+            let (s, c) = (std::f32::consts::TAU * i as f32 / n as f32).sin_cos();
+            let d = [base[0] * c - base[1] * s, base[0] * s + base[1] * c];
+            let (t0, t1) = clip_line(v, add(v, d), lo, hi)?;
+            let t0 = t0.max(0.0);
+            (t1 > t0).then(|| (i, add(v, d.map(|x| x * t0)), add(v, d.map(|x| x * t1))))
+        })
+        .collect()
+}
+
+/// Where a fan's rays crowd closer than this many pixels they would only
+/// smudge together, so they don't show...
+const FADE_FROM_GAP: f32 = 1.5;
+/// ...and from where they are this far apart they show in full.
+const FADE_TO_GAP: f32 = 8.0;
+const FADE_STEPS: usize = 5;
+
+/// A ray of an `n`-ray fan, running from `ra` to `rb` pixels out of its
+/// vanishing point, cut into pieces `(from, to, strength)`: nothing where
+/// the rays are closer together than [`FADE_FROM_GAP`], rising in steps to
+/// full strength where they are [`FADE_TO_GAP`] apart.
+pub fn fade_pieces(ra: f32, rb: f32, n: u32) -> Vec<(f32, f32, f32)> {
+    let n = n.clamp(*FAN_RAYS.start(), *FAN_RAYS.end());
+    // How far out neighbouring rays are a pixel apart.
+    let per_px = n as f32 / std::f32::consts::TAU;
+    let (r0, r1) = (FADE_FROM_GAP * per_px, FADE_TO_GAP * per_px);
+    let mut out = Vec::with_capacity(FADE_STEPS + 1);
+    for j in 0..FADE_STEPS {
+        let a = (r0 + (r1 - r0) * j as f32 / FADE_STEPS as f32).max(ra);
+        let b = (r0 + (r1 - r0) * (j + 1) as f32 / FADE_STEPS as f32).min(rb);
+        if b > a {
+            out.push((a, b, (j + 1) as f32 / (FADE_STEPS + 1) as f32));
+        }
+    }
+    let a = r1.max(ra);
+    if rb > a {
+        out.push((a, rb, 1.0));
+    }
+    out
 }
 
 /// Of `dirs`, the one most nearly parallel to `motion` (either sense).
@@ -2794,5 +2912,110 @@ mod tests {
         let i = cfg.push(PerspectiveGrid::fresh(GridKind::Flat));
         assert_eq!(cfg.active, i);
         assert!(!ids.contains(&cfg.grids[i].id));
+    }
+
+    // --- Fill canvas ---
+
+    /// A one-point floor whose vanishing point is the middle of a 1000 px
+    /// frame, its rows level, its near edge at y = 800.
+    fn room() -> (PerspectiveGrid, Space) {
+        let g = PerspectiveGrid {
+            corners: [[-0.1, 0.1], [0.1, 0.1], [0.3, 0.3], [-0.3, 0.3]],
+            ..PerspectiveGrid::default()
+        };
+        (g, Space::flat(1000.0, 1000.0))
+    }
+
+    #[test]
+    fn the_ceiling_mirrors_a_one_point_floor_across_the_horizon() {
+        let (mut g, s) = room();
+        let floor = g.doc_corners(&s);
+        let c = g.ceiling_doc(&s).unwrap();
+        for (f, c) in floor.iter().zip(&c) {
+            assert!(close(*c, [f[0], 1000.0 - f[1]]), "{f:?} -> {c:?}");
+        }
+        // Twice as high, twice as far above the horizon.
+        g.ceiling = 2.0;
+        let c = g.ceiling_doc(&s).unwrap();
+        for (f, c) in floor.iter().zip(&c) {
+            assert!(close(*c, [f[0], 500.0 - 2.0 * (f[1] - 500.0)]), "{f:?} -> {c:?}");
+        }
+        // Out of range, held to it.
+        g.ceiling = 100.0;
+        let c = g.ceiling_doc(&s).unwrap();
+        assert!(close(c[0], [floor[0][0], 500.0 - 4.0 * (floor[0][1] - 500.0)]));
+    }
+
+    #[test]
+    fn the_ceiling_rises_toward_a_vertical_vanishing_point() {
+        let (mut g, s) = room();
+        // Worm's eye: verticals run up to a point high over the frame.
+        g.extra_vps.push(ExtraVp { pos: [0.1, -2.0], on_horizon: false, ..ExtraVp::default() });
+        let v = s.to_doc([0.1, -2.0]);
+        let floor = g.doc_corners(&s);
+        let c = g.ceiling_doc(&s).unwrap();
+        for (f, c) in floor.iter().zip(&c) {
+            // On the floor point's vertical, between the horizon and the point.
+            assert!(cross(sub(*f, v), sub(*c, v)).abs() < 1e-2 * len(sub(*f, v)) * len(sub(*c, v)));
+            assert!(c[1] < 500.0 && c[1] > v[1], "{c:?}");
+            // Mirrored height: the floor point and its ceiling point split
+            // the vertical's horizon and vanishing point harmonically.
+            let u = normalize(sub(*f, v)).unwrap();
+            let foot = intersect(*f, u, [0.0, 500.0], [1.0, 0.0]).unwrap();
+            let at = |p: P| dot(sub(p, v), u);
+            let (a, b, x) = (at(*f), at(foot), at(*c));
+            let cr = ((a - 0.0) * (x - b)) / ((a - b) * (x - 0.0));
+            assert!((cr + 1.0).abs() < 1e-3, "cross-ratio {cr}");
+        }
+        // The same perspective: its columns run to the floor's vanishing point.
+        let ceiling = Plane::new(c).unwrap();
+        let Vp::Point(vp) = ceiling.vp_cols else { panic!("{:?}", ceiling.vp_cols) };
+        assert!(len(sub(vp, [500.0, 500.0])) < 0.5, "{vp:?}");
+    }
+
+    #[test]
+    fn a_floor_seen_square_on_has_no_ceiling() {
+        let g = PerspectiveGrid::fresh(GridKind::Flat);
+        assert_eq!(g.ceiling_doc(&Space::flat(1000.0, 1000.0)), None);
+    }
+
+    #[test]
+    fn a_fan_goes_evenly_round_from_its_base() {
+        let rays = fan([50.0, 50.0], [2.0, 0.0], 8, [0.0, 0.0], [100.0, 100.0]);
+        assert_eq!(rays.len(), 8);
+        for (i, a, _) in &rays {
+            assert!(close(*a, [50.0, 50.0]), "ray {i} starts at the point");
+        }
+        assert!(close(rays[0].2, [100.0, 50.0]));
+        assert!(close(rays[2].2, [50.0, 100.0]));
+        assert!(close(rays[4].2, [0.0, 50.0]));
+        // Fewer than the least a fan has: the least.
+        assert_eq!(fan([50.0, 50.0], [1.0, 0.0], 2, [0.0, 0.0], [100.0, 100.0]).len(), *FAN_RAYS.start() as usize);
+        // From outside the rect, each ray starts where it comes in.
+        let rays = fan([-50.0, 50.0], [1.0, 0.0], 8, [0.0, 0.0], [100.0, 100.0]);
+        assert_eq!(rays.len(), 1);
+        assert!(close(rays[0].1, [0.0, 50.0]) && close(rays[0].2, [100.0, 50.0]));
+    }
+
+    #[test]
+    fn a_fan_ray_fades_in_where_the_rays_crowd() {
+        let pieces = fade_pieces(0.0, 200.0, 48);
+        let per_px = 48.0 / std::f32::consts::TAU;
+        assert!((pieces[0].0 - FADE_FROM_GAP * per_px).abs() < 1e-3, "nothing before {:?}", pieces[0]);
+        let last = *pieces.last().unwrap();
+        assert!((last.0 - FADE_TO_GAP * per_px).abs() < 1e-3 && last.1 == 200.0 && last.2 == 1.0);
+        for w in pieces.windows(2) {
+            assert!((w[0].1 - w[1].0).abs() < 1e-4, "no gaps: {w:?}");
+            assert!(w[0].2 < w[1].2, "stronger outward: {w:?}");
+        }
+        // Clear of the crowd, one full piece; inside it, nothing.
+        assert_eq!(fade_pieces(100.0, 200.0, 48), vec![(100.0, 200.0, 1.0)]);
+        assert!(fade_pieces(0.0, 5.0, 48).is_empty());
+    }
+
+    #[test]
+    fn grids_saved_before_fill_canvas_load_without_it() {
+        let g: PerspectiveGrid = toml::from_str("rows = 3").unwrap();
+        assert_eq!((g.rows, g.fill_canvas, g.fan_rays, g.ceiling), (3, false, 48, 1.0));
     }
 }
