@@ -227,6 +227,7 @@ impl AppState {
             gap: self.brush.fill_gap,
             alpha_lock: self.active_alpha_lock(),
             opacity,
+            grain: self.fill_grain(target),
         };
         let behind = self.fill_behind;
         self.snapshot_pre(target);
@@ -237,7 +238,7 @@ impl AppState {
             } else if enclose {
                 fill::enclose_fill(c, &self.stroke_pre_pixels, lines.as_deref(), &shape, &opts, behind, clip.as_deref());
             } else {
-                fill::fill_masked(c, &held_shape, opts.color, opacity, opts.alpha_lock, behind);
+                fill::fill_masked(c, &held_shape, opts.color, opacity, opts.alpha_lock, behind, opts.grain);
             }
         }
         if self.project.cell(target).is_some_and(|c| c.dirty.is_some()) {
@@ -341,6 +342,22 @@ mod tests {
         drag_square(&mut st, (20.0, 20.0, 180.0, 180.0), LassoHeld { enclose: true, ..Default::default() });
         assert_eq!(px(&st, 30, 30), RED);
         assert_eq!(px(&st, 60, 100), BLACK, "still behind the line");
+    }
+
+    /// The lasso and the bucket lay down the same specks of paper.
+    #[test]
+    fn a_grainy_lasso_fill_matches_the_bucket() {
+        let mut st = state();
+        st.brush.fill_grain = 0.9;
+        drag_square(&mut st, (50.0, 50.0, 150.0, 150.0), LassoHeld::default());
+        let lassoed: Vec<[u8; 4]> = (60..140).map(|x| px(&st, x, 100)).collect();
+        assert!(lassoed.iter().any(|p| p[3] < 200), "grainy: {lassoed:?}");
+        st.undo();
+        st.set_fill_mode(FillMode::Bucket);
+        st.pointer_down(st.make_sample(100.0, 100.0, 0.0));
+        st.pointer_up();
+        let bucket: Vec<[u8; 4]> = (60..140).map(|x| px(&st, x, 100)).collect();
+        assert_eq!(lassoed, bucket);
     }
 
     /// A lasso dragged out past the canvas's corner fills the shape two

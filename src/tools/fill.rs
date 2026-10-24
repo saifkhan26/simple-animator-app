@@ -24,11 +24,17 @@
 //!
 //! The result is always part of what the plain flood fills, so closing gaps can
 //! hold a fill back but never push one through a line.
+//!
+//! Every fill — bucket, lasso, Enclose & fill, Behind, Fill selection — lays
+//! its pixels down through one writer, so paper [`Grain`] reaches them all.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::ops::RangeInclusive;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::doc::canvas::{Canvas, DirtyRect};
+use crate::tools::krita::texture::TextureMask;
+use crate::tools::krita::KritaPreset;
 use crate::tools::lasso::Mask;
 use crate::tools::ribbon::union_rect;
 
@@ -36,6 +42,10 @@ use crate::tools::ribbon::union_rect;
 pub const MAX_EXPAND: u8 = 32;
 /// Upper bound on the gap setting, matching the UI slider.
 pub const MAX_GAP: u8 = 255;
+/// The grain sizes the UI offers, 1 being Pencil-5 Tilted's own.
+pub const GRAIN_SIZES: RangeInclusive<f32> = 0.25..=4.0;
+/// The grain contrasts the UI offers, 1 being the paper as scanned.
+pub const GRAIN_CONTRASTS: RangeInclusive<f32> = 0.25..=4.0;
 
 /// The gaps a drag steps through: every pixel while gaps are small, wider
 /// strides as they grow, so the whole range is a comfortable pen's travel
@@ -61,6 +71,179 @@ pub struct FillOptions {
     /// 0..=1. Below 1 the fill goes on over what is there, the way a stroke
     /// at that opacity does, instead of replacing it.
     pub opacity: f32,
+    /// Paper showing through the fill. [`Grain::NONE`] for flat colour.
+    pub grain: Grain,
+}
+
+/// Paper grain on a fill: the paper scan Krita's Pencil-5 Tilted draws on
+/// thins the fill where the paper dips, the way a pencil's tooth does, so
+/// whatever is under the fill shows through the specks.
+///
+/// The paper is anchored to the cell's pixels, as the brushes' grain is: it
+/// stays put whatever shape is filled, every fill of a drawing shares one
+/// sheet, and at size 1 with no offset its specks fall where a Pencil-5
+/// stroke's do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grain {
+    /// 0..=1. 0 is flat colour; 1 leaves the paper's deepest valleys bare.
+    pub amount: f32,
+    /// Cell pixels per texel of the paper at Pencil-5's own scale. Larger
+    /// magnifies the tooth.
+    pub size: f32,
+    /// Krita's texture contrast, pivoting on mid-grey: 1 is the paper as
+    /// scanned, above it the tooth goes harder, below it softer.
+    pub contrast: f32,
+    /// Where the sheet sits, in cell pixels.
+    pub offset: (i32, i32),
+}
+
+impl Grain {
+    /// Flat colour.
+    pub const NONE: Self = Self {
+        amount: 0.0,
+        size: 1.0,
+        contrast: 1.0,
+        offset: (0, 0),
+    };
+
+    /// The same grain on drawing `id`'s own patch of paper: every fill of
+    /// that drawing lands on the same patch, and each drawing on a
+    /// different one, the way each drawing of a hand-drawn scene gets its
+    /// own sheet.
+    pub fn boiled(self, id: usize) -> Self {
+        // splitmix64: neighbouring ids land far apart.
+        let mut h = (id as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^= h >> 31;
+        Self {
+            offset: ((h & 0xFFF) as i32, ((h >> 32) & 0xFFF) as i32),
+            ..self
+        }
+    }
+
+    /// The grain baked for the per-pixel loops, or `None` when it adds
+    /// nothing. The last grain baked is kept, so a drag that re-applies a
+    /// fill, or the next fill at the same settings, doesn't bake again.
+    fn tooth(self) -> Option<Tooth> {
+        /// Amount, size and contrast, then the bake: its period and factors.
+        type Baked = ((u32, u32, u32), (usize, usize), Arc<Vec<f32>>);
+        static LAST: Mutex<Option<Baked>> = Mutex::new(None);
+        if self.amount <= 0.0 {
+            return None;
+        }
+        let key = (self.amount.to_bits(), self.size.to_bits(), self.contrast.to_bits());
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let (period, factors) = match &*last {
+            Some((k, p, f)) if *k == key => (*p, f.clone()),
+            _ => {
+                let (p, f) = self.bake();
+                let f = Arc::new(f);
+                *last = Some((key, p, f.clone()));
+                (p, f)
+            }
+        };
+        Some(Tooth {
+            period,
+            factors,
+            offset: self.offset,
+        })
+    }
+
+    /// One period of the paper at this size, as what each pixel's coverage
+    /// is multiplied by: 1 where the paper peaks, down to `1 - amount` in
+    /// its valleys. Row-major, `(width, height)` with it.
+    ///
+    /// Size 1 reads the texels as they are, the way Pencil-5's dabs do.
+    /// Any other size is sampled bilinearly over a whole number of pixels
+    /// as near the true period as rounding allows, so it still tiles.
+    fn bake(self) -> ((usize, usize), Vec<f32>) {
+        let paper = fill_paper();
+        let (amount, contrast) = (self.amount.min(1.0), self.contrast.max(0.0));
+        let factor = |texel: f32| {
+            let v = ((texel / 255.0 - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
+            1.0 - amount * (1.0 - v)
+        };
+        if (self.size - 1.0).abs() < 1e-3 {
+            let f = (0..paper.h as i32)
+                .flat_map(|y| (0..paper.w as i32).map(move |x| (x, y)))
+                .map(|(x, y)| factor(paper.at(x, y) as f32))
+                .collect();
+            return ((paper.w, paper.h), f);
+        }
+        let size = self.size.max(0.01);
+        let pw = ((paper.w as f32 * size).round() as usize).max(1);
+        let ph = ((paper.h as f32 * size).round() as usize).max(1);
+        let (sx, sy) = (paper.w as f32 / pw as f32, paper.h as f32 / ph as f32);
+        let mut f = Vec::with_capacity(pw * ph);
+        for y in 0..ph {
+            // Texel centres on pixel centres.
+            let v = (y as f32 + 0.5) * sy - 0.5;
+            let (v0, fy) = (v.floor(), v - v.floor());
+            for x in 0..pw {
+                let u = (x as f32 + 0.5) * sx - 0.5;
+                let (u0, fx) = (u.floor(), u - u.floor());
+                let at = |dx: i32, dy: i32| paper.at(u0 as i32 + dx, v0 as i32 + dy) as f32;
+                let top = at(0, 0) + (at(1, 0) - at(0, 0)) * fx;
+                let bot = at(0, 1) + (at(1, 1) - at(0, 1)) * fx;
+                f.push(factor(top + (bot - top) * fy));
+            }
+        }
+        ((pw, ph), f)
+    }
+}
+
+/// Krita's `04_paper-C-grain.png` at Pencil-5 Tilted's scale, taken from the
+/// preset the app already carries.
+fn fill_paper() -> &'static TextureMask {
+    static PAPER: OnceLock<TextureMask> = OnceLock::new();
+    PAPER.get_or_init(|| {
+        KritaPreset::Pencil5Tilted
+            .brush()
+            .texture
+            .clone()
+            .expect("Pencil-5 Tilted carries its paper")
+    })
+}
+
+/// A [`Grain`] baked: one period of coverage factors (see [`Grain::bake`]),
+/// laid on the cell at `offset`.
+#[derive(Clone)]
+struct Tooth {
+    period: (usize, usize),
+    factors: Arc<Vec<f32>>,
+    offset: (i32, i32),
+}
+
+impl Tooth {
+    /// The factors along row `y`, starting at column `x`.
+    fn row(&self, x: i32, y: i32) -> ToothRow<'_> {
+        let (pw, ph) = self.period;
+        let ty = (y - self.offset.1).rem_euclid(ph as i32) as usize;
+        ToothRow {
+            row: &self.factors[ty * pw..(ty + 1) * pw],
+            i: (x - self.offset.0).rem_euclid(pw as i32) as usize,
+        }
+    }
+}
+
+/// A walk along one row of a [`Tooth`], a pixel a step, wrapping at the
+/// period: no division per pixel.
+struct ToothRow<'a> {
+    row: &'a [f32],
+    i: usize,
+}
+
+impl ToothRow<'_> {
+    #[inline]
+    fn next(&mut self) -> f32 {
+        let f = self.row[self.i];
+        self.i += 1;
+        if self.i == self.row.len() {
+            self.i = 0;
+        }
+        f
+    }
 }
 
 /// Inclusive pixel bounds, `(min_x, min_y, max_x, max_y)`.
@@ -118,6 +301,7 @@ pub struct FillSession {
     color: [u8; 4],
     alpha_lock: bool,
     opacity: f32,
+    grain: Grain,
     /// Lines from another layer, already in the cell's pixels — every pixel,
     /// since the flood reads them one by one all press long. `None` reads
     /// the cell's own pixels as they were before the press.
@@ -182,6 +366,7 @@ impl FillSession {
             color: opts.color,
             alpha_lock: opts.alpha_lock,
             opacity,
+            grain: opts.grain,
             // Without a boundary, filling a region that already *is* the fill
             // colour is a no-op. With one, the sampled colour comes from a
             // different layer, so it says nothing about what is already painted.
@@ -231,16 +416,17 @@ impl FillSession {
             opacity: self.opacity,
             alpha_lock: self.alpha_lock,
             behind: false,
+            tooth: self.grain.tooth(),
         };
         let r = expand.min(MAX_EXPAND) as i32;
         let bbox = if r > 0 {
             let grown = dilate_window(&region.mask, self.w, self.h, region.bbox, r);
             let b = grown.bbox();
-            paint(canvas, b, |x, y| grown.at(x, y), ink, clip);
+            paint(canvas, b, |x, y| grown.at(x, y), &ink, clip);
             b
         } else {
             let (mask, w) = (&region.mask, self.w);
-            paint(canvas, region.bbox, |x, y| mask[(y * w + x) as usize], ink, clip);
+            paint(canvas, region.bbox, |x, y| mask[(y * w + x) as usize], &ink, clip);
             region.bbox
         };
         self.written = Some(bbox);
@@ -336,7 +522,8 @@ pub fn flood_clipped(
 /// the bucket does; a feathered edge or a lower opacity blends. With
 /// `alpha_lock`, only pixels that already have paint change, and keep their
 /// alpha. With `behind`, the fill goes under what is there instead (see
-/// [`Ink::behind`]). Returns whether anything was inside the canvas to fill.
+/// [`Ink::behind`]). `grain` thins it where the paper dips. Returns whether
+/// anything was inside the canvas to fill.
 pub fn fill_masked(
     canvas: &mut Canvas,
     mask: &Mask,
@@ -344,6 +531,7 @@ pub fn fill_masked(
     opacity: f32,
     alpha_lock: bool,
     behind: bool,
+    grain: Grain,
 ) -> bool {
     let (x1, y1) = (
         (mask.x + mask.w).min(canvas.width),
@@ -357,10 +545,13 @@ pub fn fill_masked(
         opacity: opacity.clamp(0.0, 1.0),
         alpha_lock,
         behind,
+        tooth: grain.tooth(),
     };
     for y in mask.y..y1 {
+        let mut paper = ink.tooth.as_ref().map(|t| t.row(mask.x as i32, y as i32));
         for x in mask.x..x1 {
-            put(canvas, x as i32, y as i32, ink, mask.at(x, y));
+            let g = paper.as_mut().map_or(1.0, ToothRow::next);
+            put(canvas, x as i32, y as i32, &ink, mask.at(x, y), g);
         }
     }
     canvas.mark_dirty(mask.x, mask.y, x1 - mask.x, y1 - mask.y);
@@ -368,7 +559,6 @@ pub fn fill_masked(
 }
 
 /// What a fill puts down, and how.
-#[derive(Clone, Copy)]
 struct Ink {
     color: [u8; 4],
     /// 0..=1, scaling every pixel's coverage.
@@ -379,6 +569,8 @@ struct Ink {
     /// fill behind them. Nothing at all under an alpha lock, which forbids
     /// the only thing behind does — adding paint where there is none.
     behind: bool,
+    /// Paper grain thinning the coverage, when there is any.
+    tooth: Option<Tooth>,
 }
 
 /// Write `ink` over every pixel of `bbox` that `inside` says belongs to the
@@ -387,26 +579,28 @@ fn paint(
     canvas: &mut Canvas,
     bbox: Bbox,
     inside: impl Fn(i32, i32) -> bool,
-    ink: Ink,
+    ink: &Ink,
     clip: Option<&Mask>,
 ) {
     for yi in bbox.1..=bbox.3 {
+        let mut paper = ink.tooth.as_ref().map(|t| t.row(bbox.0, yi));
         for xi in bbox.0..=bbox.2 {
+            let g = paper.as_mut().map_or(1.0, ToothRow::next);
             if inside(xi, yi) {
                 let k = clip.map_or(255, |m| m.at(xi as u32, yi as u32));
-                put(canvas, xi, yi, ink, k);
+                put(canvas, xi, yi, ink, k, g);
             }
         }
     }
 }
 
-/// Fill one pixel with `ink` at coverage `k`, scaled by its opacity: replaced
-/// when fully covered at full opacity, otherwise blended toward the colour —
-/// over what is there, as a stroke at that opacity lands. With `alpha_lock`
-/// only the colour moves: the pixel's alpha stays, and a bare pixel stays
-/// bare.
-fn put(canvas: &mut Canvas, x: i32, y: i32, ink: Ink, k: u8) {
-    let t = k as f32 / 255.0 * ink.opacity;
+/// Fill one pixel with `ink` at coverage `k`, scaled by its opacity and by
+/// `grain`, the paper's factor there (1 for none): replaced when fully
+/// covered at full opacity, otherwise blended toward the colour — over what
+/// is there, as a stroke at that opacity lands. With `alpha_lock` only the
+/// colour moves: the pixel's alpha stays, and a bare pixel stays bare.
+fn put(canvas: &mut Canvas, x: i32, y: i32, ink: &Ink, k: u8, grain: f32) {
+    let t = k as f32 / 255.0 * ink.opacity * grain;
     if t <= 0.0 {
         return;
     }
@@ -507,6 +701,7 @@ pub fn enclose_fill(
         opacity: opts.opacity.clamp(0.0, 1.0),
         alpha_lock: opts.alpha_lock,
         behind,
+        tooth: opts.grain.tooth(),
     };
     if ink.opacity <= 0.0 {
         return None;
@@ -517,10 +712,10 @@ pub fn enclose_fill(
         let painted = if r > 0 {
             let grown = dilate_window(mask, w, h, b, r);
             let gb = grown.bbox();
-            paint(canvas, gb, |x, y| grown.at(x, y), ink, clip);
+            paint(canvas, gb, |x, y| grown.at(x, y), &ink, clip);
             gb
         } else {
-            paint(canvas, b, |x, y| mask[(y * w + x) as usize], ink, clip);
+            paint(canvas, b, |x, y| mask[(y * w + x) as usize], &ink, clip);
             b
         };
         done = Some(done.map_or(painted, |d| join(d, painted)));
@@ -611,6 +806,18 @@ fn join(a: Bbox, b: Bbox) -> Bbox {
 /// than going muddy.
 fn blend_toward(canvas: &mut Canvas, x: i32, y: i32, color: [u8; 4], t: f32) {
     let p = read_px(canvas, x, y);
+    if p[3] == 0 {
+        // Over nothing the colour is the fill's own; only the alpha blends.
+        // What the general case works out, without its divides.
+        let a = color[3] as f32 / 255.0 * t;
+        let px = if a <= 0.0 {
+            [0; 4]
+        } else {
+            [color[0], color[1], color[2], (a * 255.0).round().clamp(0.0, 255.0) as u8]
+        };
+        write_px(canvas, x, y, px);
+        return;
+    }
     let (a0, a1) = (p[3] as f32 / 255.0, color[3] as f32 / 255.0);
     let a = a0 + (a1 - a0) * t;
     if a <= 0.0 {
@@ -1195,7 +1402,7 @@ mod tests {
         write_px(&mut c, 3, 3, [0, 0, 0, 255]);
         write_px(&mut c, 4, 3, [0, 0, 0, 128]);
         let all = lasso_box(0, 0, 16, 16);
-        assert!(fill_masked(&mut c, &all, RED, 1.0, false, true));
+        assert!(fill_masked(&mut c, &all, RED, 1.0, false, true, Grain::NONE));
         assert_eq!(read_px(&c, 3, 3), [0, 0, 0, 255], "solid line untouched");
         assert_eq!(read_px(&c, 0, 0), RED, "bare pixels fill");
         let soft = read_px(&c, 4, 3);
@@ -1205,7 +1412,7 @@ mod tests {
         // An alpha lock forbids the only thing behind does.
         let mut c = Canvas::new(16, 16);
         write_px(&mut c, 4, 3, [0, 0, 0, 128]);
-        fill_masked(&mut c, &all, RED, 1.0, true, true);
+        fill_masked(&mut c, &all, RED, 1.0, true, true, Grain::NONE);
         assert_eq!(read_px(&c, 4, 3), [0, 0, 0, 128]);
         assert_eq!(read_px(&c, 0, 0), [0, 0, 0, 0]);
     }
@@ -1220,6 +1427,144 @@ mod tests {
         assert!(a.intersect(&lasso_box(20, 20, 30, 30)).is_none());
     }
 
+    fn grain(amount: f32) -> Grain {
+        Grain { amount, ..Grain::NONE }
+    }
+
+    fn alphas(c: &Canvas) -> Vec<u8> {
+        c.pixels().chunks_exact(4).map(|p| p[3]).collect()
+    }
+
+    /// Mean step between horizontal neighbours: low for a coarse tooth.
+    fn roughness(a: &[u8], w: usize) -> f32 {
+        let steps = a.chunks_exact(w).flat_map(|row| row.windows(2).map(|p| p[0].abs_diff(p[1]) as f32));
+        let n = (a.len() - a.len() / w) as f32;
+        steps.sum::<f32>() / n
+    }
+
+    fn spread(a: &[u8]) -> f32 {
+        let mean = a.iter().map(|&v| v as f32).sum::<f32>() / a.len() as f32;
+        (a.iter().map(|&v| (v as f32 - mean).powi(2)).sum::<f32>() / a.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn grain_lets_the_paper_show_through_the_fill() {
+        let mut c = Canvas::new(64, 64);
+        flood(&mut c, None, 10, 10, FillOptions { grain: grain(0.8), ..opts(0) });
+        let a = alphas(&c);
+        let (lo, hi) = (*a.iter().min().unwrap(), *a.iter().max().unwrap());
+        assert!(lo < 120 && hi > 230, "specks from bare-ish to solid: {lo}..{hi}");
+        assert!(lo as f32 >= 255.0 * 0.2 - 1.0, "no deeper than 1 - amount: {lo}");
+        for p in c.pixels().chunks_exact(4) {
+            assert_eq!(p[..3], RED[..3], "grain thins the fill, never its colour");
+        }
+        // Halfway, half as deep.
+        let mut half = Canvas::new(64, 64);
+        flood(&mut half, None, 10, 10, FillOptions { grain: grain(0.4), ..opts(0) });
+        let h = alphas(&half);
+        assert!(*h.iter().min().unwrap() as f32 >= 255.0 * 0.6 - 1.0);
+        assert!(spread(&h) < spread(&a));
+    }
+
+    /// At size 1 with no offset a fill's specks are the Pencil-5 paper's
+    /// texels, where that pencil's dabs read them, so the two line up.
+    #[test]
+    fn grain_at_size_one_lines_up_with_pencil_5s_paper() {
+        let brush = KritaPreset::Pencil5Tilted.brush();
+        let paper = brush.texture.as_ref().unwrap();
+        let mut c = Canvas::new(48, 48);
+        flood(&mut c, None, 0, 0, FillOptions { grain: grain(1.0), ..opts(0) });
+        for y in 0..48 {
+            for x in 0..48 {
+                let (a, t) = (read_px(&c, x, y)[3] as i32, paper.at(x, y) as i32);
+                assert!((a - t).abs() <= 1, "({x}, {y}): alpha {a}, paper {t}");
+            }
+        }
+    }
+
+    /// The paper belongs to the canvas, not to the gesture: every way of
+    /// filling the same pixels gives the same specks.
+    #[test]
+    fn every_fill_lands_on_the_same_paper() {
+        let g = Grain { amount: 0.9, size: 1.7, contrast: 1.5, offset: (3, -7) };
+        let o = FillOptions { grain: g, ..opts(0) };
+        let mut bucket = Canvas::new(40, 40);
+        flood(&mut bucket, None, 20, 20, o);
+
+        let mut masked = Canvas::new(40, 40);
+        fill_masked(&mut masked, &lasso_box(0, 0, 40, 40), RED, 1.0, false, false, g);
+        assert!(masked.pixels() == bucket.pixels(), "lasso fill vs bucket");
+
+        // A lasso round the bare canvas: the frame shuts it all in.
+        let mut enclosed = Canvas::new(40, 40);
+        let pre = enclosed.pixels().into_owned();
+        enclose_fill(&mut enclosed, &pre, None, &lasso_box(0, 0, 40, 40), &o, false, None);
+        assert!(enclosed.pixels() == bucket.pixels(), "enclose vs bucket");
+
+        let mut behind = Canvas::new(40, 40);
+        fill_masked(&mut behind, &lasso_box(0, 0, 40, 40), RED, 1.0, false, true, g);
+        assert!(behind.pixels() == bucket.pixels(), "behind, on bare paper");
+
+        // Across a drag, re-applying puts the same paper back.
+        let pre = vec![0u8; 40 * 40 * 4];
+        let mut dragged = Canvas::new(40, 40);
+        let mut s = FillSession::new(&pre, (40, 40), (20, 20), &o, None, None).unwrap();
+        s.apply(&mut dragged, &pre, 0, 3);
+        s.apply(&mut dragged, &pre, 0, 0);
+        assert!(dragged.pixels() == bucket.pixels(), "after an expand and back");
+    }
+
+    #[test]
+    fn grain_under_an_alpha_lock_mottles_the_colour_and_keeps_the_alpha() {
+        let blue = [0, 0, 255, 255];
+        let mut c = Canvas::new(32, 32);
+        for px in c.pixels_mut().chunks_exact_mut(4) {
+            px.copy_from_slice(&blue);
+        }
+        fill_masked(&mut c, &lasso_box(0, 0, 32, 32), RED, 1.0, true, false, grain(1.0));
+        let reds: Vec<u8> = c.pixels().chunks_exact(4).map(|p| p[0]).collect();
+        assert!(c.pixels().chunks_exact(4).all(|p| p[3] == 255), "alpha kept");
+        assert!(spread(&reds) > 10.0, "the old blue shows through the specks");
+    }
+
+    #[test]
+    fn grain_size_and_contrast_shape_the_tooth() {
+        let fill = |g: Grain| {
+            let mut c = Canvas::new(96, 96);
+            fill_masked(&mut c, &lasso_box(0, 0, 96, 96), RED, 1.0, false, false, g);
+            alphas(&c)
+        };
+        let plain = fill(grain(0.7));
+        let big = fill(Grain { size: 4.0, ..grain(0.7) });
+        let hard = fill(Grain { contrast: 2.5, ..grain(0.7) });
+        let soft = fill(Grain { contrast: 0.4, ..grain(0.7) });
+        assert!(roughness(&big, 96) < roughness(&plain, 96) * 0.6, "bigger tooth, smoother steps");
+        assert!(spread(&hard) > spread(&plain) * 1.2, "harder tooth");
+        assert!(spread(&soft) < spread(&plain) * 0.7, "softer tooth");
+    }
+
+    #[test]
+    fn boiling_gives_each_drawing_its_own_patch_of_paper() {
+        let g = grain(1.0);
+        assert_eq!(g.boiled(7), g.boiled(7), "the same drawing, the same patch");
+        assert_ne!(g.boiled(7).offset, g.boiled(8).offset);
+        let fill = |g: Grain| {
+            let mut c = Canvas::new(32, 32);
+            fill_masked(&mut c, &lasso_box(0, 0, 32, 32), RED, 1.0, false, false, g);
+            c.into_pixels()
+        };
+        assert!(fill(g.boiled(7)) != fill(g.boiled(8)));
+        assert!(fill(g.boiled(7)) == fill(g.boiled(7)));
+    }
+
+    #[test]
+    fn no_grain_is_flat_colour() {
+        assert!(grain(0.0).tooth().is_none());
+        let mut c = Canvas::new(16, 16);
+        fill_masked(&mut c, &lasso_box(0, 0, 16, 16), RED, 1.0, false, false, grain(0.0));
+        assert!(c.pixels().chunks_exact(4).all(|p| p == RED));
+    }
+
     fn opts(expand: u8) -> FillOptions {
         FillOptions {
             tolerance: 24,
@@ -1228,6 +1573,7 @@ mod tests {
             gap: 0,
             alpha_lock: false,
             opacity: 1.0,
+            grain: Grain::NONE,
         }
     }
 
@@ -1366,7 +1712,7 @@ mod tests {
         // Fill selection obeys it too.
         let mut t2 = Canvas::new(16, 16);
         write_px(&mut t2, 2, 2, [90, 90, 90, 60]);
-        assert!(fill_masked(&mut t2, &left_half(255), RED, 1.0, true, false));
+        assert!(fill_masked(&mut t2, &left_half(255), RED, 1.0, true, false, Grain::NONE));
         assert_eq!(read_px(&t2, 2, 2), [255, 0, 0, 60]);
         assert_eq!(read_px(&t2, 3, 3)[3], 0);
     }
@@ -1401,7 +1747,7 @@ mod tests {
     #[test]
     fn fill_selection_paints_only_the_mask() {
         let mut target = Canvas::new(16, 16);
-        assert!(fill_masked(&mut target, &left_half(255), RED, 1.0, false, false));
+        assert!(fill_masked(&mut target, &left_half(255), RED, 1.0, false, false, Grain::NONE));
         assert!(filled_at(&target, 0, 0) && filled_at(&target, 7, 15));
         assert_eq!(read_px(&target, 8, 0)[3], 0);
     }
@@ -1496,12 +1842,12 @@ mod tests {
     #[test]
     fn fill_selection_takes_the_opacity_too() {
         let mut target = Canvas::new(16, 16);
-        assert!(fill_masked(&mut target, &left_half(255), RED, 0.5, false, false));
+        assert!(fill_masked(&mut target, &left_half(255), RED, 0.5, false, false, Grain::NONE));
         assert!(near(read_px(&target, 3, 3), [255, 0, 0, 128]), "{:?}", read_px(&target, 3, 3));
         assert_eq!(read_px(&target, 8, 3)[3], 0);
         // A feathered edge and the opacity multiply.
         let mut soft = Canvas::new(16, 16);
-        fill_masked(&mut soft, &left_half(128), RED, 0.5, false, false);
+        fill_masked(&mut soft, &left_half(128), RED, 0.5, false, false, Grain::NONE);
         assert!(near(read_px(&soft, 3, 3), [255, 0, 0, 64]), "{:?}", read_px(&soft, 3, 3));
         // The bucket held to the same selection lands the same.
         let mut clipped = Canvas::new(16, 16);
@@ -1900,7 +2246,7 @@ mod tests {
             s.apply(&mut canvas, &pre, 0, 4);
         });
         s.revert(&mut canvas, &pre);
-        let mut s = FillSession::new(&pre, (w, h), (5, 5), &o, Some(b), None).unwrap();
+        let mut s = FillSession::new(&pre, (w, h), (5, 5), &o, Some(b.clone()), None).unwrap();
         time("background: plain press", &mut || {
             s.apply(&mut canvas, &pre, 0, 0);
         });
@@ -1922,5 +2268,86 @@ mod tests {
         time("background: gap 255 step", &mut || {
             s.apply(&mut canvas, &pre, 255, 0);
         });
+
+        // Grain: the first press bakes the paper (and the very first loads
+        // it), a drag step only reads it.
+        for (label, g) in [("size 1", grain(0.6)), ("size 2.5", Grain { size: 2.5, ..grain(0.6) })] {
+            let o = FillOptions { grain: g, ..opts(0) };
+            let mut s = FillSession::new(&pre, (w, h), (5, 5), &o, Some(b.clone()), None).unwrap();
+            time(&format!("background: grain {label}, press"), &mut || {
+                s.apply(&mut canvas, &pre, 0, 0);
+            });
+            time(&format!("background: grain {label}, expand 4 step"), &mut || {
+                s.apply(&mut canvas, &pre, 0, 4);
+            });
+            s.revert(&mut canvas, &pre);
+        }
+    }
+
+    /// Writes grainy fills, under line art on its own layer, over grey
+    /// paper, as `fill_grain_render.png` into `SNAPSHOT_DIR`: flat; grain
+    /// 0.6; grain 0.6 at size 2.5 and contrast 1.8; a lasso Enclose &
+    /// fill, Behind, boiled. `SNAPSHOT_DIR=... cargo test -- --ignored grain_render`
+    #[test]
+    #[ignore]
+    fn grain_render() {
+        let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let (w, h) = (200u32, 150u32);
+        let teal = [47, 72, 80, 255];
+        // An anti-aliased ring, pencil green.
+        let mut ring = Canvas::new(w, h);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let d = ((x as f32 - 95.0) / 1.2).hypot(y as f32 - 72.0);
+                let a = (2.2 - (d - 58.0).abs()).clamp(0.0, 1.0);
+                if a > 0.0 {
+                    write_px(&mut ring, x, y, [34, 53, 36, (a * 255.0) as u8]);
+                }
+            }
+        }
+        let bucket = |g: Grain| {
+            let mut c = Canvas::new(w, h);
+            let o = FillOptions { color: teal, expand: 2, grain: g, ..opts(0) };
+            flood(&mut c, Some(&ring), 95, 72, o);
+            c
+        };
+        let enclosed = {
+            let mut c = Canvas::new(w, h);
+            let pre = c.pixels().into_owned();
+            let src = ring.pixels().into_owned();
+            let o = FillOptions { color: teal, expand: 2, grain: grain(0.6).boiled(1), ..opts(0) };
+            enclose_fill(&mut c, &pre, Some(&src), &lasso_box(10, 4, 190, 146), &o, true, None);
+            c
+        };
+        let tiles = [
+            bucket(Grain::NONE),
+            bucket(grain(0.6)),
+            bucket(Grain { size: 2.5, contrast: 1.8, ..grain(0.6) }),
+            enclosed,
+        ];
+        let over = |dst: [f32; 3], p: &[u8]| {
+            let a = p[3] as f32 / 255.0;
+            [0, 1, 2].map(|i| dst[i] * (1.0 - a) + p[i] as f32 * a)
+        };
+        let (gap, z) = (8u32, 2u32);
+        let mut sheet = image::RgbaImage::from_pixel(2 * w + gap, 2 * h + gap, image::Rgba([40, 40, 44, 255]));
+        for (i, fill) in tiles.iter().enumerate() {
+            let (ox, oy) = ((i as u32 % 2) * (w + gap), (i as u32 / 2) * (h + gap));
+            let (f, l) = (fill.pixels(), ring.pixels());
+            for y in 0..h {
+                for x in 0..w {
+                    let k = ((y * w + x) * 4) as usize;
+                    let c = over(over([195.0; 3], &f[k..k + 4]), &l[k..k + 4]);
+                    let rgb = c.map(|v| v.round().clamp(0.0, 255.0) as u8);
+                    sheet.put_pixel(ox + x, oy + y, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+                }
+            }
+        }
+        let (sw, sh) = sheet.dimensions();
+        image::imageops::resize(&sheet, sw * z, sh * z, image::imageops::FilterType::Nearest)
+            .save(dir.join("fill_grain_render.png"))
+            .unwrap();
     }
 }

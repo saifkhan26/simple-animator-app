@@ -1068,6 +1068,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 let lasso = state.fill_mode == FillMode::Lasso;
                 ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Opacity"))
                     .on_hover_text("Fill selection uses this opacity too.");
+                fill_grain_options(state, ui);
                 if lasso {
                     lasso_fill_options(state, ui);
                 }
@@ -1243,6 +1244,37 @@ fn fill_mode_toggles(state: &mut AppState, ui: &mut egui::Ui) {
             }
         }
     });
+}
+
+/// Paper grain on fills: how much, and once there is some, the paper's size
+/// and contrast and whether each drawing gets its own patch.
+fn fill_grain_options(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.add(egui::Slider::new(&mut state.brush.fill_grain, 0.0..=1.0).text("Grain"))
+        .on_hover_text(
+            "Paper shows through the fill where it dips, like a pencil's tooth. \
+             It's Krita's paper, the one Pencil-5 Tilted draws on. 0 = flat \
+             colour. Fill selection uses it too.",
+        );
+    if state.brush.fill_grain <= 0.0 {
+        return;
+    }
+    ui.add(
+        egui::Slider::new(&mut state.brush.fill_grain_size, fill::GRAIN_SIZES)
+            .logarithmic(true)
+            .text("Grain size"),
+    )
+    .on_hover_text("How big the paper's tooth is. At 1 it lines up with Pencil-5 Tilted's.");
+    ui.add(
+        egui::Slider::new(&mut state.brush.fill_grain_contrast, fill::GRAIN_CONTRASTS)
+            .logarithmic(true)
+            .text("Grain contrast"),
+    )
+    .on_hover_text("Harder or softer tooth. 1 = the paper as scanned.");
+    ui.checkbox(&mut state.brush.fill_grain_boil, "Boil per drawing").on_hover_text(
+        "Each drawing fills on its own patch of paper, so the grain changes \
+         from drawing to drawing like real sheets. Off, every drawing shares \
+         one sheet, as the pencils' grain does.",
+    );
 }
 
 /// The lasso fill's switches and how to draw one.
@@ -10554,6 +10586,74 @@ mod fill_tests {
         frame(&ctx, &mut state, vec![]);
         assert!(!state.fill_dragging());
         assert_eq!(state.history.undo_len(), 1);
+    }
+
+    /// Every piece of text a frame painted, and where.
+    fn text_rects(ctx: &egui::Context, state: &mut AppState) -> Vec<(String, Rect)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, Rect)>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.visual_bounding_rect())),
+                _ => {}
+            }
+        }
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for s in ctx.run(raw, |ctx| draw(state, ctx)).shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// The Grain slider through the real Tools panel: pressing it brings
+    /// up the rest of the grain options, and the bucket then fills with
+    /// specks of paper.
+    #[test]
+    fn the_grain_slider_brings_its_options_and_specks_the_bucket() {
+        let mut state = AppState::for_test();
+        state.show_panels = true;
+        state.show_mini_timeline = false;
+        // Off the right end of the Tools rows, where it would take the press.
+        state.hidden_panels = vec![PanelId::Timeline];
+        state.dispatch(Action::ToolFill);
+        state.brush.color = RED;
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        text_rects(&ctx, &mut state);
+        let t = text_rects(&ctx, &mut state);
+        let has = |t: &[(String, Rect)], s: &str| t.iter().any(|(x, _)| x == s);
+        assert!(has(&t, "Grain"), "{:?}", t.iter().map(|x| &x.0).collect::<Vec<_>>());
+        for s in ["Grain size", "Grain contrast", "Boil per drawing"] {
+            assert!(!has(&t, s), "{s} hidden while there is no grain");
+        }
+
+        // The slider's value box sits between its rail and its label: press
+        // the rail just left of the box, near its top end.
+        let label = t.iter().find(|(s, _)| s == "Grain").unwrap().1;
+        let value = t
+            .iter()
+            .map(|&(_, r)| r)
+            .filter(|r| r.right() < label.left() && (r.center().y - label.center().y).abs() < 4.0)
+            .max_by(|a, b| a.left().total_cmp(&b.left()))
+            .expect("the slider's value");
+        click(&ctx, &mut state, pos2(value.left() - 16.0, label.center().y));
+        assert!(state.brush.fill_grain > 0.5, "grain {}", state.brush.fill_grain);
+        let t = text_rects(&ctx, &mut state);
+        for s in ["Grain size", "Grain contrast", "Boil per drawing"] {
+            assert!(has(&t, s), "{s} shown once there is grain");
+        }
+
+        // Panels away, then the bucket on the bare canvas.
+        state.show_panels = false;
+        frame(&ctx, &mut state, vec![]);
+        let p = at(&state, 200.0, 200.0);
+        click(&ctx, &mut state, p);
+        let row: Vec<[u8; 4]> = (150..250).map(|x| px(&state, x, 200)).collect();
+        assert!(row.iter().all(|p| p[..3] == RED[..3] && p[3] > 0), "{row:?}");
+        assert!(row.iter().any(|p| p[3] < 128) && row.iter().any(|p| p[3] > 200), "{row:?}");
     }
 
     /// The Fill tool in lasso mode, red, with the panels out of the way.

@@ -108,7 +108,7 @@ impl TextureMask {
     /// The texel under canvas pixel `(x, y)`: `KisFillPainter::fillRect`'s
     /// pattern tiling, which wraps with a true modulo either side of zero.
     #[inline]
-    fn at(&self, x: i32, y: i32) -> u8 {
+    pub(crate) fn at(&self, x: i32, y: i32) -> u8 {
         let tx = (x - self.offset_x).rem_euclid(self.w as i32) as usize;
         let ty = (y - self.offset_y).rem_euclid(self.h as i32) as usize;
         self.data[ty * self.w + tx]

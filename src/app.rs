@@ -4605,6 +4605,7 @@ impl AppState {
                 gap: self.brush.fill_gap,
                 alpha_lock: self.active_alpha_lock(),
                 opacity: self.brush.opacity,
+                grain: self.fill_grain(target),
             };
             // Owned, so the immutable project borrow ends before `cell_mut`.
             let (cw, ch) = {
@@ -9602,6 +9603,12 @@ mod tests {
         let brushes = restore_tool_brushes(prefs.tool_brushes);
         assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
         assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
+        let fill = &brushes[ActiveTool::Fill.idx()];
+        assert_eq!(
+            (fill.fill_grain, fill.fill_grain_size, fill.fill_grain_contrast, fill.fill_grain_boil),
+            (0.0, 1.0, 1.0, false),
+            "fills saved before grain stay flat"
+        );
     }
 
     /// The active tool's brush is saved as it is now, not as it was at the

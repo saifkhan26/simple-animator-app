@@ -259,6 +259,19 @@ pub struct BrushSettings {
     /// Read the lines from every visible layer at once, instead of the active
     /// layer's own pixels or its `lines_from` link. Only used by the Fill tool.
     pub fill_all_visible: bool,
+    /// Paper-grain strength on fills, 0..=1 — see [`fill::Grain`]. Apart
+    /// from `grain`, the pens' own tooth, which is a different paper on a
+    /// different scale. Only used by the Fill tool.
+    pub fill_grain: f32,
+    /// Size of the fills' paper, 1 = Pencil-5 Tilted's. Only used by the
+    /// Fill tool.
+    pub fill_grain_size: f32,
+    /// Contrast of the fills' paper, 1 = as scanned. Only used by the Fill
+    /// tool.
+    pub fill_grain_contrast: f32,
+    /// Each drawing fills on its own patch of paper. Only used by the Fill
+    /// tool.
+    pub fill_grain_boil: bool,
     /// Outline shape to draw. Only used by the Shape tool.
     pub shape_kind: ShapeKind,
     /// How far the pixels follow the pen, 0..=1, at full pressure. Only used
@@ -301,6 +314,10 @@ impl Default for BrushSettings {
             fill_expand: 0,
             fill_gap: 0,
             fill_all_visible: false,
+            fill_grain: 0.0,
+            fill_grain_size: 1.0,
+            fill_grain_contrast: 1.0,
+            fill_grain_boil: false,
             shape_kind: ShapeKind::Line,
             liquify_strength: 0.6,
             liquify_mode: liquify::LiquifyMode::Push,

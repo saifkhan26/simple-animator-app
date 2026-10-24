@@ -98,7 +98,13 @@ impl Win {
     fn open(self, state: &mut AppState) {
         match self {
             Win::Panel(_) | Win::Menu => {}
-            Win::ToolPanel(t) => state.set_tool(t),
+            Win::ToolPanel(t) => {
+                state.set_tool(t);
+                // Grain on, so the sweeps see every row the Fill tool can show.
+                if t == ActiveTool::Fill {
+                    state.brush.fill_grain = 0.5;
+                }
+            }
             Win::MiniTimeline => {
                 state.show_panels = false;
                 state.show_mini_timeline = true;
@@ -778,6 +784,13 @@ fn snapshots() {
     snapshot(&mut rig, 2.0).save(dir.join("brush_narrowest.png")).unwrap();
     let mut rig = Rig::new(Win::Settings);
     snapshot(&mut rig, 1.5).save(dir.join("settings.png")).unwrap();
+
+    // The Fill tool's options with grain on, bucket then lasso.
+    let mut rig = Rig::new(Win::ToolPanel(ActiveTool::Fill));
+    snapshot(&mut rig, 2.0).save(dir.join("fill_grain.png")).unwrap();
+    rig.state.set_fill_mode(crate::app::FillMode::Lasso);
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("fill_grain_lasso.png")).unwrap();
 
     // The onion strip: off, then on with a bar dragged and an offset soloed.
     let mut rig = Rig::new(Win::Panel(PanelId::Onion));

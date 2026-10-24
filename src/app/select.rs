@@ -17,6 +17,8 @@
 use std::sync::Arc;
 
 use super::{AppState, SelDrag, SelTint};
+use crate::doc::layer::CellId;
+use crate::tools::fill::{self, Grain};
 use crate::tools::lasso::{self, Mask};
 use crate::tools::select_mask::{self, SelOp, SelShape, SelectionMask};
 use crate::tools::selection::{self, Grab, Placement, Pose, Selection, HANDLE_PX};
@@ -529,6 +531,29 @@ impl AppState {
         }
     }
 
+    /// The Fill tool's paper grain for a fill on drawing `cell`, which Fill
+    /// selection shares like the opacity. Boil per drawing gives each
+    /// drawing its own patch of paper.
+    pub fn fill_grain(&self, cell: CellId) -> Grain {
+        let b = if self.tool == ActiveTool::Fill {
+            &self.brush
+        } else {
+            &self.tool_brushes[ActiveTool::Fill.idx()]
+        };
+        let (s, c) = (fill::GRAIN_SIZES, fill::GRAIN_CONTRASTS);
+        let grain = Grain {
+            amount: b.fill_grain.clamp(0.0, 1.0),
+            size: b.fill_grain_size.clamp(*s.start(), *s.end()),
+            contrast: b.fill_grain_contrast.clamp(*c.start(), *c.end()),
+            ..Grain::NONE
+        };
+        if b.fill_grain_boil {
+            grain.boiled(cell)
+        } else {
+            grain
+        }
+    }
+
     /// Fill the selection with the brush colour at the Fill tool's opacity, on
     /// the active drawing.
     pub fn fill_selection(&mut self) {
@@ -546,10 +571,11 @@ impl AppState {
         };
         let color = self.brush.color;
         let alpha_lock = self.active_alpha_lock();
+        let grain = self.fill_grain(target);
         self.snapshot_pre(target);
         if let Some(c) = self.project.cell_mut(target) {
             c.dirty = None;
-            crate::tools::fill::fill_masked(c, &clip, color, opacity, alpha_lock, false);
+            fill::fill_masked(c, &clip, color, opacity, alpha_lock, false, grain);
         }
         self.mark_dirty(target);
         if self.commit_undo(target) {
@@ -1742,6 +1768,28 @@ mod tests {
         let steps = st.history.undo_len();
         st.fill_selection();
         assert_eq!(st.history.undo_len(), steps, "nothing to fill at zero");
+    }
+
+    #[test]
+    fn fill_selection_takes_the_fill_tools_grain() {
+        let mut st = lasso();
+        drag(&mut st, (100.0, 100.0), (200.0, 200.0), None);
+        st.tool_brushes[ActiveTool::Fill.idx()].fill_grain = 1.0;
+        st.brush.color = [255, 0, 0, 255];
+        st.fill_selection();
+        let row: Vec<[u8; 4]> = (110..190).map(|x| px(&st, x, 150)).collect();
+        assert!(row.iter().any(|p| p[3] < 60) && row.iter().any(|p| p[3] > 180), "specks: {row:?}");
+        assert!(row.iter().all(|p| p[..3] == [255, 0, 0]));
+        assert_eq!(px(&st, 90, 150)[3], 0, "still held to the selection");
+
+        // Boil: a patch of paper per drawing, the same one every time.
+        assert_eq!(st.fill_grain(0).offset, (0, 0));
+        st.tool_brushes[ActiveTool::Fill.idx()].fill_grain_boil = true;
+        assert_ne!(st.fill_grain(0).offset, st.fill_grain(1).offset);
+        assert_eq!(st.fill_grain(1), st.fill_grain(1));
+        // The bucket shows the same settings.
+        st.set_tool(ActiveTool::Fill);
+        assert_eq!((st.brush.fill_grain, st.brush.fill_grain_boil), (1.0, true));
     }
 
     #[test]
