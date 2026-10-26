@@ -104,6 +104,10 @@ impl Win {
                 if t == ActiveTool::Fill {
                     state.brush.fill_grain = 0.5;
                 }
+                // And the magic select, whose settings add rows to the Lasso's.
+                if t == ActiveTool::Lasso {
+                    state.sel_shape = crate::tools::select_mask::SelShape::Wand;
+                }
             }
             Win::MiniTimeline => {
                 state.show_panels = false;
@@ -808,6 +812,10 @@ fn snapshots() {
     rig.state.set_fill_mode(crate::app::FillMode::Lasso);
     rig.settle();
     snapshot(&mut rig, 2.0).save(dir.join("fill_grain_lasso.png")).unwrap();
+
+    // The Lasso with the magic select picked.
+    let mut rig = Rig::new(Win::ToolPanel(ActiveTool::Lasso));
+    snapshot(&mut rig, 2.0).save(dir.join("lasso_wand.png")).unwrap();
 
     // The onion strip: off, then on with a bar dragged and an offset soloed.
     let mut rig = Rig::new(Win::Panel(PanelId::Onion));

@@ -259,6 +259,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             // not to the layer under it. The cursor, not pen
                             // packets — a selection edge has no pressure.
                             state.select_down(canvas_to_doc(pos), held_op);
+                            // A magic select press keeps listening: dragging
+                            // before the pen lifts retunes it, counted from here.
+                            state.wand_anchor(pos);
                         } else if lasso_fill {
                             // So does a lasso fill, until it lands.
                             state.fill_lasso_down(canvas_to_doc(pos), lasso_held);
@@ -409,6 +412,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                         None if state.tool == ActiveTool::Lasso => {
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 state.select_move(canvas_to_doc(pos));
+                                // In screen points, as the Fill drag counts.
+                                state.wand_drag_to(pos);
                             }
                         }
                         None if lasso_fill => {
@@ -1043,7 +1048,11 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 };
                 tool_toggle(ui, state, ActiveTool::Fill, fill_icon, &f);
                 tool_toggle(ui, state, ActiveTool::Shape, ic::SHAPES, &g);
-                tool_toggle(ui, state, ActiveTool::Lasso, ic::LASSO, &l);
+                let lasso_icon = match state.sel_shape {
+                    SelShape::Wand => ic::MAGIC_WAND,
+                    _ => ic::LASSO,
+                };
+                tool_toggle(ui, state, ActiveTool::Lasso, lasso_icon, &l);
                 let tr = tip(state, Action::ToolTracker, "Tracker (stabilize)");
                 tool_toggle(ui, state, ActiveTool::Tracker, ic::CROSSHAIR, &tr);
                 let pg = tip(state, Action::ToolPerspective, "Perspective grid");
@@ -5573,6 +5582,7 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
             (SelShape::Freehand, ic::LASSO),
             (SelShape::Rect, ic::RECTANGLE_DASHED),
             (SelShape::Ellipse, ic::CIRCLE_DASHED),
+            (SelShape::Wand, ic::MAGIC_WAND),
         ] {
             if theme::icon_toggle(ui, icon, shape.label(), state.sel_shape == shape).clicked() {
                 // A half-placed polygon means nothing to the other shapes.
@@ -5583,6 +5593,9 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
             }
         }
     });
+    if state.sel_shape == SelShape::Wand {
+        wand_options(state, ui);
+    }
     ui.horizontal(|ui| {
         for (op, icon, bind) in [
             (SelOp::Replace, ic::SELECTION, None),
@@ -5692,6 +5705,49 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
         ))
         .color(theme::text_muted())
         .size(11.0),
+    );
+}
+
+/// The magic select's settings, under the Lasso's shapes while it is the one
+/// picked.
+fn wand_options(state: &mut AppState, ui: &mut egui::Ui) {
+    use crate::tools::wand::MAX_TOLERANCE;
+    let w = &mut state.wand;
+    ui.add(egui::Slider::new(&mut w.tolerance, 0..=MAX_TOLERANCE).text("Tolerance"))
+        .on_hover_text(
+            "How far a colour may stray from the one clicked and still be picked. \
+             A click on bare canvas takes the bare canvas whatever this is.\n\n\
+             Or keep the pen down after the click and drag left / right.",
+        );
+    ui.add_enabled(
+        w.contiguous,
+        // Logarithmic, as the Fill tool's, so small gaps keep most of the track.
+        egui::Slider::new(&mut w.gap, 0..=fill::MAX_GAP)
+            .logarithmic(true)
+            .smallest_positive(1.0)
+            .text("Gap (px)"),
+    )
+    .on_hover_text(
+        "Treat breaks in the lines up to this wide as closed, so a click inside \
+         a shape stops at them, as a fill would.\n\nOr keep the pen down after \
+         the click and drag up / down.",
+    );
+    ui.add(egui::Slider::new(&mut w.expand, 0..=fill::MAX_EXPAND).text("Expand (px)"))
+        .on_hover_text(
+            "Grow each pick by this many pixels, so a flat colour's selection \
+             reaches under its anti-aliased lines.",
+        );
+    ui.checkbox(&mut w.any_paint, "Any paint").on_hover_text(
+        "A click on paint takes every painted pixel touching it, whatever its \
+         colour: lines and the fills against them, as one piece.",
+    );
+    ui.checkbox(&mut w.contiguous, "Contiguous").on_hover_text(
+        "Only pixels joined to the one clicked. Off, every pixel like it anywhere \
+         on the drawing.",
+    );
+    ui.checkbox(&mut w.all_visible, "Read all visible layers").on_hover_text(
+        "Pick by what every visible layer shows together, not only this layer: \
+         on a colour layer, select a region walled in by the line layer.",
     );
 }
 
@@ -7526,8 +7582,22 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
                 );
             }
             let c = pos + egui::vec2(9.0, -9.0);
-            painter.circle_stroke(c, 5.0, Stroke::new(1.6, black));
-            painter.circle_stroke(c, 5.0, Stroke::new(0.9, white));
+            if state.sel_shape == SelShape::Wand {
+                // The magic select: a sparkle, the wand icon's tip.
+                for (w, col) in [(1.6, black), (0.9, white)] {
+                    for (a, b) in [((-5.0, 0.0), (5.0, 0.0)), ((0.0, -5.0), (0.0, 5.0))] {
+                        let (a, b) = (c + egui::vec2(a.0, a.1), c + egui::vec2(b.0, b.1));
+                        painter.line_segment([a, b], Stroke::new(w, col));
+                    }
+                    for (a, b) in [((-3.0, -3.0), (3.0, 3.0)), ((-3.0, 3.0), (3.0, -3.0))] {
+                        let (a, b) = (c + egui::vec2(a.0, a.1), c + egui::vec2(b.0, b.1));
+                        painter.line_segment([a, b], Stroke::new(w * 0.7, col));
+                    }
+                }
+            } else {
+                painter.circle_stroke(c, 5.0, Stroke::new(1.6, black));
+                painter.circle_stroke(c, 5.0, Stroke::new(0.9, white));
+            }
             // What the next drag does to the selection: add, remove or
             // intersect. Replace needs no badge.
             let op = ui.input(|i| held_sel_op(state, i)).unwrap_or(state.sel_op);
@@ -7543,6 +7613,12 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
                 for (d, col) in [(egui::vec2(1.0, 1.0), black), (egui::Vec2::ZERO, white)] {
                     painter.text(at + d, egui::Align2::CENTER_CENTER, b, font.clone(), col);
                 }
+            }
+            // What a magic select press being dragged is set to, as a Fill
+            // press shows its own.
+            if state.wand_dragging() {
+                let text = format!("Tolerance {} · Gap {}", state.wand.tolerance, state.wand.gap);
+                draw_readout(&painter, pos, text);
             }
         }
         ActiveTool::Perspective => {

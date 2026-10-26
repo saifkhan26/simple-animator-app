@@ -32,10 +32,11 @@ use std::collections::VecDeque;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
-use crate::doc::canvas::{Canvas, DirtyRect};
+use crate::doc::canvas::{par_rows, Canvas, DirtyRect};
 use crate::tools::lasso::Mask;
 use crate::tools::noise::{paper_scan, Periodic, PeriodicRow};
 use crate::tools::ribbon::union_rect;
+use crate::tools::scan;
 
 /// Upper bound on the expand radius, matching the UI slider.
 pub const MAX_EXPAND: u8 = 32;
@@ -190,23 +191,29 @@ impl Tooth {
 }
 
 /// Inclusive pixel bounds, `(min_x, min_y, max_x, max_y)`.
-type Bbox = (i32, i32, i32, i32);
+pub(super) type Bbox = (i32, i32, i32, i32);
 
 /// The gap `steps` rungs of [`GAP_LADDER`] away from `base`. No steps keeps
 /// `base` as it is, even off the ladder; the first step lands on the next rung
 /// in that direction.
 pub fn step_gap(base: u8, steps: i32) -> u8 {
-    let rungs = GAP_LADDER.len() as i32;
+    step_ladder(&GAP_LADDER, base, steps)
+}
+
+/// The value `steps` rungs of `ladder` away from `base`, as [`step_gap`]
+/// counts them.
+pub(super) fn step_ladder(ladder: &[u8], base: u8, steps: i32) -> u8 {
+    let rungs = ladder.len() as i32;
     let at = if steps > 0 {
-        let above = GAP_LADDER.iter().position(|&g| g > base).unwrap_or(GAP_LADDER.len()) as i32;
+        let above = ladder.iter().position(|&g| g > base).unwrap_or(ladder.len()) as i32;
         above + steps - 1
     } else if steps < 0 {
-        let below = GAP_LADDER.iter().rposition(|&g| g < base).map_or(-1, |i| i as i32);
+        let below = ladder.iter().rposition(|&g| g < base).map_or(-1, |i| i as i32);
         below + steps + 1
     } else {
         return base;
     };
-    GAP_LADDER[at.clamp(0, rungs - 1) as usize]
+    ladder[at.clamp(0, rungs - 1) as usize]
 }
 
 /// The flood's reach at one gap setting: a `w * h` bitmap and its bounds.
@@ -221,14 +228,14 @@ struct Region {
 /// every wall close enough to matter for a gap up to `2 * (reach - 1)` inside
 /// it; a gap fill never reaches past the plain flood, so nothing outside is
 /// needed.
-struct Field {
+pub(super) struct Field {
     x0: i32,
     y0: i32,
     w: i32,
     h: i32,
-    reach: i32,
+    pub(super) reach: i32,
     /// The window is the whole cell, so it serves any gap.
-    whole: bool,
+    pub(super) whole: bool,
     dist: Vec<f32>,
 }
 
@@ -425,7 +432,7 @@ impl FillSession {
         }
         let field = self.field.get_or_insert_with(|| {
             let reach = (needed as u32).next_power_of_two().max(16) as i32;
-            wall_distance(src, w, h, plain.bbox, reach, target, tol)
+            wall_distance(w, h, plain.bbox, reach, |x, y| matches_target(src, w, x, y, target, tol))
         });
         let (mask, bbox) = gap_flood(field, &plain.mask, w, h, seed, gap);
         self.region = Some(Region { gap, mask, bbox });
@@ -690,7 +697,8 @@ pub fn enclose_fill(
             }
             // Open to the outside, perhaps only through gaps: the pieces of
             // it that shutting them leaves inside.
-            let field = wall_distance(src, w, h, pb, reach, CLEAR, tol);
+            let field =
+                wall_distance(w, h, pb, reach, |x, y| matches_target(src, w, x, y, CLEAR, tol));
             let mut taken = vec![false; (lw * lh) as usize];
             for py in pb.1.max(ly0)..=pb.3.min(ly0 + lh - 1) {
                 for px in pb.0.max(lx0)..=pb.2.min(lx0 + lw - 1) {
@@ -787,7 +795,7 @@ fn blend_toward(canvas: &mut Canvas, x: i32, y: i32, color: [u8; 4], t: f32) {
 /// Scanline span flood over a `w`×`h` grid from `(x, y)`, entering every
 /// pixel `pass` accepts. The start itself is taken as given. Returns the
 /// reached pixels as a `w * h` bitmap plus their bounding box.
-fn span_flood(
+pub(super) fn span_flood(
     w: i32,
     h: i32,
     (x, y): (i32, i32),
@@ -880,7 +888,7 @@ const OUT: u8 = 3;
 /// between the two sides, so neither pours through.
 ///
 /// Works in the field's window, which holds the whole plain flood.
-fn gap_flood(
+pub(super) fn gap_flood(
     field: &Field,
     plain: &[bool],
     cw: i32,
@@ -895,10 +903,16 @@ fn gap_flood(
     // far out as the next even width's, so odd settings shut one pixel more.
     let half = gap.div_ceil(2) as f32;
     let open = half * half;
-    let mut label: Vec<u8> = (0..h)
-        .flat_map(|y| (0..w).map(move |x| ((y + fy) * cw + x + fx) as usize))
-        .map(|i| if plain[i] { FREE } else { OUT })
-        .collect();
+    let (wu, cwu) = (w as usize, cw as usize);
+    let mut label = vec![OUT; wu * h as usize];
+    par_rows(&mut label, wu, |r0, band| {
+        for (k, row) in band.chunks_exact_mut(wu).enumerate() {
+            let at = (r0 + k + fy as usize) * cwu + fx as usize;
+            for (l, &p) in row.iter_mut().zip(&plain[at..at + wu]) {
+                *l = if p { FREE } else { OUT };
+            }
+        }
+    });
 
     // Climb from the click to the top of its hill, so a click right beside a
     // line is judged by the open space it belongs to. Steepest ascent, and
@@ -950,9 +964,20 @@ fn gap_flood(
     }
 
     if at(p.0, p.1) > open {
-        let (core, _) = span_flood(w, h, p, |x, y| at(x, y) > open);
-        for (l, _) in label.iter_mut().zip(&core).filter(|(_, &c)| c) {
-            *l = OURS;
+        // The open space joined to the hilltop. All of it is in the plain
+        // flood, so it is the free pixels farther out than `open`, flooded.
+        let mut core = vec![scan::SHUT; label.len()];
+        par_rows(&mut core, wu, |r0, band| {
+            let (l, d) = (&label[r0 * wu..][..band.len()], &dist[r0 * wu..][..band.len()]);
+            for ((c, &l), &d) in band.iter_mut().zip(l).zip(d) {
+                *c = if l == FREE && d > open { scan::OPEN } else { scan::SHUT };
+            }
+        });
+        scan::flood(&mut core, wu, p);
+        for (l, &c) in label.iter_mut().zip(&core) {
+            if c == scan::TAKEN {
+                *l = OURS;
+            }
         }
     } else {
         // The hill never reaches open space: a shape smaller than the gap
@@ -989,16 +1014,26 @@ fn gap_flood(
     };
     // Gather the markers before any claim: a pixel claimed during this pass
     // must wait its turn in the buckets, or labels would creep along the band
-    // in scan order instead of by distance.
-    let markers: Vec<(i32, i32)> = (0..h)
-        .flat_map(|y| (0..w).map(move |x| (x, y)))
-        .filter(|&(x, y)| {
-            matches!(label[(y * w + x) as usize], OURS | THEIRS)
-                && neighbours(x, y, w, h).any(|(a, b)| label[(b * w + a) as usize] == FREE)
-        })
-        .collect();
-    for (x, y) in markers {
-        let l = label[(y * w + x) as usize];
+    // in scan order instead of by distance. A marker borders the band, so
+    // they are found from the band's side and put back in scan order.
+    let mut markers: Vec<u32> = Vec::new();
+    let mut from = 0;
+    while let Some(k) = scan::find(&label[from..], FREE) {
+        let i = from + k;
+        let (x, y) = ((i % wu) as i32, (i / wu) as i32);
+        for (a, b) in neighbours(x, y, w, h) {
+            let j = (b * w + a) as usize;
+            if matches!(label[j], OURS | THEIRS) {
+                markers.push(j as u32);
+            }
+        }
+        from = i + 1;
+    }
+    markers.sort_unstable();
+    markers.dedup();
+    for i in markers {
+        let (x, y) = (i as i32 % w, i as i32 / w);
+        let l = label[i as usize];
         claim(&mut label, &mut buckets, l, x, y);
     }
     let mut cur = top;
@@ -1018,17 +1053,19 @@ fn gap_flood(
 
     let (mut x0, mut y0, mut x1, mut y1) = (cw, ch, -1, -1);
     let mut fill = vec![false; (cw * ch) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            if label[(y * w + x) as usize] == OURS {
-                let (x, y) = (x + fx, y + fy);
-                fill[(y * cw + x) as usize] = true;
-                x0 = x0.min(x);
-                y0 = y0.min(y);
-                x1 = x1.max(x);
-                y1 = y1.max(y);
-            }
+    for (y, row) in label.chunks_exact(wu).enumerate() {
+        let Some(first) = scan::find(row, OURS) else {
+            continue;
+        };
+        let last = row.iter().rposition(|&l| l == OURS).unwrap_or(first);
+        let (cy, at) = (y as i32 + fy, (y + fy as usize) * cwu + fx as usize);
+        for (o, &l) in fill[at..at + wu].iter_mut().zip(row) {
+            *o = l == OURS;
         }
+        x0 = x0.min(fx + first as i32);
+        x1 = x1.max(fx + last as i32);
+        y0 = y0.min(cy);
+        y1 = y1.max(cy);
     }
     (fill, (x0, y0, x1, y1))
 }
@@ -1039,56 +1076,82 @@ const FAR: f64 = 1e30;
 
 /// The [`Field`] for a plain flood with bounds `bbox` on a `w`×`h` cell:
 /// squared Euclidean distance from each pixel to the nearest wall — a pixel
-/// the flood would not enter — with the cell edge counting as one, so a line
-/// that stops just short of the edge still shuts. 0 on the walls.
-/// Felzenszwalb & Huttenlocher's exact transform: along each row, then down
-/// each column.
+/// the flood would not enter, which is any `pass` turns away — with the cell
+/// edge counting as one, so a line that stops just short of the edge still
+/// shuts. 0 on the walls. Felzenszwalb & Huttenlocher's exact transform: along
+/// each row, then down each column.
 ///
 /// The window is `bbox` grown by `reach`. Walls outside it are farther from
 /// the flood than the gaps it serves look, so leaving them out changes nothing
 /// that matters.
-fn wall_distance(
-    src: &[u8],
+pub(super) fn wall_distance(
     w: i32,
     h: i32,
     bbox: Bbox,
     reach: i32,
-    target: [u8; 4],
-    tol: u8,
+    pass: impl Fn(i32, i32) -> bool + Sync,
 ) -> Field {
     let (x0, y0) = ((bbox.0 - reach).max(0), (bbox.1 - reach).max(0));
     let (x1, y1) = ((bbox.2 + reach).min(w - 1), (bbox.3 + reach).min(h - 1));
     let (fw, fh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
-    let n = fw.max(fh);
-    let mut f = vec![0f64; n];
-    let mut d = vec![0f64; n];
-    let mut v = vec![0usize; n];
-    let mut z = vec![0f64; n + 1];
+    // Along each row, a band of rows to a thread.
     let mut dist = vec![0f32; fw * fh];
-    for y in 0..fh {
-        let cy = y0 + y as i32;
-        for (x, fx) in f[..fw].iter_mut().enumerate() {
-            let wall = !matches_target(src, w, x0 + x as i32, cy, target, tol);
-            *fx = if wall { 0.0 } else { FAR };
+    par_rows(&mut dist, fw, |r0, band| {
+        let mut s = EdtScratch::new(fw);
+        for (k, out) in band.chunks_exact_mut(fw).enumerate() {
+            let cy = y0 + (r0 + k) as i32;
+            for (x, fx) in s.f.iter_mut().enumerate() {
+                let wall = !pass(x0 + x as i32, cy);
+                *fx = if wall { 0.0 } else { FAR };
+            }
+            s.run();
+            for (o, &dx) in out.iter_mut().zip(&s.d) {
+                *o = dx as f32;
+            }
         }
-        edt_line(&f[..fw], &mut d[..fw], &mut v, &mut z);
-        for (o, &dx) in dist[y * fw..(y + 1) * fw].iter_mut().zip(&d[..fw]) {
-            *o = dx as f32;
+    });
+    // Then down each column. The columns are turned into rows, a band of
+    // them to a thread, a few at a time so both sides of the turn stay in
+    // the cache; then turned back.
+    let mut cols = vec![0f32; fw * fh];
+    par_rows(&mut cols, fh, |c0, band| {
+        let mut s = EdtScratch::new(fh);
+        let mut tile = vec![0f64; TURN * fh];
+        let n = band.len() / fh;
+        for t0 in (0..n).step_by(TURN) {
+            let tn = TURN.min(n - t0);
+            for y in 0..fh {
+                let row = &dist[y * fw + c0 + t0..][..tn];
+                for (k, &v) in row.iter().enumerate() {
+                    tile[k * fh + y] = v as f64;
+                }
+            }
+            for k in 0..tn {
+                s.f.copy_from_slice(&tile[k * fh..(k + 1) * fh]);
+                s.run();
+                let cx = x0 + (c0 + t0 + k) as i32;
+                let edge_x = (cx + 1).min(w - cx);
+                let col = &mut band[(t0 + k) * fh..(t0 + k + 1) * fh];
+                for (y, (o, &dy)) in col.iter_mut().zip(&s.d).enumerate() {
+                    let cy = y0 + y as i32;
+                    let edge = edge_x.min(cy + 1).min(h - cy) as f64;
+                    *o = dy.min(edge * edge) as f32;
+                }
+            }
         }
-    }
-    for x in 0..fw {
-        for (y, fy) in f[..fh].iter_mut().enumerate() {
-            *fy = dist[y * fw + x] as f64;
+    });
+    par_rows(&mut dist, fw, |r0, band| {
+        let n = band.len() / fw;
+        for t0 in (0..n).step_by(TURN) {
+            let tn = TURN.min(n - t0);
+            for x in 0..fw {
+                let col = &cols[x * fh + r0 + t0..][..tn];
+                for (k, &v) in col.iter().enumerate() {
+                    band[(t0 + k) * fw + x] = v;
+                }
+            }
         }
-        edt_line(&f[..fh], &mut d[..fh], &mut v, &mut z);
-        let cx = x0 + x as i32;
-        let edge_x = (cx + 1).min(w - cx);
-        for (y, &dy) in d[..fh].iter().enumerate() {
-            let cy = y0 + y as i32;
-            let edge = edge_x.min(cy + 1).min(h - cy) as f64;
-            dist[y * fw + x] = dy.min(edge * edge) as f32;
-        }
-    }
+    });
     Field {
         x0,
         y0,
@@ -1097,6 +1160,32 @@ fn wall_distance(
         reach,
         whole: x0 == 0 && y0 == 0 && x1 == w - 1 && y1 == h - 1,
         dist,
+    }
+}
+
+/// Rows or columns turned at a time by [`wall_distance`].
+const TURN: usize = 16;
+
+/// One line of [`edt_line`] and its scratch: `f` in, `d` out.
+struct EdtScratch {
+    f: Vec<f64>,
+    d: Vec<f64>,
+    v: Vec<usize>,
+    z: Vec<f64>,
+}
+
+impl EdtScratch {
+    fn new(n: usize) -> Self {
+        Self {
+            f: vec![0.0; n],
+            d: vec![0.0; n],
+            v: vec![0; n],
+            z: vec![0.0; n + 1],
+        }
+    }
+
+    fn run(&mut self) {
+        edt_line(&self.f, &mut self.d, &mut self.v, &mut self.z);
     }
 }
 
@@ -1139,7 +1228,7 @@ fn edt_line(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
 }
 
 /// A grown region: a window of the canvas and its bits.
-struct Grown {
+pub(super) struct Grown {
     x0: i32,
     y0: i32,
     w: i32,
@@ -1148,11 +1237,11 @@ struct Grown {
 }
 
 impl Grown {
-    fn at(&self, x: i32, y: i32) -> bool {
+    pub(super) fn at(&self, x: i32, y: i32) -> bool {
         self.bits[((y - self.y0) * self.w + (x - self.x0)) as usize]
     }
 
-    fn bbox(&self) -> Bbox {
+    pub(super) fn bbox(&self) -> Bbox {
         (self.x0, self.y0, self.x0 + self.w - 1, self.y0 + self.h - 1)
     }
 }
@@ -1161,7 +1250,7 @@ impl Grown {
 /// the same pixels as a plain separable dilate of the whole canvas, but worked
 /// over the region's bounds grown by `r` only, with running counts, so the
 /// cost depends on neither `r` nor the canvas size.
-fn dilate_window(mask: &[bool], w: i32, h: i32, bbox: Bbox, r: i32) -> Grown {
+pub(super) fn dilate_window(mask: &[bool], w: i32, h: i32, bbox: Bbox, r: i32) -> Grown {
     let (x0, y0) = ((bbox.0 - r).max(0), (bbox.1 - r).max(0));
     let (x1, y1) = ((bbox.2 + r).min(w - 1), (bbox.3 + r).min(h - 1));
     let (gw, gh) = (x1 - x0 + 1, y1 - y0 + 1);
@@ -1210,7 +1299,7 @@ fn read_px(canvas: &Canvas, x: i32, y: i32) -> [u8; 4] {
 
 /// Pixel `(x, y)` of an RGBA8 buffer `w` pixels wide.
 #[inline]
-fn src_px(src: &[u8], w: i32, x: i32, y: i32) -> [u8; 4] {
+pub(super) fn src_px(src: &[u8], w: i32, x: i32, y: i32) -> [u8; 4] {
     let idx = ((y * w + x) * 4) as usize;
     [src[idx], src[idx + 1], src[idx + 2], src[idx + 3]]
 }
@@ -1222,7 +1311,7 @@ fn write_px(canvas: &mut Canvas, x: i32, y: i32, p: [u8; 4]) {
 }
 
 #[inline]
-fn matches_target(src: &[u8], w: i32, x: i32, y: i32, target: [u8; 4], tol: u8) -> bool {
+pub(super) fn matches_target(src: &[u8], w: i32, x: i32, y: i32, target: [u8; 4], tol: u8) -> bool {
     let p = src_px(src, w, x, y);
     let t = tol as i32;
     // When filling transparent space, ignore RGB — only check alpha.
@@ -1245,6 +1334,277 @@ fn px_eq(a: [u8; 4], b: [u8; 4]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- The gap code as first written, one thread and per pixel: what the
+    // faster one must match exactly. ---
+
+    fn old_wall_distance(
+        w: i32,
+        h: i32,
+        bbox: Bbox,
+        reach: i32,
+        pass: impl Fn(i32, i32) -> bool,
+    ) -> Field {
+        let (x0, y0) = ((bbox.0 - reach).max(0), (bbox.1 - reach).max(0));
+        let (x1, y1) = ((bbox.2 + reach).min(w - 1), (bbox.3 + reach).min(h - 1));
+        let (fw, fh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+        let n = fw.max(fh);
+        let mut f = vec![0f64; n];
+        let mut d = vec![0f64; n];
+        let mut v = vec![0usize; n];
+        let mut z = vec![0f64; n + 1];
+        let mut dist = vec![0f32; fw * fh];
+        for y in 0..fh {
+            let cy = y0 + y as i32;
+            for (x, fx) in f[..fw].iter_mut().enumerate() {
+                let wall = !pass(x0 + x as i32, cy);
+                *fx = if wall { 0.0 } else { FAR };
+            }
+            edt_line(&f[..fw], &mut d[..fw], &mut v, &mut z);
+            for (o, &dx) in dist[y * fw..(y + 1) * fw].iter_mut().zip(&d[..fw]) {
+                *o = dx as f32;
+            }
+        }
+        for x in 0..fw {
+            for (y, fy) in f[..fh].iter_mut().enumerate() {
+                *fy = dist[y * fw + x] as f64;
+            }
+            edt_line(&f[..fh], &mut d[..fh], &mut v, &mut z);
+            let cx = x0 + x as i32;
+            let edge_x = (cx + 1).min(w - cx);
+            for (y, &dy) in d[..fh].iter().enumerate() {
+                let cy = y0 + y as i32;
+                let edge = edge_x.min(cy + 1).min(h - cy) as f64;
+                dist[y * fw + x] = dy.min(edge * edge) as f32;
+            }
+        }
+        Field {
+            x0,
+            y0,
+            w: fw as i32,
+            h: fh as i32,
+            reach,
+            whole: x0 == 0 && y0 == 0 && x1 == w - 1 && y1 == h - 1,
+            dist,
+        }
+    }
+
+    fn old_gap_flood(
+        field: &Field,
+        plain: &[bool],
+        cw: i32,
+        ch: i32,
+        seed: (i32, i32),
+        gap: u8,
+    ) -> (Vec<bool>, Bbox) {
+        let (fx, fy, w, h) = (field.x0, field.y0, field.w, field.h);
+        let dist = &field.dist[..];
+        let at = |x: i32, y: i32| dist[(y * w + x) as usize];
+        // On a pixel grid a gap an odd number of pixels wide has a centre pixel as
+        // far out as the next even width's, so odd settings shut one pixel more.
+        let half = gap.div_ceil(2) as f32;
+        let open = half * half;
+        let mut label: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| ((y + fy) * cw + x + fx) as usize))
+            .map(|i| if plain[i] { FREE } else { OUT })
+            .collect();
+
+        // Climb from the click to the top of its hill, so a click right beside a
+        // line is judged by the open space it belongs to. Steepest ascent, and
+        // across a level stretch when one blocks the way up.
+        let seed = (seed.0 - fx, seed.1 - fy);
+        let mut path = vec![seed];
+        let mut seen: Vec<bool> = Vec::new();
+        let mut flat: Vec<(i32, i32)> = Vec::new();
+        let mut p = seed;
+        loop {
+            let best =
+                neighbours(p.0, p.1, w, h)
+                    .fold(p, |b, q| if at(q.0, q.1) > at(b.0, b.1) { q } else { b });
+            if best != p {
+                p = best;
+                path.push(p);
+                continue;
+            }
+            let level = at(p.0, p.1);
+            if level > open {
+                break;
+            }
+            if seen.is_empty() {
+                seen = vec![false; (w * h) as usize];
+            }
+            flat.clear();
+            let mut queue = VecDeque::from([p]);
+            seen[(p.1 * w + p.0) as usize] = true;
+            let mut up = None;
+            while let Some(q) = queue.pop_front() {
+                flat.push(q);
+                for r in neighbours(q.0, q.1, w, h) {
+                    let d = at(r.0, r.1);
+                    if d > level {
+                        up = up.or(Some(r));
+                    } else if d == level && !seen[(r.1 * w + r.0) as usize] {
+                        seen[(r.1 * w + r.0) as usize] = true;
+                        queue.push_back(r);
+                    }
+                }
+            }
+            match up {
+                Some(r) => {
+                    p = r;
+                    path.push(p);
+                }
+                None => break,
+            }
+        }
+
+        if at(p.0, p.1) > open {
+            let (core, _) = span_flood(w, h, p, |x, y| at(x, y) > open);
+            for (l, _) in label.iter_mut().zip(&core).filter(|(_, &c)| c) {
+                *l = OURS;
+            }
+        } else {
+            // The hill never reaches open space: a shape smaller than the gap
+            // itself. Its own top stands in, so it fills instead of vanishing.
+            for &(x, y) in &flat {
+                label[(y * w + x) as usize] = OURS;
+            }
+        }
+        for &(x, y) in &path {
+            label[(y * w + x) as usize] = OURS;
+        }
+        for (l, &d) in label.iter_mut().zip(dist) {
+            if *l == FREE && d > open {
+                *l = THEIRS;
+            }
+        }
+
+        // Everything still free is band, no farther out than `open`, so its
+        // squared distance — a whole number — indexes a bucket directly.
+        let top = open as usize;
+        let mut buckets: Vec<VecDeque<u32>> = vec![VecDeque::new(); top + 1];
+        let claim = |label: &mut [u8], buckets: &mut [VecDeque<u32>], from: u8, x: i32, y: i32| {
+            let mut highest = 0;
+            for (a, b) in neighbours(x, y, w, h) {
+                let i = (b * w + a) as usize;
+                if label[i] == FREE {
+                    label[i] = from;
+                    let k = dist[i] as usize;
+                    buckets[k].push_back(i as u32);
+                    highest = highest.max(k);
+                }
+            }
+            highest
+        };
+        // Gather the markers before any claim: a pixel claimed during this pass
+        // must wait its turn in the buckets, or labels would creep along the band
+        // in scan order instead of by distance.
+        let markers: Vec<(i32, i32)> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                matches!(label[(y * w + x) as usize], OURS | THEIRS)
+                    && neighbours(x, y, w, h).any(|(a, b)| label[(b * w + a) as usize] == FREE)
+            })
+            .collect();
+        for (x, y) in markers {
+            let l = label[(y * w + x) as usize];
+            claim(&mut label, &mut buckets, l, x, y);
+        }
+        let mut cur = top;
+        loop {
+            while cur > 0 && buckets[cur].is_empty() {
+                cur -= 1;
+            }
+            let Some(i) = buckets[cur].pop_front() else {
+                break;
+            };
+            let (x, y) = (i as i32 % w, i as i32 / w);
+            let l = label[i as usize];
+            // A spot that rises again past a dip is reached from below, so the
+            // flood may have to step back up a level.
+            cur = cur.max(claim(&mut label, &mut buckets, l, x, y));
+        }
+
+        let (mut x0, mut y0, mut x1, mut y1) = (cw, ch, -1, -1);
+        let mut fill = vec![false; (cw * ch) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                if label[(y * w + x) as usize] == OURS {
+                    let (x, y) = (x + fx, y + fy);
+                    fill[(y * cw + x) as usize] = true;
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (fill, (x0, y0, x1, y1))
+    }
+
+    /// A small xorshift, so the random scenes are the same every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            (self.next() % n as u64) as u32
+        }
+    }
+
+    /// The threaded wall distance and the band-side watershed against the
+    /// first ones, over random broken line art, presses and gaps — including
+    /// fields big enough to be split between threads.
+    #[test]
+    fn the_fast_gap_matches_the_first_one_exactly() {
+        let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+        for round in 0..40 {
+            let (w, h) = if round % 10 == 9 {
+                (900 + rng.below(300) as i32, 700 + rng.below(200) as i32)
+            } else {
+                (20 + rng.below(90) as i32, 12 + rng.below(70) as i32)
+            };
+            let mut wall = vec![false; (w * h) as usize];
+            for _ in 0..8 + rng.below(10) {
+                let (cx, cy) = (rng.below(w as u32) as i32, rng.below(h as u32) as i32);
+                let r = 3 + rng.below((w.min(h) / 2).max(4) as u32) as i32;
+                for k in 0..(r * 8) {
+                    let t = k as f32 / (r * 8) as f32 * std::f32::consts::TAU;
+                    let (x, y) = ((cx as f32 + r as f32 * t.cos()) as i32, (cy as f32 + r as f32 * t.sin()) as i32);
+                    // Broken here and there, so gaps have something to shut.
+                    if rng.below(17) != 0 && x >= 0 && y >= 0 && x < w && y < h {
+                        wall[(y * w + x) as usize] = true;
+                    }
+                }
+            }
+            let pass = |x: i32, y: i32| !wall[(y * w + x) as usize];
+            for _ in 0..3 {
+                let seed = (rng.below(w as u32) as i32, rng.below(h as u32) as i32);
+                if !pass(seed.0, seed.1) {
+                    continue;
+                }
+                let (plain, pbox) = span_flood(w, h, seed, pass);
+                let gap = [1u8, 2, 3, 6, 9, 20][rng.below(6) as usize];
+                let reach = ((gap.div_ceil(2) as u32 + 1).next_power_of_two().max(16)) as i32;
+                let new = wall_distance(w, h, pbox, reach, pass);
+                let old = old_wall_distance(w, h, pbox, reach, pass);
+                assert_eq!((new.x0, new.y0, new.w, new.h, new.whole), (old.x0, old.y0, old.w, old.h, old.whole));
+                assert!(new.dist == old.dist, "round {round}: the fields differ");
+                assert_eq!(
+                    gap_flood(&new, &plain, w, h, seed, gap),
+                    old_gap_flood(&old, &plain, w, h, seed, gap),
+                    "round {round}, {w}x{h}, seed {seed:?}, gap {gap}"
+                );
+            }
+        }
+    }
+
 
     const RED: [u8; 4] = [255, 0, 0, 255];
 

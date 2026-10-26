@@ -11,12 +11,14 @@ pub mod noise;
 pub mod perspective;
 pub mod paper;
 pub mod ribbon;
+pub mod scan;
 pub mod select_mask;
 pub mod selection;
 pub mod shape;
 pub mod stabilizer;
 pub mod stroke;
 pub mod tap_lasso;
+pub mod wand;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActiveTool {

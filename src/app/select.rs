@@ -23,6 +23,7 @@ use crate::tools::lasso::{self, Mask};
 use crate::tools::select_mask::{self, SelOp, SelShape, SelectionMask};
 use crate::tools::selection::{self, Grab, Placement, Pose, Selection, HANDLE_PX};
 use crate::tools::tap_lasso::TapLasso;
+use crate::tools::wand::{self, WandPick};
 use crate::tools::ActiveTool;
 use crate::undo;
 
@@ -41,6 +42,38 @@ pub enum SelGesture {
     /// The lasso: dragged freehand, or tapped out as a polygon with
     /// freehand stretches between corners. See [`TapLasso`].
     Lasso { op: SelOp, lasso: TapLasso },
+}
+
+/// A magic select press still under the pen: what it reads and the selection
+/// it started from, so a drag can retune it and Esc can put things back.
+pub struct WandDrag {
+    pick: WandPick,
+    /// Where the pixels it reads sit: the active cell, or `None` for the
+    /// document itself when it reads every visible layer.
+    at: Option<Placement>,
+    op: SelOp,
+    /// The selection before the press.
+    before: Option<SelectionMask>,
+    /// Where on screen the press landed; a drag counts from here.
+    anchor: Option<egui::Pos2>,
+    base_tolerance: u8,
+    base_gap: u8,
+}
+
+/// `shape` combined into `before` by `op`. `None` is a shape that covered
+/// nothing: Replace with it selects nothing, Intersect leaves nothing, and Add
+/// or Remove leave `before` as it was.
+fn combined(
+    op: SelOp,
+    before: Option<&SelectionMask>,
+    shape: Option<SelectionMask>,
+) -> Option<SelectionMask> {
+    match (op, shape) {
+        (SelOp::Replace, m) => m,
+        (SelOp::Intersect, None) => None,
+        (_, None) => before.cloned(),
+        (op, Some(b)) => SelectionMask::combine(before, &b, op),
+    }
 }
 
 /// What the cached cell mask was built for: the selection's version and where
@@ -240,12 +273,7 @@ impl AppState {
     /// `None` is a shape that covered nothing.
     pub fn apply_op(&mut self, op: SelOp, shape: Option<SelectionMask>) {
         self.land_float();
-        let next = match (op, shape) {
-            (SelOp::Replace, m) => m,
-            (SelOp::Intersect, None) => None,
-            (_, None) => self.sel_mask.clone(),
-            (op, Some(b)) => SelectionMask::combine(self.sel_mask.as_ref(), &b, op),
-        };
+        let next = combined(op, self.sel_mask.as_ref(), shape);
         self.set_mask(next, true);
     }
 
@@ -273,6 +301,13 @@ impl AppState {
         // starts a new shape, even inside — that is how you add to a
         // selection from within it.
         if held.is_none() && op == SelOp::Replace && self.try_grab(doc) {
+            if self.sel_shape == SelShape::Wand {
+                self.wand_repick = Some(doc);
+            }
+            return;
+        }
+        if self.sel_shape == SelShape::Wand {
+            self.wand_down(doc, op);
             return;
         }
         self.land_float();
@@ -320,13 +355,22 @@ impl AppState {
 
     /// Selection release.
     pub fn select_up(&mut self) {
+        let repick = self.wand_repick.take();
         if self.sel_drag.take().is_some() {
             // A press on the selection that never moved lifted nothing: put
-            // the candidate float away and leave everything as it was.
+            // the candidate float away and leave everything as it was — or,
+            // with the magic select, pick afresh where it pressed.
             if self.selection.as_ref().is_some_and(|s| !s.lifted) {
                 self.selection = None;
                 self.retire_float_tex();
+                if let Some(doc) = repick {
+                    self.wand_down(doc, SelOp::Replace);
+                    self.wand_up();
+                }
             }
+            return;
+        }
+        if self.wand_up() {
             return;
         }
         match self.sel_gesture.take() {
@@ -416,7 +460,156 @@ impl AppState {
     pub fn cancel_gesture(&mut self) -> bool {
         // The Fill tool's lasso too: it ends the same ways.
         let fill = self.fill_lasso.take().is_some();
-        self.sel_gesture.take().is_some() || fill
+        self.wand_repick = None;
+        // A magic select press puts back the selection it found.
+        let wand = match self.wand_drag.take() {
+            Some(d) => {
+                self.sel_mask = d.before;
+                self.mask_changed();
+                true
+            }
+            None => false,
+        };
+        self.sel_gesture.take().is_some() || fill || wand
+    }
+
+    // --- Magic select ---
+
+    /// A magic select press at `doc`: pick what joins the pixel there and show
+    /// it at once, combined by `op`. The pen may stay down to retune it with
+    /// [`AppState::wand_drag_to`]; [`AppState::wand_up`] lands it as one undo
+    /// step.
+    fn wand_down(&mut self, doc: (f32, f32), op: SelOp) {
+        self.land_float();
+        let any_paint = self.wand.any_paint;
+        let (pick, at) = if self.wand.all_visible {
+            // What the artist sees, in document space.
+            let c = crate::io::composite::flatten_doc(&self.project, self.project.current_frame);
+            let size = (c.width, c.height);
+            let seed = (doc.0.floor() as i32, doc.1.floor() as i32);
+            (WandPick::new(&c.pixels(), size, seed, any_paint), None)
+        } else {
+            let at = self.active_placement();
+            let (cx, cy) = self.doc_to_active_cell(doc);
+            let seed = (cx.floor() as i32, cy.floor() as i32);
+            let size = (at.cw, at.ch);
+            let cell = self.project.resolved_current().and_then(|id| self.project.cell(id));
+            // Read in place: the press keeps only what it works out.
+            let pick = match cell {
+                Some(c) if (c.width, c.height) == size => {
+                    WandPick::new(&c.pixels(), size, seed, any_paint)
+                }
+                // No drawing here yet: all bare canvas.
+                _ => WandPick::new(&vec![0; at.cw as usize * at.ch as usize * 4], size, seed, any_paint),
+            };
+            (pick, Some(at))
+        };
+        let Some(pick) = pick else {
+            // Off the pixels: a shape that covered nothing.
+            self.apply_op(op, None);
+            return;
+        };
+        let mut drag = WandDrag {
+            pick,
+            at,
+            op,
+            before: self.sel_mask.clone(),
+            anchor: None,
+            base_tolerance: self.wand.tolerance,
+            base_gap: self.wand.gap,
+        };
+        self.wand_show(&mut drag);
+        self.wand_drag = Some(drag);
+    }
+
+    /// Show what `drag` picks at the wand's settings now, combined into the
+    /// selection it started from. Not recorded: [`AppState::wand_up`] does that
+    /// once.
+    fn wand_show(&mut self, drag: &mut WandDrag) {
+        let p = drag.pick.pick(&self.wand);
+        let shape = match &drag.at {
+            // A whole-pixel placement moves the pick as it is, uncopied —
+            // what `from_cell` does there, less the copies.
+            Some(at) => match select_mask::integer_offset(&at.xf, at.cw, at.ch, at.pw, at.ph) {
+                Some((ox, oy)) => SelectionMask {
+                    x: p.x + ox,
+                    y: p.y + oy,
+                    w: p.w,
+                    h: p.h,
+                    cov: p.cov,
+                    outside: 0,
+                }
+                .normalize(),
+                None => SelectionMask::from_cell(
+                    p.x, p.y, p.w, p.h, &p.cov, &at.xf, at.cw, at.ch, at.pw, at.ph,
+                ),
+            },
+            None => SelectionMask {
+                x: p.x,
+                y: p.y,
+                w: p.w,
+                h: p.h,
+                cov: p.cov,
+                outside: 0,
+            }
+            .normalize(),
+        };
+        let next = combined(drag.op, drag.before.as_ref(), shape);
+        if next != self.sel_mask {
+            self.sel_mask = next;
+            self.mask_changed();
+        }
+    }
+
+    /// Remember where on screen a magic select press landed: its drag counts
+    /// from here.
+    pub fn wand_anchor(&mut self, at: egui::Pos2) {
+        if let Some(d) = &mut self.wand_drag {
+            d.anchor.get_or_insert(at);
+        }
+    }
+
+    /// The pen, still down on a magic select press, is at screen point `at`.
+    /// Sideways steps the tolerance and up and down the gap, each away from
+    /// its value at the press, the way a Fill press steps its gap and expand;
+    /// a change picks again so the outline follows. The new values stay in the
+    /// sliders.
+    pub fn wand_drag_to(&mut self, at: egui::Pos2) {
+        use crate::input::button_drag::drag_steps;
+        let Some(mut drag) = self.wand_drag.take() else {
+            return;
+        };
+        if let Some(anchor) = drag.anchor {
+            let tolerance = wand::step_tolerance(drag.base_tolerance, drag_steps(at.x - anchor.x));
+            // Screen y grows downward, and up means more.
+            let gap = fill::step_gap(drag.base_gap, drag_steps(anchor.y - at.y));
+            if (tolerance, gap) != (self.wand.tolerance, self.wand.gap) {
+                self.wand.tolerance = tolerance;
+                self.wand.gap = gap;
+                self.wand_show(&mut drag);
+            }
+        }
+        self.wand_drag = Some(drag);
+    }
+
+    /// Whether a magic select press is still under the pen.
+    pub fn wand_dragging(&self) -> bool {
+        self.wand_drag.is_some()
+    }
+
+    /// Land a magic select press as one undo step, from the selection it found
+    /// to the one it leaves. `true` if there was one.
+    fn wand_up(&mut self) -> bool {
+        let Some(drag) = self.wand_drag.take() else {
+            return false;
+        };
+        if self.sel_mask != drag.before {
+            self.history.push(undo::Command::Selection {
+                before: drag.before.as_ref().map(SelectionMask::pack),
+                after: self.sel_mask.as_ref().map(SelectionMask::pack),
+            });
+        }
+        true
     }
 
     /// A press on the float's transform box, or on the selection itself when
@@ -1873,5 +2066,262 @@ mod tests {
         gesture(&mut st, ctrl);
         assert_eq!(st.sel_mask, added, "Ctrl alone is not a selection mode");
         assert!((st.view.zoom - zoom).abs() > 1e-3, "it still zooms");
+    }
+
+    // --- Magic select ---
+
+    /// A fresh state with the Lasso up as the magic select.
+    fn wand() -> AppState {
+        let mut st = lasso();
+        st.sel_shape = SelShape::Wand;
+        st
+    }
+
+    /// A one-pixel square outline from `(a, a)` to `(b, b)` on the active cell.
+    fn ring(st: &mut AppState, a: u32, b: u32, rgba: [u8; 4]) {
+        paint(st, (a, a, b + 1, a + 1), rgba);
+        paint(st, (a, b, b + 1, b + 1), rgba);
+        paint(st, (a, a, a + 1, b + 1), rgba);
+        paint(st, (b, a, b + 1, b + 1), rgba);
+    }
+
+    fn click(st: &mut AppState, doc: (f32, f32), held: Option<SelOp>) {
+        st.select_down(doc, held);
+        st.select_up();
+    }
+
+    fn area(st: &AppState) -> usize {
+        st.sel_mask.as_ref().map_or(0, |m| m.cov.iter().filter(|&&c| c >= 128).count())
+    }
+
+    #[test]
+    fn a_wand_click_picks_what_joins_it_as_one_undo_step() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        let steps = st.history.undo_len();
+        click(&mut st, (120.5, 120.5), None);
+        assert_eq!(area(&st), 39 * 39, "the inside of the ring");
+        assert_eq!(at(&st, 101, 101), 255);
+        assert_eq!(at(&st, 100, 120), 0, "not the line");
+        assert_eq!(st.history.undo_len(), steps + 1);
+        assert!(!st.wand_dragging());
+        st.undo();
+        assert!(st.sel_mask.is_none());
+    }
+
+    #[test]
+    fn held_modes_combine_wand_picks() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        paint(&mut st, (200, 200, 220, 220), RED);
+        click(&mut st, (120.5, 120.5), None);
+        click(&mut st, (210.5, 210.5), Some(SelOp::Add));
+        assert_eq!(at(&st, 120, 120), 255);
+        assert_eq!(at(&st, 210, 210), 255);
+        click(&mut st, (120.5, 120.5), Some(SelOp::Subtract));
+        assert_eq!(at(&st, 120, 120), 0);
+        assert_eq!(at(&st, 210, 210), 255);
+    }
+
+    #[test]
+    fn any_paint_takes_the_lines_and_the_colour_inside_together() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, [10, 10, 10, 255]);
+        paint(&mut st, (101, 101, 140, 140), RED);
+        st.wand.any_paint = true;
+        click(&mut st, (120.5, 120.5), None);
+        assert_eq!(area(&st), 41 * 41);
+        assert_eq!(at(&st, 100, 100), 255);
+    }
+
+    #[test]
+    fn a_click_inside_the_selection_picks_again_and_a_drag_moves_it() {
+        let mut st = wand();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        click(&mut st, (120.5, 120.5), None);
+        assert_eq!(area(&st), 40 * 40);
+        // A click back on it picks afresh there, at the settings now.
+        st.wand.expand = 2;
+        let steps = st.history.undo_len();
+        click(&mut st, (120.5, 120.5), None);
+        assert!(st.selection.is_none(), "nothing lifted");
+        assert_eq!(area(&st), 44 * 44);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        // A drag from it moves the pixels.
+        drag(&mut st, (120.5, 120.5), (150.5, 120.5), None);
+        assert!(st.selection.is_some(), "floating");
+        st.land_float();
+        assert_eq!(px(&st, 165, 120), RED);
+        assert_eq!(px(&st, 105, 120)[3], 0);
+    }
+
+    #[test]
+    fn dragging_a_wand_press_retunes_it_live_and_lands_once() {
+        let mut st = wand();
+        paint(&mut st, (100, 100, 120, 140), [100, 100, 100, 255]);
+        paint(&mut st, (120, 100, 140, 140), [130, 100, 100, 255]);
+        st.wand.tolerance = 8;
+        let steps = st.history.undo_len();
+        st.select_down((110.5, 120.5), None);
+        let at0 = egui::pos2(400.0, 300.0);
+        st.wand_anchor(at0);
+        assert_eq!(area(&st), 20 * 40, "shown at the press");
+        // Sideways: tolerance climbs its ladder, and the pick follows.
+        st.wand_drag_to(at0 + egui::vec2(200.0, 0.0));
+        assert!(st.wand.tolerance >= 30, "tolerance {}", st.wand.tolerance);
+        assert_eq!(area(&st), 40 * 40);
+        // Up: the gap climbs.
+        st.wand_drag_to(at0 + egui::vec2(200.0, -40.0));
+        assert!(st.wand.gap > 0);
+        st.select_up();
+        assert_eq!(st.history.undo_len(), steps + 1, "one step for the whole press");
+        st.undo();
+        assert!(st.sel_mask.is_none());
+    }
+
+    #[test]
+    fn esc_mid_press_puts_the_old_selection_back() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        click(&mut st, (120.5, 120.5), None);
+        let kept = st.sel_mask.clone();
+        let steps = st.history.undo_len();
+        st.select_down((10.5, 10.5), None);
+        assert_ne!(st.sel_mask, kept, "the new pick shows");
+        assert!(st.cancel_gesture());
+        assert_eq!(st.sel_mask, kept);
+        st.select_up();
+        assert_eq!(st.history.undo_len(), steps, "nothing recorded");
+    }
+
+    #[test]
+    fn a_wand_click_off_the_drawing_picks_nothing() {
+        let mut st = wand();
+        click(&mut st, (10.5, 10.5), None);
+        assert!(st.sel_mask.is_some(), "a blank drawing is all bare canvas");
+        click(&mut st, (-500.0, 300.0), Some(SelOp::Add));
+        assert!(st.sel_mask.is_some(), "Add with nothing keeps what was there");
+        click(&mut st, (-500.0, 300.0), None);
+        assert!(st.sel_mask.is_none(), "Replace with nothing selects nothing");
+    }
+
+    #[test]
+    fn a_wand_pick_lands_where_a_moved_layer_shows_it() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        st.project.layers[0].transform.tx = 10.0;
+        // Cell u is document u - 10.
+        click(&mut st, (130.5, 120.5), None);
+        assert_eq!(at(&st, 111, 120), 255, "cell 101");
+        assert_eq!(at(&st, 110, 120), 0, "cell 100, the line");
+        assert_eq!(at(&st, 149, 120), 255, "cell 139");
+        assert_eq!(at(&st, 150, 120), 0, "cell 140, the line");
+    }
+
+    #[test]
+    fn all_visible_picks_by_the_lines_on_another_layer() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        st.dispatch(Action::LayerAdd);
+        assert_eq!(st.project.current_layer, 1, "drawing on a new, empty layer");
+        click(&mut st, (120.5, 120.5), None);
+        assert!(at(&st, 30, 30) == 255, "on its own the empty layer is all bare");
+        st.wand.all_visible = true;
+        click(&mut st, (120.5, 120.5), None);
+        assert_eq!(area(&st), 39 * 39);
+        assert_eq!(at(&st, 30, 30), 0);
+    }
+
+    /// The canvas hands a press and its drag to the wand in screen points.
+    #[test]
+    fn the_canvas_drags_a_wand_press_in_screen_points() {
+        let mut st = wand();
+        st.show_panels = false;
+        st.show_mini_timeline = false;
+        st.wand.tolerance = 8;
+        st.wand.gap = 0;
+        let steps = st.history.undo_len();
+        let ctx = egui::Context::default();
+        let run = |st: &mut AppState, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                let tab_focus = st.handle_keys(ctx);
+                crate::ui::shell::draw(st, ctx);
+                st.drop_stray_focus(ctx, tab_focus);
+            });
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (from, to) = (egui::pos2(500.0, 300.0), egui::pos2(700.0, 260.0));
+        run(&mut st, vec![egui::Event::PointerMoved(from)]);
+        run(&mut st, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=8 {
+            let p = from + (to - from) * (i as f32 / 8.0);
+            run(&mut st, vec![egui::Event::PointerMoved(p)]);
+        }
+        assert!(st.wand_dragging(), "still under the pen");
+        run(&mut st, vec![button(to, false)]);
+        run(&mut st, vec![]);
+        assert!(!st.wand_dragging());
+        assert!(st.wand.tolerance > 8, "sideways retuned it: {}", st.wand.tolerance);
+        assert!(st.wand.gap > 0, "up retuned the gap");
+        assert!(st.sel_mask.is_some());
+        assert_eq!(st.history.undo_len(), steps + 1);
+    }
+
+    /// What a magic select press costs, end to end, on a 1080p and an 8K
+    /// frame: a click on the bare background, one inside a ring, and drag
+    /// steps, each with the frame after it. `cargo test --release wand_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn wand_timing() {
+        use std::time::Instant;
+        for (w, h) in [(1920u32, 1080u32), (7680, 4320)] {
+            let mut st = wand();
+            st.load_project(crate::doc::project::Project::new(w, h, 24.0), None);
+            st.sel_shape = SelShape::Wand;
+            let (r0, r1) = (h / 4, h / 2);
+            ring(&mut st, r0, r1, RED);
+            let mid = ((r0 + r1) as f32 * 0.5, (r0 + r1) as f32 * 0.5);
+            // Each step with the next frame's upkeep, which rebuilds the
+            // active cell's view of a changed selection.
+            let time = |label: &str, st: &mut AppState, f: &mut dyn FnMut(&mut AppState)| {
+                let t = Instant::now();
+                f(st);
+                st.sync_selection();
+                println!("{w}x{h} {label}: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            };
+            time("background click", &mut st, &mut |st| click(st, (5.5, 5.5), None));
+            time("ring click", &mut st, &mut |st| click(st, mid, Some(SelOp::Add)));
+            st.deselect();
+            let at0 = egui::pos2(400.0, 300.0);
+            time("background press", &mut st, &mut |st| {
+                st.select_down((5.5, 5.5), None);
+                st.wand_anchor(at0);
+            });
+            for i in 1..=3 {
+                time("  tolerance step", &mut st, &mut |st| {
+                    st.wand_drag_to(at0 + egui::vec2(8.0 + 12.0 * i as f32, 0.0))
+                });
+            }
+            time("  gap step (builds the field)", &mut st, &mut |st| {
+                st.wand_drag_to(at0 + egui::vec2(44.0, -20.0))
+            });
+            time("  gap step", &mut st, &mut |st| st.wand_drag_to(at0 + egui::vec2(44.0, -32.0)));
+            time("release", &mut st, &mut |st| st.select_up());
+            st.wand.all_visible = true;
+            time("all visible click", &mut st, &mut |st| click(st, mid, None));
+        }
     }
 }

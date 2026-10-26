@@ -32,7 +32,8 @@ threads except export.
   brush: its bar tip turns with the pen's lean and widens as it tilts,
   pressure sets how dark, over Krita's own paper texture, built up in 8 bits
   the way Krita paints. *Brush settings → Preset → Pencil-5*.
-- **Selections, Krita-style** — lasso (drag freehand or tap corners), box or ellipse; add to,
+- **Selections, Krita-style** — lasso (drag freehand or tap corners), box, ellipse or magic
+  select (click to pick the pixels joined to it); add to,
   remove from or intersect them; every stroke and fill stays inside. Move,
   cut, copy and paste the selected pixels between frames and layers.
 - **Flip the view** horizontally or vertically as a drawing check. Never
@@ -193,6 +194,25 @@ tap back on the first corner, a double-click or `Enter` closes it,
 `Esc` abandons it. A quick click no longer deselects with the lasso; `Esc` or
 `Ctrl+D` does, and a click still does with the rectangle and ellipse.
 
+**Magic select.** The fourth shape, the wand, picks by what is drawn: click a
+line to select that line, inside a shape to select the area up to its lines,
+or bare canvas to select the bare canvas joined to it. Keep the pen down after
+the click and drag sideways to change the **Tolerance** (how far a colour may
+stray from the one clicked), or up and down to change the **Gap**: breaks in
+the lines up to that wide count as shut, as with the Fill tool, so the pick
+doesn't leak out. The outline follows as you drag and the sliders keep what
+you land on; the whole press is one undo step, and `Esc` before letting go
+puts the old selection back. **Expand** grows each pick so a flat colour's
+selection reaches under its anti-aliased lines. **Any paint** makes a click
+on paint take every painted pixel touching it, whatever its colour — a
+character's lines and fills as one piece, ready to drag away. Untick
+**Contiguous** to pick every pixel like the one clicked, anywhere on the
+drawing. It reads the active drawing; **Read all visible layers** picks by
+what every visible layer shows together, so on an empty colour layer a click
+selects the area the line layer walls in. A click inside the selection picks
+afresh there; a drag from inside it moves the pixels, as with the other
+shapes. The held Add / Remove / Intersect keys work on picks too.
+
 **Adding and removing.** Hold a modifier as the drag starts, or set the mode
 with the Lasso panel's buttons:
 
@@ -210,7 +230,7 @@ than one keyboard layout installed, left `Alt+Shift` (and optionally
 `Ctrl+Shift`) may also switch layout when released; rebind them if that gets
 in the way.
 
-A plain click outside the selection deselects.
+A plain click outside the selection deselects (with the magic select, it picks).
 
 **Flipping and turning the art.** The flip and rotate buttons in the Lasso
 panel (also **Edit → Flip / rotate**, and unbound shortcuts in Settings)

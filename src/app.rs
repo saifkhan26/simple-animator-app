@@ -43,6 +43,7 @@ use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
 use crate::tools::perspective::{self, GridGrab, PerspectiveConfig};
 use crate::tools::select_mask::{SelOp, SelShape, SelectionMask};
+use crate::tools::wand::WandOptions;
 use crate::tools::selection::{Grab, Pose, Selection};
 use crate::tools::stroke::StrokeBuilder;
 use crate::tools::shape::GridPlane;
@@ -428,6 +429,8 @@ struct UiPrefs {
     /// takes. Workspace preferences, like the tool brushes.
     sel_shape: SelShape,
     sel_amount: u32,
+    /// The magic select's tolerance, gap, expand and switches.
+    wand: WandOptions,
     /// The Fill tool's mode and its lasso's two switches. Workspace
     /// preferences, like the selection shape.
     fill_mode: FillMode,
@@ -547,6 +550,7 @@ impl Default for UiPrefs {
             project_presets: Vec::new(),
             sel_shape: SelShape::Freehand,
             sel_amount: 4,
+            wand: WandOptions::default(),
             fill_mode: FillMode::Bucket,
             fill_enclose: false,
             fill_behind: false,
@@ -1141,6 +1145,13 @@ pub struct AppState {
     pub sel_all_frames: bool,
     /// What a selection drag draws.
     pub sel_shape: SelShape,
+    /// How the magic select picks.
+    pub wand: WandOptions,
+    /// A magic select press still under the pen.
+    wand_drag: Option<select::WandDrag>,
+    /// Where a plain press on the selection with the magic select landed: if
+    /// it lets go without moving the pixels, it picks there instead.
+    wand_repick: Option<(f32, f32)>,
     /// Whether a Fill press floods or draws a lasso.
     pub fill_mode: FillMode,
     /// A lasso fill fills only what its lines shut in.
@@ -1624,6 +1635,9 @@ impl AppState {
             sel_op: SelOp::Replace,
             sel_all_frames: false,
             sel_shape: prefs.sel_shape,
+            wand: prefs.wand,
+            wand_drag: None,
+            wand_repick: None,
             fill_mode: prefs.fill_mode,
             fill_enclose: prefs.fill_enclose,
             fill_behind: prefs.fill_behind,
@@ -6589,6 +6603,7 @@ impl eframe::App for AppState {
                 krita_path: self.krita_path.clone(),
                 project_presets: self.project_presets.clone(),
                 sel_shape: self.sel_shape,
+                wand: self.wand,
                 fill_mode: self.fill_mode,
                 fill_enclose: self.fill_enclose,
                 fill_behind: self.fill_behind,
@@ -9884,6 +9899,37 @@ mod tests {
         // the three back, and Next was 1 then.
         let old: UiPrefs = toml::from_str("[onion]\nprev = 3\n").unwrap();
         assert_eq!((old.onion.prev_shown, old.onion.next_shown), (0b111, 0b1));
+    }
+
+    #[test]
+    fn the_magic_select_settings_round_trip_and_old_prefs_get_defaults() {
+        let mut prefs = UiPrefs::default();
+        prefs.sel_shape = SelShape::Wand;
+        prefs.wand = WandOptions {
+            tolerance: 40,
+            gap: 6,
+            expand: 2,
+            any_paint: true,
+            contiguous: false,
+            all_visible: true,
+        };
+        let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
+        let st = AppState::with_prefs(back, 8192, None);
+        assert_eq!(st.sel_shape, SelShape::Wand);
+        assert_eq!(st.wand, prefs.wand);
+        // Prefs from before the wand, or with only some of its settings.
+        let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
+        assert_eq!(old.wand, WandOptions::default());
+        let part: UiPrefs = toml::from_str("[wand]\ngap = 3\n").unwrap();
+        assert_eq!(part.wand, WandOptions { gap: 3, ..WandOptions::default() });
+        // And through the app's own save, as a drag left them.
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.wand.gap = 9;
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let saved: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        assert_eq!(saved.wand.gap, 9);
     }
 
     /// The active layer and those with their onion on ghost — of those

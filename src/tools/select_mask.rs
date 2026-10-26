@@ -16,6 +16,7 @@
 
 use crate::doc::transform::Transform;
 use crate::tools::lasso::{self, Mask};
+use crate::tools::scan;
 
 /// Coverage at or above this counts as "inside" for the outline and for grow.
 pub const THRESHOLD: u8 = 128;
@@ -41,6 +42,17 @@ impl SelOp {
         }
     }
 
+    /// [`SelOp::apply`] along a row: `out[i]` from `a[i]` and `b[i]`.
+    fn apply_row(self, a: &[u8], b: &[u8], out: &mut [u8]) {
+        let pairs = out.iter_mut().zip(a.iter().zip(b));
+        match self {
+            SelOp::Replace => pairs.for_each(|(o, (_, &q))| *o = q),
+            SelOp::Add => pairs.for_each(|(o, (&p, &q))| *o = p.max(q)),
+            SelOp::Subtract => pairs.for_each(|(o, (&p, &q))| *o = SelOp::Subtract.apply(p, q)),
+            SelOp::Intersect => pairs.for_each(|(o, (&p, &q))| *o = p.min(q)),
+        }
+    }
+
     /// Combine existing coverage `a` with new coverage `b`.
     fn apply(self, a: u8, b: u8) -> u8 {
         match self {
@@ -62,6 +74,9 @@ pub enum SelShape {
     Freehand,
     Rect,
     Ellipse,
+    /// Magic select: a click picks the pixels joined to the one under it.
+    /// Not a drag shape — see [`crate::tools::wand`].
+    Wand,
 }
 
 impl SelShape {
@@ -70,6 +85,10 @@ impl SelShape {
             SelShape::Freehand => "Lasso: drag freehand, or tap corners for a polygon",
             SelShape::Rect => "Rectangle",
             SelShape::Ellipse => "Ellipse",
+            SelShape::Wand => {
+                "Magic select: click to pick the pixels joined to the one under the pen; \
+                 keep the pen down and drag sideways for tolerance, up and down for gap"
+            }
         }
     }
 }
@@ -104,7 +123,7 @@ impl PackedMask {
     pub fn unpack(&self) -> SelectionMask {
         let mut cov = Vec::with_capacity((self.w * self.h) as usize);
         for &(v, n) in &self.runs {
-            cov.extend(std::iter::repeat(v).take(n as usize));
+            cov.resize(cov.len() + n as usize, v);
         }
         SelectionMask {
             x: self.x,
@@ -196,6 +215,23 @@ impl SelectionMask {
         self.cov[(dy * self.w + dx) as usize]
     }
 
+    /// Row `y` of the coverage from `x` on, into `out`: what
+    /// [`SelectionMask::at`] gives pixel by pixel, a slice at a time.
+    pub fn row_into(&self, x: i32, y: i32, out: &mut [u8]) {
+        out.fill(self.outside);
+        if y < self.y || y >= self.y + self.h as i32 {
+            return;
+        }
+        let end = x + out.len() as i32;
+        let (a, b) = (x.max(self.x), end.min(self.x + self.w as i32));
+        if a >= b {
+            return;
+        }
+        let row = (y - self.y) as usize * self.w as usize;
+        let src = &self.cov[row + (a - self.x) as usize..row + (b - self.x) as usize];
+        out[(a - x) as usize..(b - x) as usize].copy_from_slice(src);
+    }
+
     /// The box as `(x0, y0, x1, y1)`, max exclusive, or `None` when empty.
     pub fn bounds(&self) -> Option<(i32, i32, i32, i32)> {
         (self.w > 0 && self.h > 0).then(|| {
@@ -219,10 +255,11 @@ impl SelectionMask {
         let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
         for y in 0..h {
             let row = &self.cov[y * w..(y + 1) * w];
-            let Some(first) = row.iter().position(|&c| c != self.outside) else {
+            let first = scan::run_of(row, self.outside);
+            if first == w {
                 continue;
-            };
-            let last = row.iter().rposition(|&c| c != self.outside).unwrap_or(first);
+            }
+            let last = w - 1 - scan::run_of_back(row, self.outside);
             x0 = x0.min(first);
             x1 = x1.max(last + 1);
             y0 = y0.min(y);
@@ -290,11 +327,13 @@ impl SelectionMask {
         let y1 = boxes.iter().map(|b| b.3).max().unwrap_or(0);
         let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
         let mut cov = vec![0u8; (w * h) as usize];
-        for yy in 0..h as i32 {
-            for xx in 0..w as i32 {
-                let (x, y) = (x0 + xx, y0 + yy);
-                cov[(yy as u32 * w + xx as u32) as usize] = op.apply(a.at(x, y), b.at(x, y));
-            }
+        // A row of each at a time, combined in one sweep.
+        let (mut ra, mut rb) = (vec![0u8; w as usize], vec![0u8; w as usize]);
+        for (yy, out) in cov.chunks_exact_mut(w.max(1) as usize).enumerate() {
+            let y = y0 + yy as i32;
+            a.row_into(x0, y, &mut ra);
+            b.row_into(x0, y, &mut rb);
+            op.apply_row(&ra, &rb, out);
         }
         Self {
             x: x0,
@@ -379,11 +418,8 @@ impl SelectionMask {
             }
             let (w, h) = ((u1 - u0) as u32, (v1 - v0) as u32);
             let mut cov = vec![0u8; (w * h) as usize];
-            for v in 0..h as i32 {
-                let row = &mut cov[(v as u32 * w) as usize..((v as u32 + 1) * w) as usize];
-                for (u, c) in row.iter_mut().enumerate() {
-                    *c = self.at(u0 + u as i32 + ox, v0 + v + oy);
-                }
+            for (v, row) in cov.chunks_exact_mut(w as usize).enumerate() {
+                self.row_into(u0 + ox, v0 + v as i32 + oy, row);
             }
             return Mask {
                 x: u0 as u32,
@@ -537,11 +573,11 @@ impl SelectionMask {
 
     pub fn pack(&self) -> PackedMask {
         let mut runs: Vec<(u8, u32)> = Vec::new();
-        for &c in &self.cov {
-            match runs.last_mut() {
-                Some((v, n)) if *v == c => *n += 1,
-                _ => runs.push((c, 1)),
-            }
+        let mut rest = &self.cov[..];
+        while let Some(&v) = rest.first() {
+            let n = scan::run_of(rest, v);
+            runs.push((v, n as u32));
+            rest = &rest[n..];
         }
         PackedMask {
             x: self.x,
@@ -566,10 +602,8 @@ impl SelectionMask {
         let gw = (bx1 - bx0 + 2) as usize;
         let gh = (by1 - by0 + 2) as usize;
         let mut g = vec![0u8; gw * gh];
-        for j in 0..gh {
-            for i in 0..gw {
-                g[j * gw + i] = self.at(bx0 - 1 + i as i32, by0 - 1 + j as i32);
-            }
+        for (j, row) in g.chunks_exact_mut(gw).enumerate() {
+            self.row_into(bx0 - 1, by0 - 1 + j as i32, row);
         }
         let inside = |v: u8| v >= THRESHOLD;
         // Edge ids: `2 * (j * gw + i)` is the edge from sample (i, j) to
@@ -596,7 +630,19 @@ impl SelectionMask {
 
         let mut segs: Vec<(usize, usize)> = Vec::new();
         for j in 0..gh - 1 {
-            for i in 0..gw - 1 {
+            let (above, below) = (&g[j * gw..(j + 1) * gw], &g[(j + 1) * gw..(j + 2) * gw]);
+            let mut i = 0;
+            while i < gw - 1 {
+                // Where both rows hold one value there is no edge: step over
+                // the stretch a word at a time, to the cell where it ends.
+                let v = above[i];
+                if below[i] == v {
+                    let run = scan::run_of(&above[i..], v).min(scan::run_of(&below[i..], v));
+                    if run >= 2 {
+                        i += run - 1;
+                        continue;
+                    }
+                }
                 let tl = g[j * gw + i];
                 let tr = g[j * gw + i + 1];
                 let br = g[(j + 1) * gw + i + 1];
@@ -639,6 +685,7 @@ impl SelectionMask {
                         }
                     }
                 }
+                i += 1;
             }
         }
 
@@ -946,6 +993,443 @@ fn rdp(pts: &[(f32, f32)], eps: f32) -> Vec<(f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- The mask methods as first written, per pixel: what the faster ones
+    // must match exactly. ---
+
+    fn old_normalize(m: SelectionMask) -> Option<SelectionMask> {
+        let empty = |outside: u8| (outside == 255).then(SelectionMask::all);
+        if m.w == 0 || m.h == 0 {
+            return empty(m.outside);
+        }
+        let (w, h) = (m.w as usize, m.h as usize);
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+        for y in 0..h {
+            let row = &m.cov[y * w..(y + 1) * w];
+            let Some(first) = row.iter().position(|&c| c != m.outside) else {
+                continue;
+            };
+            let last = row.iter().rposition(|&c| c != m.outside).unwrap_or(first);
+            x0 = x0.min(first);
+            x1 = x1.max(last + 1);
+            y0 = y0.min(y);
+            y1 = y + 1;
+        }
+        if x1 <= x0 || y1 <= y0 {
+            return empty(m.outside);
+        }
+        if (x0, y0, x1, y1) == (0, 0, w, h) {
+            return Some(m);
+        }
+        let nw = x1 - x0;
+        let mut cov = Vec::with_capacity(nw * (y1 - y0));
+        for y in y0..y1 {
+            cov.extend_from_slice(&m.cov[y * w + x0..y * w + x1]);
+        }
+        Some(SelectionMask {
+            x: m.x + x0 as i32,
+            y: m.y + y0 as i32,
+            w: nw as u32,
+            h: (y1 - y0) as u32,
+            cov,
+            outside: m.outside,
+        })
+    }
+
+    fn old_combine(a: Option<&SelectionMask>, b: &SelectionMask, op: SelOp) -> Option<SelectionMask> {
+        if op == SelOp::Replace {
+            return b.clone().normalize();
+        }
+        let none = SelectionMask {
+            outside: 0,
+            ..SelectionMask::all()
+        };
+        let a = a.unwrap_or(&none);
+        let outside = op.apply(a.outside, b.outside);
+        let boxes: Vec<_> = [a.bounds(), b.bounds()].into_iter().flatten().collect();
+        if boxes.is_empty() {
+            return SelectionMask { outside, ..none }.normalize();
+        }
+        let x0 = boxes.iter().map(|b| b.0).min().unwrap_or(0);
+        let y0 = boxes.iter().map(|b| b.1).min().unwrap_or(0);
+        let x1 = boxes.iter().map(|b| b.2).max().unwrap_or(0);
+        let y1 = boxes.iter().map(|b| b.3).max().unwrap_or(0);
+        let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+        let mut cov = vec![0u8; (w * h) as usize];
+        for yy in 0..h as i32 {
+            for xx in 0..w as i32 {
+                let (x, y) = (x0 + xx, y0 + yy);
+                cov[(yy as u32 * w + xx as u32) as usize] = op.apply(a.at(x, y), b.at(x, y));
+            }
+        }
+        SelectionMask {
+            x: x0,
+            y: y0,
+            w,
+            h,
+            cov,
+            outside,
+        }
+        .normalize()
+    }
+
+    fn old_to_cell(m: &SelectionMask, xf: &Transform, cw: u32, ch: u32, pw: f32, ph: f32) -> Mask {
+        let empty = Mask {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+            cov: Vec::new(),
+        };
+        if cw == 0 || ch == 0 {
+            return empty;
+        }
+        let full = (0, 0, cw as i32, ch as i32);
+
+        if let Some((ox, oy)) = integer_offset(xf, cw, ch, pw, ph) {
+            let (u0, v0, u1, v1) = if m.outside == 255 {
+                full
+            } else {
+                let Some((x0, y0, x1, y1)) = m.bounds() else {
+                    return empty;
+                };
+                (
+                    (x0 - ox).max(0),
+                    (y0 - oy).max(0),
+                    (x1 - ox).min(cw as i32),
+                    (y1 - oy).min(ch as i32),
+                )
+            };
+            if u1 <= u0 || v1 <= v0 {
+                return empty;
+            }
+            let (w, h) = ((u1 - u0) as u32, (v1 - v0) as u32);
+            let mut cov = vec![0u8; (w * h) as usize];
+            for v in 0..h as i32 {
+                let row = &mut cov[(v as u32 * w) as usize..((v as u32 + 1) * w) as usize];
+                for (u, c) in row.iter_mut().enumerate() {
+                    *c = m.at(u0 + u as i32 + ox, v0 + v + oy);
+                }
+            }
+            return Mask {
+                x: u0 as u32,
+                y: v0 as u32,
+                w,
+                h,
+                cov,
+            };
+        }
+
+        let (cwf, chf) = (cw as f32, ch as f32);
+        let (u0, v0, u1, v1) = if m.outside == 255 {
+            full
+        } else {
+            let Some((x0, y0, x1, y1)) = m.bounds() else {
+                return empty;
+            };
+            let corners = [
+                (x0 as f32, y0 as f32),
+                (x1 as f32, y0 as f32),
+                (x1 as f32, y1 as f32),
+                (x0 as f32, y1 as f32),
+            ];
+            let (mut nu, mut nv, mut xu, mut xv) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for (x, y) in corners {
+                let (u, v) = xf.doc_to_cell(x, y, cwf, chf, pw, ph);
+                nu = nu.min(u);
+                nv = nv.min(v);
+                xu = xu.max(u);
+                xv = xv.max(v);
+            }
+            (
+                (nu.floor() as i32 - 1).max(0),
+                (nv.floor() as i32 - 1).max(0),
+                (xu.ceil() as i32 + 1).min(cw as i32),
+                (xv.ceil() as i32 + 1).min(ch as i32),
+            )
+        };
+        if u1 <= u0 || v1 <= v0 {
+            return empty;
+        }
+        let (w, h) = ((u1 - u0) as u32, (v1 - v0) as u32);
+        let n = xf.scale.abs().ceil().clamp(1.0, 4.0) as i32;
+        let step = 1.0 / n as f32;
+        let inv = 1.0 / (n * n) as f32;
+        let mut cov = vec![0u8; (w * h) as usize];
+        for v in 0..h {
+            for u in 0..w {
+                let mut acc = 0.0;
+                for sy in 0..n {
+                    for sx in 0..n {
+                        let cu = (u0 + u as i32) as f32 + (sx as f32 + 0.5) * step;
+                        let cv = (v0 + v as i32) as f32 + (sy as f32 + 0.5) * step;
+                        let (x, y) = xf.cell_to_doc(cu, cv, cwf, chf, pw, ph);
+                        acc += m.sample(x, y);
+                    }
+                }
+                cov[(v * w + u) as usize] = (acc * inv).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        Mask {
+            x: u0 as u32,
+            y: v0 as u32,
+            w,
+            h,
+            cov,
+        }
+    }
+
+    fn old_pack(m: &SelectionMask) -> PackedMask {
+        let mut runs: Vec<(u8, u32)> = Vec::new();
+        for &c in &m.cov {
+            match runs.last_mut() {
+                Some((v, n)) if *v == c => *n += 1,
+                _ => runs.push((c, 1)),
+            }
+        }
+        PackedMask {
+            x: m.x,
+            y: m.y,
+            w: m.w,
+            h: m.h,
+            outside: m.outside,
+            runs,
+        }
+    }
+
+    fn old_contours(m: &SelectionMask) -> Vec<Vec<(f32, f32)>> {
+        let Some((bx0, by0, bx1, by1)) = m.bounds() else {
+            return Vec::new();
+        };
+        // One sample per pixel centre, padded by one pixel of `outside` on
+        // every side so each loop closes inside the grid.
+        let gw = (bx1 - bx0 + 2) as usize;
+        let gh = (by1 - by0 + 2) as usize;
+        let mut g = vec![0u8; gw * gh];
+        for j in 0..gh {
+            for i in 0..gw {
+                g[j * gw + i] = m.at(bx0 - 1 + i as i32, by0 - 1 + j as i32);
+            }
+        }
+        let inside = |v: u8| v >= THRESHOLD;
+        // Edge ids: `2 * (j * gw + i)` is the edge from sample (i, j) to
+        // (i + 1, j); `+ 1` is the edge from (i, j) down to (i, j + 1).
+        let hid = |i: usize, j: usize| 2 * (j * gw + i);
+        let vid = |i: usize, j: usize| 2 * (j * gw + i) + 1;
+        let crossing = |a: u8, b: u8| {
+            let (a, b) = (a as f32, b as f32);
+            ((THRESHOLD as f32 - 0.5 - a) / (b - a)).clamp(0.0, 1.0)
+        };
+        let pos = |id: usize| -> (f32, f32) {
+            let cell = id / 2;
+            let (i, j) = (cell % gw, cell / gw);
+            let (sx, sy) = (
+                bx0 as f32 - 0.5 + i as f32,
+                by0 as f32 - 0.5 + j as f32,
+            );
+            if id % 2 == 0 {
+                (sx + crossing(g[j * gw + i], g[j * gw + i + 1]), sy)
+            } else {
+                (sx, sy + crossing(g[j * gw + i], g[(j + 1) * gw + i]))
+            }
+        };
+
+        let mut segs: Vec<(usize, usize)> = Vec::new();
+        for j in 0..gh - 1 {
+            for i in 0..gw - 1 {
+                let tl = g[j * gw + i];
+                let tr = g[j * gw + i + 1];
+                let br = g[(j + 1) * gw + i + 1];
+                let bl = g[(j + 1) * gw + i];
+                let case = (inside(tl) as u8) << 3
+                    | (inside(tr) as u8) << 2
+                    | (inside(br) as u8) << 1
+                    | inside(bl) as u8;
+                let (top, bottom) = (hid(i, j), hid(i, j + 1));
+                let (left, right) = (vid(i, j), vid(i + 1, j));
+                let centre_in =
+                    (tl as u32 + tr as u32 + br as u32 + bl as u32) as f32 / 4.0 >= THRESHOLD as f32 - 0.5;
+                match case {
+                    0 | 15 => {}
+                    0b1000 | 0b0111 => segs.push((left, top)),
+                    0b0100 | 0b1011 => segs.push((top, right)),
+                    0b0010 | 0b1101 => segs.push((right, bottom)),
+                    0b0001 | 0b1110 => segs.push((bottom, left)),
+                    0b1100 | 0b0011 => segs.push((left, right)),
+                    0b1001 | 0b0110 => segs.push((top, bottom)),
+                    // Saddles: the centre decides whether the two inside
+                    // corners join across the cell.
+                    0b1010 => {
+                        if centre_in {
+                            segs.push((top, right));
+                            segs.push((bottom, left));
+                        } else {
+                            segs.push((left, top));
+                            segs.push((right, bottom));
+                        }
+                    }
+                    _ => {
+                        // 0b0101: TR and BL inside.
+                        if centre_in {
+                            segs.push((left, top));
+                            segs.push((right, bottom));
+                        } else {
+                            segs.push((top, right));
+                            segs.push((bottom, left));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Every crossing is shared by exactly two segments; walk them into
+        // loops.
+        let mut at_edge: std::collections::HashMap<usize, [usize; 2]> =
+            std::collections::HashMap::with_capacity(segs.len());
+        for (s, &(a, b)) in segs.iter().enumerate() {
+            for e in [a, b] {
+                at_edge
+                    .entry(e)
+                    .and_modify(|v| v[1] = s)
+                    .or_insert([s, usize::MAX]);
+            }
+        }
+        let mut used = vec![false; segs.len()];
+        let mut loops = Vec::new();
+        for s0 in 0..segs.len() {
+            if used[s0] {
+                continue;
+            }
+            used[s0] = true;
+            let (start, mut cur) = segs[s0];
+            let mut seg = s0;
+            let mut pts = vec![pos(start)];
+            while cur != start {
+                pts.push(pos(cur));
+                let pair = at_edge[&cur];
+                let next = if pair[0] == seg { pair[1] } else { pair[0] };
+                if next == usize::MAX || used[next] {
+                    break;
+                }
+                used[next] = true;
+                let (a, b) = segs[next];
+                cur = if a == cur { b } else { a };
+                seg = next;
+            }
+            let simplified = simplify_loop(&pts, 0.35);
+            if simplified.len() >= 3 {
+                loops.push(simplified);
+            }
+        }
+        loops
+    }
+
+    fn old_unpack(m: &PackedMask) -> SelectionMask {
+        let mut cov = Vec::with_capacity((m.w * m.h) as usize);
+        for &(v, n) in &m.runs {
+            cov.extend(std::iter::repeat(v).take(n as usize));
+        }
+        SelectionMask {
+            x: m.x,
+            y: m.y,
+            w: m.w,
+            h: m.h,
+            cov,
+            outside: m.outside,
+        }
+    }
+
+
+    /// A small xorshift, so the random masks are the same every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            (self.next() % n as u64) as u32
+        }
+    }
+
+    /// A random mask: boxes of full, empty and in-between coverage, some
+    /// with feathered or speckled edges, anywhere around the origin, with
+    /// either `outside`.
+    fn random_mask(rng: &mut Rng) -> SelectionMask {
+        let (w, h) = (rng.below(60), rng.below(40));
+        let mut cov = vec![0u8; (w * h) as usize];
+        for _ in 0..rng.below(6) {
+            if w == 0 || h == 0 {
+                break;
+            }
+            let (x0, y0) = (rng.below(w), rng.below(h));
+            let (x1, y1) = ((x0 + 1 + rng.below(w)).min(w), (y0 + 1 + rng.below(h)).min(h));
+            let v = [255, 255, 0, 128, 127, 200][rng.below(6) as usize];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let speck = rng.below(13) == 0;
+                    cov[(y * w + x) as usize] = if speck { rng.below(256) as u8 } else { v };
+                }
+            }
+        }
+        SelectionMask {
+            x: rng.below(40) as i32 - 20,
+            y: rng.below(40) as i32 - 20,
+            w,
+            h,
+            cov,
+            outside: if rng.below(4) == 0 { 255 } else { 0 },
+        }
+    }
+
+    /// Every faster mask method against the per-pixel original, over random
+    /// masks: the same bytes, loops and runs.
+    #[test]
+    fn the_row_wise_mask_methods_match_the_per_pixel_ones() {
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        for round in 0..400 {
+            let a = random_mask(&mut rng);
+            let b = random_mask(&mut rng);
+            let what = format!("round {round}");
+            assert_eq!(a.clone().normalize(), old_normalize(a.clone()), "{what}");
+            let (an, bn) = (a.clone().normalize(), b.clone().normalize());
+            for op in [SelOp::Replace, SelOp::Add, SelOp::Subtract, SelOp::Intersect] {
+                assert_eq!(
+                    SelectionMask::combine(an.as_ref(), &b, op),
+                    old_combine(an.as_ref(), &b, op),
+                    "{what} {op:?}"
+                );
+            }
+            for m in [&a, &b].into_iter().chain(an.iter()).chain(bn.iter()) {
+                assert_eq!(m.contours(), old_contours(m), "{what}");
+                let packed = m.pack();
+                assert_eq!(packed, old_pack(m), "{what}");
+                assert_eq!(packed.unpack(), old_unpack(&packed), "{what}");
+                for (tx, cw, ch) in [(0.0, 30, 20), (7.0, 50, 33), (-3.0, 41, 17)] {
+                    let xf = Transform { tx, ..Transform::default() };
+                    let (new, old) = (m.to_cell(&xf, cw, ch, 50.0, 33.0), old_to_cell(m, &xf, cw, ch, 50.0, 33.0));
+                    assert_eq!((new.x, new.y, new.w, new.h, new.cov), (old.x, old.y, old.w, old.h, old.cov), "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_reads_what_each_pixel_reads() {
+        let mut rng = Rng(7);
+        for _ in 0..200 {
+            let m = random_mask(&mut rng);
+            let (x, y, n) = (rng.below(120) as i32 - 60, rng.below(80) as i32 - 40, rng.below(90) as usize);
+            let mut row = vec![9u8; n];
+            m.row_into(x, y, &mut row);
+            let want: Vec<u8> = (0..n as i32).map(|i| m.at(x + i, y)).collect();
+            assert_eq!(row, want);
+        }
+    }
 
     const HUGE: (i32, i32, i32, i32) = (-10_000, -10_000, 10_000, 10_000);
 
