@@ -30,12 +30,11 @@
 
 use std::collections::VecDeque;
 use std::ops::RangeInclusive;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use crate::doc::canvas::{Canvas, DirtyRect};
-use crate::tools::krita::texture::TextureMask;
-use crate::tools::krita::KritaPreset;
 use crate::tools::lasso::Mask;
+use crate::tools::noise::{paper_scan, Periodic, PeriodicRow};
 use crate::tools::ribbon::union_rect;
 
 /// Upper bound on the expand radius, matching the UI slider.
@@ -126,25 +125,23 @@ impl Grain {
     /// nothing. The last grain baked is kept, so a drag that re-applies a
     /// fill, or the next fill at the same settings, doesn't bake again.
     fn tooth(self) -> Option<Tooth> {
-        /// Amount, size and contrast, then the bake: its period and factors.
-        type Baked = ((u32, u32, u32), (usize, usize), Arc<Vec<f32>>);
+        /// Amount, size and contrast, then the bake.
+        type Baked = ((u32, u32, u32), Periodic);
         static LAST: Mutex<Option<Baked>> = Mutex::new(None);
         if self.amount <= 0.0 {
             return None;
         }
         let key = (self.amount.to_bits(), self.size.to_bits(), self.contrast.to_bits());
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        let (period, factors) = match &*last {
-            Some((k, p, f)) if *k == key => (*p, f.clone()),
+        let factors = match &*last {
+            Some((k, f)) if *k == key => f.clone(),
             _ => {
-                let (p, f) = self.bake();
-                let f = Arc::new(f);
-                *last = Some((key, p, f.clone()));
-                (p, f)
+                let f = self.bake();
+                *last = Some((key, f.clone()));
+                f
             }
         };
         Some(Tooth {
-            period,
             factors,
             offset: self.offset,
         })
@@ -152,97 +149,43 @@ impl Grain {
 
     /// One period of the paper at this size, as what each pixel's coverage
     /// is multiplied by: 1 where the paper peaks, down to `1 - amount` in
-    /// its valleys. Row-major, `(width, height)` with it.
+    /// its valleys.
     ///
-    /// Size 1 reads the texels as they are, the way Pencil-5's dabs do.
-    /// Any other size is sampled bilinearly over a whole number of pixels
-    /// as near the true period as rounding allows, so it still tiles.
-    fn bake(self) -> ((usize, usize), Vec<f32>) {
-        let paper = fill_paper();
+    /// Size 1 reads the texels as they are, the way Pencil-5's dabs do; any
+    /// other size is [`Periodic::scaled`].
+    fn bake(self) -> Periodic {
+        let paper = paper_scan();
         let (amount, contrast) = (self.amount.min(1.0), self.contrast.max(0.0));
-        let factor = |texel: f32| {
-            let v = ((texel / 255.0 - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
-            1.0 - amount * (1.0 - v)
+        let texels = (0..paper.h as i32)
+            .flat_map(|y| (0..paper.w as i32).map(move |x| paper.at(x, y) as f32 / 255.0))
+            .collect();
+        let mut field = Periodic {
+            period: (paper.w, paper.h),
+            values: Arc::new(texels),
         };
-        if (self.size - 1.0).abs() < 1e-3 {
-            let f = (0..paper.h as i32)
-                .flat_map(|y| (0..paper.w as i32).map(move |x| (x, y)))
-                .map(|(x, y)| factor(paper.at(x, y) as f32))
-                .collect();
-            return ((paper.w, paper.h), f);
+        if (self.size - 1.0).abs() >= 1e-3 {
+            field = field.scaled(self.size);
         }
-        let size = self.size.max(0.01);
-        let pw = ((paper.w as f32 * size).round() as usize).max(1);
-        let ph = ((paper.h as f32 * size).round() as usize).max(1);
-        let (sx, sy) = (paper.w as f32 / pw as f32, paper.h as f32 / ph as f32);
-        let mut f = Vec::with_capacity(pw * ph);
-        for y in 0..ph {
-            // Texel centres on pixel centres.
-            let v = (y as f32 + 0.5) * sy - 0.5;
-            let (v0, fy) = (v.floor(), v - v.floor());
-            for x in 0..pw {
-                let u = (x as f32 + 0.5) * sx - 0.5;
-                let (u0, fx) = (u.floor(), u - u.floor());
-                let at = |dx: i32, dy: i32| paper.at(u0 as i32 + dx, v0 as i32 + dy) as f32;
-                let top = at(0, 0) + (at(1, 0) - at(0, 0)) * fx;
-                let bot = at(0, 1) + (at(1, 1) - at(0, 1)) * fx;
-                f.push(factor(top + (bot - top) * fy));
-            }
+        for v in Arc::make_mut(&mut field.values) {
+            let p = ((*v - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
+            *v = 1.0 - amount * (1.0 - p);
         }
-        ((pw, ph), f)
+        field
     }
-}
-
-/// Krita's `04_paper-C-grain.png` at Pencil-5 Tilted's scale, taken from the
-/// preset the app already carries.
-fn fill_paper() -> &'static TextureMask {
-    static PAPER: OnceLock<TextureMask> = OnceLock::new();
-    PAPER.get_or_init(|| {
-        KritaPreset::Pencil5Tilted
-            .brush()
-            .texture
-            .clone()
-            .expect("Pencil-5 Tilted carries its paper")
-    })
 }
 
 /// A [`Grain`] baked: one period of coverage factors (see [`Grain::bake`]),
 /// laid on the cell at `offset`.
 #[derive(Clone)]
 struct Tooth {
-    period: (usize, usize),
-    factors: Arc<Vec<f32>>,
+    factors: Periodic,
     offset: (i32, i32),
 }
 
 impl Tooth {
     /// The factors along row `y`, starting at column `x`.
-    fn row(&self, x: i32, y: i32) -> ToothRow<'_> {
-        let (pw, ph) = self.period;
-        let ty = (y - self.offset.1).rem_euclid(ph as i32) as usize;
-        ToothRow {
-            row: &self.factors[ty * pw..(ty + 1) * pw],
-            i: (x - self.offset.0).rem_euclid(pw as i32) as usize,
-        }
-    }
-}
-
-/// A walk along one row of a [`Tooth`], a pixel a step, wrapping at the
-/// period: no division per pixel.
-struct ToothRow<'a> {
-    row: &'a [f32],
-    i: usize,
-}
-
-impl ToothRow<'_> {
-    #[inline]
-    fn next(&mut self) -> f32 {
-        let f = self.row[self.i];
-        self.i += 1;
-        if self.i == self.row.len() {
-            self.i = 0;
-        }
-        f
+    fn row(&self, x: i32, y: i32) -> PeriodicRow<'_> {
+        self.factors.row(x, y, self.offset)
     }
 }
 
@@ -550,7 +493,7 @@ pub fn fill_masked(
     for y in mask.y..y1 {
         let mut paper = ink.tooth.as_ref().map(|t| t.row(mask.x as i32, y as i32));
         for x in mask.x..x1 {
-            let g = paper.as_mut().map_or(1.0, ToothRow::next);
+            let g = paper.as_mut().map_or(1.0, PeriodicRow::next);
             put(canvas, x as i32, y as i32, &ink, mask.at(x, y), g);
         }
     }
@@ -585,7 +528,7 @@ fn paint(
     for yi in bbox.1..=bbox.3 {
         let mut paper = ink.tooth.as_ref().map(|t| t.row(bbox.0, yi));
         for xi in bbox.0..=bbox.2 {
-            let g = paper.as_mut().map_or(1.0, ToothRow::next);
+            let g = paper.as_mut().map_or(1.0, PeriodicRow::next);
             if inside(xi, yi) {
                 let k = clip.map_or(255, |m| m.at(xi as u32, yi as u32));
                 put(canvas, xi, yi, ink, k, g);
@@ -1470,7 +1413,7 @@ mod tests {
     /// texels, where that pencil's dabs read them, so the two line up.
     #[test]
     fn grain_at_size_one_lines_up_with_pencil_5s_paper() {
-        let brush = KritaPreset::Pencil5Tilted.brush();
+        let brush = crate::tools::krita::KritaPreset::Pencil5Tilted.brush();
         let paper = brush.texture.as_ref().unwrap();
         let mut c = Canvas::new(48, 48);
         flood(&mut c, None, 0, 0, FillOptions { grain: grain(1.0), ..opts(0) });

@@ -25,8 +25,40 @@ use std::sync::Arc;
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::tools::dab::Dab;
 use crate::tools::lasso::Mask;
+use crate::tools::noise::{Noise, NoiseRow};
 use crate::tools::paper::paper;
 use crate::tools::{BrushMode, BrushSettings};
+
+/// Turns coverage into ink a pixel at a time along a row. Every pixel of
+/// the row is visited in order, once: `skip` for one that takes no ink.
+trait Shaper {
+    fn skip(&mut self);
+    fn shape(&mut self, c: f32) -> f32;
+}
+
+/// Coverage as it is. Compiles away: without noise, the composites run
+/// exactly the loop they always have.
+struct Plain;
+
+impl Shaper for Plain {
+    #[inline(always)]
+    fn skip(&mut self) {}
+    #[inline(always)]
+    fn shape(&mut self, c: f32) -> f32 {
+        c
+    }
+}
+
+impl Shaper for NoiseRow<'_> {
+    #[inline(always)]
+    fn skip(&mut self) {
+        NoiseRow::skip(self)
+    }
+    #[inline(always)]
+    fn shape(&mut self, c: f32) -> f32 {
+        NoiseRow::shape(self, c)
+    }
+}
 
 /// One vertex of the stroke spine.
 #[derive(Clone, Copy, Debug)]
@@ -84,6 +116,8 @@ pub struct StrokeWorkspace {
     grain: f32,
     /// Canvas pixels per grain texel.
     grain_scale: f32,
+    /// Midtone noise, applied as coverage turns into ink.
+    noise: Option<Noise>,
     /// How a new stamp combines with the coverage already there.
     build_up: bool,
     /// The selection, in this canvas's pixel space, that the stroke is held
@@ -114,6 +148,7 @@ impl StrokeWorkspace {
             softness: 1.0,
             grain: 0.0,
             grain_scale: 1.5,
+            noise: None,
             build_up: false,
             clip: None,
             alpha_lock: false,
@@ -140,6 +175,7 @@ impl StrokeWorkspace {
         self.softness = brush.softness.clamp(0.1, 8.0);
         self.grain = brush.grain.clamp(0.0, 1.0);
         self.grain_scale = brush.grain_scale.max(0.05);
+        self.noise = Noise::for_brush(brush);
         self.build_up = brush.mode == BrushMode::Dab;
         self.clip = None;
         self.alpha_lock = false;
@@ -465,6 +501,10 @@ impl StrokeWorkspace {
     /// correct value; pixels inside are recomputed from `pre`. Hence
     /// compositing only each flush's new-segment bbox union is exact, even
     /// where a new segment overlaps previously composited regions.
+    ///
+    /// Midtone noise, when the brush has it, shapes each pixel's coverage by
+    /// its canvas position alone, so the result stays a pure function of
+    /// `pre` and coverage.
     pub fn composite_paint(
         &self,
         canvas: &mut Canvas,
@@ -473,6 +513,23 @@ impl StrokeWorkspace {
         color: [u8; 4],
         opacity: f32,
     ) {
+        match &self.noise {
+            None => self.paint_with(canvas, pre, rect, color, opacity, |_, _| Plain),
+            Some(n) => self.paint_with(canvas, pre, rect, color, opacity, |x, y| n.row(x, y)),
+        }
+    }
+
+    /// [`composite_paint`](Self::composite_paint), with `row(x, y)` shaping
+    /// the coverage along the row from `(x, y)`.
+    fn paint_with<'a, S: Shaper>(
+        &'a self,
+        canvas: &mut Canvas,
+        pre: &[u8],
+        rect: DirtyRect,
+        color: [u8; 4],
+        opacity: f32,
+        row_shaper: impl Fn(u32, u32) -> S + 'a,
+    ) {
         let opacity = opacity.clamp(0.0, 1.0);
         let (br, bg, bb) = (color[0] as f32, color[1] as f32, color[2] as f32);
         let Some(rect) = self.clipped(rect) else {
@@ -480,6 +537,7 @@ impl StrokeWorkspace {
         };
         for y in rect.min_y..rect.max_y.min(self.h) {
             let row = (y * self.w) as usize;
+            let mut shaper = row_shaper(rect.min_x, y);
             for x in rect.min_x..rect.max_x.min(self.w) {
                 let cov = self.cov[row + x as usize];
                 let idx = (row + x as usize) * 4;
@@ -488,13 +546,15 @@ impl StrokeWorkspace {
                     // still equals `pre` here. A cap cut is the one thing
                     // that lowers coverage, and it restores `pre` itself
                     // first — see `restore_pre`.
+                    shaper.skip();
                     continue;
                 }
                 let k = self.clip_at(x, y);
                 if k <= 0.0 {
+                    shaper.skip();
                     continue;
                 }
-                let a_src = cov as f32 / 65535.0 * opacity * k;
+                let a_src = shaper.shape(cov as f32 / 65535.0) * opacity * k;
                 let a_pre = pre[idx + 3] as f32 / 255.0;
                 if self.alpha_lock {
                     // Recolour in place: the colour mixes in by the stroke's
@@ -530,12 +590,29 @@ impl StrokeWorkspace {
 
     /// Eraser composite: `out_alpha = pre_alpha * (1 - coverage * strength)`,
     /// RGB carried from the snapshot, zeroed when fully erased.
+    /// Midtone noise shapes the coverage as it does for paint.
     pub fn composite_erase(
         &self,
         canvas: &mut Canvas,
         pre: &[u8],
         rect: DirtyRect,
         strength: f32,
+    ) {
+        match &self.noise {
+            None => self.erase_with(canvas, pre, rect, strength, |_, _| Plain),
+            Some(n) => self.erase_with(canvas, pre, rect, strength, |x, y| n.row(x, y)),
+        }
+    }
+
+    /// [`composite_erase`](Self::composite_erase), shaped as
+    /// [`paint_with`](Self::paint_with) is.
+    fn erase_with<'a, S: Shaper>(
+        &'a self,
+        canvas: &mut Canvas,
+        pre: &[u8],
+        rect: DirtyRect,
+        strength: f32,
+        row_shaper: impl Fn(u32, u32) -> S + 'a,
     ) {
         let strength = strength.clamp(0.0, 1.0);
         // Erasing is taking alpha away, which a locked alpha forbids.
@@ -547,18 +624,21 @@ impl StrokeWorkspace {
         };
         for y in rect.min_y..rect.max_y.min(self.h) {
             let row = (y * self.w) as usize;
+            let mut shaper = row_shaper(rect.min_x, y);
             for x in rect.min_x..rect.max_x.min(self.w) {
                 let cov = self.cov[row + x as usize];
                 let idx = (row + x as usize) * 4;
                 if cov == 0 {
+                    shaper.skip();
                     continue;
                 }
                 let k = self.clip_at(x, y);
                 if k <= 0.0 {
+                    shaper.skip();
                     continue;
                 }
                 let a_pre = pre[idx + 3] as f32 / 255.0;
-                let a_out = a_pre * (1.0 - cov as f32 / 65535.0 * strength * k);
+                let a_out = a_pre * (1.0 - shaper.shape(cov as f32 / 65535.0) * strength * k);
                 let a8 = (a_out * 255.0).round() as u8;
                 let dst = &mut canvas.pixels_mut()[idx..idx + 4];
                 if a8 == 0 {
@@ -771,6 +851,99 @@ mod tests {
             ((200.0 * a_src + 100.0 * a_pre * (1.0 - a_src)) / a_out).round() as u8;
         assert_eq!(canvas.pixels()[idx], expect_r);
         assert_eq!(canvas.pixels()[idx + 3], (a_out * 255.0).round() as u8);
+    }
+
+    /// A soft dot (hardness 0, so coverage runs from 1 at the centre to 0 at
+    /// the rim) painted on a bare 64×64 canvas, with `noise`.
+    fn soft_dot(noise: f32, stipple: bool, erase: bool) -> (Vec<u16>, Vec<u8>) {
+        let brush = BrushSettings {
+            noise,
+            noise_stipple: stipple,
+            ..ribbon(0.0, 0.0)
+        };
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &brush);
+        let mut canvas = Canvas::new(64, 64);
+        if erase {
+            for px in canvas.pixels_mut().chunks_exact_mut(4) {
+                px.copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+        let pre = canvas.pixels().into_owned();
+        ws.raster_dot(node(32.0, 32.0, 24.0, 1.0));
+        let rect = ws.stroke_rect.unwrap();
+        if erase {
+            ws.composite_erase(&mut canvas, &pre, rect, 1.0);
+        } else {
+            ws.composite_paint(&mut canvas, &pre, rect, [0, 0, 0, 255], 1.0);
+        }
+        (ws.cov.clone(), canvas.pixels().chunks_exact(4).map(|p| p[3]).collect())
+    }
+
+    #[test]
+    fn noise_breaks_up_the_soft_edge_and_leaves_the_core_and_paper_clean() {
+        let (cov, smooth) = soft_dot(0.0, false, false);
+        let (_, noisy) = soft_dot(0.6, false, false);
+        let mut changed = 0;
+        for i in 0..cov.len() {
+            match cov[i] {
+                0 => assert_eq!(noisy[i], 0, "bare paper stays bare"),
+                65535 => assert_eq!(noisy[i], 255, "a solid core stays solid"),
+                _ => changed += (noisy[i] != smooth[i]) as usize,
+            }
+        }
+        let soft = cov.iter().filter(|&&c| c > 0 && c < 65535).count();
+        assert!(changed * 10 > soft * 7, "{changed} of {soft} soft pixels specked");
+        // Same density overall: texture, not darkening.
+        let sum = |a: &[u8]| a.iter().map(|&v| v as f32).sum::<f32>();
+        assert!((sum(&noisy) / sum(&smooth) - 1.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn stipple_inks_each_pixel_fully_or_not_at_all() {
+        let (cov, dots) = soft_dot(1.0, true, false);
+        assert!(dots.iter().all(|&a| a == 0 || a == 255));
+        let soft: Vec<usize> = (0..cov.len()).filter(|&i| cov[i] > 6553 && cov[i] < 58981).collect();
+        let inked = soft.iter().filter(|&&i| dots[i] == 255).count();
+        assert!(inked > soft.len() / 5 && inked < soft.len() * 4 / 5, "{inked} of {}", soft.len());
+    }
+
+    #[test]
+    fn the_eraser_takes_noise_too() {
+        let (cov, smooth) = soft_dot(0.0, false, true);
+        let (_, noisy) = soft_dot(0.6, false, true);
+        assert!((0..cov.len()).any(|i| noisy[i] != smooth[i]));
+        for i in 0..cov.len() {
+            if cov[i] == 0 {
+                assert_eq!(noisy[i], 255, "untouched where the eraser didn't reach");
+            } else if cov[i] == 65535 {
+                assert_eq!(noisy[i], 0, "erased clean in the core");
+            }
+        }
+    }
+
+    /// The noise belongs to the canvas: compositing a stroke in pieces, as
+    /// flushes do, gives what compositing it whole does, and a second stroke
+    /// over the same spot lands on the same specks.
+    #[test]
+    fn noise_is_anchored_to_the_canvas() {
+        let brush = BrushSettings { noise: 0.7, ..ribbon(0.0, 0.0) };
+        let run = |pieces: bool| {
+            let mut ws = StrokeWorkspace::new();
+            ws.begin(64, 64, &brush);
+            let mut canvas = Canvas::new(64, 64);
+            let pre = canvas.pixels().into_owned();
+            let a = ws.raster_dot(node(24.0, 30.0, 14.0, 1.0)).unwrap();
+            if pieces {
+                ws.composite_paint(&mut canvas, &pre, a, [0, 0, 0, 255], 1.0);
+            }
+            let b = ws.raster_dot(node(38.0, 34.0, 14.0, 1.0)).unwrap();
+            let rect = if pieces { b } else { union_rect(Some(a), b) };
+            ws.composite_paint(&mut canvas, &pre, rect, [0, 0, 0, 255], 1.0);
+            canvas.into_pixels()
+        };
+        assert!(run(true) == run(false));
+        assert!(run(false) == run(false));
     }
 
     #[test]

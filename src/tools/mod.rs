@@ -7,6 +7,7 @@ mod golden_tests;
 pub mod krita;
 pub mod lasso;
 pub mod liquify;
+pub mod noise;
 pub mod perspective;
 pub mod paper;
 pub mod ribbon;
@@ -218,6 +219,18 @@ pub struct BrushSettings {
     pub grain: f32,
     /// Canvas pixels per grain texel. Larger values magnify the tooth.
     pub grain_scale: f32,
+    /// Midtone noise, 0..=1: the stroke's soft falloff broken into specks
+    /// while its solid core and the bare paper stay clean — see [`noise`].
+    /// 0 = smooth. Not for `Krita` brushes, which paint past where it
+    /// applies.
+    pub noise: f32,
+    /// How big the noise's specks are: canvas pixels per fine speck, or the
+    /// paper at that many times Pencil-5's scale.
+    pub noise_size: f32,
+    /// Where the noise comes from.
+    pub noise_source: noise::NoiseSource,
+    /// Each pixel fully inked or bare by the noise: pure dots.
+    pub noise_stipple: bool,
     /// Ink color (unmultiplied RGBA).
     pub color: [u8; 4],
     /// Pressure → radius.
@@ -300,6 +313,10 @@ impl Default for BrushSettings {
             spacing: 0.1,
             grain: 0.0,
             grain_scale: 1.5,
+            noise: 0.0,
+            noise_size: 1.0,
+            noise_source: noise::NoiseSource::Fine,
+            noise_stipple: false,
             color: [20, 20, 20, 255],
             size: Dyn::new(0.7, 1.0),
             flow_dyn: Dyn::new(0.5, 1.0),
@@ -443,6 +460,14 @@ impl BrushSettings {
         }
     }
 
+    /// The airbrush with midtone noise: fine specks through its soft falloff.
+    pub fn grainy_airbrush() -> Self {
+        Self {
+            noise: 0.7,
+            ..Self::airbrush()
+        }
+    }
+
     pub fn default_eraser() -> Self {
         Self {
             radius: 16.0,
@@ -525,6 +550,12 @@ impl BrushSettings {
             "Soft, low-flow spray that builds up as you pass over it; pressure sets \
              how much lands. After Krita's Airbrush_Soft.",
             BrushSettings::airbrush,
+        ),
+        (
+            "Grainy airbrush",
+            "The Airbrush with its soft edge broken into fine specks, while what \
+             builds up solid stays solid.",
+            BrushSettings::grainy_airbrush,
         ),
     ];
 }

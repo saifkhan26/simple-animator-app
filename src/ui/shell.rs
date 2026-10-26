@@ -1703,6 +1703,33 @@ pub(crate) fn title_shortfall(ctx: &egui::Context, title: &str) -> f32 {
     (style.spacing.interact_size.y - budget).max(0.0)
 }
 
+/// Midtone noise: how much, and once there is some, how big, from where, and
+/// whether it is pure dots.
+fn brush_noise(state: &mut AppState, ui: &mut egui::Ui) {
+    use crate::tools::noise::{NoiseSource, NOISE_SIZES};
+    ui.add(egui::Slider::new(&mut state.brush.noise, 0.0..=1.0).text("Noise"))
+        .on_hover_text(
+            "Breaks the stroke's soft edge into specks, while what lands solid \
+             stays solid and the paper round it stays clean. 0 = smooth.",
+        );
+    if state.brush.noise <= 0.0 {
+        return;
+    }
+    ui.add(egui::Slider::new(&mut state.brush.noise_size, NOISE_SIZES).text("Noise size"))
+        .on_hover_text("How big the specks are, in canvas pixels.");
+    ui.horizontal(|ui| {
+        ui.label("Noise from");
+        ui.selectable_value(&mut state.brush.noise_source, NoiseSource::Fine, "Fine")
+            .on_hover_text("Random specks, a pixel each at size 1.");
+        ui.selectable_value(&mut state.brush.noise_source, NoiseSource::Paper, "Paper")
+            .on_hover_text(
+                "Specks that follow Krita's paper, the one Pencil-5 Tilted draws on.",
+            );
+    });
+    ui.checkbox(&mut state.brush.noise_stipple, "Stipple")
+        .on_hover_text("Every pixel fully inked or bare: pure dots, no greys.");
+}
+
 /// Compact playback HUD shown when the floating panels are hidden (Tab).
 /// Pinned bottom-centre: play/pause, step, frame counter, scrub strip.
 /// One-click brush presets, matched to the Krita brushes they are named
@@ -1741,6 +1768,7 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
         .on_hover_text("How deeply the paper tooth eats into the stroke.");
     ui.add(egui::Slider::new(&mut state.brush.grain_scale, 0.5..=6.0).text("Grain scale"))
         .on_hover_text("Canvas pixels per grain texel — coarser paper as it rises.");
+    brush_noise(state, ui);
 
     ui.add_enabled_ui(!dab, |ui| {
         ui.horizontal(|ui| {
@@ -11587,7 +11615,8 @@ mod krita_brush_tests {
     use crate::tools::BrushSettings;
     use egui::{pos2, vec2, Pos2};
 
-    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 900.0));
+    /// Tall enough for the whole Brush settings window, grown to the bottom.
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 1000.0));
 
     fn run(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) -> Vec<String> {
         fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
@@ -11698,12 +11727,14 @@ mod krita_brush_tests {
     fn grow_brush_settings(ctx: &egui::Context, state: &mut AppState) {
         let r = egui::AreaState::load(ctx, egui::Id::new("window_brush_settings")).unwrap().rect();
         let grip = r.max - egui::vec2(3.0, 3.0);
+        // To the bottom of the screen, whatever its height.
+        let bottom = SCREEN.max.y - 5.0;
         run(ctx, state, vec![egui::Event::PointerMoved(grip), button(grip, true)]);
         for i in 1..=10 {
-            let p = egui::pos2(grip.x, grip.y + (895.0 - grip.y) * i as f32 / 10.0);
+            let p = egui::pos2(grip.x, grip.y + (bottom - grip.y) * i as f32 / 10.0);
             run(ctx, state, vec![egui::Event::PointerMoved(p)]);
         }
-        run(ctx, state, vec![button(egui::pos2(grip.x, 895.0), false)]);
+        run(ctx, state, vec![button(egui::pos2(grip.x, bottom), false)]);
         run(ctx, state, vec![]);
     }
 
@@ -11720,6 +11751,32 @@ mod krita_brush_tests {
             assert!(t.iter().any(|s| s == want), "{want} in {t:?}");
         }
         assert!(!t.iter().any(|s| s == "Tail aggressiveness"), "{t:?}");
+    }
+
+    /// Noise sits under Grain for the app's own brushes; the rest of its
+    /// controls come once there is some, and a Krita brush shows none of it.
+    #[test]
+    fn noise_options_come_with_noise_and_not_for_krita_brushes() {
+        use crate::tools::BrushSettings;
+        let (ctx, mut state) = picker_state();
+        state.brush = BrushSettings::airbrush();
+        state.brush_search = "nothing matches this".into();
+        run(&ctx, &mut state, vec![]);
+        grow_brush_settings(&ctx, &mut state);
+        let has = |t: &[String], s: &str| t.iter().any(|x| x == s);
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(has(&t, "Noise"), "{t:?}");
+        for s in ["Noise size", "Noise from", "Stipple"] {
+            assert!(!has(&t, s), "{s} hidden while there is no noise");
+        }
+        state.brush.noise = 0.5;
+        let t = run(&ctx, &mut state, vec![]);
+        for s in ["Noise size", "Noise from", "Fine", "Paper", "Stipple"] {
+            assert!(has(&t, s), "{s} in {t:?}");
+        }
+        state.brush = BrushSettings { noise: 0.5, ..BrushSettings::pencil5_krita() };
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(!has(&t, "Noise") && !has(&t, "Stipple"), "{t:?}");
     }
 
     fn picker_state() -> (egui::Context, AppState) {

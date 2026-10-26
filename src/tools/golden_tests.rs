@@ -603,6 +603,53 @@ fn golden_strokes() {
     assert!(failures.is_empty(), "{} golden strokes changed:\n{}", failures.len(), failures.join("\n"));
 }
 
+/// Writes airbrush strokes with and without midtone noise, three passes of
+/// the S each, over white, as `brush_noise_render.png` into `SNAPSHOT_DIR`:
+/// Airbrush; Grainy airbrush; noise size 2.5; noise from the paper;
+/// stipple; and the grainy airbrush as an eraser on black.
+/// `SNAPSHOT_DIR=... cargo test -- --ignored noise_render`
+#[test]
+#[ignore]
+fn noise_render() {
+    use crate::tools::noise::NoiseSource;
+    let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let grainy = BrushSettings::grainy_airbrush();
+    let tiles: [(BrushSettings, ActiveTool); 6] = [
+        (BrushSettings::airbrush(), ActiveTool::Pencil),
+        (grainy.clone(), ActiveTool::Pencil),
+        (BrushSettings { noise_size: 2.5, ..grainy.clone() }, ActiveTool::Pencil),
+        (BrushSettings { noise_source: NoiseSource::Paper, ..grainy.clone() }, ActiveTool::Pencil),
+        (BrushSettings { noise: 1.0, noise_stipple: true, ..grainy.clone() }, ActiveTool::Pencil),
+        (BrushSettings { color: [0, 0, 0, 0], ..grainy }, ActiveTool::Eraser),
+    ];
+    let (w, h, gap, z) = (256u32, 160u32, 8u32, 2u32);
+    let mut sheet = image::RgbaImage::from_pixel(3 * w + 2 * gap, 2 * h + gap, image::Rgba([40, 40, 44, 255]));
+    for (i, (brush, tool)) in tiles.into_iter().enumerate() {
+        let mut c = Canvas::new(w, h);
+        if tool == ActiveTool::Eraser {
+            for px in c.pixels_mut().chunks_exact_mut(4) {
+                px.copy_from_slice(&[20, 20, 20, 255]);
+            }
+        }
+        let mut ws = StrokeWorkspace::new();
+        for _ in 0..3 {
+            stroke_on(&mut c, &mut ws, &brush, tool, SmoothingOptions::default(), 1.0, (0.0, (false, false)), Hold::Free, &gesture("s"));
+        }
+        let (ox, oy) = ((i as u32 % 3) * (w + gap), (i as u32 / 3) * (h + gap));
+        for (k, p) in c.pixels().chunks_exact(4).enumerate() {
+            let a = p[3] as f32 / 255.0;
+            let v = |ch: u8| (ch as f32 * a + 245.0 * (1.0 - a)).round() as u8;
+            sheet.put_pixel(ox + k as u32 % w, oy + k as u32 / w, image::Rgba([v(p[0]), v(p[1]), v(p[2]), 255]));
+        }
+    }
+    let (sw, sh) = sheet.dimensions();
+    image::imageops::resize(&sheet, sw * z, sh * z, image::imageops::FilterType::Nearest)
+        .save(dir.join("brush_noise_render.png"))
+        .unwrap();
+}
+
 const PERF_TABLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tools/testdata/perf_baseline.txt");
 
 /// Stroke timings on a 1080p cell, against this machine's recorded baseline.

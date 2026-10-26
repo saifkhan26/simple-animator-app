@@ -110,7 +110,11 @@ impl Win {
                 state.show_mini_timeline = true;
             }
             Win::Settings => state.show_settings = true,
-            Win::BrushSettings => state.show_brush_settings = true,
+            Win::BrushSettings => {
+                state.show_brush_settings = true;
+                // Noise on, so the sweeps see every row it brings.
+                state.brush.noise = 0.5;
+            }
             Win::GridSettings => {
                 state.show_grid_settings = true;
                 state.perspective.show = true;
@@ -791,6 +795,12 @@ fn snapshots() {
     // A grid's settings, with Fill canvas's rows showing.
     let mut rig = Rig::new(Win::GridSettings);
     snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();
+
+    // Brush settings with noise on, tall enough to see it.
+    let mut rig = Rig::new(Win::BrushSettings);
+    rig.state.brush = crate::tools::BrushSettings::grainy_airbrush();
+    rig.drag_bottom_edge(500.0);
+    snapshot(&mut rig, 1.5).save(dir.join("brush_settings_noise.png")).unwrap();
 
     // The Fill tool's options with grain on, bucket then lasso.
     let mut rig = Rig::new(Win::ToolPanel(ActiveTool::Fill));

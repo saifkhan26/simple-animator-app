@@ -498,3 +498,27 @@ G-Pen/ink/s/clear/stabilizer	portable	f0ccd21af2db1a69
 G-Pen/ink/s/clear/stabilizer-nodelay	portable	4f4e54ce02fac96c
 Pencil-5/pencil/s/clear/stabilizer	exact	4a3ceef4e5bd79c4
 Pencil-5/pencil/s/clear/stabilizer-nodelay	exact	3ca12150911d333f
+Grainy airbrush/pencil/s/clear	portable	d1f6a76777b6d799
+Grainy airbrush/pencil/s/grey	portable	4917fe8496e5bafb
+Grainy airbrush/pencil/s/stripes	portable	c86df6e7b5a8691b
+Grainy airbrush/pencil/s/sel	portable	812ba6d7ff07eac5
+Grainy airbrush/pencil/s/lock	portable	ff9cb88027e64566
+Grainy airbrush/pencil/line/clear	portable	fc570029e04eb708
+Grainy airbrush/pencil/line/grey	portable	73c449cb2352fff0
+Grainy airbrush/pencil/line/stripes	portable	6a56286dea4bd50a
+Grainy airbrush/pencil/line/sel	portable	6617d3e4d883c08a
+Grainy airbrush/pencil/line/lock	portable	bcedc6b6ee9125e1
+Grainy airbrush/pencil/tap/clear	portable	38130ec9e9ade863
+Grainy airbrush/pencil/tap/grey	portable	17869be3377e7d63
+Grainy airbrush/pencil/tap/stripes	portable	846d405f39f458c2
+Grainy airbrush/pencil/tap/sel	portable	17869be3377e7d63
+Grainy airbrush/pencil/tap/lock	portable	369a5f253d5b2e75
+Grainy airbrush/pencil/tilt/clear	portable	19a751e5d1f30694
+Grainy airbrush/pencil/tilt/grey	portable	d8042d8a4ab4de60
+Grainy airbrush/pencil/tilt/stripes	portable	fc52ce909602ce14
+Grainy airbrush/pencil/tilt/sel	portable	94d9b6d48b00c5ed
+Grainy airbrush/pencil/tilt/lock	portable	4ea280c57f752f35
+Grainy airbrush/eraser/s/ink	portable	cdd9404ad0435f3c
+Grainy airbrush/eraser/s/sel	portable	49a53bde644bc01a
+Grainy airbrush/eraser/s/lock	portable	7fa24a236290a325
+Grainy airbrush/pencil/line+s/reused-workspace	portable	7c243caab83872d7
