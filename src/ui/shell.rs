@@ -18,7 +18,7 @@ use crate::io::frame_order::shot_len;
 use crate::io::{composite, png_import, png_save, project_file};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, ONION_RANGE, PIN_TINTS};
 use crate::tools::fill;
-use crate::tools::select_mask::{self, SelOp, SelShape};
+use crate::tools::select_mask::{SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, ShapeKind, Smoothing, StrokeCap};
 use crate::ui::theme::Scheme;
@@ -177,6 +177,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 // stops meaning "delete the drawings selected in the tracks".
                 state.track_sel.clear();
                 state.drag_inert = false;
+                state.drag_began();
                 // A press on the transform box takes it, whatever bare
                 // modifiers are held: there Shift keeps proportions and Alt
                 // scales from the centre, not pan and rotate, and a selection
@@ -1135,16 +1136,13 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                     shape_kind_toggle(ui, state, ShapeKind::Rect, ic::RECTANGLE, "Rectangle");
                     shape_kind_toggle(ui, state, ShapeKind::Ellipse, ic::CIRCLE, "Ellipse");
                 });
-                if state.shapes_on_grid() {
+                let hint = if state.shapes_on_grid() {
                     let n = state.perspective.active + 1;
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "On perspective grid {n} — Shift once dragging: square / circle"
-                        ))
-                        .color(theme::text_muted())
-                        .size(11.0),
-                    );
-                }
+                    format!("On perspective grid {n} — Shift once dragging: square / circle")
+                } else {
+                    "Shift once dragging: lines in 15° steps, square / circle".to_string()
+                };
+                ui.label(egui::RichText::new(hint).color(theme::text_muted()).size(11.0));
                 brush_size_lock(state, ui);
                 let label = if state.lock_brush_to_view {
                     "Thickness (screen px)"
@@ -4551,6 +4549,14 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
                      slots set to Step frames or Jump drawings (Mouse wheel, below).\n\n\
                      Off (default): wheel down advances.  On: wheel up advances.",
                 );
+            ui.checkbox(&mut state.lock_screen_axes, "Shift lock follows the screen")
+                .on_hover_text(
+                    "Shift pressed partway through a drag holds it straight: a move \
+                     or a stroke to the horizontal or vertical, a shape's line to \
+                     15° steps.\n\n\
+                     Off (default): straight on the canvas, however the view is \
+                     turned.  On: straight on the screen.",
+                );
             ui.add_space(4.0);
             // Pen barrel buttons arrive as these same two buttons.
             egui::Grid::new("button_drags")
@@ -4985,8 +4991,9 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(
             "Drag a corner to reshape, a vanishing point to re-aim, the horizon to raise \
-             the eye level or its round knobs to tilt it, just outside a corner to rotate \
-             (hold Shift once dragging for 15° steps), inside to move.",
+             the eye level or its round knobs to tilt it, just outside a corner to rotate, \
+             inside to move. Hold Shift once dragging: turns go in 15° steps, the rest \
+             straight across or down.",
         )
         .color(theme::text_muted())
         .size(11.0),
@@ -5698,7 +5705,8 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(format!(
             "Every stroke and fill stays inside the selection. Drag inside it to \
-             move the pixels, or nudge with the arrow keys; Enter puts them down. \
+             move the pixels (Shift once dragging: straight across or down), or \
+             nudge with the arrow keys; Enter puts them down. \
              On a handle, Shift keeps proportions and Alt scales from the centre. \
              {del} erases inside it - {cut} / {copy} / {paste} move it between \
              frames and layers.",
@@ -6284,10 +6292,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
     match &state.sel_gesture {
         Some(SelGesture::Drag { shape, start, end, .. }) => {
-            let path = match shape {
-                SelShape::Ellipse => select_mask::ellipse_path(*start, *end),
-                _ => select_mask::rect_path(*start, *end),
-            };
+            let path = state.sel_drag_path(*shape, *start, *end);
             let path: Vec<egui::Pos2> = path.iter().map(|&(x, y)| xf.doc_to_screen(x, y)).collect();
             gesture_path(&painter, &path, true);
         }
@@ -7665,9 +7670,10 @@ fn canvas_to_doc_mapping(state: &AppState, rect: Rect) -> impl Fn(egui::Pos2) ->
     move |pos: egui::Pos2| -> (f32, f32) { xf.screen_to_doc(pos) }
 }
 
-/// A stroke point in document space, passed through perspective snap.
+/// A stroke point in document space, passed through a Shift axis lock or
+/// perspective snap.
 fn snapped(state: &mut AppState, doc: (f32, f32)) -> (f32, f32) {
-    let [x, y] = state.snap_doc([doc.0, doc.1]);
+    let [x, y] = state.stroke_point_doc([doc.0, doc.1]);
     (x, y)
 }
 
@@ -9190,6 +9196,36 @@ mod perspective_tests {
         g.extend = true;
         g.horizon = true;
         state
+    }
+
+    /// A Shift lock on the screen's axes: its horizontal shows level on
+    /// screen under every turn and mirror of the view, and through a rolled
+    /// camera.
+    #[test]
+    fn a_screen_lock_is_level_on_screen() {
+        let mut state = AppState::for_test();
+        state.lock_screen_axes = true;
+        let level = |state: &AppState, what: &str| {
+            let a = state.lock_basis_doc();
+            let xf = Xform::new(state, SCREEN);
+            let p = xf.doc_to_screen(300.0, 200.0);
+            let q = xf.doc_to_screen(300.0 + 100.0 * a.cos(), 200.0 + 100.0 * a.sin());
+            assert!((q.y - p.y).abs() < 1e-3 && (q.x - p.x).abs() > 1.0, "{what}: {p:?} -> {q:?}");
+        };
+        for rot in [0.0f32, 0.6, -2.2] {
+            for (fx, fy) in [(false, false), (true, false), (false, true), (true, true)] {
+                state.view.rotation = rot;
+                state.view.flip_x = fx;
+                state.view.flip_y = fy;
+                level(&state, &format!("turned {rot}, flipped {fx} {fy}"));
+            }
+        }
+        state.view.rotation = 0.0;
+        state.project.camera.rot = 0.5;
+        state.camera_look_through = true;
+        level(&state, "through the camera");
+        state.lock_screen_axes = false;
+        assert_eq!(state.lock_basis_doc(), 0.0, "the canvas's own, however it shows");
     }
 
     #[test]
@@ -13362,5 +13398,92 @@ mod canvas_gpu_tests {
             _ => false,
         });
         assert!(as_mesh && !as_callback);
+    }
+}
+
+#[cfg(test)]
+mod axis_lock_tests {
+    use super::*;
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
+
+    /// One frame, reading the modifiers first as the app's update does.
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            modifiers,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            state.read_modifiers(ctx.input(|i| i.modifiers));
+            draw(state, ctx);
+        });
+    }
+
+    fn button(pos: Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        }
+    }
+
+    fn alpha_at_doc(state: &AppState, doc: (f32, f32)) -> u8 {
+        let Some(id) = state.project.resolved_current() else {
+            return 0;
+        };
+        let c = state.project.cell(id).unwrap();
+        let (x, y) = state.doc_to_active_cell(doc);
+        let (x, y) = (x.round() as u32, y.round() as u32);
+        c.pixels()[((y * c.width + x) * 4 + 3) as usize]
+    }
+
+    /// Shift held as the press lands is still the pan hold; Shift pressed
+    /// once the line is under way holds it level.
+    #[test]
+    fn shift_after_the_press_holds_a_line_and_at_the_press_still_pans() {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = ShapeKind::Line;
+        state.brush.radius = 3.0;
+        let ctx = egui::Context::default();
+        let (none, shift) = (egui::Modifiers::NONE, egui::Modifiers::SHIFT);
+        frame(&ctx, &mut state, vec![], none);
+        // A few degrees off level: the nearest 15° step is level itself.
+        let (from, to) = (pos2(500.0, 400.0), pos2(700.0, 415.0));
+
+        let pan = state.view.pan;
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true, shift)], shift);
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 4.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)], shift);
+        }
+        frame(&ctx, &mut state, vec![button(to, false, shift)], shift);
+        frame(&ctx, &mut state, vec![], none);
+        assert_ne!(state.view.pan, pan, "Shift at the press pans");
+        let blank = state.project.resolved_current().map_or(true, |id| {
+            state.project.cell(id).unwrap().pixels().chunks(4).all(|p| p[3] == 0)
+        });
+        assert!(blank, "and draws nothing");
+
+        let xf = Xform::new(&state, state.canvas_rect);
+        let (a, b) = (xf.screen_to_doc(from), xf.screen_to_doc(to));
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true, none)], none);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from + vec2(20.0, 0.0))], none);
+        assert!(state.shape_drag.is_some(), "a line under way");
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 4.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)], shift);
+        }
+        frame(&ctx, &mut state, vec![button(to, false, shift)], shift);
+        frame(&ctx, &mut state, vec![], none);
+        let mid = (a.0 + b.0) * 0.5;
+        assert!(alpha_at_doc(&state, (mid, a.1)) > 200, "level through the press");
+        assert_eq!(alpha_at_doc(&state, (mid, (a.1 + b.1) * 0.5)), 0, "not the slant it was dragged");
     }
 }

@@ -211,10 +211,22 @@ fn drag_target(state: &AppState, g: &Geo, drag: TrackDrag, p: Pos2, copy: bool) 
             // turning red there. The drawings land back to back from the
             // first one, so only it has to stay on the sheet — and one frame
             // past the end, in the slack, appends them.
-            let dl = (g.layer_on_sheet(p.y) as isize - grab.0 as isize)
+            let mut dl = (g.layer_on_sheet(p.y) as isize - grab.0 as isize)
                 .clamp(-min_l, g.n_layers as isize - 1 - max_l);
-            let df = (g.frame_at(p.x) - grab.1 as isize)
+            let mut df = (g.frame_at(p.x) - grab.1 as isize)
                 .clamp(-min_f, g.frame_count as isize - min_f);
+            // Shift, pressed partway, keeps them on their layers or on their
+            // frames, whichever way the pointer has gone further from the
+            // frame it grabbed.
+            if state.axis_lock_on() {
+                let sideways = (p.x - g.x(grab.1 as f32 + 0.5)).abs();
+                let across = (p.y - (g.row_y(grab.0) + ROW_H * 0.5)).abs();
+                if sideways >= across {
+                    dl = 0;
+                } else {
+                    df = 0;
+                }
+            }
             let moved = copy || dl != 0 || df != 0;
             Some(Target::Body {
                 dl,
@@ -345,6 +357,7 @@ pub fn show(state: &mut AppState, ui: &mut egui::Ui) {
                     }
                 });
                 state.playback.stop();
+                state.drag_began();
             }
         }
     }
@@ -1557,6 +1570,46 @@ mod tests {
         assert_eq!(state.project.panel_rows(), [2, g]);
         drag(&mut state, at(0, 2), at(1, 2), egui::Modifiers::NONE);
         assert_eq!(row(&state.project, 0), before, "no row to drag from");
+    }
+
+    /// Shift pressed partway through a drag that has gone further along than
+    /// across keeps the drawing on its own layer.
+    #[test]
+    fn shift_partway_keeps_a_drag_on_its_layer() {
+        let base = || {
+            let mut p = sheet(4, &[0, 1, 2, 3]);
+            p.add_layer();
+            p
+        };
+        // Layer 0 is the bottom row. Two frames along, and most of a row up.
+        let (from, to) = (at(0, 1), at(2, 0) + vec2(0.0, 6.0));
+        let mut state = AppState::for_test();
+        state.project = base();
+        drag(&mut state, from, to, egui::Modifiers::NONE);
+        assert_eq!(row(&state.project, 1)[2], 1, "free: up onto the top layer");
+
+        let mut state = AppState::for_test();
+        state.project = base();
+        let ctx = egui::Context::default();
+        let none = egui::Modifiers::NONE;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: none,
+        };
+        frame(&ctx, &mut state, vec![], none);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)], none);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from + vec2(12.0, 0.0))], none);
+        assert!(state.track_drag.is_some(), "under way before Shift");
+        state.read_modifiers(egui::Modifiers::SHIFT);
+        for i in 1..=4 {
+            let p = from + (to - from) * (i as f32 / 4.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)], egui::Modifiers::SHIFT);
+        }
+        frame(&ctx, &mut state, vec![button(to, false)], egui::Modifiers::SHIFT);
+        assert_eq!(row(&state.project, 0)[2], 1, "held: along its own layer");
+        assert!(row(&state.project, 1).iter().all(|&m| m == 0), "nothing on the top layer");
     }
 
     #[test]

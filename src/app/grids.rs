@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{AppState, GridDrag, HORIZON_ATTACH_PX, HORIZON_DETACH_PX};
 use crate::doc::camera::Ease;
 use crate::doc::transform::Transform;
+use crate::tools::axis_lock;
 use crate::tools::perspective::{
     self, Follow, GridGrab, GridKind, PerspectiveConfig, PerspectiveGrid, Space, P,
 };
@@ -392,11 +393,28 @@ impl AppState {
     /// grid carries its extra vanishing points along; reshaping it leaves them
     /// be, and those on the horizon ride it wherever it goes. A wall's top
     /// corner sets how tall it stands.
+    ///
+    /// Shift, pressed partway, holds whatever the drag slides — the grid, a
+    /// corner, a vanishing point — to the horizontal or vertical through
+    /// the press, and snaps what it turns to 15° steps.
     pub fn perspective_move(&mut self, p: P) {
         let Some(d) = self.grid_drag else {
             return;
         };
         let s = d.space;
+        let rigid = self.perspective.grids.get(d.grid).is_some_and(|g| g.kind.rigid());
+        let slides = match d.grab {
+            GridGrab::Move | GridGrab::Vp(_) | GridGrab::Extra(_) => true,
+            GridGrab::Corner(_) => !rigid,
+            _ => false,
+        };
+        let snap = self.axis_lock_on();
+        let p = if snap && slides {
+            let (x, y) = axis_lock::lock_hv((d.start[0], d.start[1]), (p[0], p[1]), self.lock_basis_doc());
+            [x, y]
+        } else {
+            p
+        };
         let moved = |from: P| [from[0] + p[0] - d.start[0], from[1] + p[1] - d.start[1]];
         if let Some(link) = self.perspective.grids.get(d.grid).and_then(|g| g.wall) {
             if let (GridGrab::Corner(c @ (0 | 1)), Some(pi)) =
@@ -413,7 +431,6 @@ impl AppState {
             }
             return;
         }
-        let snap = self.shift_held;
         let px = 1.0 / self.view_scale.max(1e-6);
         let Some(g) = self.perspective.grids.get_mut(d.grid) else {
             return;
@@ -434,7 +451,6 @@ impl AppState {
             g.extra_vps[i as usize].on_horizon = on_horizon;
             return;
         }
-        let rigid = g.kind.rigid();
         let Some(c) = perspective::dragged(&d.corners, d.grab, d.start, p, snap, rigid) else {
             return;
         };

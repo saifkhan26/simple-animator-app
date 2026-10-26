@@ -39,6 +39,7 @@ use crate::io::kra::{self, KraDoc};
 use crate::krita_link::{self, KritaLink, Pulled};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep};
 use crate::timeline::playback::Playback;
+use crate::tools::axis_lock;
 use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
 use crate::tools::perspective::{self, GridGrab, PerspectiveConfig};
@@ -253,12 +254,19 @@ struct SnapLock {
     dir: Option<[f32; 2]>,
 }
 
+/// A stroke held to an axis by Shift: the point it is held from, in document
+/// space, and — once the pointer has moved far enough to tell — the angle of
+/// the axis it keeps to.
+#[derive(Clone, Copy)]
+struct StrokeAxis {
+    from: [f32; 2],
+    angle: Option<f32>,
+}
+
 #[derive(Clone, Copy)]
 pub struct SelDrag {
     grab: Grab,
-    /// Where the pointer was, in cell space. A move updates this as it goes,
-    /// because a move accumulates in whole pixels; a scale or rotation leaves
-    /// it at the press.
+    /// Where the pointer pressed, in cell space.
     start: (f32, f32),
     pose: Pose,
 }
@@ -389,6 +397,10 @@ struct UiPrefs {
     /// down advances. A workspace preference — wheel direction is muscle
     /// memory carried from whatever editor the artist came from.
     invert_timeline_scroll: bool,
+    /// Whether Shift partway through a drag holds it to the screen's
+    /// horizontal and vertical rather than the canvas's. Off (default): the
+    /// canvas's, whichever way the view is turned.
+    lock_screen_axes: bool,
     /// What a middle- and a right-button drag do on the canvas. Pen barrel
     /// buttons arrive as those buttons, so this is muscle memory too.
     middle_drag: ButtonDrag,
@@ -536,6 +548,7 @@ impl Default for UiPrefs {
             auto_key_transform: false,
             auto_key_draw: false,
             invert_timeline_scroll: false,
+            lock_screen_axes: false,
             middle_drag: ButtonDrag::Scrub,
             right_drag: ButtonDrag::SwatchPie,
             loop_timeline: true,
@@ -1208,6 +1221,16 @@ pub struct AppState {
     /// packets rather than egui events, so they have no `InputState` of their
     /// own to ask; a selection scale reads this to keep its proportions.
     shift_held: bool,
+    /// Shift was already down when the drag in hand began, and hasn't been
+    /// let go since: it chose the drag (a pan, a selection mode), so it
+    /// doesn't lock it too. See [`Self::axis_lock_on`].
+    shift_stale: bool,
+    /// Where a stroke held to an axis by Shift is held, or `None` while it
+    /// isn't. See [`Self::stroke_point_doc`].
+    stroke_axis: Option<StrokeAxis>,
+    /// The stroke's last point, in document space: where a Shift lock taken
+    /// partway through holds it from.
+    stroke_last_doc: Option<[f32; 2]>,
     /// Alt, likewise: a selection scale about the box centre.
     alt_held: bool,
     /// Perspective grids and their display/snap switches.
@@ -1271,6 +1294,9 @@ pub struct AppState {
     pub frame_step: usize,
     /// Invert the mouse-wheel scrub direction. Off: wheel down advances.
     pub invert_timeline_scroll: bool,
+    /// Shift partway through a drag holds it to the screen's axes, not the
+    /// canvas's. See [`Self::lock_basis_doc`].
+    pub lock_screen_axes: bool,
     /// What a middle-button drag on the canvas does.
     pub middle_drag: ButtonDrag,
     /// What a right-button drag on the canvas does.
@@ -1662,6 +1688,9 @@ impl AppState {
             shape_drag: None,
             fill_drag: None,
             shift_held: false,
+            shift_stale: false,
+            stroke_axis: None,
+            stroke_last_doc: None,
             alt_held: false,
             perspective: {
                 let mut cfg = prefs.perspective.clone();
@@ -1688,6 +1717,7 @@ impl AppState {
             auto_key_draw: prefs.auto_key_draw,
             frame_step: prefs.frame_step,
             invert_timeline_scroll: prefs.invert_timeline_scroll,
+            lock_screen_axes: prefs.lock_screen_axes,
             middle_drag: prefs.middle_drag,
             right_drag: prefs.right_drag,
             button_drag: None,
@@ -3345,10 +3375,16 @@ impl AppState {
         true
     }
 
-    /// The held frame's drag has reached document point `p`.
+    /// The held frame's drag has reached document point `p`. Shift, pressed
+    /// partway through a move, holds it to the horizontal or vertical.
     pub fn camera_frame_move(&mut self, p: (f32, f32)) {
         let Some(d) = self.cam_drag else {
             return;
+        };
+        let p = if d.grab == CamGrab::Move && self.axis_lock_on() {
+            axis_lock::lock_hv(d.from, p, self.lock_basis_doc())
+        } else {
+            p
         };
         self.project.camera = d.start.dragged(d.grab, d.from, p, self.canvas_size());
         self.hold_camera_inside();
@@ -4750,6 +4786,8 @@ impl AppState {
     pub fn pointer_up(&mut self) {
         self.finish_grid_drag();
         self.snap_lock = None;
+        self.stroke_axis = None;
+        self.stroke_last_doc = None;
         // A warp has no stroke to finish, and its snapshot must outlive the
         // pen-up: the session goes on until it lands.
         if self.liquify.is_some() {
@@ -4827,14 +4865,17 @@ impl AppState {
     /// The new values stay in the sliders.
     ///
     /// Expand steps a pixel at a time. The gap climbs a ladder whose rungs
-    /// spread out as it grows, so its whole range fits in a drag.
+    /// spread out as it grows, so its whole range fits in a drag. Shift,
+    /// pressed partway, holds the drag to one of the two, the other going
+    /// back to where it was.
     pub fn fill_drag_to(&mut self, at: egui::Pos2) {
         use crate::input::button_drag::drag_steps;
         use crate::tools::fill::{step_gap, MAX_EXPAND};
-        let (Some(drag), Some(target)) = (&mut self.fill_drag, self.stroke_target) else {
+        let Some(anchor) = self.fill_drag.as_ref().and_then(|d| d.anchor) else {
             return;
         };
-        let Some(anchor) = drag.anchor else {
+        let at = self.lock_screen_drag(anchor, at);
+        let (Some(drag), Some(target)) = (&mut self.fill_drag, self.stroke_target) else {
             return;
         };
         let gap = step_gap(drag.base_gap, drag_steps(at.x - anchor.x));
@@ -5459,10 +5500,12 @@ impl AppState {
 
     /// The polyline a shape drag draws, in cell pixels: on its grid when it
     /// has one and the box stays in front of the horizon, flat otherwise.
-    /// Shift, held once the drag is under way, squares it up on the grid.
+    /// Shift, pressed once the drag is under way, squares a box up — on the
+    /// grid, in grid cells — and turns a line to a 15° step.
     /// Preview and pixels both come from here, so they always agree.
     pub fn shape_outline(&self, drag: &ShapeDrag) -> Vec<(f32, f32)> {
         let radius = self.effective_radius();
+        let lock = self.axis_lock_on();
         drag.plane
             .and_then(|plane| {
                 crate::tools::shape::outline_on_plane(
@@ -5470,18 +5513,133 @@ impl AppState {
                     drag.start,
                     drag.end,
                     &plane,
-                    self.shift_held,
+                    lock,
                     radius,
                 )
             })
-            .unwrap_or_else(|| crate::tools::shape::outline(drag.kind, drag.start, drag.end, radius))
+            .unwrap_or_else(|| {
+                let end = match (lock, drag.kind) {
+                    (false, _) => drag.end,
+                    (true, ShapeKind::Line) => axis_lock::snap_dir(
+                        drag.start,
+                        drag.end,
+                        self.lock_basis_cell(),
+                        axis_lock::LINE_STEP,
+                    ),
+                    (true, _) => axis_lock::square(drag.start, drag.end),
+                };
+                crate::tools::shape::outline(drag.kind, drag.start, end, radius)
+            })
     }
 
     /// Start of a stroke at document point `p`. Arms perspective snap when it
     /// is on; the first point itself is never moved.
     pub fn snap_begin(&mut self, p: [f32; 2]) -> [f32; 2] {
         self.snap_lock = self.snapping().then_some(SnapLock { start: p, dir: None });
+        self.stroke_axis = None;
+        self.stroke_last_doc = Some(p);
         p
+    }
+
+    /// Shift is held, and went down after the drag in hand began: hold the
+    /// drag to an axis, a shape's line to a 15° step, a box to a square.
+    /// Shift already down at the press chose the drag instead — a pan, a
+    /// selection mode — and counts only once let go and pressed again.
+    pub fn axis_lock_on(&self) -> bool {
+        self.shift_held && !self.shift_stale
+    }
+
+    /// A drag begins. Shift down now chose it, so locks nothing yet.
+    pub fn drag_began(&mut self) {
+        self.shift_stale = self.shift_held;
+    }
+
+    /// This frame's Shift and Alt. A Shift let go no longer chose anything.
+    pub(crate) fn read_modifiers(&mut self, m: egui::Modifiers) {
+        (self.shift_held, self.alt_held) = (m.shift, m.alt);
+        self.shift_stale &= self.shift_held;
+    }
+
+    /// The angle, in document space, of the horizontal a Shift lock keeps
+    /// to: the canvas's own, or with [`Self::lock_screen_axes`] the screen's,
+    /// brought back through the view's turn and mirror.
+    pub fn lock_basis_doc(&self) -> f32 {
+        if !self.lock_screen_axes {
+            return 0.0;
+        }
+        // As `Xform` draws: mirrored first, then turned.
+        let rot = if self.camera_look_through {
+            -self.look_through_camera().rot
+        } else {
+            self.view.rotation
+        };
+        let sign = |on: bool| if on { -1.0 } else { 1.0 };
+        let (s, c) = rot.sin_cos();
+        (-sign(self.view.flip_y) * s).atan2(sign(self.view.flip_x) * c)
+    }
+
+    /// [`Self::lock_basis_doc`] in the active drawing's own pixels, which its
+    /// layer may turn.
+    pub fn lock_basis_cell(&self) -> f32 {
+        let a = self.lock_basis_doc();
+        let o = self.doc_to_active_cell((0.0, 0.0));
+        let d = self.doc_to_active_cell((100.0 * a.cos(), 100.0 * a.sin()));
+        (d.1 - o.1).atan2(d.0 - o.0)
+    }
+
+    /// Screen point `at` of a drag that went down at `anchor`, held to the
+    /// screen's horizontal or vertical while Shift locks it. For the drags
+    /// whose two directions set two different things (a Fill press's gap and
+    /// expand): those are the screen's, whichever way the view is turned.
+    pub fn lock_screen_drag(&self, anchor: egui::Pos2, at: egui::Pos2) -> egui::Pos2 {
+        if !self.axis_lock_on() {
+            return at;
+        }
+        let (x, y) = axis_lock::lock_hv((anchor.x, anchor.y), (at.x, at.y), 0.0);
+        egui::pos2(x, y)
+    }
+
+    /// A stroke point at document point `p`: held to an axis while Shift
+    /// locks (see [`Self::axis_lock_on`]), else snapped to the perspective
+    /// grid.
+    ///
+    /// The lock holds from the stroke's last point when Shift went down, so
+    /// what is drawn stays joined, and picks its axis once, when the pointer
+    /// has gone far enough to show which — re-picking per point would
+    /// zigzag a hand heading near the diagonal. Let go, the stroke follows
+    /// the pen again, and grid snap picks afresh from there. A shape passes
+    /// its points through: its outline makes its own (see
+    /// [`Self::shape_outline`]).
+    pub fn stroke_point_doc(&mut self, p: [f32; 2]) -> [f32; 2] {
+        const DECIDE_PX: f32 = 6.0;
+        let out = if !self.axis_lock_on() {
+            if self.stroke_axis.take().is_some() {
+                if let (Some(lock), Some(at)) = (self.snap_lock.as_mut(), self.stroke_last_doc) {
+                    *lock = SnapLock { start: at, dir: None };
+                }
+            }
+            self.snap_doc(p)
+        } else if self.tool == ActiveTool::Shape {
+            p
+        } else {
+            let from = self.stroke_last_doc.unwrap_or(p);
+            let mut lock = self.stroke_axis.unwrap_or(StrokeAxis { from, angle: None });
+            let from = (lock.from[0], lock.from[1]);
+            if lock.angle.is_none() {
+                let far = (p[0] - from.0).hypot(p[1] - from.1) * self.view_scale >= DECIDE_PX;
+                lock.angle = far.then(|| axis_lock::hv_angle(from, (p[0], p[1]), self.lock_basis_doc()));
+            }
+            self.stroke_axis = Some(lock);
+            match lock.angle {
+                Some(a) => {
+                    let (x, y) = axis_lock::onto(from, a, (p[0], p[1]));
+                    [x, y]
+                }
+                None => lock.from,
+            }
+        };
+        self.stroke_last_doc = Some(out);
+        out
     }
 
     /// A stroke point at document point `p`, snapped to the active grid.
@@ -6116,6 +6274,7 @@ impl AppState {
             Action::PasteImage => self.paste_image_as_background(),
             Action::TogglePanels => self.show_panels = !self.show_panels,
             Action::ToggleMiniTimeline => self.show_mini_timeline = !self.show_mini_timeline,
+            Action::ToggleLockAxes => self.lock_screen_axes = !self.lock_screen_axes,
             Action::ZoomReset => self.view.zoom = 1.0,
             Action::PanReset => self.view.pan = egui::Vec2::ZERO,
             Action::RotateReset => {
@@ -6586,6 +6745,7 @@ impl eframe::App for AppState {
                 auto_key_transform: self.auto_key_transform,
                 auto_key_draw: self.auto_key_draw,
                 invert_timeline_scroll: self.invert_timeline_scroll,
+                lock_screen_axes: self.lock_screen_axes,
                 middle_drag: self.middle_drag,
                 right_drag: self.right_drag,
                 loop_timeline: self.loop_timeline,
@@ -6704,7 +6864,7 @@ impl eframe::App for AppState {
         }
         // Sampled here rather than in the pointer handlers: those run off
         // tablet packets and never see an `InputState`.
-        (self.shift_held, self.alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
+        self.read_modifiers(ctx.input(|i| i.modifiers));
 
         let tab_focus = self.handle_keys(ctx);
 
@@ -9497,6 +9657,127 @@ mod tests {
         assert_eq!(state.snap_doc([190.0, 165.0]), [190.0, 165.0]);
     }
 
+    // --- Shift partway through a drag ---
+
+    /// The Shape tool drawing flat: no grid to lie on.
+    fn flat_shapes(kind: ShapeKind) -> AppState {
+        let mut state = AppState::for_test();
+        state.view_scale = 1.0;
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = kind;
+        state.brush.radius = 3.0;
+        state
+    }
+
+    fn shift(down: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            shift: down,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn shift_down_at_the_press_locks_only_once_pressed_again() {
+        let mut state = AppState::for_test();
+        state.read_modifiers(shift(true));
+        state.drag_began();
+        assert!(!state.axis_lock_on(), "it chose the drag: a pan, a selection mode");
+        state.read_modifiers(shift(true));
+        assert!(!state.axis_lock_on(), "still the same press of it");
+        state.read_modifiers(shift(false));
+        state.read_modifiers(shift(true));
+        assert!(state.axis_lock_on(), "pressed again partway");
+        // Up at the press, down partway: locks at once.
+        state.read_modifiers(shift(false));
+        state.drag_began();
+        state.read_modifiers(shift(true));
+        assert!(state.axis_lock_on());
+    }
+
+    #[test]
+    fn shift_partway_turns_a_shape_line_to_a_fifteen_degree_step() {
+        let mut state = flat_shapes(ShapeKind::Line);
+        let a = 50f32.to_radians();
+        let end = (100.0 + 120.0 * a.cos(), 100.0 + 120.0 * a.sin());
+        state.pointer_down(state.make_sample(100.0, 100.0, 0.0));
+        state.pointer_move(state.make_sample(end.0, end.1, 0.1));
+        let angle = |o: &[(f32, f32)]| (o[1].1 - o[0].1).atan2(o[1].0 - o[0].0).to_degrees();
+        let drag = state.shape_drag.unwrap();
+        assert!((angle(&state.shape_outline(&drag)) - 50.0).abs() < 1e-3, "free");
+        state.read_modifiers(shift(true));
+        assert!((angle(&state.shape_outline(&drag)) - 45.0).abs() < 1e-3, "45°, not 50°");
+        state.pointer_up();
+        let on = 80.0 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!(alpha(&state, (100.0 + on, 100.0 + on)) > 200, "drawn down the diagonal");
+        assert_eq!(alpha(&state, (100.0 + 80.0 * a.cos(), 100.0 + 80.0 * a.sin())), 0);
+    }
+
+    /// A layer turned on the canvas: the line stays level on the canvas, or
+    /// on the screen over a turned view, as asked.
+    #[test]
+    fn a_held_line_is_level_on_the_canvas_or_the_screen() {
+        let mut state = flat_shapes(ShapeKind::Line);
+        state.project.layers[0].transform.rot = 20f32.to_radians();
+        state.view.rotation = 35f32.to_radians();
+        for (screen, want) in [(false, 0.0f32), (true, -35.0)] {
+            state.lock_screen_axes = screen;
+            let a = state.lock_basis_doc().to_degrees();
+            assert!((a - want).abs() < 1e-3, "basis {a} for screen={screen}");
+            // In the layer's pixels, the canvas's horizontal is turned back
+            // by the layer's 20°.
+            let c = state.lock_basis_cell().to_degrees();
+            assert!((c - (want - 20.0)).abs() < 1e-3, "cell basis {c}");
+        }
+    }
+
+    #[test]
+    fn shift_partway_squares_a_flat_rect() {
+        let mut state = flat_shapes(ShapeKind::Rect);
+        state.pointer_down(state.make_sample(100.0, 100.0, 0.0));
+        state.pointer_move(state.make_sample(200.0, 140.0, 0.1));
+        state.read_modifiers(shift(true));
+        state.pointer_up();
+        assert!(alpha(&state, (200.0, 190.0)) > 200, "the right side runs on down");
+        assert!(alpha(&state, (150.0, 200.0)) > 200, "to a bottom as far as it is wide");
+        assert_eq!(alpha(&state, (150.0, 140.0)), 0, "not where the drag left it");
+    }
+
+    #[test]
+    fn shift_partway_holds_a_stroke_to_an_axis_from_where_it_was() {
+        let mut state = AppState::for_test();
+        state.view_scale = 1.0;
+        state.dispatch(Action::ToolInk);
+        state.snap_begin([100.0, 100.0]);
+        assert_eq!(state.stroke_point_doc([120.0, 110.0]), [120.0, 110.0], "free");
+        state.read_modifiers(shift(true));
+        assert_eq!(state.stroke_point_doc([122.0, 112.0]), [120.0, 110.0], "still, till it shows a way");
+        let p = state.stroke_point_doc([125.0, 140.0]);
+        assert!(near(p, [120.0, 140.0]), "down from where Shift went down: {p:?}");
+        let p = state.stroke_point_doc([160.0, 150.0]);
+        assert!(near(p, [120.0, 150.0]), "and kept to, heading across too: {p:?}");
+        state.read_modifiers(shift(false));
+        assert_eq!(state.stroke_point_doc([160.0, 150.0]), [160.0, 150.0], "free again");
+        // Pressed again: a new hold, from where the stroke is now.
+        state.read_modifiers(shift(true));
+        state.stroke_point_doc([200.0, 152.0]);
+        let p = state.stroke_point_doc([230.0, 155.0]);
+        assert!(near(p, [230.0, 150.0]), "across this time: {p:?}");
+    }
+
+    #[test]
+    fn shift_partway_holds_a_grid_move_to_an_axis() {
+        let mut state = perspective_state();
+        state.perspective_down([150.0, 150.0]);
+        state.perspective_move([170.0, 156.0]);
+        assert!(near(doc_corners(&state, 0)[0], [120.0, 106.0]), "free");
+        state.read_modifiers(shift(true));
+        state.perspective_move([190.0, 158.0]);
+        assert!(near(doc_corners(&state, 0)[0], [140.0, 100.0]), "held across");
+        state.perspective_move([153.0, 190.0]);
+        assert!(near(doc_corners(&state, 0)[0], [100.0, 140.0]), "held down");
+        state.pointer_up();
+    }
+
     #[test]
     fn next_grid_cycles_the_visible_grids_and_wraps() {
         let mut state = AppState::for_test();
@@ -10769,6 +11050,18 @@ mod camera_rig_tests {
         assert_eq!(st.history.undo_len(), 1);
         st.undo();
         assert!(st.project.camera.is_identity());
+    }
+
+    #[test]
+    fn shift_partway_holds_a_camera_move_to_an_axis() {
+        let mut st = framed();
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((650.0, 320.0));
+        st.read_modifiers(egui::Modifiers::SHIFT);
+        st.camera_frame_move((700.0, 330.0));
+        st.camera_frame_up();
+        let cam = st.project.camera;
+        assert_eq!((cam.tx, cam.ty), (100.0, 0.0));
     }
 
     #[test]

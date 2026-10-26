@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use super::{AppState, SelDrag, SelTint};
 use crate::doc::layer::CellId;
+use crate::tools::axis_lock;
 use crate::tools::fill::{self, Grain};
 use crate::tools::lasso::{self, Mask};
 use crate::tools::select_mask::{self, SelOp, SelShape, SelectionMask};
@@ -387,10 +388,7 @@ impl AppState {
                     }
                     return;
                 }
-                let path = match shape {
-                    SelShape::Ellipse => select_mask::ellipse_path(start, end),
-                    _ => select_mask::rect_path(start, end),
-                };
+                let path = self.sel_drag_path(shape, start, end);
                 let m = SelectionMask::from_path(&path, self.selection_universe());
                 self.apply_op(op, m);
             }
@@ -403,6 +401,21 @@ impl AppState {
                 }
             }
             None => {}
+        }
+    }
+
+    /// The outline a rectangle or ellipse selection dragged from `start` to
+    /// `end` makes, in document space — a square or circle while Shift
+    /// locks. What the drag shows and what it lands are both this.
+    pub fn sel_drag_path(&self, shape: SelShape, start: (f32, f32), end: (f32, f32)) -> Vec<(f32, f32)> {
+        let end = if self.axis_lock_on() {
+            axis_lock::square(start, end)
+        } else {
+            end
+        };
+        match shape {
+            SelShape::Ellipse => select_mask::ellipse_path(start, end),
+            _ => select_mask::rect_path(start, end),
         }
     }
 
@@ -580,6 +593,8 @@ impl AppState {
             return;
         };
         if let Some(anchor) = drag.anchor {
+            // Shift, pressed partway, keeps to one of the two.
+            let at = self.lock_screen_drag(anchor, at);
             let tolerance = wand::step_tolerance(drag.base_tolerance, drag_steps(at.x - anchor.x));
             // Screen y grows downward, and up means more.
             let gap = fill::step_gap(drag.base_gap, drag_steps(anchor.y - at.y));
@@ -1149,8 +1164,8 @@ impl AppState {
         true
     }
 
-    /// Nudge the float by whole pixels (arrow keys, and the plain drag). Stays
-    /// integral, so a move alone never reaches the resampler.
+    /// Nudge the float by whole pixels (arrow keys). Stays integral, so a
+    /// move alone never reaches the resampler.
     pub fn nudge_selection(&mut self, dx: i32, dy: i32) {
         let Some(sel) = self.selection.as_mut() else {
             return;
@@ -1162,24 +1177,29 @@ impl AppState {
 
     /// Apply a transform-box drag to the float.
     ///
-    /// A move accumulates in whole pixels, exactly as it always has — the drag
-    /// anchor walks with the pointer and sub-pixel remainders are dropped, so
-    /// dragging a selection around is still lossless. A scale or rotation is
-    /// re-solved from the pose recorded at the press, so it depends only on
-    /// where the pointer is now.
+    /// Every drag is re-solved from the pose recorded at the press, so it
+    /// depends only on where the pointer is now. A move goes in whole pixels,
+    /// so dragging a selection around is still lossless, and Shift pressed
+    /// partway holds it to the horizontal or vertical through the press.
     pub(super) fn drag_selection(&mut self, drag: SelDrag, x: f32, y: f32) {
         if let Grab::Move = drag.grab {
-            let (dx, dy) = (
-                (x - drag.start.0).round() as i32,
-                (y - drag.start.1).round() as i32,
+            let to = if self.axis_lock_on() {
+                axis_lock::lock_hv(drag.start, (x, y), self.lock_basis_cell())
+            } else {
+                (x, y)
+            };
+            let offset = (
+                drag.pose.offset.0 + (to.0 - drag.start.0).round(),
+                drag.pose.offset.1 + (to.1 - drag.start.1).round(),
             );
-            if dx == 0 && dy == 0 {
+            let Some(sel) = self.selection.as_mut() else {
+                return;
+            };
+            if offset == sel.pose.offset {
                 return;
             }
-            if let Some(d) = self.sel_drag.as_mut() {
-                d.start = (x, y);
-            }
-            self.nudge_selection(dx, dy);
+            sel.pose.offset = offset;
+            self.touch_selection();
             return;
         }
         let mods = selection::DragMods {
@@ -1447,6 +1467,55 @@ mod tests {
         assert_eq!(px(&st, 105, 120), [200, 0, 0, 255]);
         assert_eq!(px(&st, 165, 120)[3], 0);
         assert_eq!(at(&st, 95, 120), 255);
+    }
+
+    /// Shift pressed partway through a move holds the float to the line
+    /// through the press, whichever way it has gone further; let go, it
+    /// follows the pointer again. Every step stays in whole pixels.
+    #[test]
+    fn shift_partway_holds_a_move_to_an_axis() {
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), [200, 0, 0, 255]);
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        st.select_down((120.0, 120.0), None);
+        let offset = |st: &AppState| st.selection.as_ref().unwrap().pose.offset;
+        st.select_move((130.4, 124.2));
+        assert_eq!(offset(&st), (10.0, 4.0), "free");
+        st.read_modifiers(egui::Modifiers::SHIFT);
+        st.select_move((150.0, 127.0));
+        assert_eq!(offset(&st), (30.0, 0.0), "held across");
+        st.select_move((126.0, 170.0));
+        assert_eq!(offset(&st), (0.0, 50.0), "held down");
+        st.read_modifiers(egui::Modifiers::NONE);
+        st.select_move((131.0, 170.0));
+        assert_eq!(offset(&st), (11.0, 50.0), "free again");
+        st.select_up();
+        st.land_float();
+        assert_eq!(px(&st, 125, 175), [200, 0, 0, 255]);
+    }
+
+    #[test]
+    fn shift_partway_squares_a_rectangle_selection() {
+        let mut st = lasso();
+        st.select_down((100.0, 100.0), None);
+        st.select_move((200.0, 140.0));
+        st.read_modifiers(egui::Modifiers::SHIFT);
+        st.select_move((200.0, 140.0));
+        st.select_up();
+        assert_eq!(at(&st, 150, 190), 255, "as tall as it is wide");
+        assert_eq!(at(&st, 150, 210), 0);
+    }
+
+    /// A selection mode held as the drag starts has Shift in it: that Shift
+    /// chose the mode, so the box isn't squared.
+    #[test]
+    fn a_held_mode_with_shift_in_it_doesnt_square() {
+        let mut st = lasso();
+        st.read_modifiers(egui::Modifiers::SHIFT | egui::Modifiers::CTRL);
+        st.drag_began();
+        drag(&mut st, (100.0, 100.0), (200.0, 140.0), Some(SelOp::Add));
+        assert_eq!(at(&st, 150, 120), 255);
+        assert_eq!(at(&st, 150, 170), 0, "not squared");
     }
 
     /// Once an edit lands, the stroke snapshot either is the cell it names,

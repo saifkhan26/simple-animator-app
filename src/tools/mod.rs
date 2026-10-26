@@ -1,5 +1,6 @@
 //! Drawing tools — pencil, ink, eraser, fill.
 
+pub mod axis_lock;
 pub mod dab;
 pub mod fill;
 #[cfg(test)]

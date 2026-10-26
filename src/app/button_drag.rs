@@ -112,6 +112,8 @@ impl AppState {
                 self.project.goto(frame);
             }
             ButtonDrag::ToolAdjust => {
+                // Shift, pressed partway, sets just one of the two.
+                let at = self.lock_screen_drag(d.anchor, at);
                 let (dx, up) = (at.x - d.anchor.x, d.anchor.y - at.y);
                 self.adjust_tool(&d, dx, up);
             }

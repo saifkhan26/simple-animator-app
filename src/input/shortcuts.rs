@@ -94,6 +94,9 @@ pub enum Action {
     ToggleCheckerBg,
     TogglePanels,
     ToggleMiniTimeline,
+    /// Swap what Shift holds a drag to between the canvas's axes and the
+    /// screen's. Unbound by default.
+    ToggleLockAxes,
     ZoomReset,
     PanReset,
     RotateReset,
@@ -221,6 +224,7 @@ impl Action {
         Action::PasteImage,
         Action::TogglePanels,
         Action::ToggleMiniTimeline,
+        Action::ToggleLockAxes,
         Action::ZoomReset,
         Action::PanReset,
         Action::RotateReset,
@@ -336,6 +340,7 @@ impl Action {
             Action::ToggleCheckerBg => "Toggle checker backdrop (retired)",
             Action::TogglePanels => "Toggle floating panels",
             Action::ToggleMiniTimeline => "Toggle mini timeline",
+            Action::ToggleLockAxes => "Shift lock: canvas / screen axes",
             Action::ZoomReset => "Reset zoom",
             Action::PanReset => "Reset pan",
             Action::RotateReset => "Reset rotation",
