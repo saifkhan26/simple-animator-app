@@ -8543,9 +8543,10 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             }
             ui.close_menu();
         }
+        let copy_label = format!("Copy frame to clipboard    {}", combo_text(state, Action::CopyFrame));
         if ui
-            .button(theme::icon_text(ic::COPY, "Copy frame to clipboard"))
-            .on_hover_text("The current frame as Save PNG writes it, to paste into another app")
+            .button(theme::icon_text(ic::COPY, &copy_label))
+            .on_hover_text("The current frame as the camera shows it, to paste into another app")
             .clicked()
         {
             state.copy_frame();

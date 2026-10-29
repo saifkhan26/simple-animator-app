@@ -2855,11 +2855,11 @@ impl AppState {
         });
     }
 
-    /// File → Copy frame to clipboard: the current frame as Save PNG writes it,
-    /// on the system clipboard for another app to paste.
+    /// File → Copy frame to clipboard: the current frame as the screen shows
+    /// it, on the system clipboard for another app to paste.
     pub fn copy_frame(&mut self) {
         let frame = self.project.current_frame;
-        let flat = crate::io::composite::flatten_frame(&self.project, frame);
+        let flat = self.clipboard_frame();
         match crate::io::png_save::copy_to_clipboard(&flat) {
             Ok(()) => {
                 self.save_toast = Some((format!("Copied frame {}", frame + 1), Instant::now() + Self::TOAST_TTL));
@@ -2869,6 +2869,16 @@ impl AppState {
                 self.krita_notice(format!("Couldn't copy the frame: {e:#}"), true);
             }
         }
+    }
+
+    /// What Copy frame puts on the clipboard: the current frame through the
+    /// camera its guide is drawn with — a nudge not yet keyed, or where a
+    /// move stretched over loops has got to while it plays. Save PNG and the
+    /// exports keep to the keyed camera.
+    fn clipboard_frame(&self) -> Canvas {
+        let frame = self.project.current_frame;
+        let cam = self.display_camera(frame);
+        crate::io::composite::flatten_through(&self.project, frame, Some(cam))
     }
 
     /// File → Import video…: pick a file, then probe its frame count / fps on a
@@ -6481,6 +6491,7 @@ impl AppState {
                 Ok(None) => {}
                 Err(e) => log::error!("Open project failed: {e:#}"),
             },
+            Action::CopyFrame => self.copy_frame(),
             // Held, not pressed: read by the canvas input code as a drag
             // starts, never dispatched.
             Action::CanvasZoom
@@ -11552,6 +11563,54 @@ mod camera_rig_tests {
         let (frames, _) = play(&mut st, 6);
         assert_eq!(frames, [1, 2, 3, 4, 0, 1]);
         assert!(st.shot_cam.is_none());
+    }
+
+    /// A bar down the drawing at x 40..44, for a pan to move.
+    fn mark(st: &mut AppState) {
+        let id = st.project.layers[0].resolve(0).unwrap();
+        let c = st.project.cell_mut(id).unwrap();
+        let (w, h) = (c.width, c.height);
+        let px = c.pixels_mut();
+        for y in 0..h {
+            for x in 40..44 {
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+
+    /// Copy frame copies the camera as it shows: nudged off its keys and not
+    /// keyed, the nudge — where Save PNG and the exports keep to the keys.
+    #[test]
+    fn copy_frame_takes_an_unkeyed_nudge_of_the_camera() {
+        use crate::io::composite::{flatten_frame, flatten_through};
+        let mut st = panning();
+        mark(&mut st);
+        st.sync_camera_buffer();
+        assert!(st.clipboard_frame().pixels() == flatten_frame(&st.project, 0).pixels(), "on its key");
+        st.project.camera.tx = 25.0;
+        let copied = st.clipboard_frame();
+        let shown = flatten_through(&st.project, 0, Some(st.project.camera));
+        assert!(copied.pixels() == shown.pixels());
+        assert!(copied.pixels() != flatten_frame(&st.project, 0).pixels(), "not the keyed camera");
+    }
+
+    /// Mid-play through a move stretched over loops, Copy frame takes the
+    /// camera where the move has got to, not the one keyed on the drawing
+    /// showing.
+    #[test]
+    fn copy_frame_mid_stretched_move_takes_where_the_move_has_got() {
+        use crate::io::composite::{flatten_frame, flatten_through};
+        let mut st = panning();
+        mark(&mut st);
+        st.project.camera_opts.loops = 3;
+        let (_, cams) = play(&mut st, 9);
+        let f = st.project.current_frame;
+        assert!((cams[8] - st.project.resolve_camera(f).tx).abs() > 1.0, "{cams:?}");
+        let shown = flatten_through(&st.project, f, Some(st.display_camera(f)));
+        let copied = st.clipboard_frame();
+        assert!(copied.pixels() == shown.pixels());
+        assert!(copied.pixels() != flatten_frame(&st.project, f).pixels(), "not the frame's own camera");
     }
 
     #[test]

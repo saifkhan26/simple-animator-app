@@ -141,6 +141,8 @@ pub enum Action {
     SaveProject,
     SaveProjectAs,
     OpenProject,
+    /// File → Copy frame to clipboard. Unbound by default.
+    CopyFrame,
     // Canvas drag gestures: held as a canvas drag starts — a key, bare
     // modifiers, or both. The names predate the key option and stay, so old
     // shortcut files keep loading.
@@ -264,6 +266,7 @@ impl Action {
         Action::SaveProject,
         Action::SaveProjectAs,
         Action::OpenProject,
+        Action::CopyFrame,
         Action::CanvasZoom,
         Action::CanvasPan,
         Action::CanvasRotate,
@@ -382,6 +385,7 @@ impl Action {
             Action::SaveProject => "Save project",
             Action::SaveProjectAs => "Save project as…",
             Action::OpenProject => "Open project",
+            Action::CopyFrame => "Copy frame to clipboard",
             Action::CanvasZoom => "Canvas: zoom (drag)",
             Action::CanvasPan => "Canvas: pan (drag)",
             Action::CanvasRotate => "Canvas: rotate (drag)",
@@ -1193,6 +1197,8 @@ impl Default for ShortcutMap {
         b.insert(Action::SaveProject, KeyCombo::ctrl(K::S));
         b.insert(Action::SaveProjectAs, KeyCombo::ctrl_shift(K::S));
         b.insert(Action::OpenProject, KeyCombo::ctrl(K::O));
+        // CopyFrame starts unbound: Ctrl+C is the selection's, and the File
+        // menu has it.
         // Canvas navigation gestures (held during a canvas drag).
         b.insert(Action::CanvasZoom, KeyCombo::modifier_only(true, false, false));
         b.insert(Action::CanvasPan, KeyCombo::modifier_only(false, true, false));
