@@ -1436,6 +1436,17 @@ fn context_menu(state: &mut AppState, ui: &mut egui::Ui) {
         format!("{n} frames")
     };
     if ui
+        .add(
+            egui::Button::new(format!("Insert {frames} before, every layer"))
+                .shortcut_text(combo_text(state, Action::FrameInsertBefore)),
+        )
+        .on_hover_text("Everything from the playhead on slides later, keys too; blank at the start")
+        .clicked()
+    {
+        state.insert_frames_before();
+        ui.close_menu();
+    }
+    if ui
         .button(format!("Insert {frames} on this layer"))
         .on_hover_text("The drawing here holds longer; later ones on this layer slide")
         .clicked()

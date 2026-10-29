@@ -214,6 +214,27 @@ impl Layer {
         }
     }
 
+    /// Keep transform keys on their frames after `n` frames are inserted at
+    /// `at`.
+    pub fn transform_keys_insert_frames(&mut self, at: usize, n: usize) {
+        for k in &mut self.transform_keys {
+            if k.frame >= at {
+                k.frame += n;
+            }
+        }
+    }
+
+    /// Keep transform keys on their frames after `[at, at + n)` is removed.
+    /// A key on a removed frame goes with it.
+    pub fn transform_keys_remove_frames(&mut self, at: usize, n: usize) {
+        self.transform_keys.retain(|k| !(at..at + n).contains(&k.frame));
+        for k in &mut self.transform_keys {
+            if k.frame >= at + n {
+                k.frame -= n;
+            }
+        }
+    }
+
     /// The transform shown on `frame`: the static `transform` when there are no
     /// keys, otherwise the eased interpolation of the keys (held flat before the
     /// first and after the last key). Mirrors `Camera::resolve`.

@@ -5,6 +5,7 @@
 //! A child of `app` so it can work on `AppState`'s private state directly;
 //! split out only because `app.rs` is long enough already.
 
+use super::brush_sizes::{size_with_detents, SIZE_DETENT_PX};
 use super::AppState;
 use crate::doc::project::Project;
 use crate::input::button_drag::{
@@ -186,8 +187,9 @@ impl AppState {
                     self.brush.fill_gap, self.brush.fill_expand
                 )),
                 t if adjusts_brush(t) => Some(format!(
-                    "Size {:.1} · Opacity {:.0}%",
+                    "Size {:.1}{} · Opacity {:.0}%",
                     self.brush.radius,
+                    self.size_note(),
                     self.brush.opacity * 100.0
                 )),
                 ActiveTool::Liquify => Some(format!(
@@ -211,9 +213,13 @@ impl AppState {
                 self.brush.fill_expand =
                     (d.expand as i32 + drag_steps(up)).clamp(0, MAX_EXPAND as i32) as u8;
             }
+            // The size holds a moment on each size the brush was drawn at
+            // or pinned, then carries on past it.
             t if adjusts_brush(t) => {
-                let grow = (past_dead_zone(dx) / SIZE_PX_PER_DOUBLING).exp2();
-                self.brush.radius = (d.radius * grow).clamp(MIN_RADIUS, MAX_RADIUS);
+                let stops = self.size_detents(d.radius);
+                let (r, _) =
+                    size_with_detents(d.radius, past_dead_zone(dx), SIZE_PX_PER_DOUBLING, &stops, SIZE_DETENT_PX);
+                self.brush.radius = r.clamp(MIN_RADIUS, MAX_RADIUS);
                 self.brush.opacity =
                     (d.opacity + past_dead_zone(up) / OPACITY_PX).clamp(MIN_OPACITY, 1.0);
             }
@@ -401,6 +407,23 @@ mod tests {
         assert_eq!((st.brush.radius, st.brush.opacity), (MIN_RADIUS, MIN_OPACITY));
         st.end_button_drag();
         assert_eq!(st.brush.radius, MIN_RADIUS, "the new size stays");
+    }
+
+    /// The size drag holds a moment on a pinned size, says so, then goes on
+    /// past it: a hair over the pin is in reach.
+    #[test]
+    fn tool_adjust_holds_on_a_pinned_size_then_goes_on_past() {
+        let mut st = AppState::for_test();
+        st.dispatch(crate::input::shortcuts::Action::ToolInk);
+        st.toggle_pinned_size(8.0);
+        st.brush.radius = 4.0;
+        st.begin_button_drag(ButtonDrag::ToolAdjust, AT);
+        st.button_drag_to(AT + vec2(8.0 + SIZE_PX_PER_DOUBLING + 5.0, 0.0));
+        assert_eq!(st.brush.radius, 8.0, "held");
+        assert!(st.button_drag_readout().unwrap().contains("Size 8.0 (pinned)"));
+        st.button_drag_to(AT + vec2(8.0 + SIZE_PX_PER_DOUBLING + SIZE_DETENT_PX + 2.0, 0.0));
+        assert!(st.brush.radius > 8.0 && st.brush.radius < 8.1, "{}", st.brush.radius);
+        st.end_button_drag();
     }
 
     #[test]

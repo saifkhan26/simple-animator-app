@@ -121,6 +121,31 @@ impl Project {
         cam.kept_inside((self.width as f32, self.height as f32), (ow as f32, oh as f32))
     }
 
+    /// Whether the camera as keyed shows past the canvas's edge on any
+    /// frame, or at rest.
+    pub fn camera_leaves_canvas(&self) -> bool {
+        let canvas = (self.width as f32, self.height as f32);
+        let (ow, oh) = self.output_size();
+        let out = (ow as f32, oh as f32);
+        let near = |a: f32, b: f32| (a - b).abs() <= 1e-3 * a.abs().max(1.0);
+        std::iter::once(self.camera)
+            .chain((0..self.frame_count.max(1)).map(|f| Camera::resolve(&self.camera_keys, self.camera, f)))
+            .any(|c| {
+                let k = c.kept_inside(canvas, out);
+                !(near(c.tx, k.tx) && near(c.ty, k.ty) && near(c.zoom, k.zoom))
+            })
+    }
+
+    /// Keep inside canvas on, as a project starts or opens with it — unless
+    /// its camera already shows past the edge: framed that way on purpose,
+    /// and holding it in would change what it exports. `false` when it was
+    /// left off for that.
+    pub fn keep_inside_by_default(&mut self) -> bool {
+        let on = !self.camera_leaves_canvas();
+        self.camera_opts.keep_inside = on;
+        on
+    }
+
     pub fn has_camera_key(&self, frame: usize) -> bool {
         self.camera_keys.iter().any(|k| k.frame == frame)
     }
@@ -409,6 +434,7 @@ impl Project {
             l.track_insert_frame(insert_at);
             l.pins_insert_frames(insert_at, 1);
         }
+        self.keys_insert_frames(insert_at, 1);
         self.frame_count += 1;
         self.current_frame = insert_at;
         self.loop_end = self.frame_count;
@@ -423,6 +449,7 @@ impl Project {
             l.track_insert_frame(insert_at);
             l.pins_insert_frames(insert_at, 1);
         }
+        self.keys_insert_frames(insert_at, 1);
         self.frame_count += 1;
         self.current_frame = insert_at;
         self.loop_end = self.frame_count;
@@ -452,9 +479,74 @@ impl Project {
             l.track_remove_frame(f);
             l.pins_remove_frames(f, 1);
         }
+        self.keys_remove_frames(f, 1);
         self.frame_count -= 1;
         self.current_frame = self.current_frame.min(self.frame_count - 1);
         self.loop_end = self.frame_count;
+    }
+
+    /// Insert `n` frames before the playhead on every layer: holds of what
+    /// shows before it, or blank at the start. Everything from the playhead
+    /// on moves `n` later — drawings, camera and transform keys, onion pins,
+    /// tracker points, the loop range — and the playhead goes with its
+    /// drawing.
+    pub fn insert_frames_before(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let at = self.current_frame.min(self.frame_count);
+        let need = self.frame_count + n;
+        for l in &mut self.layers {
+            layer_insert_at(l, at, n);
+            // A layer short of the timeline is padded to it, as
+            // `settle_length` does.
+            while l.exposures.len() < need {
+                l.exposures.push(None);
+                l.track_insert_frame(l.exposures.len() - 1);
+            }
+        }
+        self.keys_insert_frames(at, n);
+        // A loop over the whole timeline stays whole; a shorter one stays on
+        // its drawings.
+        if self.loop_start == 0 && self.loop_end >= self.frame_count {
+            self.loop_end = need;
+        } else {
+            if self.loop_start >= at {
+                self.loop_start += n;
+            }
+            if self.loop_end > at {
+                self.loop_end += n;
+            }
+        }
+        self.frame_count = need;
+        self.current_frame = at + n;
+    }
+
+    /// Keep camera keys and every layer's transform keys on their frames
+    /// after `n` frames are inserted at `at` on every layer.
+    fn keys_insert_frames(&mut self, at: usize, n: usize) {
+        for k in &mut self.camera_keys {
+            if k.frame >= at {
+                k.frame += n;
+            }
+        }
+        for l in &mut self.layers {
+            l.transform_keys_insert_frames(at, n);
+        }
+    }
+
+    /// The same after `[at, at + n)` is removed from every layer. A key on
+    /// a removed frame goes with it.
+    fn keys_remove_frames(&mut self, at: usize, n: usize) {
+        self.camera_keys.retain(|k| !(at..at + n).contains(&k.frame));
+        for k in &mut self.camera_keys {
+            if k.frame >= at + n {
+                k.frame -= n;
+            }
+        }
+        for l in &mut self.layers {
+            l.transform_keys_remove_frames(at, n);
+        }
     }
 
     pub fn goto(&mut self, frame: usize) {
@@ -1440,6 +1532,39 @@ mod tests {
         assert_eq!(p.resolve_camera(2).tx, 60.0, "frames already inside are as keyed");
     }
 
+    /// Keep inside canvas starts on for a camera that stays on the canvas,
+    /// and off for one keyed past its edge — on a key, or only between two.
+    #[test]
+    fn keep_inside_starts_on_unless_the_camera_already_leaves_the_canvas() {
+        use crate::doc::camera::{CameraKey, Ease};
+        let mut p = Project::new(400, 200, 12.0);
+        assert!(p.keep_inside_by_default(), "a fresh camera fills the canvas exactly");
+        assert!(p.camera_opts.keep_inside);
+
+        p.ensure_frame_count(11);
+        let key = |frame, tx, zoom| CameraKey {
+            frame,
+            camera: Camera {
+                tx,
+                zoom,
+                ..Default::default()
+            },
+            ease: Ease::Linear,
+        };
+        // Zoomed in 2×, the frame has 100 px of room each way.
+        p.camera_keys = vec![key(0, -100.0, 2.0), key(10, 100.0, 2.0)];
+        assert!(p.keep_inside_by_default(), "keyed right up to both edges");
+        p.camera_keys[1].camera.tx = 101.0;
+        assert!(!p.keep_inside_by_default(), "a key past the edge");
+        assert!(!p.camera_opts.keep_inside);
+        // Both keys inside, but zoomed out on the way between them.
+        p.camera_keys = vec![key(0, 0.0, 2.0), key(5, 0.0, 0.5), key(10, 0.0, 2.0)];
+        assert!(!p.keep_inside_by_default(), "zoomed out past the canvas on frame 5");
+        p.camera_keys.clear();
+        p.camera = Camera { zoom: 0.9, ..Default::default() };
+        assert!(!p.keep_inside_by_default(), "the camera at rest");
+    }
+
     /// A symmetric grow leaves the old pixels centered, which is what keeps a
     /// layer visually still (its transform is defined about the cell center).
     #[test]
@@ -2175,6 +2300,78 @@ mod tests {
         assert_eq!(pin_frames(&p, 0), vec![0, 7]);
         p.remove_layer_frames(0, 1, 2);
         assert_eq!(pin_frames(&p, 0), vec![0, 5]);
+    }
+
+    fn cam_key(frame: usize) -> CameraKey {
+        CameraKey {
+            frame,
+            camera: Camera::default(),
+            ease: crate::doc::camera::Ease::Linear,
+        }
+    }
+
+    fn cam_frames(p: &Project) -> Vec<usize> {
+        p.camera_keys.iter().map(|k| k.frame).collect()
+    }
+
+    /// Frames inserted before the first one go in on every layer, blank:
+    /// every drawing slides, every key with it, and the playhead stays on
+    /// the drawing it was on.
+    #[test]
+    fn inserting_before_the_first_frame_slides_every_layer_and_key() {
+        let mut p = pinned(6, &[0, 3], &[3]);
+        p.add_layer();
+        key(&mut p, 1, 0, 50);
+        key(&mut p, 1, 4, 54);
+        p.camera_keys = vec![cam_key(0), cam_key(5)];
+        p.layers[1].set_transform_key(2, crate::doc::transform::Transform::default());
+        (p.loop_start, p.loop_end) = (0, 6);
+        p.current_frame = 0;
+        p.insert_frames_before(2);
+        assert_eq!(p.frame_count, 8);
+        assert_eq!(row(&p, 0), vec![0, 0, 1, 1, 1, 4, 4, 4]);
+        assert_eq!(row(&p, 1), vec![0, 0, 50, 50, 50, 50, 54, 54]);
+        assert_eq!(pin_frames(&p, 0), vec![5]);
+        assert_eq!(cam_frames(&p), vec![2, 7]);
+        assert_eq!(p.layers[1].transform_keys[0].frame, 4);
+        assert_eq!(p.current_frame, 2, "on the drawing it was on");
+        assert_eq!((p.loop_start, p.loop_end), (0, 8), "a loop over everything stays so");
+        assert_sound(&p);
+    }
+
+    /// Mid-timeline, what showed before the playhead holds over the new
+    /// frames, and a shorter loop stays on its drawings.
+    #[test]
+    fn inserting_before_mid_timeline_holds_what_showed_before() {
+        let mut p = sheet(6, &[0, 3]);
+        (p.loop_start, p.loop_end) = (3, 5);
+        p.current_frame = 3;
+        p.insert_frames_before(2);
+        assert_eq!(row(&p, 0), vec![1, 1, 1, 1, 1, 4, 4, 4]);
+        assert_eq!(p.current_frame, 5);
+        assert_eq!((p.loop_start, p.loop_end), (5, 7));
+        assert_sound(&p);
+    }
+
+    /// Adding, duplicating and deleting frames on every layer move the
+    /// camera's and the layers' transform keys with the drawings; a key on
+    /// a deleted frame goes with it.
+    #[test]
+    fn frame_ops_move_camera_and_transform_keys_too() {
+        let mut p = sheet(10, &[0]);
+        p.camera_keys = vec![cam_key(0), cam_key(4), cam_key(8)];
+        p.layers[0].set_transform_key(4, crate::doc::transform::Transform::default());
+        p.current_frame = 3;
+        p.add_frame(); // inserts at 4
+        assert_eq!(cam_frames(&p), vec![0, 5, 9]);
+        assert_eq!(p.layers[0].transform_keys[0].frame, 5);
+        p.current_frame = 5;
+        p.duplicate_frame(); // inserts at 6
+        assert_eq!(cam_frames(&p), vec![0, 5, 10]);
+        p.current_frame = 5;
+        p.delete_frame();
+        assert_eq!(cam_frames(&p), vec![0, 9]);
+        assert!(p.layers[0].transform_keys.is_empty());
     }
 
     #[test]

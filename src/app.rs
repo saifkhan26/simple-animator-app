@@ -1,5 +1,6 @@
 //! Top-level application state. Wires project (timeline + layers), tools, UI.
 
+pub mod brush_sizes;
 mod button_drag;
 mod grids;
 mod groups;
@@ -321,6 +322,14 @@ const DEFAULT_BG_COLOR: [f32; 3] = [0.12, 0.12, 0.13];
 
 /// The longest side a camera frame may have — a canvas's limit too.
 const MAX_CAMERA_SIDE: u32 = 16384;
+/// Settings > Appearance's panel padding, as it starts.
+pub const DEFAULT_PANEL_PADDING: u8 = 8;
+/// The most panel padding Settings offers.
+pub const MAX_PANEL_PADDING: u8 = 48;
+
+/// The smallest side a free camera box gives the camera, so a drag along
+/// one axis doesn't leave it a sliver.
+pub const MIN_FREE_CAMERA_SIDE: u32 = 16;
 
 /// The camera's frame held by one of its handles: what was grabbed, where,
 /// and the camera as it was — every step of the drag is solved from that,
@@ -386,6 +395,8 @@ struct UiPrefs {
     frame_step: usize,
     show_camera_guide: bool,
     dim_outside_camera: bool,
+    /// Draw camera mode's box takes any shape, and sets the camera's size.
+    camera_box_free: bool,
     show_layer_bounds: bool,
     lock_brush_to_view: bool,
     /// Onion skin is a workspace preference, not project data — tints and
@@ -420,6 +431,9 @@ struct UiPrefs {
     /// Pinned colour swatches. A workspace preference, not project data: a
     /// palette follows the artist between files.
     palette: Vec<[u8; 3]>,
+    /// The sizes each tool's brush was drawn at, and the ones pinned, by
+    /// `ActiveTool::idx`.
+    brush_sizes: Vec<brush_sizes::SizeMemory>,
     /// Frame column width in the timeline tracks — how zoomed in the artist
     /// likes to work.
     track_frame_w: f32,
@@ -467,6 +481,8 @@ struct UiPrefs {
     hidden_panels: Vec<PanelId>,
     /// Bumped by Reset panel layout; see [`AppState::panel_layout_gen`].
     panel_layout_gen: u32,
+    /// See [`AppState::panel_padding`].
+    panel_padding: u8,
     /// The colours the UI is drawn in, and the five a Custom scheme is
     /// made from — kept while another scheme is picked, so switching back
     /// finds them as they were.
@@ -542,6 +558,7 @@ impl Default for UiPrefs {
             frame_step: 1,
             show_camera_guide: true,
             dim_outside_camera: true,
+            camera_box_free: false,
             show_layer_bounds: true,
             lock_brush_to_view: false,
             onion: OnionConfig::default(),
@@ -555,6 +572,7 @@ impl Default for UiPrefs {
             smoothing: SmoothingOptions::default(),
             tool_brushes: None,
             palette: Vec::new(),
+            brush_sizes: Vec::new(),
             track_frame_w: crate::ui::tracks::DEFAULT_FRAME_W,
             perspective: PerspectiveConfig::default(),
             grid_files: Vec::new(),
@@ -574,6 +592,7 @@ impl Default for UiPrefs {
             last_camera_size: None,
             hidden_panels: Vec::new(),
             panel_layout_gen: 0,
+            panel_padding: DEFAULT_PANEL_PADDING,
             color_scheme: Scheme::default(),
             custom_colors: BaseColors::default(),
         }
@@ -1103,6 +1122,12 @@ pub struct AppState {
     /// Pinned swatches, most recently added last. Capped at
     /// [`AppState::MAX_SWATCHES`].
     pub palette: Vec<[u8; 3]>,
+    /// The sizes each tool's brush was drawn at, and the ones pinned, by
+    /// `ActiveTool::idx`. See [`brush_sizes`].
+    pub brush_sizes: Vec<brush_sizes::SizeMemory>,
+    /// The last size swap: the brush slot, the size swapped to, and the one
+    /// swapped from, which the next swap goes back to.
+    size_swap: Option<(usize, f32, f32)>,
     /// The Color panel's harmony set. Its scheme is a workspace preference;
     /// the base follows the brush colour.
     pub harmony: HarmonySet,
@@ -1416,6 +1441,12 @@ pub struct AppState {
     /// for. Reset panel layout moves to a new one, so every panel opens as if
     /// for the first time; 0 is the ids panels have always had.
     pub panel_layout_gen: u32,
+    /// How far, in points, the panels and the top bar keep from the window's
+    /// edges. Settings > Appearance.
+    pub panel_padding: u8,
+    /// The padding the panels were last laid out to, so a change moves the
+    /// ones it held. Kept with `viewport_rect`, on frames that draw panels.
+    pub panel_padding_laid: u8,
     /// Settings > Appearance. Applied with [`AppState::apply_scheme`].
     pub color_scheme: Scheme,
     pub custom_colors: BaseColors,
@@ -1446,6 +1477,10 @@ pub struct AppState {
     /// The same for an opacity drag in the Layers panel, which may change
     /// several layers at once.
     layer_opacity_before: Option<undo::TimelineState>,
+    /// The layer whose row % is being dragged or typed into: its % stays on
+    /// the row until it is let go, even at 100%, and the slider over the
+    /// list leaves the undo step the row opened alone.
+    pub opacity_row_uid: Option<u64>,
     /// What a group being transformed turns and scales about, in document
     /// space: the middle of its layers when the drag started.
     group_pivot: Option<(f32, f32)>,
@@ -1468,6 +1503,10 @@ pub struct AppState {
     /// and keys it on this frame. Never on with `camera_edit` — both claim
     /// the plain drag.
     pub camera_box: bool,
+    /// Draw camera mode's box takes any shape: its size, at zoom 1, becomes
+    /// the camera's own — the size exports come out at. Off, the box keeps
+    /// the camera's shape. A workspace preference.
+    pub camera_box_free: bool,
     /// The box, while one is being dragged out.
     pub cam_box: Option<CamBox>,
     /// A camera key, while it is being dragged along the timeline ruler.
@@ -1599,7 +1638,8 @@ impl AppState {
     /// Everything `new` does that doesn't need the window.
     /// `brush_root`: where imported Krita presets live (none in tests).
     fn with_prefs(prefs: UiPrefs, max_tex: u32, brush_root: Option<PathBuf>) -> Self {
-        let project = Project::new(1280, 720, 24.0);
+        let mut project = Project::new(1280, 720, 24.0);
+        project.keep_inside_by_default();
         let (shortcuts, shortcuts_err) = shortcuts::load();
         let mut cell_dirty = HashMap::new();
         for id in 0..project.cells.len() {
@@ -1638,6 +1678,8 @@ impl AppState {
             brush_thumbs: HashMap::new(),
             krita_import: None,
             palette: prefs.palette,
+            brush_sizes: prefs.brush_sizes,
+            size_swap: None,
             harmony: {
                 let c = restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()].color;
                 HarmonySet::new(prefs.harmony, [c[0], c[1], c[2]])
@@ -1762,6 +1804,8 @@ impl AppState {
             show_panels: prefs.show_panels,
             hidden_panels: prefs.hidden_panels.into_iter().filter(|&p| p != PanelId::Color).collect(),
             panel_layout_gen: prefs.panel_layout_gen,
+            panel_padding: prefs.panel_padding,
+            panel_padding_laid: prefs.panel_padding,
             color_scheme: prefs.color_scheme,
             custom_colors: prefs.custom_colors,
             show_mini_timeline: prefs.show_mini_timeline,
@@ -1775,6 +1819,7 @@ impl AppState {
             nav_to_layer: false,
             layer_xform_before: None,
             layer_opacity_before: None,
+            opacity_row_uid: None,
             group_pivot: None,
             xform_sync_last: None,
             camera_edit: false,
@@ -1782,6 +1827,7 @@ impl AppState {
             camera_drag_before: None,
             cam_drag: None,
             camera_box: false,
+            camera_box_free: prefs.camera_box_free,
             cam_box: None,
             cam_key_drag: None,
             shot_cam: None,
@@ -1830,6 +1876,7 @@ impl AppState {
         self.stop_krita_link();
         self.stash_grids();
         self.project = Project::new(width, height, fps);
+        self.project.keep_inside_by_default();
         // Forget the old file, or the next Save silently overwrites the project
         // the user just navigated away from.
         self.project_path = None;
@@ -1888,6 +1935,7 @@ impl AppState {
         self.nav_to_layer = false;
         self.layer_xform_before = None;
         self.layer_opacity_before = None;
+        self.opacity_row_uid = None;
         self.xform_sync_last = None;
         // Camera guide / dim / bounds are view preferences, kept like the panel
         // toggles above; only the transient edit + lock modes reset.
@@ -2354,6 +2402,13 @@ impl AppState {
     /// All other structural edits leave the cell pool intact, so a cheap
     /// `TimelineState` snapshot is enough.
     pub fn structural_edit(&mut self, capture_cells: bool, edit: impl FnOnce(&mut Project)) {
+        let cmd = self.structural_command(capture_cells, edit);
+        self.history.push(cmd);
+    }
+
+    /// [`AppState::structural_edit`]'s edit, with its undo step handed back
+    /// rather than recorded, for a caller with more to add to the step.
+    fn structural_command(&mut self, capture_cells: bool, edit: impl FnOnce(&mut Project)) -> undo::Command {
         // Floating pixels belong to a cell that may be about to move.
         self.land_float();
         // Keys may move under the track selection; the track edits that want
@@ -2388,14 +2443,89 @@ impl AppState {
         // texture. The rest are exactly as uploaded — the timeline around them
         // moved, not them.
         let changed: Vec<CellId> = cell_pixels.iter().map(|d| d.cell).collect();
-        self.history.push(undo::Command::Structural {
-            before,
-            after,
-            cell_pixels,
-        });
         for id in changed {
             self.mark_dirty(id);
         }
+        undo::Command::Structural {
+            before,
+            after,
+            cell_pixels,
+        }
+    }
+
+    /// A structural edit that inserts or removes whole frames on every
+    /// layer. The project's own keys move inside `edit`; the perspective
+    /// grids' keys live on the app, so `grids` moves them, in the same undo
+    /// step.
+    fn frame_edit(
+        &mut self,
+        capture_cells: bool,
+        grids: impl Fn(&mut perspective::PerspectiveGrid),
+        edit: impl FnOnce(&mut Project),
+    ) {
+        let mut cmds = vec![self.structural_command(capture_cells, edit)];
+        for g in &mut self.perspective.grids {
+            let before = g.clone();
+            grids(g);
+            if *g != before {
+                cmds.push(undo::Command::Grid {
+                    before: Box::new(before),
+                    after: Box::new(g.clone()),
+                });
+            }
+        }
+        // Keyed grids take the pose their keys now give this frame.
+        self.grid_sync_last = None;
+        self.history.push(if cmds.len() == 1 { cmds.remove(0) } else { undo::Command::Compound(cmds) });
+    }
+
+    /// The step size's worth of held frames after the playhead, on every
+    /// layer. One undo step for all of them.
+    pub fn add_frames(&mut self) {
+        let n = self.frame_step_count();
+        let at = (self.project.current_frame + 1).min(self.project.frame_count);
+        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| {
+            for _ in 0..n {
+                p.add_frame();
+            }
+        });
+    }
+
+    /// The step size's worth of copies of this frame after it, on every
+    /// layer.
+    pub fn duplicate_frames(&mut self) {
+        let n = self.frame_step_count();
+        let at = (self.project.current_frame + 1).min(self.project.frame_count);
+        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| {
+            for _ in 0..n {
+                p.duplicate_frame();
+            }
+        });
+    }
+
+    /// Delete the frame under the playhead from every layer. The only frame
+    /// left is cleared instead.
+    pub fn delete_frame(&mut self) {
+        let wipes_pixels = self.project.frame_count <= 1;
+        let at = self.project.current_frame;
+        self.frame_edit(
+            wipes_pixels,
+            |g| {
+                if !wipes_pixels {
+                    g.keys_remove_frames(at, 1);
+                }
+            },
+            Project::delete_frame,
+        );
+    }
+
+    /// The step size's worth of frames before the playhead, on every layer
+    /// — blank ones at the start — with every key from the playhead on,
+    /// the grids' too, moved along. The playhead stays on its drawing.
+    pub fn insert_frames_before(&mut self) {
+        let n = self.frame_step_count();
+        let at = self.project.current_frame.min(self.project.frame_count);
+        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| p.insert_frames_before(n));
     }
 
     /// Insert `cells` as a brand-new layer *below* the active layer, recorded as
@@ -3439,29 +3569,64 @@ impl AppState {
     /// The camera the box being dragged out gives: what its preview shows
     /// and what letting go keys. `None` while it is still a tap, or brought
     /// back to one.
+    #[cfg(test)]
     pub fn camera_box_camera(&self) -> Option<Camera> {
+        self.camera_box_frame().map(|(cam, _)| cam)
+    }
+
+    /// [`AppState::camera_box_camera`], and the size of the frame it has:
+    /// the camera's own, or with a free box, the box's — at zoom 1, in
+    /// even pixels, and no smaller than [`MIN_FREE_CAMERA_SIDE`].
+    pub fn camera_box_frame(&self) -> Option<(Camera, (u32, u32))> {
         let b = self.cam_box.filter(|b| b.moved)?;
         let tap = CAMERA_TAP_PX / self.view_scale.max(1e-6);
         if (b.to.0 - b.from.0).hypot(b.to.1 - b.from.1) <= tap {
             return None;
         }
-        let cam = self
-            .project
-            .camera
-            .boxed(b.from, b.to, self.canvas_size(), self.camera_frame_size());
-        Some(self.project.held_inside(cam))
+        let canvas = self.canvas_size();
+        let (cam, size) = if self.camera_box_free {
+            // Measured along the frame's own axes, as `Camera::boxed` does.
+            let rot = self.project.camera.rot;
+            let (s, c) = rot.sin_cos();
+            let (dx, dy) = (b.to.0 - b.from.0, b.to.1 - b.from.1);
+            let (u, v) = (dx * c + dy * s, dy * c - dx * s);
+            let side = |d: f32| ((d.abs() * 0.5).round() as u32 * 2).clamp(MIN_FREE_CAMERA_SIDE, MAX_CAMERA_SIDE);
+            let mid = ((b.from.0 + b.to.0) * 0.5, (b.from.1 + b.to.1) * 0.5);
+            let cam = Camera {
+                tx: mid.0 - canvas.0 * 0.5,
+                ty: mid.1 - canvas.1 * 0.5,
+                zoom: 1.0,
+                rot,
+            };
+            (cam, (side(u), side(v)))
+        } else {
+            let cam = self.project.camera.boxed(b.from, b.to, canvas, self.camera_frame_size());
+            (cam, self.project.output_size())
+        };
+        // Held on the canvas as the frame it will have, not the one it has.
+        let cam = if self.project.camera_opts.keep_inside {
+            cam.kept_inside(canvas, (size.0 as f32, size.1 as f32))
+        } else {
+            cam
+        };
+        Some((cam, size))
     }
 
     /// Let go of the box: key its camera on this frame. A tap keys the
     /// camera as it was, centred where it landed. A box dragged back to
     /// nothing is let go of, and keys nothing.
     pub fn camera_box_up(&mut self) {
-        let boxed = self.camera_box_camera();
+        let boxed = self.camera_box_frame();
         let Some(b) = self.cam_box.take() else {
             return;
         };
         let cam = match boxed {
-            Some(cam) => cam,
+            Some((cam, size)) => {
+                if self.camera_box_free {
+                    self.set_camera_size(Some(size));
+                }
+                cam
+            }
             None if !b.moved => {
                 let cam = self.project.camera.centred_on(b.from, self.canvas_size());
                 self.project.held_inside(cam)
@@ -4805,6 +4970,7 @@ impl AppState {
             return;
         };
         let mut paints = false;
+        let mut drew = false;
         if let Some(drag) = self.shape_drag.take() {
             // Rasterise the final shape now; undo records the dirty rect below.
             let outline = self.shape_outline(&drag);
@@ -4826,6 +4992,7 @@ impl AppState {
             }
             self.mark_dirty(target);
             paints = true;
+            drew = true;
         } else if let Some(mut builder) = self.stroke.take() {
             if let Some(t0) = self.stroke_clock.take() {
                 builder.tick(t0.elapsed().as_secs_f64() * 1000.0);
@@ -4843,6 +5010,10 @@ impl AppState {
                 self.mark_region(target, Dirty::Rect(r));
             }
             paints = self.tool != ActiveTool::Eraser;
+            drew = true;
+        }
+        if drew {
+            self.remember_size();
         }
         self.preview_upload_rect = None;
         // Only a stroke that changed something marks the drawing as painted:
@@ -6010,6 +6181,17 @@ impl AppState {
         }
     }
 
+    /// Set layer `i`'s opacity alone, from the % on its row. One undo step
+    /// per drag, as with [`AppState::set_selected_opacity`].
+    pub fn set_layer_opacity(&mut self, i: usize, v: f32) {
+        if self.layer_opacity_before.is_none() {
+            self.layer_opacity_before = Some(undo::TimelineState::capture(&self.project));
+        }
+        if let Some(l) = self.project.layers.get_mut(i) {
+            l.opacity = v.clamp(0.0, 1.0);
+        }
+    }
+
     /// Close the undo step an opacity drag opened. Nothing when it changed
     /// nothing.
     pub fn commit_layer_opacity(&mut self) {
@@ -6180,28 +6362,11 @@ impl AppState {
                     self.project.goto(f);
                 }
             }
-            // Insert the user's step size worth of frames. One `structural_edit`
-            // wraps the whole loop, so N frames cost one undo entry, not N.
-            Action::FrameAdd => {
-                let n = self.frame_step_count();
-                self.structural_edit(false, |p| {
-                    for _ in 0..n {
-                        p.add_frame();
-                    }
-                });
-            }
-            Action::FrameDuplicate => {
-                let n = self.frame_step_count();
-                self.structural_edit(false, |p| {
-                    for _ in 0..n {
-                        p.duplicate_frame();
-                    }
-                });
-            }
-            Action::FrameDelete => {
-                let wipes_pixels = self.project.frame_count <= 1;
-                self.structural_edit(wipes_pixels, Project::delete_frame);
-            }
+            // Insert the user's step size worth of frames, as one undo entry.
+            Action::FrameAdd => self.add_frames(),
+            Action::FrameDuplicate => self.duplicate_frames(),
+            Action::FrameDelete => self.delete_frame(),
+            Action::FrameInsertBefore => self.insert_frames_before(),
             Action::OnionToggle => self.onion.enabled = !self.onion.enabled,
             Action::LayerAdd => self.structural_edit(false, |p| {
                 p.add_layer_above_active();
@@ -6268,6 +6433,7 @@ impl AppState {
             Action::SizeUp => {
                 self.brush.radius = (self.brush.radius * 1.18).min(256.0);
             }
+            Action::SizeSwap => self.swap_size(),
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::ClearCell => self.clear_active(),
@@ -6470,6 +6636,13 @@ impl AppState {
         self.project_path = path;
         self.save_toast = None;
         self.save_error = None;
+        if !self.project.keep_inside_by_default() {
+            self.save_toast = Some((
+                "Keep inside canvas is off: this camera already goes past the canvas".to_string(),
+                // A sentence to read, not a word to glance at.
+                Instant::now() + Self::TOAST_TTL * 3,
+            ));
+        }
         self.retire_cell_textures();
         self.retire_all_ghosts();
         self.cell_dirty.clear();
@@ -6739,6 +6912,7 @@ impl eframe::App for AppState {
                 frame_step: self.frame_step,
                 show_camera_guide: self.show_camera_guide,
                 dim_outside_camera: self.dim_outside_camera,
+                camera_box_free: self.camera_box_free,
                 show_layer_bounds: self.show_layer_bounds,
                 lock_brush_to_view: self.lock_brush_to_view,
                 onion: self.onion,
@@ -6752,6 +6926,7 @@ impl eframe::App for AppState {
                 smoothing: self.smoothing,
                 tool_brushes: Some(tool_brushes),
                 palette: self.palette.clone(),
+                brush_sizes: self.brush_sizes.clone(),
                 track_frame_w: self.track_frame_w,
                 perspective: PerspectiveConfig {
                     grids: self.grid_seed.clone(),
@@ -6775,6 +6950,7 @@ impl eframe::App for AppState {
                 last_camera_size: self.last_camera_size,
                 hidden_panels: self.hidden_panels.clone(),
                 panel_layout_gen: self.panel_layout_gen,
+                panel_padding: self.panel_padding,
                 color_scheme: self.color_scheme,
                 custom_colors: self.custom_colors,
             },
@@ -9224,6 +9400,47 @@ mod tests {
         assert_eq!(state.perspective.grids[0].keys.len(), 2);
     }
 
+    /// Frames inserted before the playhead move the grids' keys along with
+    /// the camera's and the drawings, and one undo puts all of it back.
+    #[test]
+    fn inserting_frames_before_moves_grid_keys_in_one_undo() {
+        let mut state = perspective_state();
+        state.project.ensure_frame_count(30);
+        state.sync_grid_buffers();
+        state.project.goto(4);
+        state.add_grid_key();
+        state.add_camera_key();
+        let grid_keys = |s: &AppState| s.perspective.grids[0].keys.iter().map(|k| k.frame).collect::<Vec<_>>();
+        state.frame_step = 3;
+        let steps = state.history.undo_len();
+
+        state.project.goto(2);
+        state.dispatch(Action::FrameInsertBefore);
+        assert_eq!(grid_keys(&state), vec![7]);
+        assert_eq!(state.project.camera_keys[0].frame, 7);
+        assert_eq!((state.project.frame_count, state.project.current_frame), (33, 5));
+        assert_eq!(state.history.undo_len(), steps + 1, "one step");
+
+        state.undo();
+        assert_eq!(grid_keys(&state), vec![4]);
+        assert_eq!(state.project.camera_keys[0].frame, 4);
+        assert_eq!(state.project.frame_count, 30);
+        state.redo();
+        assert_eq!(grid_keys(&state), vec![7]);
+
+        // The other frame buttons move them too.
+        state.project.goto(8);
+        state.dispatch(Action::FrameDelete);
+        assert_eq!(grid_keys(&state), vec![7]);
+        state.project.goto(7);
+        state.dispatch(Action::FrameDelete);
+        assert!(grid_keys(&state).is_empty(), "the key on the deleted frame went with it");
+        state.undo();
+        state.project.goto(0);
+        state.dispatch(Action::FrameAdd);
+        assert_eq!(grid_keys(&state), vec![10]);
+    }
+
     #[test]
     fn dragging_a_keyed_grid_keys_the_frame_as_one_undo_step() {
         let mut state = perspective_state();
@@ -9890,6 +10107,7 @@ mod tests {
         assert_eq!(prefs.palette, want.palette);
         assert_eq!(prefs.krita_path, want.krita_path);
         assert_eq!(prefs.bg_color, want.bg_color);
+        assert_eq!(prefs.panel_padding, DEFAULT_PANEL_PADDING, "a padding it never had");
         assert!(prefs.hidden_panels.is_empty() && prefs.panel_layout_gen == 0, "every panel where it was");
         assert_eq!(prefs.color_scheme, Scheme::Graphite);
         // The onion sliders it saved (Prev 1, Next 1, Max α 0.75) become the
@@ -11025,6 +11243,108 @@ mod camera_rig_tests {
         assert_eq!(next.last_camera_size, Some((640, 360)));
         assert_eq!(next.project.camera_opts.size, None, "the size is not");
         assert_eq!(UiPrefs::default().last_camera_size, None);
+    }
+
+    /// A free camera box gives the camera the box's size, in even pixels,
+    /// framed at zoom 1 and centred on it; a drag along one axis leaves no
+    /// sliver; letting go keys it.
+    #[test]
+    fn a_free_camera_box_sets_the_camera_size() {
+        let mut st = AppState::for_test();
+        let canvas = (st.project.width as f32, st.project.height as f32);
+        st.set_camera_box(true);
+        st.camera_box_free = true;
+        assert!(st.camera_box_down((100.0, 100.0)));
+        st.camera_box_move((501.0, 251.0));
+        let (_, size) = st.camera_box_frame().expect("a box");
+        assert_eq!(size, (402, 152));
+        assert_eq!(st.project.output_size(), (st.project.width, st.project.height), "not till let go");
+        st.camera_box_up();
+        assert_eq!(st.project.output_size(), (402, 152));
+        assert_eq!(st.last_camera_size, Some((402, 152)));
+        let k = st.project.camera_keys.iter().find(|k| k.frame == 0).expect("keyed").camera;
+        assert_eq!(k.zoom, 1.0);
+        assert!((k.tx - (300.5 - canvas.0 * 0.5)).abs() < 1e-3, "{k:?}");
+        assert!((k.ty - (175.5 - canvas.1 * 0.5)).abs() < 1e-3, "{k:?}");
+
+        st.camera_box_down((100.0, 100.0));
+        st.camera_box_move((400.0, 101.0));
+        assert_eq!(st.camera_box_frame().unwrap().1, (300, MIN_FREE_CAMERA_SIDE));
+        st.cam_box = None;
+
+        // Hanging off the top left, it is held on the canvas as that frame.
+        st.camera_box_down((-100.0, -100.0));
+        st.camera_box_move((300.0, 200.0));
+        let (cam, size) = st.camera_box_frame().unwrap();
+        assert_eq!(size, (400, 300));
+        assert_eq!((cam.tx, cam.ty), (200.0 - canvas.0 * 0.5, 150.0 - canvas.1 * 0.5));
+        st.cam_box = None;
+
+        // Off, the box keeps the camera's shape.
+        st.camera_box_free = false;
+        st.camera_box_down((100.0, 100.0));
+        st.camera_box_move((501.0, 251.0));
+        assert_eq!(st.camera_box_frame().unwrap().1, (402, 152), "the size set above");
+        st.camera_box_up();
+        assert_eq!(st.project.output_size(), (402, 152));
+    }
+
+    /// Free shape and the panel padding are workspace preferences.
+    #[test]
+    fn free_camera_box_and_panel_padding_are_kept_between_runs() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        assert!(!st.camera_box_free);
+        assert_eq!(st.panel_padding, DEFAULT_PANEL_PADDING);
+        st.camera_box_free = true;
+        st.panel_padding = 20;
+        let mut storage = tests::MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let next = AppState::with_prefs(prefs, 8192, None);
+        assert!(next.camera_box_free);
+        assert_eq!((next.panel_padding, next.panel_padding_laid), (20, 20));
+    }
+
+    /// Each brush's pinned and recent sizes are kept between runs.
+    #[test]
+    fn brush_sizes_are_kept_between_runs() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolEraser);
+        st.toggle_pinned_size(6.5);
+        let mut storage = tests::MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let mut next = AppState::with_prefs(prefs, 8192, None);
+        next.dispatch(Action::ToolEraser);
+        assert_eq!(next.size_memory().pinned, vec![6.5]);
+        next.dispatch(Action::ToolInk);
+        assert!(next.size_memory().pinned.is_empty(), "the eraser's alone");
+    }
+
+    /// Keep inside canvas is on at launch and for a new project, and for an
+    /// opened one whose camera stays on the canvas. One keyed past the edge
+    /// opens with it off, and says so.
+    #[test]
+    fn keep_inside_is_on_for_every_project_unless_its_camera_leaves_the_canvas() {
+        let mut st = AppState::for_test();
+        assert!(st.project.camera_opts.keep_inside, "at launch");
+        st.project.camera_opts.keep_inside = false;
+        st.reset_with(640, 360, 24.0);
+        assert!(st.project.camera_opts.keep_inside, "a new project");
+
+        let inside = Project::new(640, 360, 24.0);
+        st.load_project(inside, None);
+        assert!(st.project.camera_opts.keep_inside, "opened, on the canvas");
+        assert!(st.save_toast.is_none());
+
+        let mut wide = Project::new(640, 360, 24.0);
+        wide.camera.zoom = 0.5;
+        st.load_project(wide, None);
+        assert!(!st.project.camera_opts.keep_inside, "opened, framed past the edge");
+        assert_eq!(st.project.camera.zoom, 0.5, "and left as it was");
+        assert!(st.save_toast.as_ref().is_some_and(|(t, _)| t.contains("Keep inside canvas is off")));
     }
 
     /// A 1280×720 canvas with a 640×360 frame in the middle of it: x

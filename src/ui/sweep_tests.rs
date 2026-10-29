@@ -158,10 +158,10 @@ impl Win {
 
     fn show(self, state: &mut AppState, ctx: &egui::Context) {
         match self {
-            Win::Panel(id) => panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None),
+            Win::Panel(id) => panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None, None),
             Win::ToolPanel(_) => {
                 let id = PanelId::Tools;
-                panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None)
+                panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None, None)
             }
             Win::Menu => menu_window(state, ctx),
             Win::MiniTimeline => mini_timeline_window(state, ctx),
@@ -517,12 +517,13 @@ fn every_window_is_clean_with_its_sections_open() {
 }
 
 /// A busier project — more layers, long names, cleanup chains, a group,
-/// a long scene, camera keys — leaves every window the size it was, and
-/// still clean.
+/// faded layers, a long scene, camera keys, a brush with many sizes
+/// remembered, brush values a drag left unrounded — leaves every window the
+/// size it was, and still clean.
 #[test]
 fn a_busy_project_leaves_every_window_its_size() {
     type Step = (&'static str, fn(&mut AppState));
-    let steps: [Step; 7] = [
+    let steps: [Step; 10] = [
         ("12 more layers", |s| {
             for k in 0..12 {
                 s.project.add_layer();
@@ -548,7 +549,23 @@ fn a_busy_project_leaves_every_window_its_size() {
             s.selected_layers.insert(other);
             s.group_selected_layers();
         }),
+        ("faded layers, the long name's too", |s| {
+            for l in &mut s.project.layers {
+                l.opacity = 0.35;
+            }
+        }),
         ("240 frames", |s| s.project.ensure_frame_count(240)),
+        ("brush values a drag left unrounded", |s| {
+            s.brush.radius = 16.892_37;
+            s.brush.opacity = 0.922_54;
+        }),
+        ("many brush sizes remembered", |s| {
+            let m = crate::app::brush_sizes::SizeMemory {
+                recent: vec![0.5, 3.3, 12.5, 64.0, 127.9],
+                pinned: vec![1.0, 2.5, 7.5, 100.0, 128.0],
+            };
+            s.brush_sizes = vec![m; 16];
+        }),
         ("camera keys", |s| {
             for f in [0, 12, 48, 200] {
                 s.project.current_frame = f;

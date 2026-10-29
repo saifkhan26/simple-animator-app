@@ -7,6 +7,7 @@ use egui_phosphor::regular as ic;
 use crate::app::{
     AppState, CameraFraming, ExportKind, FillMode, LassoHeld, NavKind, PanelId, SelGesture, MP4_PRESETS,
 };
+use crate::app::brush_sizes::{same_size, size_label};
 use crate::color::{fmt_rgb, parse_color};
 use crate::doc::camera::{Camera, Ease, Fill};
 use crate::doc::canvas::DirtyRect;
@@ -64,23 +65,63 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             .viewport_rect
             .replace(screen)
             .filter(|prev| *prev != screen);
+        // A new padding is walked to a few points a frame, so every panel it
+        // held — against an edge, the bar or another panel — keeps up.
+        let was = state.panel_padding_laid;
+        let step = state.panel_padding.abs_diff(was).min(PADDING_STEP);
+        let now = if state.panel_padding > was { was + step } else { was - step };
+        state.panel_padding_laid = now;
+        if now != state.panel_padding {
+            ctx.request_repaint();
+        }
+        let pad = f32::from(now);
 
         menu_window(state, ctx);
+        let edges = PanelEdges {
+            screen,
+            pad,
+            was: (was != now).then(|| f32::from(was)),
+            bar: egui::AreaState::load(ctx, egui::Id::new("menu_bar")).map(|s| s.rect()),
+        };
+        let e = Some(edges);
         // Left: tools + brush.  Right: layers / onion / x-sheet.  Bottom: timeline.
-        panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, resized);
-        panel_window(state, ctx, PanelId::Brush, [12.0, 300.0], 200.0, true, resized);
-        panel_window(state, ctx, PanelId::Layers, [1004.0, 48.0], 252.0, true, resized);
-        panel_window(state, ctx, PanelId::Onion, [1004.0, 300.0], 252.0, false, resized);
-        panel_window(state, ctx, PanelId::Camera, [1004.0, 400.0], 252.0, false, resized);
-        panel_window(state, ctx, PanelId::Xsheet, [1004.0, 470.0], 252.0, false, resized);
+        // Where each first opens: the columns' top corners at the padding,
+        // each panel a padding under the one above, the timeline centred.
+        let under = |ctx: &egui::Context, state: &AppState, id| {
+            egui::AreaState::load(ctx, panel_area(state, id))
+                .filter(|s| s.size.is_some())
+                .map(|s| s.rect().bottom() + pad)
+        };
+        let under_bar = edges.bar.map_or(48.0, |b| b.bottom() + pad);
+        let right = (screen.right() - pad - 272.0).max(pad);
+        panel_window(state, ctx, PanelId::Tools, [pad, under_bar], 232.0, true, resized, e);
+        let under_tools = under(ctx, state, PanelId::Tools).unwrap_or(under_bar + TOOLS_START_H + pad);
+        panel_window(state, ctx, PanelId::Brush, [pad, under_tools], 200.0, true, resized, e);
+        panel_window(state, ctx, PanelId::Layers, [right, pad], 252.0, true, resized, e);
+        let mut below = under(ctx, state, PanelId::Layers).unwrap_or(300.0);
+        for id in [PanelId::Onion, PanelId::Camera, PanelId::Xsheet] {
+            panel_window(state, ctx, id, [right, below], 252.0, false, resized, e);
+            below = under(ctx, state, id).unwrap_or(below);
+        }
+        // Between the two columns when it fits there, else on the window.
+        let left_col = egui::AreaState::load(ctx, panel_area(state, PanelId::Tools))
+            .filter(|s| s.size.is_some())
+            .map_or(pad + 252.0, |s| s.rect().right());
+        let (lo, hi) = (left_col + pad, right - pad);
+        let centred = if hi - lo >= TIMELINE_START_W {
+            lo + (hi - lo - TIMELINE_START_W) * 0.5
+        } else {
+            ((screen.width() - TIMELINE_START_W) * 0.5).max(pad)
+        };
         panel_window(
             state,
             ctx,
             PanelId::Timeline,
-            [320.0, 600.0],
+            [centred, 600.0],
             640.0,
             true,
             resized,
+            e,
         );
         settings_window(state, ctx);
     } else if state.show_mini_timeline {
@@ -874,10 +915,123 @@ const XSHEET_DEFAULT_H: f32 = 330.0;
 /// at their shortest, the settings under it and the pin controls.
 const ONION_DEFAULT_H: f32 = 210.0;
 
+/// The Tools panel's height as it first opens, on the pencil: where the
+/// Brush panel under it starts.
+const TOOLS_START_H: f32 = 240.0;
+
+/// The widest the Tools panel goes, inside its frame.
+const TOOLS_MAX_W: f32 = 560.0;
+
+/// The Timeline's width as it first opens, its toolbar's: what centres it.
+const TIMELINE_START_W: f32 = 718.0;
+
+/// How near, in points, a panel let go by an edge has to be to settle at
+/// the padding from it.
+const PANEL_SNAP_PX: f32 = 20.0;
+
+/// How far the panels' padding moves in a frame on its way to a new one.
+/// Small enough that a panel a padding from another one moved by it is
+/// still in snapping reach of it the next frame.
+const PADDING_STEP: u8 = 4;
+
+/// What the panels keep to: `pad` in from the window's edges, and as far
+/// under the top bar.
+#[derive(Clone, Copy, Debug)]
+struct PanelEdges {
+    screen: Rect,
+    pad: f32,
+    /// The padding before it changed this frame: panels it held against
+    /// the window's edges move to the new one.
+    was: Option<f32>,
+    /// The top bar. A panel under it keeps `pad` below it.
+    bar: Option<Rect>,
+}
+
+/// Where a panel at `rect` settles against the padding, if it moves. On
+/// each axis a place within [`PANEL_SNAP_PX`] pulls it there: a padding in
+/// from the window's edge, a padding from the side of another panel
+/// (`others`) level with it — overlapping it a little, too — or, for one
+/// held at the padding before it changed, the new padding. The top bar is
+/// the top edge for a panel under it, and one overlapping the bar goes
+/// below it. Nothing pulls a panel out of the padded window, or one too big
+/// for it.
+///
+/// The window's edges win over other panels, and among panels hanging
+/// wins over resting: under a panel before over one, right of a panel
+/// before left of one. So a stack closes up under a panel that shrinks,
+/// rather than each panel in it holding the one above where it was.
+fn padded_pos(rect: Rect, e: PanelEdges, others: &[Rect]) -> Option<egui::Pos2> {
+    let (s, pad) = (e.screen, e.pad);
+    let moved = e.was.map(|w| pad - w);
+    // `(place, where the padding before had it, rank)`: one it held goes
+    // with it; otherwise one in reach, lowest rank, then the nearest.
+    let pick = |at: f32, places: &[(f32, Option<f32>, u8)]| {
+        places
+            .iter()
+            .find(|(_, before, _)| before.is_some_and(|b| (at - b).abs() <= 1.0))
+            .map(|&(p, _, _)| p)
+            .or_else(|| {
+                places
+                    .iter()
+                    .filter(|&&(p, _, _)| (at - p).abs() <= PANEL_SNAP_PX)
+                    .min_by(|a, b| (a.2, (at - a.0).abs()).partial_cmp(&(b.2, (at - b.0).abs())).unwrap())
+                    .map(|&(p, _, _)| p)
+            })
+    };
+    const EDGE: u8 = 0;
+    const HANG: u8 = 1;
+    const REST: u8 = 2;
+    let mut pos = rect.min;
+    let (w, h) = (rect.width(), rect.height());
+    let (fits_x, fits_y) = (w <= s.width() - 2.0 * pad, h <= s.height() - 2.0 * pad);
+    let (left, right) = (s.left() + pad, s.right() - pad - w);
+    let mut xs = Vec::new();
+    if fits_x {
+        xs.push((left, moved.map(|d| left - d), EDGE));
+        xs.push((right, moved.map(|d| right + d), EDGE));
+        for o in others.iter().filter(|o| o.y_range().intersects(rect.y_range())) {
+            for (p, rank) in [(o.right() + pad, HANG), (o.left() - pad - w, REST)] {
+                if (left..=right).contains(&p) {
+                    xs.push((p, None, rank));
+                }
+            }
+        }
+    }
+    if let Some(x) = pick(rect.left(), &xs) {
+        pos.x = x;
+    }
+    let x_range = egui::Rangef::new(pos.x, pos.x + w);
+    let bar = e.bar.filter(|b| b.x_range().intersects(x_range));
+    // The bar sits at the padding too, so it moves with it.
+    let top = bar.map_or(s.top() + pad, |b| b.bottom() + pad);
+    let bottom = s.bottom() - pad - h;
+    let mut ys = Vec::new();
+    if fits_y {
+        ys.push((top, moved.map(|d| bar.map_or(top - d, |_| top - 2.0 * d)), EDGE));
+        ys.push((bottom, moved.map(|d| bottom + d), EDGE));
+        for o in others.iter().filter(|o| o.x_range().intersects(x_range)) {
+            for (p, rank) in [(o.bottom() + pad, HANG), (o.top() - pad - h, REST)] {
+                if (top..=bottom).contains(&p) {
+                    ys.push((p, None, rank));
+                }
+            }
+        }
+    }
+    match pick(rect.top(), &ys) {
+        Some(y) => pos.y = y,
+        None if fits_y && bar.is_some() && rect.top() < top => pos.y = top,
+        None => {}
+    }
+    ((pos - rect.min).length() > 0.5).then_some(pos)
+}
+
 /// Render a panel as a draggable floating window.
 ///
 /// `resized` carries the previous viewport rect on frames where the window
-/// changed size; the panel is then re-stuck to its nearest edge.
+/// changed size; the panel is then re-stuck to its nearest edge. With
+/// `edges`, the panel keeps the padding from the window's edges: it can't
+/// be dragged nearer, and settles at the padding once let go near one.
+#[allow(clippy::too_many_arguments)]
 fn panel_window(
     state: &mut AppState,
     ctx: &egui::Context,
@@ -886,6 +1040,7 @@ fn panel_window(
     width: f32,
     open: bool,
     resized: Option<Rect>,
+    edges: Option<PanelEdges>,
 ) {
     if !state.panel_shown(id) {
         return;
@@ -907,6 +1062,33 @@ fn panel_window(
             window = window.current_pos(pos);
         }
     }
+    let laid = egui::AreaState::load(ctx, area).filter(|s| s.size.is_some()).map(|s| s.rect());
+    if let (None, Some(e)) = (resized, edges) {
+        // Not mid-drag: a panel settles once it is let go. A new padding
+        // moves the panels it held at once, though, even while its value
+        // is being dragged.
+        let settled = e.was.is_some() || ctx.input(|i| !i.pointer.any_down());
+        if let Some(r) = laid.filter(|_| settled) {
+            let others: Vec<Rect> = PanelId::ALL
+                .into_iter()
+                .filter(|&p| p != id && state.panel_shown(p))
+                .filter_map(|p| egui::AreaState::load(ctx, panel_area(state, p)))
+                .filter(|s| s.size.is_some())
+                .map(|s| s.rect())
+                .collect();
+            if let Some(pos) = padded_pos(r, e, &others) {
+                window = window.current_pos(pos);
+            }
+        }
+    }
+    if let Some(e) = edges {
+        // Not on its first frame: egui lays a new window out at a stand-in
+        // size, and holding that inside would shove a right-hand panel in.
+        window = match laid {
+            Some(_) => window.constrain_to(e.screen.shrink(e.pad)),
+            None => window.constrain(false),
+        };
+    }
     // The layer list and the sheet fill whatever height their panel has, so
     // those panels need one to start at.
     let start_h = match id {
@@ -917,6 +1099,12 @@ fn panel_window(
     };
     if let Some(h) = start_h {
         window = window.default_height(h);
+    }
+    // Tools' sliders fill its width, so a width it once grew to for any
+    // reason it would keep for good: held to a sane one, which also brings
+    // a panel stretched before back.
+    if id == PanelId::Tools {
+        window = window.max_width(TOOLS_MAX_W);
     }
     // The toolbar row can't wrap, so it is the timeline's narrowest: without
     // this a drag could pull the panel under it until the drag ends.
@@ -1151,12 +1339,13 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 };
                 // Same range as the pens' Size: the slider clamps whatever it
                 // shows, so a narrower one would cut a big pen down.
-                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=128.0).text(label))
-                    .on_hover_text(format!(
-                        "Shared with the {}, the pen you used last: change one and the \
-                         other follows.",
-                        tool_name(state.last_pen)
-                    ));
+                let hover = format!(
+                    "Shared with the {}, the pen you used last: change one and the \
+                     other follows.",
+                    tool_name(state.last_pen)
+                );
+                size_slider(state, ui, label, Some(&hover));
+                size_strip(state, ui);
             } else if state.tool == ActiveTool::Tracker {
                 ui.label(
                     egui::RichText::new(
@@ -1220,9 +1409,133 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 } else {
                     "Size"
                 };
-                ui.add(egui::Slider::new(&mut state.brush.radius, 0.5..=128.0).text(label));
-                ui.add(egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).text("Opacity"));
+                size_slider(state, ui, label, None);
+                size_strip(state, ui);
+                // Two decimals at most: a value a drag left long (0.9225)
+                // would be wider than the row leaves it.
+                let opacity = egui::Slider::new(&mut state.brush.opacity, 0.0..=1.0).max_decimals(2).text("Opacity");
+                fill_slider(ui, "Opacity", opacity);
             }
+    }
+}
+
+/// The pens' and Shape's size range.
+const BRUSH_SIZES: std::ops::RangeInclusive<f32> = 0.5..=128.0;
+
+/// A brush's size slider, as long as its row allows, its value to a tenth
+/// as the strip under it shows sizes. A line marks each pinned size, and a
+/// fainter one each size drawn at lately, over the slider.
+fn size_slider(state: &mut AppState, ui: &mut egui::Ui, label: &str, hover: Option<&str>) {
+    let m = state.size_memory();
+    let slider = egui::Slider::new(&mut state.brush.radius, BRUSH_SIZES).max_decimals(1).text(label);
+    let resp = fill_slider(ui, label, slider);
+    ui.painter().extend(size_marks(ui, resp.rect, &m));
+    if let Some(h) = hover {
+        resp.on_hover_text(h);
+    }
+}
+
+/// The lines [`size_slider`] marks remembered sizes with, for a slider row
+/// whose rect is `row`: where egui puts those values on the slider, the
+/// slider being the row's first `slider_width` points. That width is the
+/// one the row was laid out with, so this goes right after the slider.
+fn size_marks(ui: &egui::Ui, row: Rect, m: &crate::app::brush_sizes::SizeMemory) -> Vec<egui::Shape> {
+    let w = ui.spacing().slider_width;
+    let h = ui.text_style_height(&egui::TextStyle::Body).max(ui.spacing().interact_size.y);
+    // egui keeps the handle's centre a handle radius in from either end.
+    let r = h / 2.5;
+    let (x0, x1, y) = (row.left() + r, row.left() + w - r, row.center().y);
+    let (lo, hi) = (*BRUSH_SIZES.start(), *BRUSH_SIZES.end());
+    let x_at = |s: f32| x0 + (x1 - x0) * ((s - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let mut lines = Vec::new();
+    for &s in &m.recent {
+        if !m.pinned.iter().any(|&p| same_size(p, s)) {
+            let x = x_at(s);
+            lines.push(egui::Shape::line_segment(
+                [egui::pos2(x, y - h * 0.25), egui::pos2(x, y + h * 0.25)],
+                Stroke::new(1.0, theme::text_muted().gamma_multiply(0.6)),
+            ));
+        }
+    }
+    for &s in &m.pinned {
+        let x = x_at(s);
+        lines.push(egui::Shape::line_segment(
+            [egui::pos2(x, y - h * 0.4), egui::pos2(x, y + h * 0.4)],
+            Stroke::new(1.5, theme::accent()),
+        ));
+    }
+    lines
+}
+
+/// The sizes this brush was drawn at lately and the ones pinned, under its
+/// size slider: click one to draw at it, right-click to pin or unpin it,
+/// the pin to keep the size it is at. One row: pinned sizes first, then as
+/// many recent ones as fit. Wrapping would grow the panel for good.
+fn size_strip(state: &mut AppState, ui: &mut egui::Ui) {
+    let m = state.size_memory();
+    let r = state.brush.radius;
+    let mut sizes: Vec<(f32, bool)> = m.pinned.iter().map(|&s| (s, true)).collect();
+    for &s in &m.recent {
+        if !sizes.iter().any(|&(p, _)| same_size(p, s)) {
+            sizes.push((s, false));
+        }
+    }
+    let pinned_now = m.pinned.iter().any(|&s| same_size(s, r));
+    let swap_key = combo_text(state, Action::SizeSwap);
+    let pin_tip = format!(
+        "{}{}",
+        if pinned_now { "This size is pinned" } else { "Pin this size, to keep it here" },
+        if swap_key.is_empty() {
+            String::new()
+        } else {
+            format!("\n{swap_key}: swap to the size drawn at last, and back")
+        },
+    );
+    let (mut pick, mut toggle) = (None, None);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let pin = egui::Button::new(egui::RichText::new(ic::PUSH_PIN_SIMPLE).size(13.0)).frame(false);
+        if ui
+            .add_enabled(!pinned_now, pin)
+            .on_hover_text(&pin_tip)
+            .on_disabled_hover_text(&pin_tip)
+            .clicked()
+        {
+            toggle = Some(r);
+        }
+        for (s, pinned) in sizes {
+            let mut text = egui::RichText::new(size_label(s)).size(11.5);
+            if pinned {
+                text = text.strong().color(theme::accent());
+            }
+            let w = egui::WidgetText::from(text.clone())
+                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button)
+                .size()
+                .x
+                + 2.0 * ui.spacing().button_padding.x;
+            if w > ui.available_width() {
+                break;
+            }
+            let resp = ui
+                .add(egui::SelectableLabel::new(same_size(s, r), text))
+                .on_hover_text(if pinned {
+                    "Pinned: click to draw at this size, right-click to unpin"
+                } else {
+                    "Drawn at lately: click to draw at this size, right-click to pin"
+                });
+            if resp.clicked() {
+                pick = Some(s);
+            }
+            if resp.secondary_clicked() {
+                toggle = Some(s);
+            }
+        }
+    });
+    if let Some(s) = pick {
+        state.brush.radius = s;
+    }
+    if let Some(s) = toggle {
+        state.toggle_pinned_size(s);
     }
 }
 
@@ -1492,6 +1805,29 @@ fn fit_sliders(ui: &mut egui::Ui, label: &str, extra: f32) {
     ui.spacing_mut().slider_width = (ui.available_width() - fixed).floor().clamp(40.0, s.slider_width);
 }
 
+/// Add `slider`, labelled `label`, as long as its row has room for beside
+/// its value and label — growing it as well as shrinking it, unlike
+/// [`fit_sliders`].
+///
+/// A slider that fills its row feeds back: a row even a point too wide
+/// grows the panel, which gives the slider a point more, and so on across
+/// the screen. So a row that came out wider than the room it had is
+/// remembered, and the slider gives that much back from then on: the panel
+/// grows once, by that much, at most.
+fn fill_slider(ui: &mut egui::Ui, label: &str, slider: egui::Slider<'_>) -> egui::Response {
+    let id = ui.id().with(("fill_slider", label));
+    let over = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    let room = ui.available_width();
+    ui.spacing_mut().slider_width = room;
+    fit_sliders(ui, label, over);
+    let resp = ui.add(slider);
+    let past = resp.rect.width() - room;
+    if past > 0.0 {
+        ui.data_mut(|d| d.insert_temp(id, over + past.ceil()));
+    }
+    resp
+}
+
 /// Where the timeline toolbar leaves its full width for the panel.
 fn timeline_bar_id() -> egui::Id {
     egui::Id::new("timeline_bar_width")
@@ -1572,6 +1908,15 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
         gap(ui);
 
         let n = state.frame_step_count();
+        let before_base = if n == 1 {
+            "Insert a frame before this one, on every layer — blank at the start".to_string()
+        } else {
+            format!("Insert {n} frames before this one, on every layer — blank at the start")
+        };
+        let before_tip = tip(state, Action::FrameInsertBefore, &before_base);
+        if theme::icon_button(ui, ic::COLUMNS_PLUS_LEFT, &before_tip).clicked() {
+            state.insert_frames_before();
+        }
         let add_base = if n == 1 {
             "Add frame (hold)".to_string()
         } else {
@@ -1579,11 +1924,7 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
         };
         let add_tip = tip(state, Action::FrameAdd, &add_base);
         if theme::icon_button(ui, ic::PLUS, &add_tip).clicked() {
-            state.structural_edit(false, |p| {
-                for _ in 0..n {
-                    p.add_frame();
-                }
-            });
+            state.add_frames();
         }
         let dup_base = if n == 1 {
             "Duplicate frame".to_string()
@@ -1592,16 +1933,11 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
         };
         let dup_tip = tip(state, Action::FrameDuplicate, &dup_base);
         if theme::icon_button(ui, ic::COPY, &dup_tip).clicked() {
-            state.structural_edit(false, |p| {
-                for _ in 0..n {
-                    p.duplicate_frame();
-                }
-            });
+            state.duplicate_frames();
         }
         let del_tip = tip(state, Action::FrameDelete, "Delete frame");
         if theme::icon_button(ui, ic::TRASH, &del_tip).clicked() {
-            let wipes_pixels = state.project.frame_count <= 1;
-            state.structural_edit(wipes_pixels, |p| p.delete_frame());
+            state.delete_frame();
         }
         gap(ui);
 
@@ -1644,7 +1980,20 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
             )
             .on_hover_text("Playback speed");
             gap(ui);
-            ui.label(egui::RichText::new(format!("/ {count}")).color(theme::text_muted()));
+            // A slot four digits wide, so the bar — and the panel, which
+            // takes it as its narrowest — keeps its width as the scene grows.
+            let count_text = egui::RichText::new(format!("/ {count}")).color(theme::text_muted());
+            let slot = ["/ 0000".to_string(), format!("/ {count}")]
+                .map(|t| {
+                    egui::WidgetText::from(t)
+                        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+                        .size()
+                        .x
+                })
+                .into_iter()
+                .fold(0.0, f32::max)
+                .ceil();
+            ui.add_sized([slot, ui.spacing().interact_size.y], egui::Label::new(count_text));
             let field = ui
                 .add(
                     egui::DragValue::new(&mut cur)
@@ -3050,11 +3399,22 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
         state.set_camera_box(boxing);
     }
+    ui.horizontal(|ui| {
+        ui.add_space(18.0);
+        ui.checkbox(&mut state.camera_box_free, "Free shape").on_hover_text(
+            "Draw the box any shape: its size becomes the camera's own, the size exports \
+             come out at, and the camera frames it at zoom 1. Off, the box keeps the \
+             camera's shape.",
+        );
+    });
     ui.label(
-        egui::RichText::new(
+        egui::RichText::new(if state.camera_box_free {
+            "Drag a box on the canvas: the camera takes its size and frames it, keyed on this \
+             frame. Tap to centre the camera there."
+        } else {
             "Drag a box on the canvas: the camera frames it, keyed on this frame, and moves \
-             into it from the key before (the dashed frame). Tap to centre the camera there.",
-        )
+             into it from the key before (the dashed frame). Tap to centre the camera there."
+        })
         .color(theme::text_muted())
         .size(10.5),
     );
@@ -3451,9 +3811,41 @@ fn layer_selection_actions(state: &mut AppState, ui: &mut egui::Ui) {
     if (v - state.project.layers[cur].opacity).abs() > f32::EPSILON || (resp.changed() && many) {
         state.set_selected_opacity(v);
     }
-    if !resp.dragged() && !resp.has_focus() {
+    // A row's % being dragged owns the open undo step; it closes it.
+    if !resp.dragged() && !resp.has_focus() && state.opacity_row_uid.is_none() {
         state.commit_layer_opacity();
     }
+}
+
+/// Side padding of the % on a layer row: as little as still reads as a
+/// field, so it takes no more room than the plain text it once was.
+const OPACITY_BADGE_PAD: f32 = 2.0;
+
+/// The % on a layer row, to drag or click and type: small, in the room
+/// its text takes.
+fn opacity_badge(ui: &mut egui::Ui, pct: &mut f32) -> egui::Response {
+    let w = opacity_badge_w(ui, *pct / 100.0);
+    ui.scope(|ui| {
+        ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
+        ui.spacing_mut().button_padding.x = OPACITY_BADGE_PAD;
+        let h = ui.spacing().interact_size.y;
+        ui.add_sized(
+            [w, h],
+            egui::DragValue::new(pct).range(0.0..=100.0).speed(0.5).fixed_decimals(0).suffix("%"),
+        )
+    })
+    .inner
+    .on_hover_text("This layer's opacity: drag sideways, or click and type")
+}
+
+/// Width of [`opacity_badge`] showing `opacity`.
+fn opacity_badge_w(ui: &egui::Ui, opacity: f32) -> f32 {
+    let text = format!("{:.0}%", (opacity * 100.0).round());
+    let w = egui::WidgetText::from(text)
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Small)
+        .size()
+        .x;
+    (w + 2.0 * OPACITY_BADGE_PAD).ceil()
 }
 
 fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
@@ -3541,6 +3933,11 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             let mut toggle_fold: Option<usize> = None;
             let mut menu_pick: Option<(usize, RowCmd)> = None;
             let mut pick: Option<(usize, bool)> = None;
+            // A row's % dragged to a new opacity, and the layer whose % is
+            // still in hand.
+            let mut row_opacity: Option<(usize, f32)> = None;
+            let mut row_live: Option<u64> = None;
+            let live_uid = state.opacity_row_uid;
             let rows = state.project.panel_rows();
             let picked = state.selected_layers.clone();
             let grp_key = combo_text(state, Action::LayerGroup);
@@ -3746,20 +4143,12 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         // What follows the name keeps its
                                         // room: the alpha-lock mark, the
                                         // opacity when under full, and the ⋮.
-                                        let badge = (layer.opacity < 0.995).then(|| {
-                                            egui::RichText::new(format!("{:.0}%", layer.opacity * 100.0))
-                                                .size(11.0)
-                                                .color(theme::text_muted())
-                                        });
+                                        // The opacity stays while its % is in
+                                        // hand, so a drag up to 100% keeps it.
+                                        let badge = layer.opacity < 0.995 || live_uid == Some(layer.uid);
                                         let room = ui.available_width();
                                         let gap = ui.spacing().item_spacing.x;
-                                        let badge_w = badge.clone().map_or(0.0, |b| {
-                                            let w = egui::WidgetText::from(b)
-                                                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
-                                                .size()
-                                                .x;
-                                            w + gap
-                                        });
+                                        let badge_w = if badge { opacity_badge_w(ui, layer.opacity) + gap } else { 0.0 };
                                         let lock_w = if layer.alpha_lock { 14.0 + gap } else { 0.0 };
                                         let name_w = (room - badge_w - lock_w - ROW_DOTS_W - gap).max(0.0);
                                         let resp = ui
@@ -3805,10 +4194,15 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                                  changes pixels that already have paint"
                                             ));
                                         }
-                                        if let Some(b) = badge {
-                                            ui.label(b).on_hover_text(
-                                                "Layer opacity. Set it with the slider over the list.",
-                                            );
+                                        if badge {
+                                            let mut pct = (layer.opacity * 100.0).round();
+                                            let resp = opacity_badge(ui, &mut pct);
+                                            if resp.changed() {
+                                                row_opacity = Some((i, pct / 100.0));
+                                            }
+                                            if resp.dragged() || resp.has_focus() {
+                                                row_live = Some(layer.uid);
+                                            }
                                         }
                                         // The rest of what the layer offers: the
                                         // ⋮ at the row's top right, and the same
@@ -4050,6 +4444,14 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
             if let Some(i) = cleanup_of {
                 state.add_cleanup_layer(i);
             }
+            if let Some((i, v)) = row_opacity {
+                state.set_layer_opacity(i, v);
+            }
+            // Let go: the row's whole drag, or what was typed, is one undo.
+            if row_live.is_none() && state.opacity_row_uid.is_some() {
+                state.commit_layer_opacity();
+            }
+            state.opacity_row_uid = row_live;
 
             // The sections under the list, laid out in a child that claims no
             // room by itself. Opening one makes it taller than last frame's
@@ -4808,6 +5210,20 @@ fn appearance_section(state: &mut AppState, ui: &mut egui::Ui) {
     if changed {
         state.apply_scheme(ui.ctx());
     }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Panel padding");
+        ui.add(
+            egui::DragValue::new(&mut state.panel_padding)
+                .range(0..=crate::app::MAX_PANEL_PADDING)
+                .suffix(" px"),
+        )
+        .on_hover_text(
+            "How far the panels and the top bar keep from the window's edges. A panel \
+             can't go nearer, and one let go close to an edge settles exactly this far \
+             in from it — or from the top bar, under it.",
+        );
+    });
 }
 
 /// A clickable preview of a scheme: its panel on its background, a line of
@@ -6441,8 +6857,8 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 4.0,
             ));
         }
-        if let Some(c) = state.camera_box_camera() {
-            let q = frame_corners(c).to_vec();
+        if let Some((c, (bw, bh))) = state.camera_box_frame() {
+            let q = layer_screen_corners(&xf, c.as_frame_transform(), bw as f32, bh as f32, pw, ph).to_vec();
             let (under, over) = (Color32::from_black_alpha(150), Color32::from_rgb(255, 190, 90));
             painter.add(egui::Shape::closed_line(q.clone(), Stroke::new(2.6, under)));
             painter.add(egui::Shape::closed_line(q, Stroke::new(1.2, over)));
@@ -7889,13 +8305,15 @@ fn stroke_sample(
     }
 }
 
-/// Small floating menu strip: File / Edit menus + a panel-visibility toggle.
-/// The OS window frame provides the border and window controls.
+/// Small menu strip: File / Edit menus + a panel-visibility toggle. Pinned
+/// to the top left: a drag on it never moves it, only its handle moves the
+/// OS window. The OS window frame provides the border and window controls.
 fn menu_window(state: &mut AppState, ctx: &egui::Context) {
+    let pad = f32::from(state.panel_padding_laid);
     egui::Window::new("menu_bar")
         .title_bar(false)
         .resizable(false)
-        .default_pos([12.0, 8.0])
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(pad, pad))
         .frame(floating_frame())
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -10032,7 +10450,7 @@ mod panel_drag_tests {
             ..Default::default()
         };
         ctx.run(raw, |ctx| {
-            panel_window(state, ctx, PanelId::Onion, [300.0, 200.0], 252.0, true, None);
+            panel_window(state, ctx, PanelId::Onion, [300.0, 200.0], 252.0, true, None, None);
         })
         .shapes
     }
@@ -10177,6 +10595,510 @@ mod panel_drag_tests {
         let (before, after) = drag(pos2(1.0, 150.0), vec2(-1.0, 0.0));
         assert!(after.left() < before.left() - 30.0, "{before:?} → {after:?}");
         assert_eq!(after.right(), before.right());
+    }
+
+    /// The menu strip stays pinned at the top left: a drag on its margin, or
+    /// on the gap between its menus, leaves it where it is.
+    #[test]
+    fn dragging_the_menu_strip_leaves_it_where_it_is() {
+        let run = |ctx: &egui::Context, state: &mut AppState, events| {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| menu_window(state, ctx));
+        };
+        let rect = |ctx: &egui::Context| {
+            egui::AreaState::load(ctx, egui::Id::new("menu_bar")).expect("menu laid out").rect()
+        };
+        for at in [vec2(2.0, 2.0), vec2(3.0, 12.0)] {
+            let mut state = AppState::for_test();
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                run(&ctx, &mut state, vec![]);
+            }
+            let before = rect(&ctx);
+            let pad = f32::from(state.panel_padding);
+            assert_eq!(before.min, pos2(pad, pad));
+            let from = before.min + at;
+            let to = from + vec2(60.0, 40.0);
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            run(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+            for i in 1..=4 {
+                let p = from + (to - from) * (i as f32 / 4.0);
+                run(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+            }
+            run(&ctx, &mut state, vec![button(to, false)]);
+            run(&ctx, &mut state, vec![]);
+            assert_eq!(rect(&ctx).min, before.min, "grabbed at {at:?}");
+        }
+    }
+}
+
+/// Panels and the top bar keeping the padding from the window's edges.
+#[cfg(test)]
+mod panel_padding_tests {
+    use super::*;
+    use egui::{pos2, vec2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0));
+    const BAR: Rect = Rect::from_min_max(pos2(8.0, 8.0), pos2(300.0, 53.0));
+
+    fn edges(was: Option<f32>) -> PanelEdges {
+        PanelEdges { screen: SCREEN, pad: 8.0, was, bar: Some(BAR) }
+    }
+
+    fn panel(x: f32, y: f32) -> Rect {
+        Rect::from_min_size(pos2(x, y), vec2(272.0, 300.0))
+    }
+
+    fn padded_pos_alone(rect: Rect, e: PanelEdges) -> Option<Pos2> {
+        padded_pos(rect, e, &[])
+    }
+
+    /// Panels settle a padding from each other as from the window's edge:
+    /// let go near one, or overlapping it a little — not right on top.
+    #[test]
+    fn a_panel_near_another_settles_a_padding_from_it() {
+        let tools = Rect::from_min_max(pos2(8.0, 61.0), pos2(240.0, 301.0));
+        let near = |x, y| padded_pos(panel(x, y), edges(None), &[tools]);
+        assert_eq!(near(8.0, 320.0), Some(pos2(8.0, 309.0)), "under it, near");
+        assert_eq!(near(8.0, 295.0), Some(pos2(8.0, 309.0)), "under it, overlapping a little");
+        assert_eq!(near(8.0, 200.0), None, "right on top of it is left be");
+        assert_eq!(near(8.0, 400.0), None, "well clear");
+        // Held both under one panel and over another, it hangs from the one
+        // above; the window's edge beats either.
+        let on_bottom = panel(8.0, 900.0 - 300.0 - 14.0);
+        let above = Rect::from_min_max(pos2(8.0, 400.0), pos2(240.0, on_bottom.top() - 18.0));
+        assert_eq!(padded_pos(on_bottom, edges(None), &[above]), Some(pos2(8.0, 592.0)), "the bottom edge");
+        let below = Rect::from_min_max(pos2(8.0, 628.0), pos2(240.0, 700.0));
+        assert_eq!(
+            padded_pos(panel(8.0, 320.0), edges(None), &[tools, below]),
+            Some(pos2(8.0, 309.0)),
+            "under Tools, not resting on the one below"
+        );
+        assert_eq!(near(260.0, 100.0), Some(pos2(248.0, 100.0)), "beside it");
+        assert_eq!(near(240.0, 100.0), Some(pos2(248.0, 100.0)), "beside it, overlapping");
+        // A place outside the padded window doesn't pull.
+        let at_edge = Rect::from_min_max(pos2(8.0, 400.0), pos2(240.0, 600.0));
+        assert_eq!(padded_pos(panel(15.0, 450.0), edges(None), &[at_edge]), Some(pos2(8.0, 450.0)));
+    }
+
+    #[test]
+    fn a_panel_near_an_edge_settles_at_the_padding() {
+        assert_eq!(padded_pos_alone(panel(1600.0 - 272.0 - 20.0, 200.0), edges(None)), Some(pos2(1320.0, 200.0)));
+        assert_eq!(padded_pos_alone(panel(500.0, 900.0 - 300.0 - 15.0), edges(None)), Some(pos2(500.0, 592.0)));
+        assert_eq!(padded_pos_alone(panel(1320.0, 25.0), edges(None)), Some(pos2(1320.0, 8.0)), "clear of the bar");
+        assert_eq!(padded_pos_alone(panel(500.0, 200.0), edges(None)), None, "out in the open");
+        assert_eq!(padded_pos_alone(panel(8.0, 200.0), edges(None)), None, "already there");
+        assert_eq!(padded_pos_alone(panel(1320.0 - 21.0, 200.0), edges(None)), None, "too far to pull");
+    }
+
+    #[test]
+    fn under_the_top_bar_the_bar_is_the_edge() {
+        assert_eq!(padded_pos_alone(panel(20.0, 70.0), edges(None)), Some(pos2(8.0, 61.0)));
+        assert_eq!(padded_pos_alone(panel(8.0, 30.0), edges(None)), Some(pos2(8.0, 61.0)), "off the bar");
+        assert_eq!(padded_pos_alone(panel(8.0, 300.0), edges(None)), None);
+    }
+
+    /// A new padding moves the panels the old one held, however far.
+    #[test]
+    fn a_new_padding_moves_the_panels_it_held() {
+        let e = PanelEdges { pad: 40.0, bar: Some(BAR.translate(vec2(32.0, 32.0))), ..edges(Some(8.0)) };
+        assert_eq!(padded_pos_alone(panel(8.0, 300.0), e), Some(pos2(40.0, 300.0)));
+        assert_eq!(padded_pos_alone(panel(1320.0, 300.0), e), Some(pos2(1288.0, 300.0)));
+        assert_eq!(padded_pos_alone(panel(8.0, 61.0), e), Some(pos2(40.0, 125.0)), "under the bar, which moved");
+        assert_eq!(padded_pos_alone(panel(500.0, 300.0), e), None);
+    }
+
+    fn run(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| draw(state, ctx));
+    }
+
+    fn rect(ctx: &egui::Context, id: egui::Id) -> Rect {
+        egui::AreaState::load(ctx, id).expect("laid out").rect()
+    }
+
+    fn setup() -> (egui::Context, AppState) {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut state = AppState::for_test();
+        state.show_panels = true;
+        for _ in 0..4 {
+            run(&ctx, &mut state, vec![]);
+        }
+        (ctx, state)
+    }
+
+    fn layers(state: &AppState) -> egui::Id {
+        panel_area(state, PanelId::Layers)
+    }
+
+    /// As they first open, the top bar, the left column and the right one
+    /// all keep the padding from the edges, and the left one from the bar.
+    #[test]
+    fn the_first_layout_keeps_the_padding() {
+        let (ctx, state) = setup();
+        let bar = rect(&ctx, egui::Id::new("menu_bar"));
+        let tools = rect(&ctx, panel_area(&state, PanelId::Tools));
+        let right = rect(&ctx, layers(&state));
+        assert_eq!(bar.min, pos2(8.0, 8.0));
+        assert_eq!(tools.min, pos2(8.0, bar.bottom() + 8.0));
+        assert_eq!((right.right(), right.top()), (SCREEN.right() - 8.0, 8.0));
+    }
+
+    /// Drag a panel by its title bar to `to`, its top-left; the panel's
+    /// rect while still held, and after letting go.
+    fn drag_to(ctx: &egui::Context, state: &mut AppState, id: egui::Id, to: Pos2) -> (Rect, Rect) {
+        let from = rect(ctx, id).min + vec2(60.0, 14.0);
+        let at = to + vec2(60.0, 14.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(ctx, state, vec![egui::Event::PointerMoved(from)]);
+        run(ctx, state, vec![button(from, true)]);
+        for i in 1..=6 {
+            run(ctx, state, vec![egui::Event::PointerMoved(from + (at - from) * (i as f32 / 6.0))]);
+        }
+        let held = rect(ctx, id);
+        run(ctx, state, vec![button(at, false)]);
+        run(ctx, state, vec![]);
+        run(ctx, state, vec![]);
+        (held, rect(ctx, id))
+    }
+
+    #[test]
+    fn a_panel_let_go_near_an_edge_settles_at_the_padding_and_no_nearer() {
+        let (ctx, mut state) = setup();
+        let id = layers(&state);
+        let w = rect(&ctx, id).width();
+        // egui's drag threshold leaves a drag a point or two short of its aim.
+        let (held, after) = drag_to(&ctx, &mut state, id, pos2(SCREEN.right() - w - 25.0, 300.0));
+        assert!((held.right() - (SCREEN.right() - 25.0)).abs() < 4.0, "not while held: {held:?}");
+        assert_eq!((after.right(), after.top()), (SCREEN.right() - 8.0, held.top()));
+
+        let (_, out) = drag_to(&ctx, &mut state, id, pos2(SCREEN.right() - w + 100.0, 300.0));
+        assert_eq!(out.right(), SCREEN.right() - 8.0, "dragged past the edge");
+
+        let (held, free) = drag_to(&ctx, &mut state, id, pos2(700.0, 300.0));
+        assert!((free.left() - 700.0).abs() < 4.0, "{free:?}");
+        assert_eq!(free, held, "out in the open it stays put");
+    }
+
+    #[test]
+    fn changing_the_padding_moves_the_bar_and_the_panels_it_held() {
+        let (ctx, mut state) = setup();
+        state.panel_padding = 30;
+        // A few points a frame, then a frame to settle.
+        for _ in 0..8 {
+            run(&ctx, &mut state, vec![]);
+        }
+        assert_eq!(state.panel_padding_laid, 30);
+        let brush = rect(&ctx, panel_area(&state, PanelId::Brush));
+        let bar = rect(&ctx, egui::Id::new("menu_bar"));
+        let tools = rect(&ctx, panel_area(&state, PanelId::Tools));
+        let right = rect(&ctx, layers(&state));
+        assert_eq!(bar.min, pos2(30.0, 30.0));
+        assert_eq!(tools.min, pos2(30.0, bar.bottom() + 30.0));
+        assert_eq!((right.right(), right.top()), (SCREEN.right() - 30.0, 30.0));
+        assert_eq!(brush.min, pos2(30.0, tools.bottom() + 30.0), "the one under Tools came along");
+    }
+
+    /// As they first open, the panels stacked in a column sit a padding
+    /// apart, and no two panels overlap.
+    #[test]
+    fn the_first_layout_stacks_the_panels_a_padding_apart() {
+        let (ctx, state) = setup();
+        let at = |id| rect(&ctx, panel_area(&state, id));
+        for pair in [
+            [PanelId::Tools, PanelId::Brush],
+            [PanelId::Layers, PanelId::Onion],
+            [PanelId::Onion, PanelId::Camera],
+            [PanelId::Camera, PanelId::Xsheet],
+        ] {
+            let (a, b) = (at(pair[0]), at(pair[1]));
+            assert_eq!(b.top(), a.bottom() + 8.0, "{pair:?}: {a:?} {b:?}");
+        }
+        let all: Vec<Rect> = PanelId::ALL.into_iter().map(at).collect();
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert!(!a.intersects(*b), "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    /// Dragged to just under another panel and let go, a panel settles a
+    /// padding under it.
+    #[test]
+    fn a_panel_let_go_under_another_settles_a_padding_below_it() {
+        let (ctx, mut state) = setup();
+        let tools = rect(&ctx, panel_area(&state, PanelId::Tools));
+        let id = panel_area(&state, PanelId::Brush);
+        let (_, after) = drag_to(&ctx, &mut state, id, pos2(8.0, tools.bottom() + 20.0));
+        assert_eq!(after.min, pos2(8.0, tools.bottom() + 8.0));
+    }
+}
+
+/// The sizes under the Size slider, through the Tools panel.
+#[cfg(test)]
+mod size_strip_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) -> Vec<egui::epaint::ClippedShape> {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| {
+            panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, None, None);
+        })
+        .shapes
+    }
+
+    /// Where `text` was painted, exactly that, if it was.
+    fn text_pos(shapes: &[egui::epaint::ClippedShape], text: &str) -> Option<Pos2> {
+        fn find(shape: &egui::Shape, text: &str, out: &mut Option<Pos2>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| find(s, text, out)),
+                egui::Shape::Text(t) if t.galley.text() == text => *out = Some(t.visual_bounding_rect().center()),
+                _ => {}
+            }
+        }
+        let mut out = None;
+        for s in shapes {
+            find(&s.shape, text, &mut out);
+        }
+        out
+    }
+
+    fn click(ctx: &egui::Context, state: &mut AppState, at: Pos2, button: egui::PointerButton) -> Vec<egui::epaint::ClippedShape> {
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, state, vec![egui::Event::PointerMoved(at), press(true)]);
+        frame(ctx, state, vec![press(false)]);
+        frame(ctx, state, vec![])
+    }
+
+    /// Sizes drawn at show under the slider: a click draws at one, a
+    /// right-click pins it, and a pinned size shows once, with its pin.
+    #[test]
+    fn the_strip_offers_sizes_drawn_at_and_pins_them() {
+        let mut state = AppState::for_test();
+        state.dispatch(Action::ToolInk);
+        for s in [7.5, 12.0] {
+            state.brush.radius = s;
+            state.pointer_down(state.make_sample(20.0, 20.0, 0.0));
+            state.pointer_move(state.make_sample(60.0, 20.0, 0.1));
+            state.pointer_up();
+        }
+        state.brush.radius = 30.0;
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        frame(&ctx, &mut state, vec![]);
+        let shapes = frame(&ctx, &mut state, vec![]);
+
+        let at = text_pos(&shapes, "7.5").expect("7.5 offered");
+        let shapes = click(&ctx, &mut state, at, egui::PointerButton::Primary);
+        assert_eq!(state.brush.radius, 7.5);
+
+        let at = text_pos(&shapes, "12").expect("12 offered");
+        let shapes = click(&ctx, &mut state, at, egui::PointerButton::Secondary);
+        assert_eq!(state.size_memory().pinned, vec![12.0]);
+        assert_eq!(state.brush.radius, 7.5, "pinning leaves the size alone");
+        // Pinned, it leads the row, and shows once.
+        let twelve = text_pos(&shapes, "12").expect("still offered");
+        let seven = text_pos(&shapes, "7.5").expect("still offered");
+        assert!(twelve.x < seven.x, "pinned first");
+    }
+
+    /// Every shape painted, flattened.
+    fn all(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Shape> {
+        fn walk(s: &egui::Shape, out: &mut Vec<egui::Shape>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                s => out.push(s.clone()),
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// The vertical lines drawn in `color`: their x and middle y.
+    fn marks(shapes: &[egui::epaint::ClippedShape], color: Color32) -> Vec<Pos2> {
+        all(shapes)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::Shape::LineSegment { points: [a, b], stroke }
+                    if stroke.color == egui::epaint::ColorMode::Solid(color)
+                        && (a.x - b.x).abs() < 1e-3
+                        && (a.y - b.y).abs() > 2.0 =>
+                {
+                    Some(egui::pos2(a.x, (a.y + b.y) * 0.5))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The Size slider's handle: the circle on the marks' row.
+    fn handle_x(shapes: &[egui::epaint::ClippedShape], y: f32) -> f32 {
+        all(shapes)
+            .into_iter()
+            .find_map(|s| match s {
+                egui::Shape::Circle(c) if (c.center.y - y).abs() < 1.0 => Some(c.center.x),
+                _ => None,
+            })
+            .expect("the Size handle")
+    }
+
+    /// The slider marks each pinned size, and more faintly each size drawn
+    /// at lately, right where its handle sits at that size, over the slider.
+    #[test]
+    fn the_size_slider_marks_pinned_and_recent_sizes_where_the_handle_sits() {
+        let mut state = AppState::for_test();
+        state.dispatch(Action::ToolInk);
+        let slot = state.size_slot();
+        state.brush_sizes = vec![Default::default(); slot + 1];
+        state.brush_sizes[slot] = crate::app::brush_sizes::SizeMemory {
+            recent: vec![16.9, 77.4],
+            pinned: vec![16.9],
+        };
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        // No fade-in: the window would paint the marks dimmed while it opens.
+        ctx.style_mut(|s| s.animation_time = 0.0);
+        state.brush.radius = 16.9;
+        frame(&ctx, &mut state, vec![]);
+        let shapes = frame(&ctx, &mut state, vec![]);
+        let pins = marks(&shapes, theme::accent());
+        assert_eq!(pins.len(), 1, "one pin, marked once: {pins:?}");
+        assert!((handle_x(&shapes, pins[0].y) - pins[0].x).abs() < 0.5, "under the handle at 16.9");
+        let faint = marks(&shapes, theme::text_muted().gamma_multiply(0.6));
+        assert_eq!(faint.len(), 1, "77.4 only; 16.9 is pinned: {faint:?}");
+
+        state.brush.radius = 77.4;
+        let shapes = frame(&ctx, &mut state, vec![]);
+        assert!((handle_x(&shapes, faint[0].y) - faint[0].x).abs() < 0.5, "under the handle at 77.4");
+        assert_eq!(marks(&shapes, theme::accent()), pins, "the marks stay put");
+
+        // Drawn over the slider: after its handle.
+        let all = all(&shapes);
+        let handle = all
+            .iter()
+            .position(|s| matches!(s, egui::Shape::Circle(c) if (c.center.y - pins[0].y).abs() < 1.0))
+            .expect("the handle");
+        let pin = all
+            .iter()
+            .position(|s| matches!(s, egui::Shape::LineSegment { points: [a, _], .. } if (a.x - pins[0].x).abs() < 1e-3))
+            .expect("the pin's line");
+        assert!(pin > handle, "the line is drawn under the slider");
+    }
+
+    /// Values a drag leaves long (0.9225) don't widen the Tools panel: a
+    /// filling slider would otherwise feed its own overflow back, a few
+    /// points a frame, until the panel crossed the screen.
+    #[test]
+    fn long_values_leave_the_tools_panel_its_width() {
+        let mut state = AppState::for_test();
+        state.dispatch(Action::ToolPencil);
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        for _ in 0..3 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        let area = panel_area(&state, PanelId::Tools);
+        let width = || egui::AreaState::load(&ctx, area).unwrap().rect().width();
+        let before = width();
+        state.brush.radius = 16.892_37;
+        state.brush.opacity = 0.922_54;
+        for _ in 0..20 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        assert_eq!(width(), before);
+    }
+
+    /// The Tools panel goes no wider than its cap, dragged by its edge.
+    /// egui holds a stored size to the cap every frame too, so a panel an
+    /// older build stretched comes back on its own.
+    #[test]
+    fn the_tools_panel_goes_no_wider_than_its_cap() {
+        let mut state = AppState::for_test();
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        for _ in 0..3 {
+            frame(&ctx, &mut state, vec![]);
+        }
+        let area = panel_area(&state, PanelId::Tools);
+        let rect = || egui::AreaState::load(&ctx, area).unwrap().rect();
+        let from = pos2(rect().right() - 1.0, rect().center().y);
+        let to = from + egui::vec2(1200.0, 0.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from)]);
+        frame(&ctx, &mut state, vec![button(from, true)]);
+        for i in 1..=8 {
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from + (to - from) * (i as f32 / 8.0))]);
+        }
+        frame(&ctx, &mut state, vec![button(to, false)]);
+        frame(&ctx, &mut state, vec![]);
+        let w = rect().width();
+        assert!(w > 400.0, "the drag widened it: {w}");
+        assert!(w <= TOOLS_MAX_W + 2.0 * 10.0 + 1.0, "{w}");
+    }
+
+    /// However many sizes there are, they keep to one row: the pinned all
+    /// show, and recent ones as many as fit.
+    #[test]
+    fn the_strip_keeps_to_one_row() {
+        let mut state = AppState::for_test();
+        state.dispatch(Action::ToolInk);
+        let slot = state.size_slot();
+        state.brush_sizes = vec![Default::default(); slot + 1];
+        state.brush_sizes[slot] = crate::app::brush_sizes::SizeMemory {
+            recent: vec![0.5, 3.3, 12.5, 64.0, 127.9],
+            pinned: vec![1.1, 2.5, 7.7, 100.1, 128.0],
+        };
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        frame(&ctx, &mut state, vec![]);
+        let shapes = frame(&ctx, &mut state, vec![]);
+        let ys: Vec<f32> = ["1.1", "2.5", "7.7", "100.1", "128"]
+            .iter()
+            .map(|t| text_pos(&shapes, t).unwrap_or_else(|| panic!("pinned {t} shows")).y)
+            .collect();
+        assert!(ys.iter().all(|&y| (y - ys[0]).abs() < 1.0), "one row: {ys:?}");
+        for t in ["0.5", "3.3", "12.5", "64", "127.9"] {
+            if let Some(p) = text_pos(&shapes, t) {
+                assert!((p.y - ys[0]).abs() < 1.0, "{t} on the same row");
+            }
+        }
     }
 }
 
@@ -10423,6 +11345,48 @@ mod timeline_panel_tests {
         let shorter = panel(&ctx);
         assert!((shorter.max.y - (from.y - 50.0)).abs() < 1.0, "{taller:?} → {shorter:?}");
         assert!((shorter.min.y - taller.min.y).abs() < 1.0, "the top stays put");
+    }
+
+    /// The toolbar's insert-before button puts the step size's worth of
+    /// blank frames in front of the first drawing, on every layer.
+    #[test]
+    fn the_insert_before_button_adds_frames_at_the_start() {
+        let (mut state, ctx) = setup();
+        state.project.add_layer();
+        state.frame_step = 2;
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            ..Default::default()
+        };
+        let shapes = ctx.run(raw, |ctx| draw(&mut state, ctx)).shapes;
+        let timeline = panel(&ctx);
+        let at = shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t)
+                    if t.galley.text() == ic::COLUMNS_PLUS_LEFT
+                        && timeline.contains(t.visual_bounding_rect().center()) =>
+                {
+                    Some(t.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .expect("the button is on the timeline's toolbar");
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let was: Vec<_> = state.project.layers.iter().map(|l| l.exposures[0]).collect();
+        assert!(was[0].is_some());
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(at), button(true)]);
+        frame(&ctx, &mut state, vec![button(false)]);
+        assert_eq!(state.project.frame_count, 3);
+        assert_eq!(state.project.current_frame, 2);
+        for (l, was) in state.project.layers.iter().zip(was) {
+            assert_eq!(l.exposures[..], [None, None, was], "{}: blank in front, then what was first", l.name);
+        }
     }
 }
 
@@ -10761,6 +11725,45 @@ mod layers_panel_tests {
         frame(&ctx, &mut state, vec![]);
         let shapes = frame(&ctx, &mut state, vec![]);
         on_row(&ctx, &shapes, "Alpha", "40%");
+    }
+
+    /// The % on a faded layer's row drags like the backdrop's: that layer
+    /// alone changes, picked with others or not, the whole drag is one undo,
+    /// and the % stays on the row while it is dragged up to full.
+    #[test]
+    fn a_row_s_opacity_drags_that_layer_alone() {
+        let (mut state, ctx, _) = setup();
+        for l in &mut state.project.layers {
+            l.opacity = 0.4;
+        }
+        state.selected_layers.extend(state.project.layers.iter().map(|l| l.uid));
+        frame(&ctx, &mut state, vec![]);
+        let shapes = frame(&ctx, &mut state, vec![]);
+        let at = on_row(&ctx, &shapes, "Alpha", "40%");
+        let undos = state.history.undo_len();
+
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(at), button(at, true)]);
+        // Half a percent a point: 160 points takes 40% past full.
+        for k in 1..=8 {
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(at + egui::vec2(20.0 * k as f32, 0.0))]);
+        }
+        let shapes = frame(&ctx, &mut state, vec![]);
+        assert_eq!(state.project.layers[0].opacity, 1.0);
+        on_row(&ctx, &shapes, "Alpha", "100%");
+        assert_eq!(state.history.undo_len(), undos, "nothing lands mid-drag");
+
+        frame(&ctx, &mut state, vec![button(at + egui::vec2(160.0, 0.0), false)]);
+        frame(&ctx, &mut state, vec![]);
+        let shapes = frame(&ctx, &mut state, vec![]);
+        assert!(state.project.layers[1..].iter().all(|l| l.opacity == 0.4), "the others stay");
+        let y = name_rect(&ctx, &shapes, "Alpha").center().y;
+        assert!(
+            text_rects(&shapes, "100%").iter().all(|r| (r.center().y - y).abs() >= 8.0),
+            "at full, the % goes once let go"
+        );
+        assert_eq!(state.history.undo_len(), undos + 1, "one undo for the drag");
+        state.undo();
+        assert_eq!(state.project.layers[0].opacity, 0.4);
     }
 
     /// The ⋮ on a row opens the layer's menu, and its Rename opens the
@@ -12463,6 +13466,9 @@ mod camera_panel_tests {
     #[test]
     fn the_framing_buttons_frame_the_canvas() {
         let (ctx, mut state) = setup();
+        // A square frame fit to the canvas shows past its edge, which Keep
+        // inside canvas would push back in.
+        state.project.camera_opts.keep_inside = false;
         state.set_camera_size(Some((1920, 1080)));
         state.project.camera.tx = 300.0;
         state.project.camera.zoom = 3.0;
@@ -12514,13 +13520,26 @@ mod camera_panel_tests {
     fn keep_inside_canvas_holds_the_panel_s_edits() {
         let (ctx, mut state) = setup();
         state.set_camera_size(Some((1920, 1080)));
-        click(&ctx, &mut state, "Keep inside canvas");
-        assert!(state.project.camera_opts.keep_inside);
+        assert!(state.project.camera_opts.keep_inside, "on from the start");
         state.apply_camera_pan(5000.0, 0.0);
         assert_eq!(state.project.camera.tx, 960.0, "half the canvas less half the frame");
         state.apply_camera_zoom(0.01);
         assert!((state.project.camera.zoom - 0.5).abs() < 1e-5, "no further out than the canvas");
         assert_eq!(state.project.camera.tx, 0.0);
+
+        click(&ctx, &mut state, "Keep inside canvas");
+        assert!(!state.project.camera_opts.keep_inside);
+        state.apply_camera_pan(5000.0, 0.0);
+        assert!(state.project.camera.tx > 1000.0, "off, it goes past the edge");
+    }
+
+    #[test]
+    fn the_panel_turns_the_free_camera_box_on_and_off() {
+        let (ctx, mut state) = setup();
+        click(&ctx, &mut state, "Free shape");
+        assert!(state.camera_box_free);
+        click(&ctx, &mut state, "Free shape");
+        assert!(!state.camera_box_free);
     }
 
     /// Fourteen lines, all of them inside the frame, the thirds a third in.
@@ -12799,11 +13818,28 @@ mod camera_frame_drag_tests {
         assert_eq!(state.project.camera_keys[1].ease, Ease::Both);
     }
 
+    /// With Free shape, the box dragged on the canvas becomes the camera's
+    /// size, whatever its shape.
+    #[test]
+    fn a_free_box_drawn_on_the_canvas_sizes_the_camera() {
+        let (ctx, mut state, _) = setup();
+        state.set_camera_box(true);
+        state.camera_box_free = true;
+        let xf = Xform::new(&state, state.canvas_rect);
+        let from = xf.doc_to_screen(200.0, 100.0);
+        drag(&ctx, &mut state, from, xf.doc_to_screen(600.0, 400.0) - from);
+        let (w, h) = state.project.output_size();
+        assert!((w as f32 - 400.0).abs() <= 2.0 && (h as f32 - 300.0).abs() <= 2.0, "{w}×{h}");
+        assert_eq!(state.project.camera_keys.len(), 1);
+    }
+
     /// A tap centres the camera where it lands, the size it was; a drag
     /// brought back to where it began keys nothing.
     #[test]
     fn a_tap_centres_and_a_box_brought_back_does_nothing() {
         let (ctx, mut state, id) = setup();
+        // Centred near the corner, the frame hangs off the canvas.
+        state.project.camera_opts.keep_inside = false;
         state.set_camera_box(true);
         let xf = Xform::new(&state, state.canvas_rect);
         let at = xf.doc_to_screen(300.0, 250.0);
@@ -13010,7 +14046,7 @@ mod window_layout_tests {
         let (ctx, mut state) = setup();
         let id = egui::Id::new(panel_key(PanelId::Timeline));
         let mut show =
-            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Timeline, [20.0, 300.0], 640.0, true, None);
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Timeline, [20.0, 300.0], 640.0, true, None, None);
         settle(&ctx, &mut show);
         let left = window(&ctx, id).min.x;
         drag_right_edge(&ctx, id, left + 300.0, &mut show);
@@ -13028,7 +14064,7 @@ mod window_layout_tests {
         let (ctx, mut state) = setup();
         let id = egui::Id::new(panel_key(PanelId::Layers));
         let mut show =
-            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Layers, [20.0, 20.0], 252.0, true, None);
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Layers, [20.0, 20.0], 252.0, true, None, None);
         settle(&ctx, &mut show);
         let left = window(&ctx, id).min.x;
         drag_right_edge(&ctx, id, left + 420.0, &mut show);
@@ -13048,7 +14084,7 @@ mod window_layout_tests {
         }
         let id = egui::Id::new(panel_key(PanelId::Xsheet));
         let mut show =
-            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Xsheet, [20.0, 20.0], 252.0, true, None);
+            |ctx: &egui::Context| panel_window(&mut state, ctx, PanelId::Xsheet, [20.0, 20.0], 252.0, true, None, None);
         settle(&ctx, &mut show);
         let left = window(&ctx, id).min.x;
         drag_right_edge(&ctx, id, left + 400.0, &mut show);
@@ -13199,7 +14235,7 @@ mod window_layout_tests {
     }
 
     fn settle_layers(ctx: &egui::Context, state: &mut AppState) -> Shapes {
-        settle(ctx, &mut |ctx| panel_window(state, ctx, PanelId::Layers, [20.0, 20.0], 252.0, true, None))
+        settle(ctx, &mut |ctx| panel_window(state, ctx, PanelId::Layers, [20.0, 20.0], 252.0, true, None, None))
     }
 
     /// Each cleanup layer is one more row, and a cleanup of a cleanup is a
