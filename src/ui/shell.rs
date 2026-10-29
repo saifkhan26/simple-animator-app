@@ -7690,16 +7690,18 @@ fn doc_to_active_cell(state: &AppState, doc: (f32, f32)) -> (f32, f32) {
     t.doc_to_cell(doc.0, doc.1, cw as f32, ch as f32, pw, ph)
 }
 
-/// How far, in points, the newest packet may sit from the OS cursor before
-/// the batch is disbelieved.
+/// How far, in points, the OS cursor may sit from the pen's recent path
+/// before the batch is disbelieved.
 ///
-/// Both are read at the same moment — packets are drained at the top of the
-/// frame, the cursor position comes from that frame's input — and the driver
-/// moves the cursor from the very same packets. So they agree closely however
-/// fast the stroke is: it is the *oldest* packet in a batch that trails the
-/// cursor, never the newest. Disagreement here means the mapping is wrong, not
-/// that the hand moved, which makes this a cheap check on a class of bug whose
-/// symptom is otherwise a stroke drawn confidently in the wrong place.
+/// The path, not the newest packet: the driver moves the cursor from the
+/// same packets, but later, so mid-stroke the cursor trails the pen by a few
+/// milliseconds — which on a quick flick is far more than this. Measured
+/// against the newest packet, every fast stroke failed and went to the
+/// cursor for good, at one whole-pixel sample a frame: long straight chords,
+/// and a speed sensor fed every repeat of the same point. A wrong mapping
+/// puts the whole path somewhere else, so this still catches the bug it is
+/// for, whose symptom is otherwise a stroke drawn confidently in the wrong
+/// place.
 const PEN_MOUSE_AGREEMENT: f32 = 20.0;
 
 /// How far, in points, a packet may sit from the newest one in its own batch.
@@ -7732,12 +7734,19 @@ fn pen_to_points(p: &PenPacket, (ox, oy): (f32, f32), ppp: f32) -> egui::Pos2 {
     egui::pos2((p.x - ox) / ppp, (p.y - oy) / ppp)
 }
 
-/// Whether a packet position is close enough to the OS cursor to believe.
-/// Counts and logs (once per stroke) when it is not.
-fn pen_agrees_with_cursor(state: &mut AppState, pen: egui::Pos2, cursor: egui::Pos2) -> bool {
-    if (pen.x - cursor.x).abs() + (pen.y - cursor.y).abs() <= PEN_MOUSE_AGREEMENT {
+/// Whether the pen's recent path passes close enough to the OS cursor to
+/// believe. Counts and logs (once per stroke) when it does not.
+fn pen_agrees_with_cursor(
+    state: &mut AppState,
+    origin: (f32, f32),
+    ppp: f32,
+    cursor: egui::Pos2,
+) -> bool {
+    let path: Vec<egui::Pos2> = state.pen.trail().iter().map(|p| pen_to_points(p, origin, ppp)).collect();
+    if path_passes_near(&path, cursor, PEN_MOUSE_AGREEMENT) {
         return true;
     }
+    let pen = path.last();
     state.pen_batches_rejected = state.pen_batches_rejected.saturating_add(1);
     if !state.pen_outlier_logged {
         state.pen_outlier_logged = true;
@@ -7767,7 +7776,21 @@ fn pen_stroke_start(
     let origin = state.pen.client_origin()?;
     let packet = state.pen.last_packet()?;
     let at = pen_to_points(&packet, origin, ppp);
-    pen_agrees_with_cursor(state, at, cursor).then_some((at, packet))
+    pen_agrees_with_cursor(state, origin, ppp, cursor).then_some((at, packet))
+}
+
+/// Whether `at` lies within `reach` of the polyline through `path`.
+fn path_passes_near(path: &[egui::Pos2], at: egui::Pos2, reach: f32) -> bool {
+    let near = |a: egui::Pos2, b: egui::Pos2| {
+        let ab = b - a;
+        let t = ((at - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+        (a + ab * t).distance(at) <= reach
+    };
+    match path {
+        [] => false,
+        [p] => p.distance(at) <= reach,
+        _ => path.windows(2).any(|w| near(w[0], w[1])),
+    }
 }
 
 /// This frame's tablet packets, for a stroke already being drawn by the pen.
@@ -7784,13 +7807,13 @@ fn pen_stroke_points(state: &mut AppState, ppp: f32, pointer: Option<egui::Pos2>
     };
     let newest = pen_to_points(last, origin, ppp);
 
-    // Checked every frame rather than latched once per stroke. An earlier
-    // version decided at pen-down and held, on the theory that the newest
-    // packet outruns the cursor during fast motion — it does not, and holding
-    // the decision meant a mapping that only looked right at the moment of
-    // contact stayed trusted for the whole stroke.
+    // Checked every frame rather than latched once per stroke: holding the
+    // decision made at pen-down meant a mapping that only looked right at the
+    // moment of contact stayed trusted for the whole stroke. The newest
+    // packet does outrun the cursor in fast motion, which is why the check
+    // is against the path — see `PEN_MOUSE_AGREEMENT`.
     if let Some(pointer) = pointer {
-        if !pen_agrees_with_cursor(state, newest, pointer) {
+        if !pen_agrees_with_cursor(state, origin, ppp, pointer) {
             return PenFrame::Untrusted;
         }
     }
@@ -10160,7 +10183,7 @@ mod panel_drag_tests {
 /// Which source a stroke draws from, frame by frame.
 #[cfg(test)]
 mod stroke_source_tests {
-    use super::{stroke_frame_samples, PenFrame};
+    use super::{path_passes_near, stroke_frame_samples, PenFrame, PEN_MOUSE_AGREEMENT};
     use crate::input::tablet::PenPacket;
     use egui::pos2;
 
@@ -10225,6 +10248,48 @@ mod stroke_source_tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, pos2(8.0, 6.0));
         assert!(out[0].1.is_none());
+    }
+
+    /// A quick flick: a 200 Hz pen at 10 points a millisecond, so 50 points
+    /// between packets, along a gentle curve.
+    fn flick() -> Vec<egui::Pos2> {
+        (0..32)
+            .map(|i| {
+                let x = 100.0 + 50.0 * i as f32;
+                pos2(x, 600.0 - 0.0002 * (x - 100.0) * (x - 100.0))
+            })
+            .collect()
+    }
+
+    /// The fast-stroke regression. The cursor trails the newest packet by a
+    /// few milliseconds, which on a flick is well past the tolerance; it
+    /// still lies on the pen's path, so the pen keeps the stroke.
+    #[test]
+    fn a_cursor_trailing_a_fast_pen_still_agrees() {
+        let path = flick();
+        let newest = *path.last().unwrap();
+        // 12 ms behind: between two packets, on the chord joining them.
+        let lag = path[path.len() - 4].lerp(path[path.len() - 3], 0.5);
+        assert!(lag.distance(newest) > 5.0 * PEN_MOUSE_AGREEMENT, "not a fast stroke");
+        assert!(path_passes_near(&path, lag, PEN_MOUSE_AGREEMENT));
+        // Rounded to a whole pixel, as the cursor is.
+        assert!(path_passes_near(&path, pos2(lag.x.round(), lag.y.round()), PEN_MOUSE_AGREEMENT));
+    }
+
+    /// What the check is for: a mapping that puts the pen somewhere else.
+    /// The driver that sent top-down Y into a bottom-up area put the pen
+    /// 1440 pixels from the cursor; a smaller offset off to the side fails
+    /// as well, however close it runs along the path.
+    #[test]
+    fn a_path_away_from_the_cursor_disagrees() {
+        let path = flick();
+        let cursor = path[20];
+        let flipped: Vec<_> = path.iter().map(|p| pos2(p.x, 1440.0 - p.y)).collect();
+        assert!(!path_passes_near(&flipped, cursor, PEN_MOUSE_AGREEMENT));
+        let beside: Vec<_> = path.iter().map(|p| pos2(p.x, p.y + 1.5 * PEN_MOUSE_AGREEMENT)).collect();
+        assert!(!path_passes_near(&beside, cursor, PEN_MOUSE_AGREEMENT));
+        assert!(!path_passes_near(&[], cursor, PEN_MOUSE_AGREEMENT));
+        assert!(path_passes_near(&[pos2(cursor.x + 3.0, cursor.y)], cursor, PEN_MOUSE_AGREEMENT));
     }
 }
 

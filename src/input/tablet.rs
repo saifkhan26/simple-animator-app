@@ -620,6 +620,10 @@ pub struct PenDiagnostics {
 /// stroke that pauses mid-line never loses its pressure.
 const PEN_IDLE_FRAMES: u32 = 12;
 
+/// Packets [`PenInput::trail`] keeps: some 130 ms of a 240 Hz pen, against
+/// a cursor that trails the newest packet by a few milliseconds.
+const TRAIL_LEN: usize = 32;
+
 pub struct PenInput {
     #[cfg(target_os = "windows")]
     backend: Option<windows_backend::Wintab>,
@@ -632,6 +636,9 @@ pub struct PenInput {
     /// the frame that sees the press has often already drained its packet a
     /// frame earlier.
     last_packet: Option<PenPacket>,
+    /// The newest packets drained, oldest first, across polls: the path the
+    /// pen has just taken, ending at `last_packet`.
+    trail: Vec<PenPacket>,
     last_pressure: f32,
     idle_frames: u32,
     /// The app window, once known. Looked up by title only until then.
@@ -654,6 +661,7 @@ impl PenInput {
             backend: (),
             packets: Vec::new(),
             last_packet: None,
+            trail: Vec::with_capacity(TRAIL_LEN * 2),
             last_pressure: 1.0,
             idle_frames: u32::MAX,
             hwnd: None,
@@ -713,6 +721,7 @@ impl PenInput {
                     self.last_reopen = Some(reason);
                     // Positions from the old mapping mean nothing now.
                     self.last_packet = None;
+                    self.trail.clear();
                 }
                 self.reconnect = false;
                 self.retry = Retry::default();
@@ -754,6 +763,9 @@ impl PenInput {
             self.last_pressure = last.pressure;
             self.last_packet = Some(last);
             self.idle_frames = 0;
+            self.trail.extend_from_slice(&self.packets);
+            let over = self.trail.len().saturating_sub(TRAIL_LEN);
+            self.trail.drain(..over);
         } else if !pointer_down {
             self.idle_frames = self.idle_frames.saturating_add(1);
             // Idle with nothing pressed: assume the mouse took over. Without
@@ -774,6 +786,13 @@ impl PenInput {
     /// until the pen has reported at all.
     pub fn last_packet(&self) -> Option<PenPacket> {
         self.last_packet
+    }
+
+    /// The last few dozen packets, oldest first, from this frame and earlier
+    /// ones; the newest is [`last_packet`](Self::last_packet). Empty until
+    /// the pen has reported at all.
+    pub fn trail(&self) -> &[PenPacket] {
+        &self.trail
     }
 
     /// A snapshot for the diagnostics readout. See [`PenDiagnostics`].
@@ -1776,6 +1795,27 @@ mod tests {
         }
         assert!(pen.recently_seen());
         assert_eq!(pen.last_pressure, 0.3);
+    }
+
+    /// The trail runs across polls, oldest first, ends at the newest packet
+    /// and keeps only the last `TRAIL_LEN`.
+    #[test]
+    fn the_trail_keeps_the_newest_packets_across_polls() {
+        let mut pen = PenInput::new();
+        assert!(pen.trail().is_empty());
+        let mut n: usize = 0;
+        for batch in [3, 0, 5, 40, 2] {
+            pen.packets.clear();
+            for _ in 0..batch {
+                pen.packets.push(PenPacket { x: n as f32, ..packet(0.5) });
+                n += 1;
+            }
+            pen.track_idle(true);
+            let xs: Vec<f32> = pen.trail().iter().map(|p| p.x).collect();
+            let want: Vec<f32> = (n.saturating_sub(TRAIL_LEN)..n).map(|i| i as f32).collect();
+            assert_eq!(xs, want, "after a batch of {batch}");
+            assert_eq!(pen.trail().last().map(|p| p.x), pen.last_packet().map(|p| p.x));
+        }
     }
 
     /// A pen hovering around the screen, as `(true x, true y)` in screen
