@@ -90,6 +90,10 @@ pub enum Action {
     SizeUp,
     /// Swap to the brush size drawn at last, and back. Unbound by default.
     SizeSwap,
+    /// Turn the active pen's Stabilizer on, or back to the smoothing it had.
+    StabilizerToggle,
+    /// Step the active pen's smoothing on: None, Basic, Weighted, Stabilizer.
+    SmoothingCycle,
     Undo,
     Redo,
     ClearCell,
@@ -227,6 +231,8 @@ impl Action {
         Action::SizeDown,
         Action::SizeUp,
         Action::SizeSwap,
+        Action::StabilizerToggle,
+        Action::SmoothingCycle,
         Action::Undo,
         Action::Redo,
         Action::ClearCell,
@@ -345,6 +351,8 @@ impl Action {
             Action::SizeDown => "Brush size down",
             Action::SizeUp => "Brush size up",
             Action::SizeSwap => "Brush size: swap to the one drawn at last",
+            Action::StabilizerToggle => "Stabilizer on / off (this pen)",
+            Action::SmoothingCycle => "Smoothing: next kind (this pen)",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
             Action::ClearCell => "Clear current cell",
@@ -1139,6 +1147,9 @@ impl Default for ShortcutMap {
         // Brush size — bracket keys (Photoshop / Krita convention).
         b.insert(Action::SizeDown, KeyCombo::plain(K::OpenBracket));
         b.insert(Action::SizeUp, KeyCombo::plain(K::CloseBracket));
+        // Smoothing, for the pen in hand.
+        b.insert(Action::StabilizerToggle, KeyCombo::plain(K::U));
+        b.insert(Action::SmoothingCycle, KeyCombo::shift(K::U));
         // History.
         b.insert(Action::Undo, KeyCombo::ctrl(K::Z));
         b.insert(Action::Redo, KeyCombo::ctrl(K::Y));

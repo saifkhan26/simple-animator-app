@@ -311,6 +311,12 @@ impl StrokeBuilder {
         self.opts.kind == Smoothing::Stabilizer
     }
 
+    /// The stabilizer's string length, screen pixels, when this stroke holds
+    /// its line back on one.
+    pub fn stabilizer_delay(&self) -> Option<f32> {
+        (self.stabilized() && self.opts.use_delay).then_some(self.opts.delay_distance)
+    }
+
     /// The stabilized line's end, where Krita draws the delay circle.
     pub fn stabilizer_end(&self) -> Option<(f32, f32)> {
         self.stabilizer.as_ref().map(|st| {

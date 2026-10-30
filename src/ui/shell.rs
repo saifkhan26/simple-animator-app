@@ -21,7 +21,7 @@ use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, O
 use crate::tools::fill;
 use crate::tools::select_mask::{SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
-use crate::tools::{ActiveTool, BrushMode, ShapeKind, Smoothing, StrokeCap};
+use crate::tools::{ActiveTool, BrushMode, ShapeKind, Smoothing, SmoothingOptions, StrokeCap};
 use crate::ui::theme::Scheme;
 use crate::ui::{color_wheel, expr, theme};
 
@@ -2483,8 +2483,8 @@ fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui) {
 /// all — a clean line comes from sub-pixel tablet input and the Bezier fit
 /// through it, not from averaging the hand away. Weighted is there for people
 /// who want the extra help and can live with the lag it costs.
-fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
-    let label = match state.smoothing.kind {
+fn smoothing_controls(o: &mut SmoothingOptions, ui: &mut egui::Ui, hint: &str) {
+    let label = match o.kind {
         Smoothing::None => "None",
         Smoothing::Basic => "Basic",
         Smoothing::Weighted => "Weighted",
@@ -2493,55 +2493,57 @@ fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
     egui::ComboBox::from_id_salt("smoothing_kind")
         .selected_text(label)
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut state.smoothing.kind, Smoothing::None, "None")
+            ui.selectable_value(&mut o.kind, Smoothing::None, "None")
                 .on_hover_text("Straight lines between raw samples.");
-            ui.selectable_value(&mut state.smoothing.kind, Smoothing::Basic, "Basic")
+            ui.selectable_value(&mut o.kind, Smoothing::Basic, "Basic")
                 .on_hover_text(
                     "Krita's default. No averaging — samples are joined by a cubic \
                      Bezier fitted to the local tangents.",
                 );
-            ui.selectable_value(&mut state.smoothing.kind, Smoothing::Weighted, "Weighted")
+            ui.selectable_value(&mut o.kind, Smoothing::Weighted, "Weighted")
                 .on_hover_text(
                     "A gaussian average over the recent samples, then the same \
                      Bezier fit. Steadier, at the cost of the stroke trailing \
                      the pen.",
                 );
-            ui.selectable_value(&mut state.smoothing.kind, Smoothing::Stabilizer, "Stabilizer")
+            ui.selectable_value(&mut o.kind, Smoothing::Stabilizer, "Stabilizer")
                 .on_hover_text(
                     "Krita's stabilizer: the line follows the pen on a timer, \
                      averaging away the hand's shake, and can trail it on a string.",
                 );
-        });
+        })
+        .response
+        .on_hover_text(hint);
 
-    if state.smoothing.kind == Smoothing::Stabilizer {
-        stabilizer_controls(state, ui);
+    if o.kind == Smoothing::Stabilizer {
+        stabilizer_controls(o, ui);
         return;
     }
 
-    ui.add_enabled_ui(state.smoothing.kind == Smoothing::Weighted, |ui| {
+    ui.add_enabled_ui(o.kind == Smoothing::Weighted, |ui| {
         // Krita keeps a separate width for fast strokes. Dragging the main
         // slider carries the other with it unless the artist has deliberately
         // split them, which is the same thing Krita's linked-ratio button does.
-        let linked = (state.smoothing.distance_min - state.smoothing.distance_max).abs() < 0.01;
+        let linked = (o.distance_min - o.distance_max).abs() < 0.01;
         let resp = ui.add(
-            egui::Slider::new(&mut state.smoothing.distance_max, 3.0..=200.0).text("Distance"),
+            egui::Slider::new(&mut o.distance_max, 3.0..=200.0).text("Distance"),
         );
         if linked && resp.changed() {
-            state.smoothing.distance_min = state.smoothing.distance_max;
+            o.distance_min = o.distance_max;
         }
         ui.add(
-            egui::Slider::new(&mut state.smoothing.distance_min, 3.0..=200.0)
+            egui::Slider::new(&mut o.distance_min, 3.0..=200.0)
                 .text("Distance (fast)"),
         )
         .on_hover_text("Filter width once the pen is moving quickly.");
         ui.add(
-            egui::Slider::new(&mut state.smoothing.tail_aggressiveness, 0.0..=1.0)
+            egui::Slider::new(&mut o.tail_aggressiveness, 0.0..=1.0)
                 .text("Tail aggressiveness"),
         )
         .on_hover_text("How hard the filter resists the thinning at a stroke's start.");
-        ui.checkbox(&mut state.smoothing.smooth_pressure, "Smooth pressure")
+        ui.checkbox(&mut o.smooth_pressure, "Smooth pressure")
             .on_hover_text("Run pressure through the same filter as position.");
-        ui.checkbox(&mut state.smoothing.scalable_distance, "Scale distance with zoom")
+        ui.checkbox(&mut o.scalable_distance, "Scale distance with zoom")
             .on_hover_text(
                 "Measure the distance above in screen pixels rather than canvas \
                  pixels, so smoothing feels the same at every zoom. Off, a \
@@ -2550,9 +2552,21 @@ fn smoothing_controls(state: &mut AppState, ui: &mut egui::Ui) {
     });
 }
 
+/// What the smoothing picker belongs to, and the keys that change it
+/// without opening this window.
+fn smoothing_hint(state: &AppState) -> String {
+    let mut hint = "This pen's own: Pencil, Ink and Eraser each keep their own smoothing.".to_owned();
+    for (action, what) in [(Action::StabilizerToggle, "Stabilizer on / off"), (Action::SmoothingCycle, "next kind")] {
+        let key = combo_text(state, action);
+        if !key.is_empty() {
+            hint += &format!("\n{key}: {what}");
+        }
+    }
+    hint
+}
+
 /// Krita's Stabilizer options.
-fn stabilizer_controls(state: &mut AppState, ui: &mut egui::Ui) {
-    let o = &mut state.smoothing;
+fn stabilizer_controls(o: &mut SmoothingOptions, ui: &mut egui::Ui) {
     let linked = (o.distance_min - o.distance_max).abs() < 0.01;
     let resp = ui
         .add(egui::Slider::new(&mut o.distance_max, 3.0..=1000.0).logarithmic(true).text("Distance"))
@@ -4912,7 +4926,13 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
 
                     ui.add_space(6.0);
                     theme::section_header(ui, ic::SCRIBBLE, "Smoothing");
-                    smoothing_controls(state, ui);
+                    let hint = smoothing_hint(state);
+                    match state.smoothing_mut() {
+                        Some(o) => smoothing_controls(o, ui, &hint),
+                        None => {
+                            ui.weak("Pencil, Ink and Eraser each keep their own.");
+                        }
+                    }
 
                     ui.add_space(6.0);
                     egui::CollapsingHeader::new(theme::icon_text(ic::PEN, "Tablet"))
@@ -6214,10 +6234,23 @@ fn tool_toggle(
     label: &str,
 ) {
     let selected = state.tool == target;
-    if theme::icon_toggle(ui, icon, label, selected).clicked() && !selected {
+    let stabilized = state.smoothing_for(target).is_some_and(|o| o.kind == Smoothing::Stabilizer);
+    let label = if stabilized { format!("{label}\nStabilizer on") } else { label.to_owned() };
+    let resp = theme::icon_toggle(ui, icon, &label, selected);
+    // A pen that will draw stabilized says so on its button, the key that
+    // turns it on being easy to hit without looking.
+    if stabilized {
+        let r = resp.rect;
+        ui.painter()
+            .circle_filled(egui::pos2(r.right() - 5.0, r.top() + 5.0), STABILIZED_DOT_R, theme::accent());
+    }
+    if resp.clicked() && !selected {
         state.set_tool(target);
     }
 }
+
+/// The radius of the dot on a stabilized pen's tool button.
+const STABILIZED_DOT_R: f32 = 2.5;
 
 fn shape_kind_toggle(
     ui: &mut egui::Ui,
@@ -6543,9 +6576,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // Krita's stabilizer delay circle, around the line's end while drawing.
-    if let Some((x, y)) = state.stroke.as_ref().and_then(|b| b.stabilizer_end()) {
-        if state.smoothing.use_delay {
-            delay_circle(&painter, cell_to_screen(x, y), state.smoothing.delay_distance);
+    if let Some(b) = &state.stroke {
+        if let (Some((x, y)), Some(r)) = (b.stabilizer_end(), b.stabilizer_delay()) {
+            delay_circle(&painter, cell_to_screen(x, y), r);
         }
     }
 
@@ -7852,9 +7885,8 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
     let black = theme::premul(0, 0, 0, 180);
 
     // The stabilizer's string, around the pen until a stroke takes it over.
-    let draws = matches!(state.tool, ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser);
-    if idle && draws && state.smoothing.kind == Smoothing::Stabilizer && state.smoothing.use_delay {
-        delay_circle(&painter, pos, state.smoothing.delay_distance);
+    if let Some(o) = state.smoothing().filter(|o| idle && o.kind == Smoothing::Stabilizer && o.use_delay) {
+        delay_circle(&painter, pos, o.delay_distance);
     }
 
     match state.tool {
@@ -12684,6 +12716,40 @@ mod button_drag_tests {
     }
 }
 
+/// The Tools panel's buttons, drawn headless.
+#[cfg(test)]
+mod tool_button_tests {
+    use super::shortcut_clash_tests::settle;
+    use super::*;
+
+    /// The dots marking stabilized pens.
+    fn dots(shapes: &[egui::Shape]) -> usize {
+        shapes
+            .iter()
+            .filter(|s| {
+                matches!(s, egui::Shape::Circle(c) if c.fill == theme::accent() && c.radius == STABILIZED_DOT_R)
+            })
+            .count()
+    }
+
+    /// A stabilized pen wears a dot on its button, whichever tool is in hand.
+    #[test]
+    fn a_stabilized_pen_shows_a_dot_on_its_button() {
+        let mut state = AppState::for_test();
+        state.show_panels = true;
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        assert_eq!(dots(&settle(&ctx, &mut state)), 0);
+        state.dispatch(Action::ToolInk);
+        state.dispatch(Action::StabilizerToggle);
+        state.dispatch(Action::ToolFill);
+        assert_eq!(dots(&settle(&ctx, &mut state)), 1, "Ink's, with the Fill in hand");
+        state.dispatch(Action::ToolEraser);
+        state.dispatch(Action::StabilizerToggle);
+        assert_eq!(dots(&settle(&ctx, &mut state)), 2);
+    }
+}
+
 /// The Krita brush through the real UI: the preset is offered, its summary
 /// replaces the sliders it does not use, and a drag on the canvas paints
 /// with it as one undoable stroke.
@@ -12696,7 +12762,7 @@ mod shortcut_clash_tests {
     use egui::{pos2, Pos2};
 
     /// One frame's painted shapes, flattened.
-    fn shapes(ctx: &egui::Context, state: &mut AppState) -> Vec<egui::Shape> {
+    pub(super) fn shapes(ctx: &egui::Context, state: &mut AppState) -> Vec<egui::Shape> {
         fn walk(shape: egui::Shape, out: &mut Vec<egui::Shape>) {
             match shape {
                 egui::Shape::Vec(v) => v.into_iter().for_each(|s| walk(s, out)),
@@ -12716,7 +12782,7 @@ mod shortcut_clash_tests {
 
     /// Run frames until the windows have faded in, so colours are exact;
     /// returns the last frame's shapes.
-    fn settle(ctx: &egui::Context, state: &mut AppState) -> Vec<egui::Shape> {
+    pub(super) fn settle(ctx: &egui::Context, state: &mut AppState) -> Vec<egui::Shape> {
         for _ in 0..30 {
             shapes(ctx, state);
         }
@@ -12923,7 +12989,7 @@ mod krita_brush_tests {
     #[test]
     fn the_stabilizer_offers_krita_s_options() {
         let (ctx, mut state) = picker_state();
-        state.smoothing.kind = Smoothing::Stabilizer;
+        state.smoothing_mut().unwrap().kind = Smoothing::Stabilizer;
         state.brush_search = "nothing matches this".into();
         run(&ctx, &mut state, vec![]);
         grow_brush_settings(&ctx, &mut state);
@@ -12932,6 +12998,11 @@ mod krita_brush_tests {
             assert!(t.iter().any(|s| s == want), "{want} in {t:?}");
         }
         assert!(!t.iter().any(|s| s == "Tail aggressiveness"), "{t:?}");
+        // The Ink keeps its own smoothing, Basic.
+        state.dispatch(Action::ToolInk);
+        let t = run(&ctx, &mut state, vec![]);
+        assert!(t.iter().any(|s| s == "Basic"), "{t:?}");
+        assert!(!t.iter().any(|s| s == "Finish line"), "{t:?}");
     }
 
     /// Noise sits under Grain for the app's own brushes; the rest of its

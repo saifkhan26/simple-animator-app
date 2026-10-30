@@ -49,7 +49,7 @@ use crate::tools::wand::WandOptions;
 use crate::tools::selection::{Grab, Pose, Selection};
 use crate::tools::stroke::StrokeBuilder;
 use crate::tools::shape::GridPlane;
-use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
+use crate::tools::{ActiveTool, BrushSettings, ShapeKind, Smoothing, SmoothingOptions};
 use crate::ui;
 use crate::ui::canvas_gpu::CanvasGpu;
 use crate::ui::theme::{BaseColors, Scheme};
@@ -420,9 +420,15 @@ struct UiPrefs {
     /// range and frame stepping wraps at both ends. Off: playback runs once
     /// and stops, and stepping clamps.
     loop_timeline: bool,
-    /// Line smoothing. A workspace preference: how much the app fights the
-    /// hand is a matter of taste, and of what the artist is used to.
+    /// Line smoothing as it was before each pen had its own: read only to
+    /// seed `pen_smoothing` from a prefs file older than it, and written as
+    /// the pencil's for a build older than this one.
     smoothing: SmoothingOptions,
+    /// Line smoothing per freehand tool, in `PEN_TOOLS` order. A workspace
+    /// preference: how much the app fights the hand is a matter of taste,
+    /// and of the tool — a stabilized ink line, a free pencil. Empty in a
+    /// prefs file older than it, which gives every tool `smoothing`.
+    pen_smoothing: Vec<SmoothingOptions>,
     /// Per-tool brush settings. A tuned brush is worth as much as a tuned
     /// palette and was previously thrown away on exit. `None` from an
     /// older prefs blob, or from one whose tool list has since changed,
@@ -550,6 +556,20 @@ fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; TO
     }
 }
 
+/// The tools that draw freehand, each with its own line smoothing, in
+/// `pen_smoothing` order.
+const PEN_TOOLS: [ActiveTool; 3] = [ActiveTool::Pencil, ActiveTool::Ink, ActiveTool::Eraser];
+
+/// Saved smoothing per freehand tool. A prefs file from before each tool had
+/// its own gives all of them the one setting it kept.
+fn restore_pen_smoothing(prefs: &UiPrefs) -> [SmoothingOptions; PEN_TOOLS.len()] {
+    let mut out = [prefs.smoothing; PEN_TOOLS.len()];
+    for (slot, saved) in out.iter_mut().zip(&prefs.pen_smoothing) {
+        *slot = *saved;
+    }
+    out
+}
+
 impl Default for UiPrefs {
     fn default() -> Self {
         Self {
@@ -570,6 +590,7 @@ impl Default for UiPrefs {
             right_drag: ButtonDrag::SwatchPie,
             loop_timeline: true,
             smoothing: SmoothingOptions::default(),
+            pen_smoothing: Vec::new(),
             tool_brushes: None,
             palette: Vec::new(),
             brush_sizes: Vec::new(),
@@ -1328,8 +1349,12 @@ pub struct AppState {
     pub right_drag: ButtonDrag,
     /// A middle- or right-button drag under way on the canvas.
     pub button_drag: Option<ButtonDragState>,
-    /// Line smoothing, latched into every new stroke. See `tools::Smoothing`.
-    pub smoothing: SmoothingOptions,
+    /// Line smoothing per freehand tool, in `PEN_TOOLS` order, latched into
+    /// every new stroke. See `tools::Smoothing` and [`Self::smoothing`].
+    pub pen_smoothing: [SmoothingOptions; PEN_TOOLS.len()],
+    /// The smoothing each pen had before the Stabilizer key turned it on,
+    /// for the key to turn it back to. Session-only.
+    smoothing_before_stabilizer: [Smoothing; PEN_TOOLS.len()],
     /// Whether the timeline wraps. Gates playback, wheel scrub and the frame
     /// step actions alike, so one toggle means one behaviour everywhere.
     pub loop_timeline: bool,
@@ -1645,6 +1670,7 @@ impl AppState {
         for id in 0..project.cells.len() {
             cell_dirty.insert(id, Dirty::Full);
         }
+        let pen_smoothing = restore_pen_smoothing(&prefs);
         Self {
             project,
             project_path: None,
@@ -1764,7 +1790,8 @@ impl AppState {
             right_drag: prefs.right_drag,
             button_drag: None,
             loop_timeline: prefs.loop_timeline,
-            smoothing: prefs.smoothing,
+            pen_smoothing,
+            smoothing_before_stabilizer: [Smoothing::Basic; PEN_TOOLS.len()],
             pen_outlier_logged: false,
             pen_batches_rejected: 0,
             pen_packets_dropped: 0,
@@ -4903,8 +4930,9 @@ impl AppState {
         let mut brush = self.brush.clone();
         brush.radius = self.effective_radius();
         let krita = self.krita_brush();
+        let smoothing = self.smoothing().copied().unwrap_or_default();
         let mut builder =
-            StrokeBuilder::new_with_krita(brush, self.tool, self.cell_view_scale(), self.smoothing, krita);
+            StrokeBuilder::new_with_krita(brush, self.tool, self.cell_view_scale(), smoothing, krita);
         let (rotation, mirrored) = self.cell_screen_orientation();
         builder.orient(rotation, mirrored);
         self.stroke_clock = Some(Instant::now());
@@ -5925,6 +5953,52 @@ impl AppState {
         }
     }
 
+    /// `tool`'s own line smoothing, for a tool that draws freehand.
+    pub fn smoothing_for(&self, tool: ActiveTool) -> Option<&SmoothingOptions> {
+        let slot = PEN_TOOLS.iter().position(|&t| t == tool)?;
+        Some(&self.pen_smoothing[slot])
+    }
+
+    /// The active tool's own line smoothing, for a tool that draws freehand.
+    pub fn smoothing(&self) -> Option<&SmoothingOptions> {
+        self.smoothing_for(self.tool)
+    }
+
+    pub fn smoothing_mut(&mut self) -> Option<&mut SmoothingOptions> {
+        let slot = PEN_TOOLS.iter().position(|&t| t == self.tool)?;
+        Some(&mut self.pen_smoothing[slot])
+    }
+
+    /// Turn the active pen's Stabilizer on, or off again to the smoothing it
+    /// had before. The next stroke takes it; one under way keeps its own.
+    fn toggle_stabilizer(&mut self) {
+        let Some(slot) = PEN_TOOLS.iter().position(|&t| t == self.tool) else { return };
+        let o = &mut self.pen_smoothing[slot];
+        if o.kind == Smoothing::Stabilizer {
+            o.kind = self.smoothing_before_stabilizer[slot];
+        } else {
+            self.smoothing_before_stabilizer[slot] = o.kind;
+            o.kind = Smoothing::Stabilizer;
+        }
+    }
+
+    /// Step the active pen's smoothing on to the next kind, round to None
+    /// after the Stabilizer.
+    fn cycle_smoothing(&mut self) {
+        let Some(slot) = PEN_TOOLS.iter().position(|&t| t == self.tool) else { return };
+        let o = &mut self.pen_smoothing[slot];
+        let next = match o.kind {
+            Smoothing::None => Smoothing::Basic,
+            Smoothing::Basic => Smoothing::Weighted,
+            Smoothing::Weighted => Smoothing::Stabilizer,
+            Smoothing::Stabilizer => Smoothing::None,
+        };
+        if next == Smoothing::Stabilizer {
+            self.smoothing_before_stabilizer[slot] = o.kind;
+        }
+        o.kind = next;
+    }
+
     /// Make `t` the active tool with its stored brush. Shape draws at the
     /// size of the pen used last, not at a size of its own.
     pub(crate) fn load_brush(&mut self, t: ActiveTool) {
@@ -6444,6 +6518,8 @@ impl AppState {
                 self.brush.radius = (self.brush.radius * 1.18).min(256.0);
             }
             Action::SizeSwap => self.swap_size(),
+            Action::StabilizerToggle => self.toggle_stabilizer(),
+            Action::SmoothingCycle => self.cycle_smoothing(),
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::ClearCell => self.clear_active(),
@@ -6934,7 +7010,8 @@ impl eframe::App for AppState {
                 middle_drag: self.middle_drag,
                 right_drag: self.right_drag,
                 loop_timeline: self.loop_timeline,
-                smoothing: self.smoothing,
+                smoothing: self.pen_smoothing[0],
+                pen_smoothing: self.pen_smoothing.to_vec(),
                 tool_brushes: Some(tool_brushes),
                 palette: self.palette.clone(),
                 brush_sizes: self.brush_sizes.clone(),
@@ -10115,6 +10192,11 @@ mod tests {
         assert!(!prefs.show_panels);
         assert_eq!(prefs.frame_step, 3);
         assert_eq!(format!("{:?}", prefs.smoothing), format!("{:?}", want.smoothing));
+        assert_eq!(
+            format!("{:?}", restore_pen_smoothing(&prefs)),
+            format!("{:?}", [want.smoothing; PEN_TOOLS.len()]),
+            "every pen gets the one smoothing there was"
+        );
         assert_eq!(prefs.palette, want.palette);
         assert_eq!(prefs.krita_path, want.krita_path);
         assert_eq!(prefs.bg_color, want.bg_color);
@@ -10150,6 +10232,20 @@ mod tests {
         let pencil = &restore_tool_brushes(prefs.tool_brushes)[ActiveTool::Pencil.idx()];
         assert_eq!(pencil.mode, crate::tools::BrushMode::Krita);
         assert_eq!(pencil.radius, 33.0);
+    }
+
+    /// Each pen's smoothing is saved as its own.
+    #[test]
+    fn each_pen_s_smoothing_outlasts_a_restart() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolInk);
+        st.dispatch(Action::StabilizerToggle);
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let kinds = restore_pen_smoothing(&prefs).map(|o| o.kind);
+        assert_eq!(kinds, [Smoothing::Basic, Smoothing::Stabilizer, Smoothing::Basic]);
     }
 
     #[test]
@@ -10324,7 +10420,7 @@ mod tests {
     fn a_stabilized_stroke_finishes_at_pen_up() {
         let mut st = AppState::for_test();
         st.dispatch(Action::ToolPencil);
-        st.smoothing = SmoothingOptions {
+        *st.smoothing_mut().unwrap() = SmoothingOptions {
             kind: crate::tools::Smoothing::Stabilizer,
             use_delay: false,
             ..SmoothingOptions::default()
@@ -10342,6 +10438,61 @@ mod tests {
         let alpha = |x: u32, y: u32| cell.pixels()[((y * cell.width + x) * 4 + 3) as usize];
         assert!(alpha(250, 100) > 0, "the line runs on to where the pen lifted");
         assert_eq!(alpha(275, 100), 0);
+    }
+
+    /// Each pen keeps its own smoothing: a stabilized Ink leaves the Pencil
+    /// and the Eraser drawing as they did.
+    #[test]
+    fn each_pen_keeps_its_own_smoothing() {
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolInk);
+        st.smoothing_mut().unwrap().kind = Smoothing::Stabilizer;
+        let stabilized = |st: &mut AppState, tool: Action| {
+            st.dispatch(tool);
+            st.pointer_down(st.make_sample(100.0, 100.0, 0.0));
+            for i in 1..=10 {
+                st.pointer_move(st.make_sample(100.0 + i as f32 * 4.0, 100.0, i as f32 * 0.004));
+            }
+            let on = st.stroke.as_ref().expect("a stroke").stabilized();
+            st.pointer_up();
+            on
+        };
+        assert!(!stabilized(&mut st, Action::ToolPencil));
+        assert!(stabilized(&mut st, Action::ToolInk));
+        assert!(!stabilized(&mut st, Action::ToolEraser));
+        st.dispatch(Action::ToolFill);
+        assert!(st.smoothing().is_none(), "Fill has no smoothing");
+    }
+
+    /// The Stabilizer key turns the pen in hand's on, and off to what it had;
+    /// the cycle key steps through every kind. Neither touches the other
+    /// pens, and neither does anything on a tool with no smoothing.
+    #[test]
+    fn the_smoothing_keys_change_the_pen_in_hand() {
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolPencil);
+        st.smoothing_mut().unwrap().kind = Smoothing::Weighted;
+        st.dispatch(Action::StabilizerToggle);
+        assert_eq!(st.smoothing().unwrap().kind, Smoothing::Stabilizer);
+        assert_eq!(st.smoothing_for(ActiveTool::Ink).unwrap().kind, Smoothing::Basic);
+        st.dispatch(Action::StabilizerToggle);
+        assert_eq!(st.smoothing().unwrap().kind, Smoothing::Weighted, "back to what it had");
+
+        st.dispatch(Action::ToolEraser);
+        let seen: Vec<_> = (0..4)
+            .map(|_| {
+                st.dispatch(Action::SmoothingCycle);
+                st.smoothing().unwrap().kind
+            })
+            .collect();
+        assert_eq!(seen, [Smoothing::Weighted, Smoothing::Stabilizer, Smoothing::None, Smoothing::Basic]);
+        assert_eq!(st.smoothing_for(ActiveTool::Pencil).unwrap().kind, Smoothing::Weighted);
+
+        let before = format!("{:?}", st.pen_smoothing);
+        st.dispatch(Action::ToolFill);
+        st.dispatch(Action::StabilizerToggle);
+        st.dispatch(Action::SmoothingCycle);
+        assert_eq!(format!("{:?}", st.pen_smoothing), before);
     }
 
     #[test]
