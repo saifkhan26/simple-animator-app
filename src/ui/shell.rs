@@ -14959,4 +14959,81 @@ mod axis_lock_tests {
         assert!(alpha_at_doc(&state, (left, c.1)) > 200, "as far left of the press as right");
         assert!(alpha_at_doc(&state, (e.0, c.1)) > 200, "and the right side under the pointer");
     }
+
+    /// The bindings as reported: plain Space is the brush-size hold and
+    /// Ctrl+Space plays. Space down before the press still sizes the brush
+    /// and draws nothing; pressed partway through a rectangle it slides the
+    /// rectangle and leaves the size alone.
+    #[test]
+    fn with_space_on_brush_size_space_partway_still_slides_a_rect() {
+        use crate::input::shortcuts::KeyCombo;
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.shortcuts.set(Action::HoldToolAdjust, KeyCombo::plain(egui::Key::Space));
+        state.shortcuts.set(Action::PlayPause, KeyCombo::ctrl(egui::Key::Space));
+        assert_eq!(state.shortcuts.get(Action::ShapeMove), Some(KeyCombo::plain(egui::Key::Space)));
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = ShapeKind::Rect;
+        state.brush.radius = 3.0;
+        let ctx = egui::Context::default();
+        let none = egui::Modifiers::NONE;
+        let run = |state: &mut AppState, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(SCREEN),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                ctx.input(|i| state.read_input(i));
+                state.handle_keys(ctx);
+                draw(state, ctx);
+            });
+        };
+        let space = |pressed| egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: Some(egui::Key::Space),
+            pressed,
+            repeat: false,
+            modifiers: none,
+        };
+        let moved = egui::Event::PointerMoved;
+        run(&mut state, vec![]);
+
+        // Space down before the press: a brush-size drag, no rectangle.
+        let (from, by) = (pos2(400.0, 300.0), vec2(200.0, 0.0));
+        run(&mut state, vec![moved(from), space(true)]);
+        run(&mut state, vec![button(from, true, none)]);
+        for i in 1..=4 {
+            run(&mut state, vec![moved(from + by * (i as f32 / 4.0))]);
+        }
+        run(&mut state, vec![button(from + by, false, none)]);
+        run(&mut state, vec![space(false)]);
+        run(&mut state, vec![]);
+        assert!(state.brush.radius > 3.0 * 1.5, "Space at the press sized the brush: {}", state.brush.radius);
+        assert_eq!(state.history.undo_len(), 0, "drew a rectangle");
+
+        // Space pressed partway: the rectangle slides, the size stays.
+        state.brush.radius = 3.0;
+        let xf = Xform::new(&state, state.canvas_rect);
+        let (from, to, by) = (pos2(400.0, 300.0), pos2(500.0, 360.0), vec2(150.0, 90.0));
+        run(&mut state, vec![moved(from), button(from, true, none)]);
+        for i in 1..=4 {
+            run(&mut state, vec![moved(from + (to - from) * (i as f32 / 4.0))]);
+        }
+        run(&mut state, vec![space(true)]);
+        for i in 1..=4 {
+            run(&mut state, vec![moved(to + by * (i as f32 / 4.0))]);
+        }
+        run(&mut state, vec![space(false)]);
+        run(&mut state, vec![button(to + by, false, none)]);
+        run(&mut state, vec![]);
+        assert_eq!(state.brush.radius, 3.0, "Space partway left the size alone");
+        assert!(!state.playback.playing);
+        assert_eq!(state.history.undo_len(), 1);
+        let (a, b) = (xf.screen_to_doc(from + by), xf.screen_to_doc(to + by));
+        assert!(alpha_at_doc(&state, (a.0, (a.1 + b.1) * 0.5)) > 200, "left side, slid along");
+        let (a0, b0) = (xf.screen_to_doc(from), xf.screen_to_doc(to));
+        assert_eq!(alpha_at_doc(&state, (a0.0, (a0.1 + b0.1) * 0.5)), 0, "not where it was pressed");
+    }
 }
