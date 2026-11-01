@@ -139,6 +139,11 @@ pub enum Action {
     FillLassoErase,
     FillLassoEnclose,
     FillPolygonSnap,
+    // Pressed partway through a shape, a selection box or the camera box:
+    // slide it along under the pointer, or grow it from where it was pressed
+    // as its middle. Held like the others, but read only mid-drag.
+    ShapeMove,
+    ShapeCentre,
     // Timeline tracks: the drawings selected there.
     TrackClear,
     TrackCloseGap,
@@ -267,6 +272,8 @@ impl Action {
         Action::FillLassoErase,
         Action::FillLassoEnclose,
         Action::FillPolygonSnap,
+        Action::ShapeMove,
+        Action::ShapeCentre,
         Action::TrackClear,
         Action::TrackCloseGap,
         Action::SaveProject,
@@ -388,6 +395,8 @@ impl Action {
             Action::FillLassoErase => "Lasso fill: erase the shape instead (hold)",
             Action::FillLassoEnclose => "Lasso fill: switch Enclose & fill (hold)",
             Action::FillPolygonSnap => "Lasso fill: polygon edges in 15° steps (hold)",
+            Action::ShapeMove => "Shape / box being dragged: move it (hold)",
+            Action::ShapeCentre => "Shape / box being dragged: from the centre (hold)",
             Action::TrackClear => "Timeline: delete drawings (leave blank)",
             Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
             Action::SaveProject => "Save project",
@@ -444,7 +453,15 @@ impl Action {
                     | Action::FillLassoErase
                     | Action::FillLassoEnclose
                     | Action::FillPolygonSnap
+                    | Action::ShapeMove
+                    | Action::ShapeCentre
             )
+    }
+
+    /// Read only once a drag is under way, never at its press: the press
+    /// holds on the same keys keep their meaning there.
+    pub fn is_mid_drag(self) -> bool {
+        matches!(self, Action::ShapeMove | Action::ShapeCentre)
     }
 
     /// The drag a hold action starts. `None` for everything else, the
@@ -751,6 +768,10 @@ fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
         | (Action::SelModeIntersect, Action::FillPolygonSnap) => {
             Some("the Lasso tool reads one, the Fill tool's lasso the other")
         }
+        (a, b) if a.is_mid_drag() != b.is_mid_drag() => Some(
+            "pressed partway through a shape or box drag it moves or centres that; \
+             anywhere else the other has it",
+        ),
         _ => None,
     }
 }
@@ -764,6 +785,9 @@ fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
 /// different from binding any other key.
 fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str> {
     use egui::Key as K;
+    if action.is_mid_drag() && c.key.is_none() && c.shift {
+        return Some("Shift partway through a drag also squares it up");
+    }
     match c.key? {
         K::Z if c.ctrl && c.shift && action != Action::Redo => {
             Some("Ctrl+Shift+Z always redoes as well")
@@ -1217,6 +1241,9 @@ impl Default for ShortcutMap {
             Action::CanvasRotate,
             KeyCombo::modifier_only(false, false, true),
         );
+        // Mid-drag, on the same keys: by then those have done their job.
+        b.insert(Action::ShapeMove, KeyCombo::plain(K::Space));
+        b.insert(Action::ShapeCentre, KeyCombo::modifier_only(false, false, true));
         // Layer transform editing.
         b.insert(Action::LayerTransformToggle, KeyCombo::plain(K::B));
         b.insert(Action::TransformKeyAdd, KeyCombo::plain(K::K));
@@ -1312,6 +1339,22 @@ impl ShortcutMap {
             }
         }
         best
+    }
+
+    /// The keys the mid-drag holds are on. While a shape or box is being
+    /// dragged, a press bound to one of them is theirs, not the press's.
+    pub fn mid_drag_keys(&self) -> Vec<egui::Key> {
+        self.bindings
+            .iter()
+            .filter(|(a, _)| a.is_mid_drag())
+            .filter_map(|(_, c)| c.key)
+            .collect()
+    }
+
+    /// Whether `action`'s hold is down now, extra modifiers allowed: Shift
+    /// going down on top to square the box mustn't let go of the move.
+    pub fn still_held(&self, action: Action, i: &egui::InputState) -> bool {
+        self.get(action).is_some_and(|c| c.still_held(i))
     }
 
     /// Keys some hold binding uses. A press on one fires only on its first
@@ -1847,6 +1890,26 @@ mod tests {
     }
 
     #[test]
+    fn the_mid_drag_keys_share_the_press_holds_on_purpose() {
+        let map = ShortcutMap::default();
+        assert_eq!(map.get(Action::ShapeMove), Some(KeyCombo::plain(egui::Key::Space)));
+        assert_eq!(map.get(Action::ShapeCentre), Some(KeyCombo::modifier_only(false, false, true)));
+        let c = map.clashes();
+        assert!(matches!(c[&Action::ShapeMove][..], [Clash::Shared(Action::PlayPause, _)]));
+        assert!(matches!(c[&Action::ShapeCentre][..], [Clash::Shared(Action::CanvasRotate, _)]));
+        assert_eq!(map.mid_drag_keys(), vec![egui::Key::Space]);
+        // Never a press: Space still plays, and only through PlayPause.
+        assert!(Action::ShapeMove.is_hold() && Action::ShapeMove.hold_drag().is_none());
+
+        // On each other, or on Shift, they are a real conflict.
+        let mut map = map;
+        map.set(Action::ShapeCentre, KeyCombo::plain(egui::Key::Space));
+        assert!(map.clashes()[&Action::ShapeMove].contains(&Clash::Action(Action::ShapeCentre)));
+        map.set(Action::ShapeCentre, KeyCombo::modifier_only(false, true, false));
+        assert!(map.clashes()[&Action::ShapeCentre].iter().any(|c| matches!(c, Clash::Builtin(_))));
+    }
+
+    #[test]
     fn clashes_name_the_other_action_and_note_the_delete_pair() {
         let mut map = ShortcutMap::default();
         map.set(Action::FlipHorizontal, KeyCombo::plain(egui::Key::Num9));
@@ -2207,6 +2270,8 @@ mod tests {
     #[test]
     fn hold_and_press_on_one_combo_clash() {
         let mut map = ShortcutMap::default();
+        // Moving a shape mid-drag shares Space on purpose; not this pair.
+        map.clear(Action::ShapeMove);
         map.set(Action::CanvasPan, KeyCombo::plain(egui::Key::Space));
         map.set(Action::PlayPause, KeyCombo::plain(egui::Key::Space));
         let c = map.clashes();

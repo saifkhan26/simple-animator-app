@@ -258,6 +258,31 @@ struct SnapLock {
     dir: Option<[f32; 2]>,
 }
 
+/// A hold read partway through a drag (the move and centre keys), sampled
+/// once a frame like Shift. Down at the drag's press, it chose that drag (a
+/// pan, a rotate, a brush adjust) and counts only once let go and pressed
+/// again — the rule [`AppState::axis_lock_on`] keeps for Shift.
+#[derive(Clone, Copy, Default)]
+struct MidKey {
+    held: bool,
+    stale: bool,
+}
+
+impl MidKey {
+    fn on(self) -> bool {
+        self.held && !self.stale
+    }
+
+    fn read(&mut self, held: bool) {
+        self.held = held;
+        self.stale &= held;
+    }
+
+    fn began(&mut self) {
+        self.stale = self.held;
+    }
+}
+
 /// A stroke held to an axis by Shift: the point it is held from, in document
 /// space, and — once the pointer has moved far enough to tell — the angle of
 /// the axis it keeps to.
@@ -1292,6 +1317,13 @@ pub struct AppState {
     stroke_last_doc: Option<[f32; 2]>,
     /// Alt, likewise: a selection scale about the box centre.
     alt_held: bool,
+    /// The keys that slide a shape or box along mid-drag, and grow it from
+    /// its middle. See [`Self::move_on`], [`Self::centre_on`].
+    move_key: MidKey,
+    centre_key: MidKey,
+    /// A Shape drag's pointer, in document space before any snap: what the
+    /// move key slides the shape by.
+    shape_pointer_doc: Option<[f32; 2]>,
     /// Perspective grids and their display/snap switches.
     pub perspective: PerspectiveConfig,
     /// In-flight drag on a perspective grid, or `None`.
@@ -1776,6 +1808,9 @@ impl AppState {
             stroke_axis: None,
             stroke_last_doc: None,
             alt_held: false,
+            move_key: MidKey::default(),
+            centre_key: MidKey::default(),
+            shape_pointer_doc: None,
             perspective: {
                 let mut cfg = prefs.perspective.clone();
                 cfg.ensure_ids();
@@ -3611,10 +3646,15 @@ impl AppState {
         true
     }
 
-    /// The box's drag has reached document point `p`.
+    /// The box's drag has reached document point `p`. The move key slides
+    /// the whole box along with it.
     pub fn camera_box_move(&mut self, p: (f32, f32)) {
         let tap = CAMERA_TAP_PX / self.view_scale.max(1e-6);
+        let slide = self.move_on();
         if let Some(b) = &mut self.cam_box {
+            if slide {
+                b.from = (b.from.0 + p.0 - b.to.0, b.from.1 + p.1 - b.to.1);
+            }
             b.to = p;
             b.moved |= (p.0 - b.from.0).hypot(p.1 - b.from.1) > tap;
         }
@@ -3630,13 +3670,22 @@ impl AppState {
 
     /// [`AppState::camera_box_camera`], and the size of the frame it has:
     /// the camera's own, or with a free box, the box's — at zoom 1, in
-    /// even pixels, and no smaller than [`MIN_FREE_CAMERA_SIDE`].
+    /// even pixels, and no smaller than [`MIN_FREE_CAMERA_SIDE`]. While the
+    /// centre key holds, the press point is the frame's middle.
     pub fn camera_box_frame(&self) -> Option<(Camera, (u32, u32))> {
         let b = self.cam_box.filter(|b| b.moved)?;
         let tap = CAMERA_TAP_PX / self.view_scale.max(1e-6);
         if (b.to.0 - b.from.0).hypot(b.to.1 - b.from.1) <= tap {
             return None;
         }
+        let centre = self.centre_on().then_some(b.from);
+        let b = match centre {
+            Some(c) => CamBox {
+                from: axis_lock::mirror(c, b.to),
+                ..b
+            },
+            None => b,
+        };
         let canvas = self.canvas_size();
         let (cam, size) = if self.camera_box_free {
             // Measured along the frame's own axes, as `Camera::boxed` does.
@@ -3655,6 +3704,12 @@ impl AppState {
             (cam, (side(u), side(v)))
         } else {
             let cam = self.project.camera.boxed(b.from, b.to, canvas, self.camera_frame_size());
+            // Kept to the frame's shape, the box may reach further one way
+            // than dragged: hold its middle where it was pressed.
+            let cam = match centre {
+                Some(c) => cam.centred_on(c, canvas),
+                None => cam,
+            };
             (cam, self.project.output_size())
         };
         // Held on the canvas as the frame it will have, not the one it has.
@@ -5727,11 +5782,13 @@ impl AppState {
     /// The polyline a shape drag draws, in cell pixels: on its grid when it
     /// has one and the box stays in front of the horizon, flat otherwise.
     /// Shift, pressed once the drag is under way, squares a box up — on the
-    /// grid, in grid cells — and turns a line to a 15° step.
+    /// grid, in grid cells — and turns a line to a 15° step; the centre key
+    /// makes the press point its middle, and the far end mirrors the pointer.
     /// Preview and pixels both come from here, so they always agree.
     pub fn shape_outline(&self, drag: &ShapeDrag) -> Vec<(f32, f32)> {
         let radius = self.effective_radius();
         let lock = self.axis_lock_on();
+        let centred = self.centre_on();
         drag.plane
             .and_then(|plane| {
                 crate::tools::shape::outline_on_plane(
@@ -5740,6 +5797,7 @@ impl AppState {
                     drag.end,
                     &plane,
                     lock,
+                    centred,
                     radius,
                 )
             })
@@ -5754,8 +5812,48 @@ impl AppState {
                     ),
                     (true, _) => axis_lock::square(drag.start, drag.end),
                 };
-                crate::tools::shape::outline(drag.kind, drag.start, end, radius)
+                let start = if centred {
+                    axis_lock::mirror(drag.start, end)
+                } else {
+                    drag.start
+                };
+                crate::tools::shape::outline(drag.kind, start, end, radius)
             })
+    }
+
+    /// A Shape drag's pointer has reached document point `p`. While the move
+    /// key holds, the shape slides with it — along its grid, when it lies on
+    /// one — and a snapped line's lock goes along, aimed afresh from where it
+    /// lands.
+    fn slide_shape(&mut self, p: [f32; 2]) {
+        let last = self.shape_pointer_doc.replace(p);
+        let Some(last) = last.filter(|_| self.move_on() && self.shape_drag.is_some()) else {
+            return;
+        };
+        let from = self.doc_to_active_cell((last[0], last[1]));
+        let to = self.doc_to_active_cell((p[0], p[1]));
+        if let Some(drag) = &mut self.shape_drag {
+            drag.start = crate::tools::shape::slide(drag.start, from, to, drag.plane.as_ref());
+        }
+        let Some(mut lock) = self.snap_lock else {
+            return;
+        };
+        lock.start = [lock.start[0] + p[0] - last[0], lock.start[1] + p[1] - last[1]];
+        if let Some(dir) = lock.dir {
+            // The family it was heading for, from here: a line slid across a
+            // one-point floor still runs to the vanishing point.
+            let f = self.project.current_frame;
+            let dirs = self
+                .perspective
+                .active_grid()
+                .map(|g| {
+                    let s = self.grid_space(g, f);
+                    g.snap_dirs(&s, lock.start, self.perspective.snap_vertical)
+                })
+                .unwrap_or_default();
+            lock.dir = perspective::pick_dir(&dirs, dir).or(Some(dir));
+        }
+        self.snap_lock = Some(lock);
     }
 
     /// Start of a stroke at document point `p`. Arms perspective snap when it
@@ -5764,6 +5862,7 @@ impl AppState {
         self.snap_lock = self.snapping().then_some(SnapLock { start: p, dir: None });
         self.stroke_axis = None;
         self.stroke_last_doc = Some(p);
+        self.shape_pointer_doc = Some(p);
         p
     }
 
@@ -5775,15 +5874,54 @@ impl AppState {
         self.shift_held && !self.shift_stale
     }
 
-    /// A drag begins. Shift down now chose it, so locks nothing yet.
+    /// A drag begins. Shift down now chose it, so locks nothing yet, and the
+    /// move and centre keys likewise.
     pub fn drag_began(&mut self) {
         self.shift_stale = self.shift_held;
+        self.move_key.began();
+        self.centre_key.began();
     }
 
     /// This frame's Shift and Alt. A Shift let go no longer chose anything.
     pub(crate) fn read_modifiers(&mut self, m: egui::Modifiers) {
         (self.shift_held, self.alt_held) = (m.shift, m.alt);
         self.shift_stale &= self.shift_held;
+    }
+
+    /// This frame's modifiers and mid-drag keys, as the app's update reads
+    /// them before anything else.
+    pub(crate) fn read_input(&mut self, i: &egui::InputState) {
+        self.read_modifiers(i.modifiers);
+        self.move_key.read(self.shortcuts.still_held(Action::ShapeMove, i));
+        self.centre_key.read(self.shortcuts.still_held(Action::ShapeCentre, i));
+    }
+
+    /// The move and centre keys as a frame would read them, for tests that
+    /// drive the state without a frame.
+    #[cfg(test)]
+    pub(crate) fn hold_mid_keys(&mut self, slide: bool, centre: bool) {
+        self.move_key.read(slide);
+        self.centre_key.read(centre);
+    }
+
+    /// The move key went down partway through the drag in hand: the shape
+    /// or box slides along under the pointer instead of growing.
+    pub fn move_on(&self) -> bool {
+        self.move_key.on()
+    }
+
+    /// The centre key went down partway through: the shape or box grows
+    /// from where it was pressed as its middle.
+    pub fn centre_on(&self) -> bool {
+        self.centre_key.on()
+    }
+
+    /// A shape, a rectangle or ellipse selection, or a camera box is being
+    /// dragged out — what the move and centre keys work on.
+    fn mid_drag_under_way(&self) -> bool {
+        self.shape_drag.is_some()
+            || self.cam_box.is_some()
+            || matches!(self.sel_gesture, Some(SelGesture::Drag { .. }))
     }
 
     /// The angle, in document space, of the horizontal a Shift lock keeps
@@ -5838,6 +5976,9 @@ impl AppState {
     /// [`Self::shape_outline`]).
     pub fn stroke_point_doc(&mut self, p: [f32; 2]) -> [f32; 2] {
         const DECIDE_PX: f32 = 6.0;
+        if self.tool == ActiveTool::Shape {
+            self.slide_shape(p);
+        }
         let out = if !self.axis_lock_on() {
             if self.stroke_axis.take().is_some() {
                 if let (Some(lock), Some(at)) = (self.snap_lock.as_mut(), self.stroke_last_doc) {
@@ -6599,7 +6740,9 @@ impl AppState {
             | Action::SelModeIntersect
             | Action::FillLassoErase
             | Action::FillLassoEnclose
-            | Action::FillPolygonSnap => {}
+            | Action::FillPolygonSnap
+            | Action::ShapeMove
+            | Action::ShapeCentre => {}
             Action::LayerTransformToggle => self.layer_xform = !self.layer_xform,
             Action::TransformKeyAdd => self.add_transform_key(),
             Action::TransformKeyDelete => self.delete_transform_key(),
@@ -6897,7 +7040,17 @@ impl AppState {
                 // Backspace takes back a polygon corner while one is being
                 // placed, rather than clearing the drawing under it.
                 let polygon = self.polygon_active() || self.fill_polygon_active();
+                // Space moving a shape mustn't also play.
+                let mid_keys = if self.mid_drag_under_way() {
+                    self.shortcuts.mid_drag_keys()
+                } else {
+                    Vec::new()
+                };
                 for a in actions {
+                    let key = self.shortcuts.get(a).and_then(|c| c.key);
+                    if key.is_some_and(|k| mid_keys.contains(&k)) {
+                        continue;
+                    }
                     match a {
                         Action::TrackClear if !tracks_own_delete => continue,
                         Action::SelectionDelete if tracks_own_delete => continue,
@@ -7145,7 +7298,7 @@ impl eframe::App for AppState {
         }
         // Sampled here rather than in the pointer handlers: those run off
         // tablet packets and never see an `InputState`.
-        self.read_modifiers(ctx.input(|i| i.modifiers));
+        ctx.input(|i| self.read_input(i));
 
         let tab_focus = self.handle_keys(ctx);
 
@@ -10087,6 +10240,129 @@ mod tests {
         assert_eq!(alpha(&state, (150.0, 140.0)), 0, "not where the drag left it");
     }
 
+    // --- The move and centre keys partway through a drag ---
+
+    /// A Shape drag's next point as the canvas feeds it: through
+    /// `stroke_point_doc`, where the move key slides the shape.
+    fn shape_to(state: &mut AppState, p: [f32; 2], t: f32) {
+        let [x, y] = state.stroke_point_doc(p);
+        state.pointer_move(state.make_sample(x, y, t));
+    }
+
+    /// And its press.
+    fn shape_from(state: &mut AppState, p: [f32; 2]) {
+        let [x, y] = state.snap_begin(p);
+        state.pointer_down(state.make_sample(x, y, 0.0));
+    }
+
+    #[test]
+    fn a_mid_key_down_at_the_press_counts_only_once_pressed_again() {
+        let mut state = AppState::for_test();
+        state.hold_mid_keys(true, true);
+        state.drag_began();
+        assert!(!state.move_on() && !state.centre_on(), "they chose the drag");
+        state.hold_mid_keys(false, false);
+        state.hold_mid_keys(true, true);
+        assert!(state.move_on() && state.centre_on(), "pressed again partway");
+    }
+
+    #[test]
+    fn the_move_key_partway_slides_a_flat_rect() {
+        let mut state = flat_shapes(ShapeKind::Rect);
+        shape_from(&mut state, [100.0, 100.0]);
+        shape_to(&mut state, [150.0, 130.0], 0.1);
+        state.hold_mid_keys(true, false);
+        shape_to(&mut state, [180.0, 150.0], 0.2);
+        let drag = state.shape_drag.unwrap();
+        assert_eq!((drag.start, drag.end), ((130.0, 120.0), (180.0, 150.0)), "slid, same size");
+        // Let go, it grows again from where it was slid to.
+        state.hold_mid_keys(false, false);
+        shape_to(&mut state, [200.0, 170.0], 0.3);
+        assert_eq!(state.shape_drag.unwrap().start, (130.0, 120.0));
+        state.pointer_up();
+        assert!(alpha(&state, (130.0, 145.0)) > 200, "left side where it was slid to");
+        assert_eq!(alpha(&state, (100.0, 145.0)), 0, "not where it was pressed");
+    }
+
+    #[test]
+    fn the_centre_key_partway_grows_a_rect_from_the_press() {
+        let mut state = flat_shapes(ShapeKind::Rect);
+        shape_from(&mut state, [150.0, 150.0]);
+        shape_to(&mut state, [190.0, 170.0], 0.1);
+        state.hold_mid_keys(false, true);
+        let o = state.shape_outline(&state.shape_drag.unwrap());
+        assert_eq!((o[0], o[2]), ((110.0, 130.0), (190.0, 170.0)));
+        // With Shift too: a square round the press.
+        state.read_modifiers(shift(true));
+        let o = state.shape_outline(&state.shape_drag.unwrap());
+        assert_eq!((o[0], o[2]), ((110.0, 110.0), (190.0, 190.0)));
+        state.read_modifiers(shift(false));
+        state.pointer_up();
+        assert!(alpha(&state, (110.0, 150.0)) > 200, "reaches as far left of the press as right");
+        assert!(alpha(&state, (150.0, 130.0)) > 200, "top edge above the press");
+    }
+
+    #[test]
+    fn a_centred_line_runs_both_ways_from_the_press() {
+        let mut state = flat_shapes(ShapeKind::Line);
+        shape_from(&mut state, [150.0, 150.0]);
+        shape_to(&mut state, [200.0, 160.0], 0.1);
+        state.hold_mid_keys(false, true);
+        let o = state.shape_outline(&state.shape_drag.unwrap());
+        assert_eq!(o, vec![(100.0, 140.0), (200.0, 160.0)]);
+        // Slid as well: the middle goes with the pointer.
+        state.hold_mid_keys(true, true);
+        shape_to(&mut state, [210.0, 160.0], 0.2);
+        let o = state.shape_outline(&state.shape_drag.unwrap());
+        assert_eq!(o, vec![(110.0, 140.0), (210.0, 160.0)]);
+    }
+
+    #[test]
+    fn the_move_key_slides_a_rect_along_its_grid() {
+        let mut state = shape_state(ShapeKind::Rect);
+        shape_from(&mut state, [130.0, 380.0]);
+        shape_to(&mut state, [170.0, 340.0], 0.1);
+        let plane = state.shape_drag.unwrap().plane.expect("on the floor");
+        let span = |state: &AppState| {
+            let o = state.shape_outline(&state.shape_drag.unwrap());
+            let [u0, v0] = plane.h.unmap([o[0].0, o[0].1]).unwrap();
+            let [u1, v1] = plane.h.unmap([o[2].0, o[2].1]).unwrap();
+            (u1 - u0, v1 - v0)
+        };
+        let before = span(&state);
+        state.hold_mid_keys(true, false);
+        shape_to(&mut state, [160.0, 250.0], 0.2);
+        let after = span(&state);
+        assert!((before.0 - after.0).abs() < 1e-4 && (before.1 - after.1).abs() < 1e-4,
+            "as many cells across: {before:?} {after:?}");
+        let drag = state.shape_drag.unwrap();
+        let (w0, w1) = (40.0, (drag.end.0 - drag.start.0).abs());
+        assert!(w1 < w0, "smaller up the floor, nearer the horizon: {w1}");
+    }
+
+    #[test]
+    fn a_snapped_line_slid_stays_snapped_from_where_it_went() {
+        let mut state = shape_state(ShapeKind::Line);
+        let (w, h) = state.frame_size();
+        let sq = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]];
+        state.perspective.grids[0].set_doc_corners(sq, &perspective::Space::flat(w, h));
+        shape_from(&mut state, [150.0, 150.0]);
+        shape_to(&mut state, [190.0, 165.0], 0.1);
+        let end = |s: &AppState| [s.shape_drag.unwrap().end.0, s.shape_drag.unwrap().end.1];
+        assert!(near(end(&state), [190.0, 150.0]), "on the row");
+        state.hold_mid_keys(true, false);
+        shape_to(&mut state, [190.0, 185.0], 0.2);
+        let start = state.shape_drag.unwrap().start;
+        assert!(near([start.0, start.1], [150.0, 170.0]), "slid down a row: {start:?}");
+        assert!(near(end(&state), [190.0, 170.0]), "and the end with it");
+        state.hold_mid_keys(false, false);
+        shape_to(&mut state, [215.0, 178.0], 0.3);
+        assert!(near(end(&state), [215.0, 170.0]), "still on the row it went to");
+        state.pointer_up();
+        assert!(alpha(&state, (200.0, 170.0)) > 200);
+        assert_eq!(alpha(&state, (170.0, 150.0)), 0, "nothing left on the first row");
+    }
+
     #[test]
     fn shift_partway_holds_a_stroke_to_an_axis_from_where_it_was() {
         let mut state = AppState::for_test();
@@ -11489,6 +11765,32 @@ mod camera_rig_tests {
         assert_eq!(st.camera_box_frame().unwrap().1, (402, 152), "the size set above");
         st.camera_box_up();
         assert_eq!(st.project.output_size(), (402, 152));
+    }
+
+    /// The centre key partway makes the press the box's middle, free or
+    /// kept to the camera's shape; the move key slides it.
+    #[test]
+    fn a_camera_box_grows_from_its_middle_and_slides() {
+        let mut st = AppState::for_test();
+        let canvas = (st.project.width as f32, st.project.height as f32);
+        st.set_camera_box(true);
+        st.camera_box_free = true;
+        st.camera_box_down((300.0, 200.0));
+        st.camera_box_move((400.0, 260.0));
+        st.hold_mid_keys(false, true);
+        let (cam, size) = st.camera_box_frame().expect("a box");
+        assert_eq!(size, (200, 120), "as far again the other way");
+        assert_eq!((cam.tx, cam.ty), (300.0 - canvas.0 * 0.5, 200.0 - canvas.1 * 0.5));
+        // Kept to the camera's shape, it may reach further one way than
+        // dragged; its middle still holds on the press.
+        st.camera_box_free = false;
+        let cam = st.camera_box_frame().unwrap().0;
+        assert_eq!((cam.tx, cam.ty), (300.0 - canvas.0 * 0.5, 200.0 - canvas.1 * 0.5));
+        st.hold_mid_keys(true, false);
+        st.camera_box_move((450.0, 300.0));
+        let b = st.cam_box.unwrap();
+        assert_eq!((b.from, b.to), ((350.0, 240.0), (450.0, 300.0)));
+        st.cam_box = None;
     }
 
     /// Free shape and the panel padding are workspace preferences.

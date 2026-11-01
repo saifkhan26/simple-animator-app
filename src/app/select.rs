@@ -514,6 +514,7 @@ impl AppState {
         // more samples than the polygon needs.
         let step = (1.0 / self.view_scale.max(1e-6)).min(1.0);
         let tap = CLICK_PX / self.view_scale.max(1e-6);
+        let slide = self.move_on();
         match &mut self.sel_gesture {
             Some(SelGesture::Drag {
                 start,
@@ -521,6 +522,10 @@ impl AppState {
                 max_dist,
                 ..
             }) => {
+                // The move key slides the whole box along with the pointer.
+                if slide {
+                    *start = (start.0 + doc.0 - end.0, start.1 + doc.1 - end.1);
+                }
                 *end = doc;
                 *max_dist = max_dist.max(dist(*start, doc));
             }
@@ -582,12 +587,18 @@ impl AppState {
 
     /// The outline a rectangle or ellipse selection dragged from `start` to
     /// `end` makes, in document space — a square or circle while Shift
-    /// locks. What the drag shows and what it lands are both this.
+    /// locks, and round `start` as its middle while the centre key holds.
+    /// What the drag shows and what it lands are both this.
     pub fn sel_drag_path(&self, shape: SelShape, start: (f32, f32), end: (f32, f32)) -> Vec<(f32, f32)> {
         let end = if self.axis_lock_on() {
             axis_lock::square(start, end)
         } else {
             end
+        };
+        let start = if self.centre_on() {
+            axis_lock::mirror(start, end)
+        } else {
+            start
         };
         match shape {
             SelShape::Ellipse => select_mask::ellipse_path(start, end),
@@ -1893,6 +1904,35 @@ mod tests {
         st.select_up();
         assert_eq!(at(&st, 150, 190), 255, "as tall as it is wide");
         assert_eq!(at(&st, 150, 210), 0);
+    }
+
+    #[test]
+    fn the_move_key_partway_slides_a_rectangle_selection() {
+        let mut st = lasso();
+        st.select_down((100.0, 100.0), None);
+        st.select_move((140.0, 130.0));
+        st.hold_mid_keys(true, false);
+        st.select_move((180.0, 150.0));
+        st.hold_mid_keys(false, false);
+        st.select_move((190.0, 160.0));
+        st.select_up();
+        assert_eq!(at(&st, 145, 125), 255, "slid by (40, 20), then grown");
+        assert_eq!(at(&st, 120, 115), 0, "not where it was pressed");
+    }
+
+    #[test]
+    fn the_centre_key_partway_grows_an_ellipse_selection_from_the_press() {
+        let mut st = lasso();
+        st.sel_shape = SelShape::Ellipse;
+        st.select_down((150.0, 150.0), None);
+        st.select_move((190.0, 170.0));
+        st.hold_mid_keys(false, true);
+        st.select_move((190.0, 170.0));
+        st.select_up();
+        assert_eq!(at(&st, 150, 150), 255, "the press is its middle");
+        assert_eq!(at(&st, 115, 150), 255, "as wide left of it as right");
+        assert_eq!(at(&st, 150, 133), 255);
+        assert_eq!(at(&st, 150, 125), 0);
     }
 
     /// A selection mode held as the drag starts has Shift in it: that Shift

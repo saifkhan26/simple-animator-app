@@ -52,6 +52,26 @@ pub(crate) fn combo_text(state: &AppState, action: Action) -> String {
         .unwrap_or_default()
 }
 
+/// What the mid-drag keys do, for the hints on a shape or box drag:
+/// "Space moves it, Alt from the middle", naming whichever are bound.
+fn mid_drag_hint(state: &AppState) -> String {
+    let key = |a| state.shortcuts.get(a).map(|c| c.display());
+    match (key(Action::ShapeMove), key(Action::ShapeCentre)) {
+        (Some(m), Some(c)) => format!("{m} moves it, {c} from the middle"),
+        (Some(m), None) => format!("{m} moves it"),
+        (None, Some(c)) => format!("{c} from the middle"),
+        (None, None) => String::new(),
+    }
+}
+
+/// `base` with the mid-drag keys' hint after it, if any are bound.
+fn with_mid_drag_hint(state: &AppState, base: &str) -> String {
+    match mid_drag_hint(state) {
+        h if h.is_empty() => base.to_owned(),
+        h => format!("{base}, {h}"),
+    }
+}
+
 pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if state.show_panels {
         // Did the window change size since panels were last drawn? If so each
@@ -1326,10 +1346,11 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 });
                 let hint = if state.shapes_on_grid() {
                     let n = state.perspective.active + 1;
-                    format!("On perspective grid {n} — Shift once dragging: square / circle")
+                    format!("On perspective grid {n} — once dragging: Shift square / circle")
                 } else {
-                    "Shift once dragging: lines in 15° steps, square / circle".to_string()
+                    "Once dragging: Shift for 15° lines, square / circle".to_string()
                 };
+                let hint = with_mid_drag_hint(state, &hint);
                 ui.label(egui::RichText::new(hint).color(theme::text_muted()).size(11.0));
                 brush_size_lock(state, ui);
                 let label = if state.lock_brush_to_view {
@@ -3421,17 +3442,18 @@ fn camera_content(state: &mut AppState, ui: &mut egui::Ui) {
              camera's shape.",
         );
     });
-    ui.label(
-        egui::RichText::new(if state.camera_box_free {
-            "Drag a box on the canvas: the camera takes its size and frames it, keyed on this \
-             frame. Tap to centre the camera there."
-        } else {
-            "Drag a box on the canvas: the camera frames it, keyed on this frame, and moves \
-             into it from the key before (the dashed frame). Tap to centre the camera there."
-        })
-        .color(theme::text_muted())
-        .size(10.5),
-    );
+    let how = if state.camera_box_free {
+        "Drag a box on the canvas: the camera takes its size and frames it, keyed on this \
+         frame. Tap to centre the camera there."
+    } else {
+        "Drag a box on the canvas: the camera frames it, keyed on this frame, and moves \
+         into it from the key before (the dashed frame). Tap to centre the camera there."
+    };
+    let how = match mid_drag_hint(state) {
+        h if h.is_empty() => how.to_owned(),
+        h => format!("{how} Once dragging: {h}."),
+    };
+    ui.label(egui::RichText::new(how).color(theme::text_muted()).size(10.5));
     ui.add_space(4.0);
 
     ui.horizontal(|ui| {
@@ -6027,7 +6049,14 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
             (SelShape::Ellipse, ic::CIRCLE_DASHED),
             (SelShape::Wand, ic::MAGIC_WAND),
         ] {
-            if theme::icon_toggle(ui, icon, shape.label(), state.sel_shape == shape).clicked() {
+            let tip = match shape {
+                SelShape::Rect | SelShape::Ellipse => with_mid_drag_hint(
+                    state,
+                    &format!("{} — once dragging: Shift squares it", shape.label()),
+                ),
+                _ => shape.label().to_owned(),
+            };
+            if theme::icon_toggle(ui, icon, &tip, state.sel_shape == shape).clicked() {
                 // A half-placed polygon means nothing to the other shapes.
                 if shape != state.sel_shape {
                     state.cancel_gesture();
@@ -14781,7 +14810,7 @@ mod axis_lock_tests {
             ..Default::default()
         };
         let _ = ctx.run(raw, |ctx| {
-            state.read_modifiers(ctx.input(|i| i.modifiers));
+            ctx.input(|i| state.read_input(i));
             draw(state, ctx);
         });
     }
@@ -14849,5 +14878,85 @@ mod axis_lock_tests {
         let mid = (a.0 + b.0) * 0.5;
         assert!(alpha_at_doc(&state, (mid, a.1)) > 200, "level through the press");
         assert_eq!(alpha_at_doc(&state, (mid, (a.1 + b.1) * 0.5)), 0, "not the slant it was dragged");
+    }
+
+    /// Space pressed partway through a rectangle slides it, on the default
+    /// keys where Space is also Play / Pause, and doesn't play; Alt pressed
+    /// partway grows the next one from its press, and doesn't turn the view.
+    #[test]
+    fn space_partway_slides_a_rect_and_alt_grows_one_from_the_press() {
+        let mut state = AppState::for_test();
+        state.show_panels = false;
+        state.show_mini_timeline = false;
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = ShapeKind::Rect;
+        state.brush.radius = 3.0;
+        assert_eq!(state.shortcuts.get(Action::PlayPause), Some(crate::input::shortcuts::KeyCombo::plain(egui::Key::Space)));
+        let ctx = egui::Context::default();
+        let (none, alt) = (egui::Modifiers::NONE, egui::Modifiers::ALT);
+        // As the app's update runs a frame: input, then keys, then the UI.
+        let run = |state: &mut AppState, events: Vec<egui::Event>, modifiers| {
+            let raw = egui::RawInput {
+                screen_rect: Some(SCREEN),
+                events,
+                modifiers,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                ctx.input(|i| state.read_input(i));
+                state.handle_keys(ctx);
+                draw(state, ctx);
+            });
+        };
+        let space = |pressed| egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: Some(egui::Key::Space),
+            pressed,
+            repeat: false,
+            modifiers: none,
+        };
+        let moved = egui::Event::PointerMoved;
+        run(&mut state, vec![], none);
+        // Idle, Space plays: the check below means something.
+        run(&mut state, vec![space(true)], none);
+        assert!(state.playback.playing, "Space is Play / Pause");
+        run(&mut state, vec![space(false)], none);
+        state.playback.stop();
+        run(&mut state, vec![], none);
+
+        let xf = Xform::new(&state, state.canvas_rect);
+        let (from, to, by) = (pos2(400.0, 300.0), pos2(500.0, 360.0), vec2(150.0, 90.0));
+        run(&mut state, vec![moved(from), button(from, true, none)], none);
+        for i in 1..=4 {
+            run(&mut state, vec![moved(from + (to - from) * (i as f32 / 4.0))], none);
+        }
+        run(&mut state, vec![space(true)], none);
+        for i in 1..=4 {
+            run(&mut state, vec![moved(to + by * (i as f32 / 4.0))], none);
+        }
+        run(&mut state, vec![space(false)], none);
+        assert!(!state.playback.playing, "Space slid the shape; it didn't play");
+        run(&mut state, vec![button(to + by, false, none)], none);
+        run(&mut state, vec![], none);
+        let (a, b) = (xf.screen_to_doc(from + by), xf.screen_to_doc(to + by));
+        assert!(alpha_at_doc(&state, (a.0, (a.1 + b.1) * 0.5)) > 200, "left side, slid along");
+        let (a0, b0) = (xf.screen_to_doc(from), xf.screen_to_doc(to));
+        assert_eq!(alpha_at_doc(&state, (a0.0, (a0.1 + b0.1) * 0.5)), 0, "not where it was pressed");
+
+        // Alt partway: the press is the middle.
+        let view = (state.view.rotation, state.view.pan);
+        let (from, to) = (pos2(700.0, 500.0), pos2(760.0, 540.0));
+        run(&mut state, vec![moved(from), button(from, true, none)], none);
+        for i in 1..=4 {
+            run(&mut state, vec![moved(from + (to - from) * (i as f32 / 4.0))], none);
+        }
+        run(&mut state, vec![moved(to)], alt);
+        run(&mut state, vec![button(to, false, alt)], alt);
+        run(&mut state, vec![], none);
+        assert_eq!((state.view.rotation, state.view.pan), view, "the view stayed put");
+        let (c, e) = (xf.screen_to_doc(from), xf.screen_to_doc(to));
+        let left = 2.0 * c.0 - e.0;
+        assert!(alpha_at_doc(&state, (left, c.1)) > 200, "as far left of the press as right");
+        assert!(alpha_at_doc(&state, (e.0, c.1)) > 200, "and the right side under the pointer");
     }
 }

@@ -80,19 +80,21 @@ pub fn outline(kind: ShapeKind, a: (f32, f32), b: (f32, f32), radius: f32) -> Ve
 /// horizon, where it would wrap round behind the viewer.
 ///
 /// `square` makes the box as many grid cells deep as it is wide — a square
-/// on the grid, and the ellipse inside it a circle.
+/// on the grid, and the ellipse inside it a circle. `centred` makes `a` the
+/// box's middle on the grid rather than its corner.
 pub fn outline_on_plane(
     kind: ShapeKind,
     a: (f32, f32),
     b: (f32, f32),
     plane: &GridPlane,
     square: bool,
+    centred: bool,
     radius: f32,
 ) -> Option<Vec<(f32, f32)>> {
     if kind == ShapeKind::Line {
         return None;
     }
-    let [u0, v0] = plane.h.unmap([a.0, a.1])?;
+    let [mut u0, mut v0] = plane.h.unmap([a.0, a.1])?;
     let [mut u1, mut v1] = plane.h.unmap([b.0, b.1])?;
     if square {
         let (cols, rows) = (plane.cols.max(1) as f32, plane.rows.max(1) as f32);
@@ -101,6 +103,9 @@ pub fn outline_on_plane(
         let sign = |d: f32| if d < 0.0 { -1.0 } else { 1.0 };
         u1 = u0 + sign(du) * cells / cols;
         v1 = v0 + sign(dv) * cells / rows;
+    }
+    if centred {
+        (u0, v0) = (2.0 * u0 - u1, 2.0 * v0 - v1);
     }
     // `w` is affine in (u, v), so with every corner in front the whole box —
     // and the ellipse inside it — is too.
@@ -140,6 +145,27 @@ pub fn outline_on_plane(
         .fold(0.0f32, f32::max);
     let n = ((COARSE as f32 * longest / chord).ceil() as usize).clamp(COARSE, 4096);
     Some((0..=n).map(|i| at(step(i, n))).collect())
+}
+
+/// Where a shape's anchor goes when the pointer slides it from `from` to `to`
+/// (cell pixels). On a grid it keeps its place relative to the pointer in
+/// the grid's own `(u, v)`, so the shape slides along the plane, growing as
+/// it comes nearer; flat, or when a point is past the horizon, it moves as
+/// the pointer did.
+pub fn slide(
+    anchor: (f32, f32),
+    from: (f32, f32),
+    to: (f32, f32),
+    plane: Option<&GridPlane>,
+) -> (f32, f32) {
+    let on_plane = plane.and_then(|g| {
+        let [u0, v0] = g.h.unmap([from.0, from.1])?;
+        let [u1, v1] = g.h.unmap([to.0, to.1])?;
+        let [ua, va] = g.h.unmap([anchor.0, anchor.1])?;
+        let p = g.h.map_front(ua + u1 - u0, va + v1 - v0)?;
+        Some((p[0], p[1]))
+    });
+    on_plane.unwrap_or((anchor.0 + to.0 - from.0, anchor.1 + to.1 - from.1))
 }
 
 /// Rasterise the `spine` polyline (from [`outline`] or [`outline_on_plane`])
@@ -207,7 +233,7 @@ mod tests {
         let g = plane([[10.0, 20.0], [110.0, 20.0], [110.0, 70.0], [10.0, 70.0]], 4, 4);
         let (a, b) = ((30.0, 30.0), (80.0, 60.0));
         let flat = outline(ShapeKind::Rect, a, b, 2.0);
-        let on = outline_on_plane(ShapeKind::Rect, a, b, &g, false, 2.0).unwrap();
+        let on = outline_on_plane(ShapeKind::Rect, a, b, &g, false, false, 2.0).unwrap();
         assert_eq!(flat.len(), on.len());
         for (p, q) in flat.iter().zip(&on) {
             assert!(close(*p, *q), "{p:?} vs {q:?}");
@@ -217,7 +243,7 @@ mod tests {
     #[test]
     fn a_rect_on_a_floor_runs_its_sides_to_the_vanishing_point() {
         let g = plane(TRAP, 4, 4);
-        let r = outline_on_plane(ShapeKind::Rect, (30.0, 90.0), (70.0, 40.0), &g, false, 2.0)
+        let r = outline_on_plane(ShapeKind::Rect, (30.0, 90.0), (70.0, 40.0), &g, false, false, 2.0)
             .unwrap();
         assert_eq!(r.len(), 5);
         assert!(close(r[0], (30.0, 90.0)), "starts at the anchor");
@@ -241,7 +267,7 @@ mod tests {
     fn square_means_as_many_cells_deep_as_wide() {
         // 4 columns, 8 rows: a square in cells is twice as deep in v as wide in u.
         let g = plane(TRAP, 8, 4);
-        let r = outline_on_plane(ShapeKind::Rect, (30.0, 90.0), (70.0, 80.0), &g, true, 2.0)
+        let r = outline_on_plane(ShapeKind::Rect, (30.0, 90.0), (70.0, 80.0), &g, true, false, 2.0)
             .unwrap();
         let [u0, v0] = g.h.unmap([r[0].0, r[0].1]).unwrap();
         let [u1, v1] = g.h.unmap([r[2].0, r[2].1]).unwrap();
@@ -254,7 +280,7 @@ mod tests {
     fn a_circle_on_the_floor_has_its_far_half_foreshortened() {
         let g = plane(TRAP, 4, 4);
         let (a, b) = ((20.0, 95.0), (80.0, 40.0));
-        let e = outline_on_plane(ShapeKind::Ellipse, a, b, &g, true, 2.0).unwrap();
+        let e = outline_on_plane(ShapeKind::Ellipse, a, b, &g, true, false, 2.0).unwrap();
         assert!(close(e[0], *e.last().unwrap()), "closed");
         // The circle's centre on the floor sits below the middle of its
         // picture: the half nearer the horizon is squeezed.
@@ -273,13 +299,49 @@ mod tests {
     }
 
     #[test]
+    fn a_centred_box_on_the_grid_has_the_press_for_its_middle() {
+        let g = plane(TRAP, 4, 4);
+        let (a, b) = ((50.0, 70.0), (65.0, 85.0));
+        let r = outline_on_plane(ShapeKind::Rect, a, b, &g, false, true, 2.0).unwrap();
+        let [ua, va] = g.h.unmap([a.0, a.1]).unwrap();
+        let [u0, v0] = g.h.unmap([r[0].0, r[0].1]).unwrap();
+        let [u1, v1] = g.h.unmap([r[2].0, r[2].1]).unwrap();
+        // The middle on the floor, not in the picture: foreshortening puts
+        // the box's picture-space middle elsewhere.
+        assert!(((u0 + u1) * 0.5 - ua).abs() < 1e-4 && ((v0 + v1) * 0.5 - va).abs() < 1e-4);
+        assert!(close(r[2], b), "the far corner stays under the pointer");
+        // Squared too: as many cells deep as wide, still round the press.
+        let r = outline_on_plane(ShapeKind::Rect, a, b, &g, true, true, 2.0).unwrap();
+        let [u0, v0] = g.h.unmap([r[0].0, r[0].1]).unwrap();
+        let [u1, v1] = g.h.unmap([r[2].0, r[2].1]).unwrap();
+        assert!(((u1 - u0).abs() - (v1 - v0).abs()).abs() < 1e-4);
+        assert!(((u0 + u1) * 0.5 - ua).abs() < 1e-4 && ((v0 + v1) * 0.5 - va).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_slide_keeps_the_anchor_where_it_was_on_the_floor() {
+        // Flat: just the pointer's move.
+        assert_eq!(slide((10.0, 20.0), (50.0, 50.0), (80.0, 40.0), None), (40.0, 10.0));
+        // On the floor, the same steps across the grid: slid toward the
+        // horizon, the anchor closes in on the pointer as the floor shrinks.
+        let g = plane(TRAP, 4, 4);
+        let (anchor, from, to) = ((30.0, 90.0), (60.0, 80.0), (60.0, 30.0));
+        let moved = slide(anchor, from, to, Some(&g));
+        let uv = |p: (f32, f32)| g.h.unmap([p.0, p.1]).unwrap();
+        let (a0, f0, a1, t1) = (uv(anchor), uv(from), uv(moved), uv(to));
+        assert!(((f0[0] - a0[0]) - (t1[0] - a1[0])).abs() < 1e-4);
+        assert!(((f0[1] - a0[1]) - (t1[1] - a1[1])).abs() < 1e-4);
+        assert!(dist(moved, to) < dist(anchor, from), "smaller further off");
+    }
+
+    #[test]
     fn a_box_past_the_horizon_is_not_on_the_plane() {
         let g = plane(TRAP, 4, 4);
         // Above the horizon at y = -25.
-        assert!(outline_on_plane(ShapeKind::Rect, (50.0, 50.0), (60.0, -40.0), &g, false, 2.0)
+        assert!(outline_on_plane(ShapeKind::Rect, (50.0, 50.0), (60.0, -40.0), &g, false, false, 2.0)
             .is_none());
         // Lines never lie on the plane; they snap to a direction instead.
-        assert!(outline_on_plane(ShapeKind::Line, (50.0, 50.0), (60.0, 60.0), &g, false, 2.0)
+        assert!(outline_on_plane(ShapeKind::Line, (50.0, 50.0), (60.0, 60.0), &g, false, false, 2.0)
             .is_none());
     }
 }

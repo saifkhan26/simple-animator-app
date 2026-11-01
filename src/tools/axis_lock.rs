@@ -1,8 +1,9 @@
 //! Shift held partway through a drag: what it holds the drag to.
 //!
 //! A drag is held to the horizontal or the vertical through where it started,
-//! a shape's line to a 15° step, and a box to a square. Each function works in
-//! whatever space it is handed. `basis` is the angle, in that space, of the
+//! a shape's line to a 15° step, and a box to a square — and, with the centre
+//! key, grown from its middle ([`mirror`]). Each function works in whatever
+//! space it is handed. `basis` is the angle, in that space, of the
 //! horizontal the lock keeps to: 0 for the space's own axes, something else
 //! when the lock follows the screen over a turned view or layer.
 
@@ -45,6 +46,12 @@ pub fn onto(from: P, a: f32, p: P) -> P {
     let (s, c) = a.sin_cos();
     let along = (p.0 - from.0) * c + (p.1 - from.1) * s;
     (from.0 + along * c, from.1 + along * s)
+}
+
+/// The far end of a drag grown from `centre` as its middle: `p` mirrored
+/// through it. Square a box up first, then mirror, and it stays square.
+pub fn mirror(centre: P, p: P) -> P {
+    (2.0 * centre.0 - p.0, 2.0 * centre.1 - p.1)
 }
 
 /// `to` moved so the box from `from` is square: the longer side kept, each
@@ -95,6 +102,14 @@ mod tests {
     fn a_box_squares_up_the_way_it_was_dragged() {
         assert_eq!(square((0.0, 0.0), (30.0, -10.0)), (30.0, -30.0));
         assert_eq!(square((0.0, 0.0), (-5.0, 20.0)), (-20.0, 20.0));
+    }
+
+    #[test]
+    fn a_centred_box_reaches_as_far_the_other_way() {
+        assert_eq!(mirror((10.0, 20.0), (40.0, 5.0)), (-20.0, 35.0));
+        // Squared, then mirrored: still square, round the same middle.
+        let end = square((0.0, 0.0), (30.0, -10.0));
+        assert_eq!(mirror((0.0, 0.0), end), (-30.0, 30.0));
     }
 
     #[test]
