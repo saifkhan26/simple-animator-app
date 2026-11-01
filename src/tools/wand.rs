@@ -4,7 +4,8 @@
 //! one under it and touch it, the way the bucket floods — or, with
 //! [`WandOptions::any_paint`], every painted pixel touching it whatever its
 //! colour — and the selection takes that shape. It shares the bucket's flood,
-//! its gap closing and its expand, so a pick stops where a fill would.
+//! its soft edges, its gap closing and its expand, so a pick stops where a
+//! fill would.
 //!
 //! A press is a [`WandPick`]. It keeps the pixels and what it worked out, so a
 //! drag that retunes the tolerance or the gap afterwards only redoes what
@@ -14,7 +15,7 @@
 //! they are in.
 
 use crate::doc::canvas::par_rows;
-use crate::tools::fill::{self, Bbox, Field};
+use crate::tools::fill::{self, Bbox, Cover, Field};
 use crate::tools::scan::{self, OPEN, SHUT, TAKEN};
 
 /// Alpha at or above this is paint to [`WandOptions::any_paint`] — the same
@@ -80,17 +81,26 @@ pub struct Picked {
     pub cov: Vec<u8>,
 }
 
-/// The pick at one tolerance: a byte per pixel, [`SHUT`] or [`OPEN`], and
-/// once flooded, [`TAKEN`] for the run joined to the press — a [`scan::flood`]
-/// map.
+/// The pick at one cut: a byte per pixel, [`SHUT`] or [`OPEN`], and once
+/// flooded, [`TAKEN`] for the run joined to the press — a [`scan::flood`]
+/// map — and [`EDGE`] for the soft edges a press on bare canvas takes with
+/// it.
 struct Level {
-    tolerance: u8,
+    /// The most reach let in.
+    cut: u8,
     map: Vec<u8>,
     /// The flood's bounds, once it has run.
     flood: Option<Bbox>,
+    /// On bare canvas, the bounds of the flood and its soft edges, once
+    /// those are marked.
+    edged: Option<Bbox>,
     /// The flood as `bool`s, for the gap and the expand, once asked for.
     taken: Option<Vec<bool>>,
 }
+
+/// In a [`Level`]'s map: the soft edge of a line beside a pick on bare
+/// canvas, which the pick takes as the bucket's fill would.
+const EDGE: u8 = TAKEN + 1;
 
 /// One press of the wand. Built at pen-down; [`pick`](Self::pick) works out
 /// what it takes, and may be called again as a drag retunes it.
@@ -102,10 +112,16 @@ pub struct WandPick {
     w: i32,
     h: i32,
     seed: (i32, i32),
-    /// Per pixel: the smallest tolerance that lets it in. 255 is never.
+    /// Per pixel: the smallest tolerance that lets it in, `base` aside.
+    /// 255 is never. On bare canvas that is how covered the pixel is.
     reach: Vec<u8>,
+    /// Pressed on bare canvas.
+    bare: bool,
+    /// How covered the pixel pressed on is, on bare canvas: a tolerance lets
+    /// in that much more. 0 otherwise.
+    base: u8,
     level: Option<Level>,
-    /// Distance to the walls, for the tolerance it was built at.
+    /// Distance to the walls, for the cut it was built at.
     field: Option<(u8, Field)>,
 }
 
@@ -122,18 +138,18 @@ impl WandPick {
         let target = fill::src_px(src, w, x, y);
         let n = size.0 as usize;
         let mut reach = vec![0u8; n * size.1 as usize];
-        // The bucket's rules (`fill::matches_target`), as the tolerance each
-        // pixel needs: on paint with Any paint, any paint; on bare canvas,
-        // anything at most half covered; otherwise the widest channel apart.
+        // The bucket's rules, as the tolerance each pixel needs: on paint
+        // with Any paint, any paint; on bare canvas, how covered it is,
+        // whatever its colour; otherwise the widest channel apart.
         let paint = any_paint && target[3] >= PAINT;
-        let bare = target[3] < 8;
+        let bare = !paint && target[3] < 8;
         par_rows(&mut reach, n, |y0, band| {
             let src = &src[y0 * n * 4..(y0 * n + band.len()) * 4];
             let px = band.iter_mut().zip(src.chunks_exact(4));
             if paint {
                 px.for_each(|(r, p)| *r = if p[3] >= PAINT { 0 } else { 255 });
             } else if bare {
-                px.for_each(|(r, p)| *r = if p[3] <= 128 { 0 } else { 255 });
+                px.for_each(|(r, p)| *r = p[3]);
             } else {
                 px.for_each(|(r, p)| {
                     let d = |c: usize| p[c].abs_diff(target[c]);
@@ -146,6 +162,8 @@ impl WandPick {
             h,
             seed,
             reach,
+            bare,
+            base: if bare { target[3] } else { 0 },
             level: None,
             field: None,
         })
@@ -155,20 +173,27 @@ impl WandPick {
     pub fn pick(&mut self, o: &WandOptions) -> Picked {
         let (w, h, seed) = (self.w, self.h, self.seed);
         let tolerance = o.tolerance.min(MAX_TOLERANCE);
-        if self.level.as_ref().map_or(true, |l| l.tolerance != tolerance) {
+        // On bare canvas a press runs over pixels no more than the tolerance
+        // more covered than its own, as the bucket's fill does, and takes
+        // the soft edges of its lines after. A pick of every match anywhere
+        // has nobody to share those with, so they are simply let in.
+        let lo = tolerance.saturating_add(self.base);
+        let cut = if self.bare && !o.contiguous { lo.max(fill::SOFT_EDGE) } else { lo };
+        if self.level.as_ref().map_or(true, |l| l.cut != cut) {
             let n = w as usize;
             let mut map = vec![SHUT; self.reach.len()];
             let reach = &self.reach;
             par_rows(&mut map, n, |y0, band| {
                 let reach = &reach[y0 * n..y0 * n + band.len()];
                 for (m, &r) in band.iter_mut().zip(reach) {
-                    *m = if r <= tolerance { OPEN } else { SHUT };
+                    *m = if r <= cut { OPEN } else { SHUT };
                 }
             });
             self.level = Some(Level {
-                tolerance,
+                cut,
                 map,
                 flood: None,
+                edged: None,
                 taken: None,
             });
         }
@@ -189,32 +214,61 @@ impl WandPick {
         let pbox = *level
             .flood
             .get_or_insert_with(|| scan::flood(&mut level.map, w as usize, seed));
+        let ebox = if self.bare {
+            *level.edged.get_or_insert_with(|| {
+                let cover = Cover::bytes(&self.reach);
+                let soft = fill::soft_pixels(cover, w, h, &level.map, TAKEN, pbox, lo, |_| false);
+                let (mut x0, mut y0, mut x1, mut y1) = pbox;
+                for i in soft {
+                    level.map[i as usize] = EDGE;
+                    let (x, y) = (i as i32 % w, i as i32 / w);
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                }
+                (x0, y0, x1, y1)
+            })
+        } else {
+            pbox
+        };
+        let picked = |v: u8| v == TAKEN || v == EDGE;
         if o.gap == 0 && r == 0 {
-            return cover_map(&level.map, w, pbox, |v| v == TAKEN);
+            return cover_map(&level.map, w, ebox, picked);
         }
         let map = &level.map;
-        let taken = level
-            .taken
-            .get_or_insert_with(|| map.iter().map(|&v| v == TAKEN).collect());
-        let owned: (Vec<bool>, Bbox);
-        let (mask, bbox) = if o.gap == 0 {
-            (&taken[..], pbox)
-        } else {
-            // As the bucket does: walls from farther out for a wider gap,
-            // rebuilt in doubling steps.
-            let needed = o.gap.div_ceil(2) as i32 + 1;
-            let stale = self
-                .field
-                .as_ref()
-                .map_or(true, |(t, f)| *t != tolerance || (!f.whole && f.reach < needed));
-            if stale {
-                let reach = (needed as u32).next_power_of_two().max(16) as i32;
-                let pass = |x: i32, y: i32| map[(y * w + x) as usize] != SHUT;
-                self.field = Some((tolerance, fill::wall_distance(w, h, pbox, reach, pass)));
-            }
-            let (_, field) = self.field.as_ref().expect("just built");
-            owned = fill::gap_flood(field, taken, w, h, seed, o.gap);
+        let mut owned: (Vec<bool>, Bbox);
+        let (mask, bbox) = if o.gap == 0 && self.bare {
+            owned = (map.iter().map(|&v| picked(v)).collect(), ebox);
             (&owned.0[..], owned.1)
+        } else {
+            let taken = level
+                .taken
+                .get_or_insert_with(|| map.iter().map(|&v| v == TAKEN).collect());
+            if o.gap == 0 {
+                (&taken[..], pbox)
+            } else {
+                // As the bucket does: walls from farther out for a wider gap,
+                // rebuilt in doubling steps.
+                let needed = o.gap.div_ceil(2) as i32 + 1;
+                let stale = self
+                    .field
+                    .as_ref()
+                    .map_or(true, |(c, f)| *c != cut || (!f.whole && f.reach < needed));
+                if stale {
+                    let reach = (needed as u32).next_power_of_two().max(16) as i32;
+                    // A soft edge is a wall, as anything shut is.
+                    let pass = |x: i32, y: i32| matches!(map[(y * w + x) as usize], OPEN | TAKEN);
+                    self.field = Some((cut, fill::wall_distance(w, h, pbox, reach, pass)));
+                }
+                let (_, field) = self.field.as_ref().expect("just built");
+                owned = fill::gap_flood(field, taken, w, h, seed, o.gap);
+                if self.bare {
+                    // The flood past the gap is someone else's, however small.
+                    let ours = bytemuck::cast_slice(&owned.0);
+                    let cover = Cover::bytes(&self.reach);
+                    let soft = fill::soft_pixels(cover, w, h, ours, 1, owned.1, lo, |i| taken[i]);
+                    owned.1 = fill::take(&mut owned.0, w, owned.1, &soft);
+                }
+                (&owned.0[..], owned.1)
+            }
         };
         if r > 0 {
             let grown = fill::dilate_window(mask, w, h, bbox, r);
@@ -431,19 +485,109 @@ mod tests {
     }
 
 
+    /// A grainy pencil ring of radius 10 round (15, 15): at most about 80%
+    /// covered, fading over 3 px each side and thinned by a hash of the pixel
+    /// to as little as a third, so pixels under half covered run right
+    /// through it.
+    fn grainy_ring() -> Vec<u8> {
+        let mut px = blank();
+        for y in 0..H as i32 {
+            for x in 0..W as i32 {
+                let d = ((x - 15) as f32).hypot((y - 15) as f32) - 10.0;
+                let body = (1.0 - d.abs() / 3.0).clamp(0.0, 1.0);
+                if body > 0.0 {
+                    let mut k = ((x as u64) << 32) | y as u64;
+                    k = (k ^ (k >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    k = (k ^ (k >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    let n = ((k ^ (k >> 31)) & 0xFFFF) as f32 / 65535.0;
+                    let a = (0.8 * body * (0.35 + 0.65 * n) * 255.0) as u8;
+                    let i = ((y as u32 * W + x as u32) * 4) as usize;
+                    px[i..i + 4].copy_from_slice(&[40, 40, 40, a]);
+                }
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn a_grainy_line_holds_the_pick() {
+        let px = grainy_ring();
+        let half = |x: i32, y: i32| px[((y * W as i32 + x) * 4 + 3) as usize] <= fill::SOFT_EDGE;
+        assert!(fill::span_flood(W as i32, H as i32, (15, 15), half).0[0], "porous at half covered");
+        for gap in [0, 3] {
+            let p = pick(px.clone(), (15, 15), WandOptions { gap, ..Default::default() });
+            for y in 0..H as i32 {
+                for x in 0..W as i32 {
+                    let d = ((x - 15) as f32).hypot((y - 15) as f32);
+                    if d < 7.5 {
+                        assert!(at(&p, x, y), "gap {gap}: ({x}, {y}) inside, up to the line");
+                    } else if d > 11.5 {
+                        assert!(!at(&p, x, y), "gap {gap}: ({x}, {y}) past the line");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pick_on_bare_canvas_takes_the_soft_edges_of_its_lines() {
+        // A two-pixel ring, solid inside, with a faint rim both sides.
+        let mut px = blank();
+        ring(&mut px);
+        rect(&mut px, (6, 6, 19, 6), [10, 10, 10, 100]);
+        rect(&mut px, (6, 4, 6, 4), [10, 10, 10, 60]);
+        let p = pick(px.clone(), (12, 12), WandOptions::default());
+        assert!(at(&p, 12, 6), "the soft rim inside");
+        assert!(!at(&p, 6, 4), "not the rim outside");
+        let out = pick(px, (30, 2), WandOptions::default());
+        assert!(at(&out, 6, 4) && !at(&out, 12, 6));
+    }
+
+    #[test]
+    fn tolerance_on_bare_canvas_is_how_covered_a_pixel_may_be() {
+        let mut px = blank();
+        rect(&mut px, (0, 0, 9, 9), [0, 0, 0, 40]);
+        // A wash on its own: soft, with nobody to share it, so it goes too.
+        assert_eq!(count(&pick(px.clone(), (20, 20), WandOptions::default())), (W * H) as usize);
+        // Every match anywhere: the wash too, however tight the tolerance.
+        let anywhere = WandOptions { tolerance: 0, contiguous: false, ..Default::default() };
+        assert_eq!(count(&pick(px.clone(), (20, 20), anywhere)), (W * H) as usize);
+        // A wall of solid ink cuts the wash off from a press beside it, and a
+        // wash past half covered is a body, not an edge.
+        rect(&mut px, (0, 0, 9, 9), [0, 0, 0, 200]);
+        assert_eq!(count(&pick(px, (20, 20), WandOptions::default())), (W * H) as usize - 100);
+    }
+
     /// The pick as first written: the bucket's own flood and rules, straight
     /// off the pixels. What the fast one must match, pixel for pixel.
     fn reference_pick(src: &[u8], size: (u32, u32), seed: (i32, i32), o: &WandOptions) -> Picked {
         let (w, h) = (size.0 as i32, size.1 as i32);
         let target = fill::src_px(src, w, seed.0, seed.1);
         let paint = o.any_paint && target[3] >= PAINT;
+        let bare = !paint && target[3] < 8;
         let tol = o.tolerance.min(MAX_TOLERANCE);
+        let lo = target[3].saturating_add(tol);
+        let cut = if o.contiguous { lo } else { lo.max(fill::SOFT_EDGE) };
         let pass = |x: i32, y: i32| {
+            let a = fill::src_px(src, w, x, y)[3];
             if paint {
-                fill::src_px(src, w, x, y)[3] >= PAINT
+                a >= PAINT
+            } else if bare {
+                a <= cut
             } else {
                 fill::matches_target(src, w, x, y, target, tol)
             }
+        };
+        // On bare canvas, the soft edges `ours` takes from the lines, with
+        // `core` the plain flood when the gap may have cut it.
+        let edged = |(mut ours, b): (Vec<bool>, Bbox), core: Option<&[bool]>| {
+            if !bare {
+                return (ours, b);
+            }
+            let theirs = |i: usize| core.is_some_and(|c| c[i]);
+            let soft = fill::soft_pixels(Cover::rgba(src), w, h, bytemuck::cast_slice(&ours), 1, b, lo, theirs);
+            let b = fill::take(&mut ours, w, b, &soft);
+            (ours, b)
         };
         let owned: (Vec<bool>, Bbox);
         let (mask, bbox) = if !o.contiguous {
@@ -462,13 +606,13 @@ mod tests {
         } else {
             let (plain, pbox) = fill::span_flood(w, h, seed, pass);
             if o.gap == 0 {
-                owned = (plain, pbox);
+                owned = edged((plain, pbox), None);
                 (&owned.0[..], owned.1)
             } else {
                 let needed = o.gap.div_ceil(2) as i32 + 1;
                 let reach = (needed as u32).next_power_of_two().max(16) as i32;
                 let field = fill::wall_distance(w, h, pbox, reach, pass);
-                owned = fill::gap_flood(&field, &plain, w, h, seed, o.gap);
+                owned = edged(fill::gap_flood(&field, &plain, w, h, seed, o.gap), Some(&plain));
                 (&owned.0[..], owned.1)
             }
         };

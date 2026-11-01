@@ -800,3 +800,45 @@ fn perf_brushes_1080p() {
         assert!(slow.is_empty(), "slower than baseline:\n{}", slow.join("\n"));
     }
 }
+
+/// Paper grain and noise riddle a pencil line with pixels under half
+/// covered. The bucket pressed inside a ring drawn with one fills the ring,
+/// and not the page round it.
+#[test]
+fn a_grainy_pencil_ring_holds_the_bucket() {
+    let pencil = BrushSettings { radius: 13.5, noise: 0.37, ..BrushSettings::default_pencil() };
+    let at = |i: usize| {
+        let a = i as f32 / 140.0 * std::f32::consts::TAU;
+        (300.0 + 55.0 * a.cos(), 300.0 + 55.0 * a.sin())
+    };
+    for pressure in [0.3, 0.6] {
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolPencil);
+        st.brush = BrushSettings { color: st.brush.color, ..pencil.clone() };
+        for i in 0..=150 {
+            let (x, y) = at(i);
+            let mut p = st.make_sample(x, y, i as f32 * 0.01);
+            p.pressure = pressure;
+            if i == 0 {
+                st.pointer_down(p);
+            } else {
+                st.pointer_move(p);
+            }
+        }
+        st.pointer_up();
+        st.dispatch(Action::ToolFill);
+        st.pointer_down(st.make_sample(300.0, 300.0, 2.0));
+        st.pointer_up();
+
+        let id = st.project.resolved_current().expect("a drawing");
+        let cell = st.project.cell(id).expect("its cell");
+        let alpha = |x: u32, y: u32| cell.pixels()[((y * cell.width + x) * 4 + 3) as usize];
+        assert_eq!(alpha(300, 300), 255, "pressure {pressure}: the middle fills");
+        for k in 0..64 {
+            let a = k as f32 / 64.0 * std::f32::consts::TAU;
+            let (x, y) = (300.0 + 85.0 * a.cos(), 300.0 + 85.0 * a.sin());
+            assert_eq!(alpha(x as u32, y as u32), 0, "pressure {pressure}: ({x:.0}, {y:.0}) is past the ring");
+        }
+        assert_eq!(alpha(5, 5), 0, "pressure {pressure}: the page stays bare");
+    }
+}
