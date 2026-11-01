@@ -134,7 +134,11 @@ impl Win {
                 use crate::brush_library::import::{KritaImport, KritaPlaces};
                 state.krita_import = Some(KritaImport::start(KritaPlaces::default(), None));
             }
-            Win::NewProject => state.show_new_project = true,
+            Win::NewProject => {
+                state.show_new_project = true;
+                // An image on the clipboard: the widest Clipboard label.
+                state.new_project_cfg.clipboard.size = Some((16384, 16384));
+            }
             Win::Export(kind) => {
                 state.show_export = true;
                 state.export_cfg.kind = kind;
@@ -869,4 +873,13 @@ fn snapshots() {
         let name = if matches!(win, Win::Panel(PanelId::Layers)) { "layers.png" } else { "timeline.png" };
         snapshot(&mut rig, 2.0).save(dir.join(name)).unwrap();
     }
+
+    // New project with a Full HD image on the clipboard, then with none.
+    let mut rig = Rig::new(Win::NewProject);
+    rig.state.new_project_cfg.clipboard.size = Some((1920, 1080));
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("new_project_clipboard.png")).unwrap();
+    rig.state.new_project_cfg.clipboard.size = None;
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("new_project_no_clipboard.png")).unwrap();
 }

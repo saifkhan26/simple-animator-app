@@ -8747,10 +8747,22 @@ fn orientation_toggle(ui: &mut egui::Ui, w: &mut u32, h: &mut u32) -> bool {
     want != landscape
 }
 
+/// `w`×`h` scaled down, aspect kept, until neither side passes `max`.
+fn fit_side(w: u32, h: u32, max: u32) -> (u32, u32) {
+    if w <= max && h <= max {
+        return (w, h);
+    }
+    let s = max as f64 / w.max(h) as f64;
+    let fit = |d: u32| ((d as f64 * s).round() as u32).clamp(1, max);
+    (fit(w), fit(h))
+}
+
 fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
     if !state.show_new_project {
         return;
     }
+    state.new_project_cfg.clipboard.poll();
+    ctx.request_repaint_after(crate::io::image_import::CLIPBOARD_POLL);
     let mut open = true;
     let mut create = false;
     let mut cancel = false;
@@ -8810,6 +8822,31 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
                 for &(label, w, h) in &SIZE_PRESETS {
                     if ui.button(label).clicked() {
                         let (w, h) = if landscape { (w, h) } else { (h, w) };
+                        state.new_project_cfg.width = w;
+                        state.new_project_cfg.height = h;
+                    }
+                }
+                // The clipboard image's size as it is: the point is to match
+                // it, so the orientation above doesn't flip it.
+                let clip = state
+                    .new_project_cfg
+                    .clipboard
+                    .size
+                    .map(|(w, h)| fit_side(w, h, MAX_SIDE));
+                let label = match clip {
+                    Some((w, h)) => format!("Clipboard {w}×{h}"),
+                    None => "Clipboard".to_owned(),
+                };
+                if ui
+                    .add_enabled(
+                        clip.is_some(),
+                        egui::Button::new(theme::icon_text(ic::CLIPBOARD, &label)),
+                    )
+                    .on_hover_text("The size of the image on the clipboard")
+                    .on_disabled_hover_text("No image on the clipboard")
+                    .clicked()
+                {
+                    if let Some((w, h)) = clip {
                         state.new_project_cfg.width = w;
                         state.new_project_cfg.height = h;
                     }
@@ -11253,6 +11290,7 @@ mod stroke_source_tests {
 mod new_project_tests {
     use super::*;
     use crate::app::{LayerRename, ProjectPreset};
+    use egui::{Pos2, Rect};
 
     fn preset(name: &str, width: u32, height: u32, is_default: bool) -> ProjectPreset {
         ProjectPreset {
@@ -11289,6 +11327,72 @@ mod new_project_tests {
         // Opened on the starred preset, which the list shows as current.
         let cfg = &state.new_project_cfg;
         assert_eq!((cfg.width, cfg.height), (1080, 1920));
+    }
+
+    /// One frame of the dialog; the centre of the text that starts with
+    /// `find`, if drawn.
+    fn draw(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>, find: &str) -> Option<Pos2> {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1600.0, 1000.0))),
+            events,
+            ..Default::default()
+        };
+        let out = ctx.run(raw, |ctx| new_project_dialog(state, ctx));
+        out.shapes.iter().find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text().contains(find) => {
+                Some(t.pos + t.galley.rect.center().to_vec2())
+            }
+            _ => None,
+        })
+    }
+
+    fn click(ctx: &egui::Context, state: &mut AppState, at: Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        draw(ctx, state, vec![egui::Event::PointerMoved(at)], "");
+        draw(ctx, state, vec![button(true)], "");
+        draw(ctx, state, vec![button(false)], "");
+    }
+
+    #[test]
+    fn clipboard_button_takes_the_image_size_as_it_is() {
+        let mut state = AppState::for_test();
+        state.open_new_project();
+        // Landscape now; a portrait image must not be flipped to match.
+        state.new_project_cfg.width = 1920;
+        state.new_project_cfg.height = 1080;
+        state.new_project_cfg.clipboard.size = Some((1000, 2000));
+        let ctx = egui::Context::default();
+        draw(&ctx, &mut state, vec![], "");
+        let at = draw(&ctx, &mut state, vec![], "Clipboard 1000×2000").expect("size on the button");
+        click(&ctx, &mut state, at);
+        let cfg = &state.new_project_cfg;
+        assert_eq!((cfg.width, cfg.height), (1000, 2000));
+    }
+
+    #[test]
+    fn clipboard_button_does_nothing_without_an_image() {
+        let mut state = AppState::for_test();
+        state.open_new_project();
+        let before = (state.new_project_cfg.width, state.new_project_cfg.height);
+        let ctx = egui::Context::default();
+        draw(&ctx, &mut state, vec![], "");
+        let at = draw(&ctx, &mut state, vec![], "Clipboard").expect("button drawn");
+        click(&ctx, &mut state, at);
+        let cfg = &state.new_project_cfg;
+        assert_eq!((cfg.width, cfg.height), before);
+    }
+
+    #[test]
+    fn an_oversized_clipboard_image_fits_the_side_limit() {
+        assert_eq!(fit_side(1920, 1080, MAX_SIDE), (1920, 1080));
+        assert_eq!(fit_side(32768, 16384, MAX_SIDE), (16384, 8192));
+        assert_eq!(fit_side(100, 40000, MAX_SIDE), (41, 16384));
+        assert_eq!(fit_side(1, 99999, MAX_SIDE), (1, 16384));
     }
 }
 

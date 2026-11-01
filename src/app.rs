@@ -63,6 +63,9 @@ pub struct NewProjectConfig {
     pub preset_name: String,
     /// In-progress inline rename of a saved preset.
     pub preset_rename: Option<LayerRename>,
+    /// The size of the image on the system clipboard, for the Clipboard
+    /// preset.
+    pub clipboard: crate::io::image_import::ClipboardWatch,
 }
 
 /// A saved New project size. A workspace preference, not project data: the
@@ -975,6 +978,7 @@ impl Default for NewProjectConfig {
             fps: 24.0,
             preset_name: String::new(),
             preset_rename: None,
+            clipboard: Default::default(),
         }
     }
 }
