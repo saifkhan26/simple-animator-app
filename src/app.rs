@@ -1232,6 +1232,14 @@ pub struct AppState {
     /// Floating pixels lifted through the selection, if any. Bound to one
     /// cell: changing frame or layer lands them first.
     pub selection: Option<Selection>,
+    /// The same selection lifted off the other picked layers, moving with
+    /// `selection`. Empty with one layer picked.
+    pub sel_followers: Vec<select::Follower>,
+    /// The float's own layer, which leads: the active one unless that has
+    /// nothing to lift.
+    pub float_layer: usize,
+    /// The active layer when the float was made. Picking another lands it.
+    float_cur: usize,
     /// A Liquify warp under way, until it lands or is cancelled.
     pub liquify: Option<liquify::LiquifySession>,
     /// The float's cell as it was before the lift, so landing records lift
@@ -1242,8 +1250,9 @@ pub struct AppState {
     float_lift_rect: Option<DirtyRect>,
     /// In-flight drag on the selection's transform box, or `None`.
     sel_drag: Option<SelDrag>,
-    /// Selection clipboard: mask plus lifted pixels.
-    pixel_clip: Option<(Mask, Vec<u8>)>,
+    /// Selection clipboard: mask plus lifted pixels, per layer copied from,
+    /// the lead's first. Empty before any copy.
+    pixel_clip: Vec<select::ClipPart>,
     /// Set when the floating pixels changed and their texture must be rebuilt.
     /// Posing does *not* set it — the pose moves the quad, and the GPU samples
     /// the same texture through it.
@@ -1744,12 +1753,15 @@ impl AppState {
             tint_outside: prefs.tint_outside,
             sel_tint: None,
             selection: None,
+            sel_followers: Vec::new(),
+            float_layer: 0,
+            float_cur: 0,
             liquify: None,
             float_pre: Vec::new(),
             float_pre_live: false,
             float_lift_rect: None,
             sel_drag: None,
-            pixel_clip: None,
+            pixel_clip: Vec::new(),
             sel_tex_stale: false,
             selection_tex: None,
             tool_brushes: restore_tool_brushes(prefs.tool_brushes.clone()),
@@ -2300,6 +2312,7 @@ impl AppState {
         self.history.for_each_cell(&mut keep);
         self.stroke_target.into_iter().for_each(&mut keep);
         self.selection.as_ref().map(|s| s.cell).into_iter().for_each(&mut keep);
+        self.sel_followers.iter().for_each(|fl| keep(fl.sel.cell));
         // The link maps Krita's drawings, old ones included, onto cells.
         let link = self.krita.as_ref().and_then(|k| k.baseline.as_ref());
         for &id in link.into_iter().flat_map(|b| b.layers.iter().flat_map(|l| l.by_hash.values())) {
@@ -2345,7 +2358,7 @@ impl AppState {
         let active = p.layers.get(p.current_layer).and_then(|l| l.resolve(p.current_frame));
         let hot = [self.stroke_target, active, self.selection.as_ref().map(|s| s.cell)];
         for (id, cell) in self.project.cells.iter_mut().enumerate() {
-            if cell.is_packed() || hot.contains(&Some(id)) {
+            if cell.is_packed() || hot.contains(&Some(id)) || self.sel_followers.iter().any(|fl| fl.sel.cell == id) {
                 continue;
             }
             // Shared with a save in flight or an undo step: packing would
@@ -4389,24 +4402,8 @@ impl AppState {
         // change: a move shifts the quad, not the texture.
         match &self.selection {
             Some(sel) if self.sel_tex_stale || self.selection_tex.is_none() => {
-                let dims = [sel.mask.w as usize, sel.mask.h as usize];
-                let image = premultiplied_image(dims, &sel.pixels);
-                match self.selection_tex.as_mut() {
-                    Some(tex) if tex.size() == dims => {
-                        tex.set(image, TextureOptions::LINEAR);
-                        self.fresh_full.insert(tex.id());
-                    }
-                    _ => {
-                        if let Some(old) = self.selection_tex.take() {
-                            self.retired_textures.push(old);
-                        }
-                        self.selection_tex = Some(ctx.load_texture(
-                            "selection",
-                            image,
-                            TextureOptions::LINEAR,
-                        ));
-                    }
-                }
+                let (retired, fresh) = (&mut self.retired_textures, &mut self.fresh_full);
+                sync_float_tex(ctx, &mut self.selection_tex, sel, retired, fresh);
                 self.sel_tex_stale = false;
             }
             None if self.selection_tex.is_some() => {
@@ -4415,6 +4412,10 @@ impl AppState {
                 }
             }
             _ => {}
+        }
+        for fl in self.sel_followers.iter_mut().filter(|fl| fl.tex_stale || fl.tex.is_none()) {
+            sync_float_tex(ctx, &mut fl.tex, &fl.sel, &mut self.retired_textures, &mut self.fresh_full);
+            fl.tex_stale = false;
         }
 
         self.sync_tint(ctx);
@@ -4804,7 +4805,17 @@ impl AppState {
     /// The cell a paint edit on the active slot should write to, allocating
     /// it if the slot is empty. `None` on a locked or reference layer.
     fn begin_edit_cell(&mut self) -> Option<CellId> {
-        if !self.project.paintable(self.project.current_layer) {
+        let (id, key) = self.edit_cell_on(self.project.current_layer)?;
+        if let Some(cmd) = key {
+            self.history.push(cmd);
+        }
+        Some(id)
+    }
+
+    /// [`AppState::begin_edit_cell`] for layer `li`, with the undo step of a
+    /// key auto-key adds handed back rather than recorded.
+    fn edit_cell_on(&mut self, li: usize) -> Option<(CellId, Option<undo::Command>)> {
+        if !self.project.paintable(li) {
             return None;
         }
         // Auto-key: break the hold first, so the stroke starts a drawing of
@@ -4813,20 +4824,22 @@ impl AppState {
         // drawing without reaching for the X-sheet, and a duplicate would put
         // the previous drawing's strokes on the new frame. Seeing the previous
         // drawing is what onion skin is for.
+        let f = self.project.current_frame;
+        let mut key = None;
         if self.auto_key_draw {
-            let f = self.project.current_frame;
             let holding = self
                 .project
                 .layers
-                .get(self.project.current_layer)
+                .get(li)
                 .is_some_and(|l| l.resolve(f).is_some() && !l.is_key(f));
             if holding {
-                self.structural_edit(false, |p| {
-                    p.insert_blank_key_here();
-                });
+                key = Some(self.structural_command(false, |p| {
+                    let id = p.alloc_cell_for(li);
+                    p.layers[li].set_key(f, id);
+                }));
             }
         }
-        Some(self.project.ensure_active_cell())
+        Some((self.project.ensure_cell(li, f), key))
     }
 
     pub fn pointer_down(&mut self, sample: PointerSample) {
@@ -7184,6 +7197,29 @@ impl eframe::App for AppState {
 /// them in gamma space — light strokes get a white rim. The same rim comes
 /// back between texels if they are *mixed* in linear light, as egui's
 /// sampler does, so the canvas draws them through `ui::canvas_gpu`.
+/// Bring floating pixels' texture in `slot` up to `sel`'s pixels: re-filled
+/// in place while the size holds, else made anew and the old one retired.
+fn sync_float_tex(
+    ctx: &egui::Context,
+    slot: &mut Option<TextureHandle>,
+    sel: &Selection,
+    retired: &mut Vec<TextureHandle>,
+    fresh_full: &mut HashSet<egui::TextureId>,
+) {
+    let dims = [sel.mask.w as usize, sel.mask.h as usize];
+    let image = premultiplied_image(dims, &sel.pixels);
+    match slot.as_mut() {
+        Some(tex) if tex.size() == dims => {
+            tex.set(image, TextureOptions::LINEAR);
+            fresh_full.insert(tex.id());
+        }
+        _ => {
+            retired.extend(slot.take());
+            *slot = Some(ctx.load_texture("selection", image, TextureOptions::LINEAR));
+        }
+    }
+}
+
 pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
     let pixels = rgba.chunks_exact(4).map(premultiplied).collect();
     ColorImage { size, pixels }

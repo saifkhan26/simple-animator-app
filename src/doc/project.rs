@@ -294,15 +294,18 @@ impl Project {
     ///   * Slot holds an earlier key → return the held CellId (paint into
     ///     shared). To break the hold, callers should use `insert_key` first.
     ///   * No prior key exists at all → allocate a new cell and key it here.
+    #[cfg(test)]
     pub fn ensure_active_cell(&mut self) -> CellId {
-        let cur_layer = self.current_layer;
-        let cur_frame = self.current_frame;
-        let already = self.layers[cur_layer].resolve(cur_frame);
-        match already {
+        self.ensure_cell(self.current_layer, self.current_frame)
+    }
+
+    /// [`Project::ensure_active_cell`] for layer `layer` at `frame`.
+    pub fn ensure_cell(&mut self, layer: usize, frame: usize) -> CellId {
+        match self.layers[layer].resolve(frame) {
             Some(id) => id,
             None => {
-                let id = self.alloc_cell();
-                self.layers[cur_layer].set_key(cur_frame, id);
+                let id = self.alloc_cell_for(layer);
+                self.layers[layer].set_key(frame, id);
                 id
             }
         }

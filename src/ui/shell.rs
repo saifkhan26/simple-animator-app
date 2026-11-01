@@ -6058,14 +6058,19 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
     });
     ui.checkbox(&mut state.sel_all_frames, "All frames").on_hover_text(
         "Moving, scaling or rotating the selection lands on every drawing on this \
-         layer, through the same selection. Draw it around the object's whole path — \
-         onion skin shows where it goes.",
+         layer — on each picked layer — through the same selection. Draw it around \
+         the object's whole path — onion skin shows where it goes.",
     );
+    let layers = state.sel_layers();
     if state.sel_all_frames {
-        let n = state.layer_drawings(state.project.current_layer).len();
+        let n: usize = layers.iter().map(|&li| state.layer_drawings(li).len()).sum();
         let what = if n == 1 { "drawing" } else { "drawings" };
+        let on = match layers.len() {
+            0 | 1 => "on this layer".to_owned(),
+            k => format!("on {k} layers"),
+        };
         ui.label(
-            egui::RichText::new(format!("Applies to {n} {what} on this layer"))
+            egui::RichText::new(format!("Applies to {n} {what} {on}"))
                 .color(theme::text_muted())
                 .size(11.0),
         );
@@ -6145,7 +6150,8 @@ fn selection_options(state: &mut AppState, ui: &mut egui::Ui) {
              nudge with the arrow keys; Enter puts them down. \
              On a handle, Shift keeps proportions and Alt scales from the centre. \
              {del} erases inside it - {cut} / {copy} / {paste} move it between \
-             frames and layers.",
+             frames and layers. With several layers picked, all of it works on \
+             each of them.",
         ))
         .color(theme::text_muted())
         .size(11.0),
@@ -6368,6 +6374,33 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
+    // Floating pixels — the float and its followers on the other picked
+    // layers — each drawn just over its own layer at that layer's opacity, so
+    // lifted lines stay under the layers above them. The pose moves the
+    // quad's corners rather than the texture, so the GPU does the scaling and
+    // rotation and the lifted pixels are never resampled until they land.
+    let floats: Vec<(usize, &crate::tools::selection::Selection, egui::TextureId)> = state
+        .selection
+        .iter()
+        .filter_map(|s| Some((state.float_layer, s, state.selection_tex.as_ref()?.id())))
+        .chain(state.sel_followers.iter().filter_map(|fl| Some((fl.li, &fl.sel, fl.tex.as_ref()?.id()))))
+        .collect();
+    let mut float_drawn = vec![false; floats.len()];
+    let mut draw_floats = |on: &dyn Fn(usize) -> bool, a: u8| {
+        for (i, &(li, sel, tex)) in floats.iter().enumerate() {
+            if float_drawn[i] || !on(li) {
+                continue;
+            }
+            float_drawn[i] = true;
+            let p = sel.placement;
+            let q = sel.corners().map(|(x, y)| {
+                let (dx, dy) = p.xf.cell_to_doc(x, y, p.cw as f32, p.ch as f32, p.pw, p.ph);
+                xf.doc_to_screen(dx, dy)
+            });
+            canvas_quad(&painter, state, tex, q, theme::white_alpha(a));
+        }
+    };
+
     for (li, layer) in state.project.layers.iter().enumerate() {
         if !state.project.shows(li) || layer.reference {
             continue;
@@ -6394,6 +6427,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                     ];
                     let op = layer.opacity * state.layer_view_alpha(li);
                     canvas_quad(&painter, state, tex.id(), q, theme::white_alpha((op.clamp(0.0, 1.0) * 255.0) as u8));
+                    draw_floats(&|fl| state.project.group_of(fl) == Some(li), (op.clamp(0.0, 1.0) * 255.0) as u8);
                 }
             }
             continue;
@@ -6414,10 +6448,10 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             .group_of(li)
             .map_or(1.0, |g| state.project.layers[g].opacity);
         // A clipped layer draws its drawing cut to its base.
+        let op = layer.opacity * group_op * state.layer_view_alpha(li);
+        let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
         if let Some((id, tex, rect)) = state.layer_texture(li) {
             if let Some(lc) = tex_corners(li, id, rect) {
-                let op = layer.opacity * group_op * state.layer_view_alpha(li);
-                let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
                 canvas_quad(
                     &painter,
                     state,
@@ -6427,10 +6461,16 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
                 );
             }
         }
+        draw_floats(&|fl| fl == li, a);
     }
+    // A float its layer didn't draw — the active layer hidden — goes on top.
+    draw_floats(&|_| true, 255);
 
-    // Dim what is not selected. Over the artwork, under every overlay.
-    if state.tint_outside && state.sel_mask.is_some() {
+    // Dim what is not selected. Over the artwork, under every overlay — but
+    // not while pixels are lifted: they float at their layers' depths, under
+    // it, and would dim wherever they moved past where they were picked up.
+    let lifted = state.selection.as_ref().is_some_and(|s| s.lifted);
+    if state.tint_outside && state.sel_mask.is_some() && !lifted {
         if let Some(t) = &state.sel_tint {
             let (x0, y0, x1, y1) = t.rect;
             let q = [
@@ -6497,10 +6537,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // document space before going to screen, so previews line up with the
     // committed pixels on moved / scaled / rotated layers.
     let preview_xf = state.display_transform(cur_layer, cur_frame);
-    // Falls back to the active layer's cell size, not the project size: a
-    // floating selection has no `stroke_target` between drags, and a layer with
-    // an expanded canvas would then have its float and outline mapped through
-    // the wrong dimensions.
+    // Falls back to the active layer's cell size, not the project size: with
+    // no stroke under way, a layer with an expanded canvas would otherwise
+    // have its previews mapped through the wrong dimensions.
     let (preview_cw, preview_ch) = state
         .stroke_target
         .and_then(|id| state.project.cell(id))
@@ -6625,23 +6664,19 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     // marching ants around the mask so it reads as "selected", not "drawn",
     // and the transform box that scales and rotates it.
     if let Some(sel) = &state.selection {
-        // The pose is applied to the quad's corners rather than baked into the
-        // texture, so the GPU does the scaling and rotation for free and the
-        // lifted pixels are never resampled until the selection commits.
+        // The float's quad went in with its layer; here it is boxed. All of it
+        // in the float's own drawing's pixels: the active layer's, unless
+        // another picked layer leads.
+        let p = sel.placement;
+        let cell_to_screen = |u: f32, v: f32| -> egui::Pos2 {
+            let (dx, dy) = p.xf.cell_to_doc(u, v, p.cw as f32, p.ch as f32, p.pw, p.ph);
+            xf.doc_to_screen(dx, dy)
+        };
         let corners = sel.corners();
         let box_pts: Vec<egui::Pos2> = corners
             .iter()
             .map(|&(x, y)| cell_to_screen(x, y))
             .collect();
-        if let Some(tex) = &state.selection_tex {
-            canvas_quad(
-                &painter,
-                state,
-                tex.id(),
-                [box_pts[0], box_pts[1], box_pts[2], box_pts[3]],
-                Color32::WHITE,
-            );
-        }
         for outline in &sel.outline {
             let pts: Vec<egui::Pos2> = outline
                 .iter()
@@ -6708,6 +6743,11 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
             && state.sel_gesture.is_none()
             && state.mask_is_grabbable();
         if let Some(m) = state.cached_cell_mask().filter(|m| boxed && m.w > 0 && m.h > 0) {
+            let p = state.lead_placement();
+            let cell_to_screen = |u: f32, v: f32| -> egui::Pos2 {
+                let (dx, dy) = p.xf.cell_to_doc(u, v, p.cw as f32, p.ch as f32, p.pw, p.ph);
+                xf.doc_to_screen(dx, dy)
+            };
             let (mx, my) = (m.x as f32, m.y as f32);
             let (w, h) = (m.w as f32, m.h as f32);
             let box_pts = vec![
@@ -14600,6 +14640,53 @@ mod canvas_gpu_tests {
                 .shapes;
         }
         shapes
+    }
+
+    /// With two layers picked and their pixels lifted, each float draws just
+    /// over its own layer — the bottom one's under the top layer — and at
+    /// its layer's opacity.
+    #[test]
+    fn floats_draw_at_their_own_layers_depth() {
+        let mut st = AppState::for_test();
+        st.show_panels = false;
+        st.show_mini_timeline = false;
+        st.project.add_layer();
+        for (li, rgba) in [(0, [200, 30, 30, 255]), (1, [30, 30, 200, 255])] {
+            let c = block(&st, (100, 100, 300, 300), rgba);
+            let id = st.project.cells.len();
+            st.project.cells.push(Arc::new(c));
+            st.project.layers[li].set_key(0, id);
+        }
+        st.project.layers[0].opacity = 0.5;
+        st.project.current_layer = 1;
+        st.selected_layers.insert(st.project.layers[0].uid);
+        st.set_tool(ActiveTool::Lasso);
+        st.sel_shape = SelShape::Rect;
+        // The left half lifted, so each drawing keeps its right half to draw.
+        st.select_down((50.0, 50.0), None);
+        st.select_move((200.0, 350.0));
+        st.select_up();
+        st.select_down((150.0, 200.0), None);
+        st.select_move((150.0, 400.0));
+        st.select_up();
+        assert_eq!(st.sel_followers.len(), 1, "layer 0 floats too");
+
+        let toks = tokens(&paint(&mut st));
+        let at = |want: egui::TextureId| {
+            toks.iter()
+                .position(|t| matches!(t, Token::Quad { tex, .. } if *tex == want))
+                .unwrap_or_else(|| panic!("{want:?} not drawn among {toks:?}"))
+        };
+        let cell_tex = |li: usize| {
+            let id = st.project.layers[li].resolve(0).unwrap();
+            st.cell_textures.get(&id).expect("cell texture").tex.id()
+        };
+        let follower = st.sel_followers[0].tex.as_ref().expect("follower texture").id();
+        let lead = st.selection_tex.as_ref().expect("float texture").id();
+        let order = [at(cell_tex(0)), at(follower), at(cell_tex(1)), at(lead)];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "stacked as the layers: {order:?}");
+        let Token::Quad { tint, .. } = &toks[order[1]] else { unreachable!() };
+        assert_eq!(tint.a(), 127, "at layer 0's half opacity");
     }
 
     /// Drawing through the canvas pipeline paints exactly what the mesh path
