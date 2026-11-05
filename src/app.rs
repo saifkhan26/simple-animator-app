@@ -763,6 +763,16 @@ fn tex_rect(content: Option<DirtyRect>, cw: u32, ch: u32) -> DirtyRect {
     }
 }
 
+/// All of a `cw`×`ch` cell.
+fn whole_rect(cw: u32, ch: u32) -> DirtyRect {
+    DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: cw,
+        max_y: ch,
+    }
+}
+
 /// `r` lies wholly inside `outer`.
 fn rect_within(r: DirtyRect, outer: DirtyRect) -> bool {
     r.min_x >= outer.min_x && r.min_y >= outer.min_y && r.max_x <= outer.max_x && r.max_y <= outer.max_y
@@ -785,6 +795,19 @@ fn tex_dims(rect: DirtyRect) -> [usize; 2] {
         (rect.max_x - rect.min_x).max(1) as usize,
         (rect.max_y - rect.min_y).max(1) as usize,
     ]
+}
+
+/// What the drawing the pen would paint needs on the GPU so a stroke never
+/// re-makes its texture partway: a texture holding the whole cell. A stroke
+/// that reached past a cropped one re-sent the whole drawing in one frame —
+/// 32 MB at 2160×3840, ~20 ms, the pen running on ahead of the ink. Readied
+/// while the pen rests instead. See `AppState::sync_pen_tex`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PenTex {
+    /// This drawing's own texture, grown to its whole cell.
+    Cell(CellId),
+    /// A clear texture of this size, for the new drawing a press would make.
+    Blank([u32; 2]),
 }
 
 /// How a cropped texture catches up with its cell. See `plan_upload`.
@@ -1470,6 +1493,15 @@ pub struct AppState {
     /// when, while waiting to take its snapshot ahead of the pen. See
     /// `warm_pre`.
     warm_wait: Option<(Option<CellId>, f64)>,
+    /// What `warm_pre` last asked the GPU to have ready for the pen. See
+    /// `sync_pen_tex`.
+    pen_tex_want: Option<PenTex>,
+    /// The drawing whose texture holds its whole cell for the pen, to be
+    /// cropped again once the pen has moved on.
+    pen_tex_whole: Option<CellId>,
+    /// A clear texture the size of a whole cell, ready to become the new
+    /// drawing a press makes (auto-key, an empty slot). See `adopt_spare_tex`.
+    spare_tex: Option<(TextureHandle, [u32; 2])>,
     /// Under a stroke, where the target cell held anything before the
     /// stroke began (`None`: blank). With the stroke's own `Canvas::dirty`
     /// it bounds the drawing, so the texture can grow without a scan.
@@ -1866,6 +1898,9 @@ impl AppState {
             pre_inked: None,
             pre_w: 0,
             warm_wait: None,
+            pen_tex_want: None,
+            pen_tex_whole: None,
+            spare_tex: None,
             stroke_base: None,
             stroke_clock: None,
             stroke_ws: StrokeWorkspace::new(),
@@ -4368,37 +4403,24 @@ impl AppState {
 
         // During an active stroke, stream only the flushed sub-rect to the
         // GPU as a partial texture update — exact WYSIWYG feedback without
-        // full-buffer uploads on large canvases.
+        // full-buffer uploads on large canvases. Mostly sent already, by
+        // `stream_stroke` straight after last frame's pen samples; what's
+        // left is what the stabilizer's timer painted since.
         if self.stroke.is_some() {
-            let Some(target) = self.stroke_target else {
+            if self.stroke_target.is_none() {
                 return;
-            };
-            // Painting a clipped layer, or a base something is clipped to:
-            // what shows is the clipped texture, so take the full path below,
-            // which redoes just the changed rect of it.
-            let cur = self.project.current_layer;
-            let clipping = self.project.clip_base(cur).is_some()
-                || (0..self.project.layers.len()).any(|i| self.project.clip_base(i) == Some(cur))
-                || self.feeds_group_image(cur);
-            if !clipping && self.cell_textures.contains_key(&target) {
-                self.cell_tex_used.insert(target, now);
-                // What the stroke flushed, and anything left over from
-                // before it. Sent now, so pen-up has only the last flush left
-                // to send rather than the whole stroke again.
-                let pending = self.cell_dirty.insert(target, Dirty::Clean).unwrap_or(Dirty::Full);
-                let dirty = match self.preview_upload_rect.take() {
-                    Some(r) => pending.with(Dirty::Rect(r)),
-                    None => pending,
-                };
-                if dirty != Dirty::Clean {
-                    self.upload_cell(ctx, target, dirty);
-                }
+            }
+            if self.stream_stroke(ctx) {
                 return;
             }
             // No texture for the target cell yet — fall through so the full
             // upload below creates it.
             self.preview_upload_rect = None;
         }
+
+        // Before the drawings on screen: a drawing the pen left is dropped
+        // here to be remade cropped below.
+        self.sync_pen_tex(ctx);
 
         // Only what's drawn. Onion ghosts are drawn from their own silhouette
         // textures, so a ghosted cell's plain texture isn't needed at all.
@@ -4476,6 +4498,159 @@ impl AppState {
         self.sync_tint(ctx);
         self.sync_ghosts(ctx, now);
         self.enforce_texture_budget();
+    }
+
+    /// Send what the live stroke has painted and not yet sent, as a patch of
+    /// its drawing's texture. `false` when it can't stream — painting a
+    /// clipped layer, or a base something is clipped to, shows the clipped
+    /// texture instead; and a drawing with no texture yet needs one made —
+    /// both left to the full sync.
+    ///
+    /// The canvas calls this once the frame's pen samples are painted, so
+    /// they show on this frame: egui applies texture changes before it draws.
+    /// Left to the next frame's sync, every stroke showed a frame behind the
+    /// pen — at a slow frame's length, a visible gap.
+    pub fn stream_stroke(&mut self, ctx: &egui::Context) -> bool {
+        let Some(target) = self.stroke_target.filter(|_| self.stroke.is_some()) else {
+            return false;
+        };
+        if self.paints_through_clip() || !self.cell_textures.contains_key(&target) {
+            return false;
+        }
+        self.cell_tex_used.insert(target, self.sync_frame);
+        // What the stroke flushed, and anything left over from before it.
+        // Sent now, so pen-up has only the last flush left to send rather
+        // than the whole stroke again.
+        let pending = self.cell_dirty.insert(target, Dirty::Clean).unwrap_or(Dirty::Full);
+        let dirty = match self.preview_upload_rect.take() {
+            Some(r) => pending.with(Dirty::Rect(r)),
+            None => pending,
+        };
+        if dirty != Dirty::Clean {
+            self.upload_cell(ctx, target, dirty);
+        }
+        true
+    }
+
+    /// Whether the active layer shows through a texture other than its
+    /// drawing's own: clipped, a base something is clipped to, or inside a
+    /// group drawn as one image. Its cell texture isn't what's on screen.
+    fn paints_through_clip(&self) -> bool {
+        let p = &self.project;
+        let cur = p.current_layer;
+        p.clip_base(cur).is_some() || (0..p.layers.len()).any(|i| p.clip_base(i) == Some(cur)) || self.feeds_group_image(cur)
+    }
+
+    /// Whether drawing `id` has a texture holding its whole cell (or is
+    /// nothing anyone can draw on, so never will).
+    fn whole_tex(&self, id: CellId) -> bool {
+        let Some(c) = self.project.cell(id).filter(|c| c.width > 0 && c.height > 0) else {
+            return true;
+        };
+        self.cell_textures
+            .get(&id)
+            .is_some_and(|t| t.cell == [c.width, c.height] && t.rect == whole_rect(c.width, c.height))
+    }
+
+    /// Whether what `want` names is on the GPU, asked for and made.
+    fn pen_tex_ready(&self, want: PenTex) -> bool {
+        if self.pen_tex_want != Some(want) {
+            return false;
+        }
+        if self.paints_through_clip() {
+            return true;
+        }
+        match want {
+            PenTex::Cell(id) => self.whole_tex(id),
+            PenTex::Blank(size) => self.spare_tex.as_ref().is_some_and(|(_, s)| *s == size),
+        }
+    }
+
+    /// Make what `warm_pre` asked for, while the pen rests: the drawing it
+    /// would paint grown to a whole-cell texture, or a clear whole-cell one
+    /// for the new drawing a press would make. Only one drawing is kept whole:
+    /// the one before is cropped again, by dropping its texture — remade
+    /// cropped below if it's on screen, or when next it is. A whole cell per
+    /// drawing outgrew `TEXTURE_BUDGET` in playback; see `CellTex`.
+    fn sync_pen_tex(&mut self, ctx: &egui::Context) {
+        let Some(want) = self.pen_tex_want else {
+            return;
+        };
+        let clip = self.paints_through_clip();
+        let keep = match want {
+            PenTex::Cell(id) if !clip => Some(id),
+            _ => None,
+        };
+        if let Some(old) = self.pen_tex_whole.filter(|&o| Some(o) != keep) {
+            self.pen_tex_whole = None;
+            if let Some(t) = self.cell_textures.remove(&old) {
+                self.retired_textures.push(t.tex);
+                self.cell_tex_used.remove(&old);
+                self.cell_dirty.insert(old, Dirty::Full);
+            }
+        }
+        // A spare is only for a press about to make a new drawing.
+        if !matches!(want, PenTex::Blank(_)) || clip {
+            if let Some((tex, _)) = self.spare_tex.take() {
+                self.retired_textures.push(tex);
+            }
+        }
+        if clip {
+            return;
+        }
+        // Made once, while the pen rests on it: not again for a drawing
+        // the playhead has left without resting, nor while playing, where
+        // the budget may drop it and remaking it would cost every pass.
+        if self.playback.playing {
+            return;
+        }
+        match want {
+            PenTex::Cell(id) => {
+                self.pen_tex_whole = Some(id);
+                if !self.whole_tex(id) && self.project.resolved_current() == Some(id) {
+                    // `upload_cell` rebuilds the pen's drawing whole.
+                    self.upload_cell(ctx, id, Dirty::Full);
+                    self.cell_dirty.insert(id, Dirty::Clean);
+                    self.cell_tex_used.insert(id, self.sync_frame);
+                }
+            }
+            PenTex::Blank(size) => {
+                if self.spare_tex.as_ref().is_some_and(|(_, s)| *s == size) || size[0] == 0 || size[1] == 0 {
+                    return;
+                }
+                if let Some((tex, _)) = self.spare_tex.take() {
+                    self.retired_textures.push(tex);
+                }
+                let image = ColorImage::new([size[0] as usize, size[1] as usize], Color32::TRANSPARENT);
+                self.spare_tex = Some((ctx.load_texture("pen_spare", image, TextureOptions::LINEAR), size));
+            }
+        }
+    }
+
+    /// A press just made `target`, a new blank drawing: give it the clear
+    /// whole-cell texture readied for it, so its first stroke streams as
+    /// patches from the start rather than outgrowing a texture made to fit
+    /// its first dab.
+    fn adopt_spare_tex(&mut self, target: CellId) {
+        if self.stroke_base.is_some() || self.cell_textures.contains_key(&target) || self.paints_through_clip() {
+            return;
+        }
+        let Some(size) = self.project.cell(target).map(|c| [c.width, c.height]) else {
+            return;
+        };
+        if !self.spare_tex.as_ref().is_some_and(|(_, s)| *s == size) {
+            return;
+        }
+        let Some((tex, _)) = self.spare_tex.take() else {
+            return;
+        };
+        let rect = whole_rect(size[0], size[1]);
+        self.cell_textures.insert(target, CellTex { tex, rect, cell: size });
+        self.cell_dirty.insert(target, Dirty::Clean);
+        self.cell_tex_used.insert(target, self.sync_frame);
+        // Kept whole, and the drawing kept whole before cropped, once the
+        // stroke is down.
+        self.pen_tex_want = Some(PenTex::Cell(target));
     }
 
     /// Layer `li`, clipped to `b`, as it shows on the current frame: its
@@ -4612,7 +4787,16 @@ impl AppState {
         // Expanding a layer's canvas resizes cells under their textures, so
         // only a texture made for this size can be patched.
         let have = self.cell_textures.get(&id).filter(|t| t.cell == cell).map(|t| t.rect);
-        match plan_upload(c, have, dirty, stroke) {
+        let plan = match plan_upload(c, have, dirty, stroke) {
+            // The pen's drawing stays whole, however it's remade: see
+            // `sync_pen_tex`.
+            // Not while playing, which only shows it.
+            TexPlan::Rebuild(_) if self.pen_tex_whole == Some(id) && !self.playback.playing => {
+                TexPlan::Rebuild(whole_rect(c.width, c.height))
+            }
+            plan => plan,
+        };
+        match plan {
             TexPlan::Keep => {}
             TexPlan::Patch(r) => {
                 if let Some(t) = self.cell_textures.get_mut(&id) {
@@ -4920,6 +5104,7 @@ impl AppState {
         if let Some(c) = self.project.cell_mut(target) {
             c.dirty = None;
         }
+        self.adopt_spare_tex(target);
 
         if self.tool == ActiveTool::Fill {
             let opts = crate::tools::fill::FillOptions {
@@ -5361,7 +5546,19 @@ impl AppState {
             self.warm_wait = None;
             return;
         };
+        // And its texture, grown to the whole cell — or for a new drawing,
+        // a clear one ready to be its texture. A warp makes no new drawing.
+        let want = match target {
+            Some(id) => Some(PenTex::Cell(id)),
+            None if self.tool == ActiveTool::Liquify => None,
+            None => {
+                let p = &self.project;
+                let (w, h) = p.draw_cell_size(p.current_layer, p.current_frame);
+                Some(PenTex::Blank([w, h]))
+            }
+        };
         let ready = self.stroke_ws.is_clear()
+            && want.is_none_or(|w| self.pen_tex_ready(w))
             && match target {
                 Some(id) => self
                     .project
@@ -5388,6 +5585,10 @@ impl AppState {
         }
         self.warm_wait = None;
         self.stroke_ws.clear_last();
+        // Made by the texture sync, straight after this.
+        if want.is_some() {
+            self.pen_tex_want = want;
+        }
         match target {
             Some(id) => {
                 // Snapshot first, from the packed drawing: just its rect.
@@ -11656,6 +11857,161 @@ mod tests {
             probe_stroke(&mut st, &ctx, "old drawing, 600 px", (mid.0 - 300.0, mid.1), (mid.0 + 300.0, mid.1 + 100.0));
         }
     }
+
+    /// One wall-clock stroke: samples come due at `hz` against real time, so
+    /// a slow frame takes more of them, as in the app. Prints the frame-time
+    /// spread and the worst frames, phase by phase.
+    fn wall_stroke(
+        st: &mut AppState,
+        ctx: &egui::Context,
+        label: &str,
+        secs: f32,
+        hz: f32,
+        at: impl Fn(f32) -> (f32, f32, f32),
+    ) {
+        let n = (secs * hz).ceil() as usize;
+        let sample = |i: usize| {
+            let (x, y, p) = at(i as f32 / n as f32);
+            PointerSample {
+                x,
+                y,
+                pressure: p,
+                tilt_x: 25.0,
+                tilt_y: 10.0,
+                t: i as f32 / hz,
+                time_ms: i as f64 * 1000.0 / hz as f64,
+                ..Default::default()
+            }
+        };
+        let raw = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0))),
+            max_texture_side: Some(8192),
+            ..Default::default()
+        };
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        let t0 = Instant::now();
+        st.pointer_down(sample(0));
+        let down = ms(t0);
+        let mut fed = 1;
+        // (fed this frame, sync, ui, tessellate, input, bytes)
+        let mut frames: Vec<(usize, f64, f64, f64, f64, usize)> = Vec::new();
+        while fed <= n {
+            let (mut sync, mut ui) = (0.0, 0.0);
+            let start = Instant::now();
+            let out = ctx.run(raw(), |ctx| {
+                st.collect_cells();
+                st.pack_idle_cells();
+                st.warm_pre(ctx);
+                let s = Instant::now();
+                st.sync_textures(ctx);
+                sync = ms(s);
+                let s = Instant::now();
+                ui::shell::draw(st, ctx);
+                ui = ms(s);
+            });
+            let s = Instant::now();
+            std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
+            let tess = ms(s);
+            let _ = start;
+            // The app feeds this frame's packets inside `draw`; here, after it.
+            let due = ((t0.elapsed().as_secs_f32() * hz) as usize).min(n);
+            let s = Instant::now();
+            let before = fed;
+            while fed <= due {
+                st.pointer_move(sample(fed));
+                fed += 1;
+            }
+            let input = ms(s);
+            let bytes = out.textures_delta.set.iter().map(|(_, d)| d.image.width() * d.image.height() * 4).sum();
+            frames.push((fed - before, sync, ui, tess, input, bytes));
+        }
+        let s = Instant::now();
+        st.pointer_up();
+        let up = ms(s);
+        let total = |f: &(usize, f64, f64, f64, f64, usize)| f.1 + f.2 + f.3 + f.4;
+        let mut times: Vec<f64> = frames.iter().map(total).collect();
+        times.sort_by(f64::total_cmp);
+        let pct = |p: f64| times[((times.len() - 1) as f64 * p) as usize];
+        eprintln!(
+            "{label:<34} down {down:>5.1} | {} frames, p50 {:>5.1} p95 {:>5.1} max {:>6.1} | up {up:>5.1}",
+            frames.len(),
+            pct(0.5),
+            pct(0.95),
+            pct(1.0),
+        );
+        let mut worst: Vec<(usize, &(usize, f64, f64, f64, f64, usize))> = frames.iter().enumerate().collect();
+        worst.sort_by(|a, b| total(b.1).total_cmp(&total(a.1)));
+        for (i, f) in worst.into_iter().take(4) {
+            eprintln!(
+                "    frame {i:>3}: {:>6.1} ms = sync {:>5.1} ui {:>5.1} tess {:>4.1} input {:>5.1} ({} samples) | sent {:>5.2} MB",
+                total(f),
+                f.1,
+                f.2,
+                f.3,
+                f.4,
+                f.0,
+                f.5 as f64 / (1024.0 * 1024.0),
+            );
+        }
+    }
+
+    /// The user's own pens (from a `ui_prefs` blob) on a real project, as
+    /// wall-clock strokes. Not a pass/fail test — run it for the numbers:
+    /// `PREFS_PROBE=<ui_prefs.ron> ANIM_PROBE=<x.anim> cargo test --release
+    /// perf_user_strokes -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn perf_user_strokes() {
+        let prefs = || -> UiPrefs {
+            let Some(p) = std::env::var_os("PREFS_PROBE") else { return UiPrefs::default() };
+            let mut storage = MemStorage::default();
+            eframe::Storage::set_string(&mut storage, UI_PREFS_KEY, std::fs::read_to_string(p).expect("prefs file"));
+            eframe::get_value(&storage, UI_PREFS_KEY).expect("prefs parse")
+        };
+        let project = || match std::env::var_os("ANIM_PROBE") {
+            Some(p) => crate::io::project_file::load_from(std::path::Path::new(&p)).expect("probe project"),
+            None => probe_project(2160, 2880, 3),
+        };
+        for tool in [ActiveTool::Pencil, ActiveTool::Ink, ActiveTool::Eraser] {
+            let mut st = AppState::with_prefs(prefs(), 8192, None);
+            st.load_project(project(), None);
+            st.load_brush(tool);
+            let ctx = egui::Context::default();
+            let settle = |st: &mut AppState| {
+                for _ in 0..30 {
+                    probe_frame(st, &ctx);
+                }
+            };
+            settle(&mut st);
+            let (w, h) = (st.project.width as f32, st.project.height as f32);
+            eprintln!(
+                "\n{tool:?}: {:?} r {:.1}, smoothing {:?}, {}x{}, view scale {:.3}. Times in ms.",
+                st.brush.mode,
+                st.brush.radius,
+                st.smoothing().map(|s| s.kind),
+                w,
+                h,
+                st.view_scale,
+            );
+            let wave = |x0: f32, x1: f32, y: f32, amp: f32, waves: f32| {
+                move |u: f32| {
+                    let p = 0.3 + 0.6 * (u * std::f32::consts::PI).sin();
+                    (x0 + (x1 - x0) * u, y + amp * (u * waves * std::f32::consts::TAU).sin(), p)
+                }
+            };
+            wall_stroke(&mut st, &ctx, "quick 0.4 s across", 0.4, 220.0, wave(w * 0.2, w * 0.8, h * 0.4, h * 0.05, 1.0));
+            settle(&mut st);
+            wall_stroke(&mut st, &ctx, "slow 3 s scribble", 3.0, 220.0, wave(w * 0.15, w * 0.85, h * 0.55, h * 0.2, 6.0));
+            settle(&mut st);
+            wall_stroke(&mut st, &ctx, "right after (no rest)", 0.6, 220.0, wave(w * 0.85, w * 0.1, h * 0.3, h * 0.1, 2.0));
+            wall_stroke(&mut st, &ctx, "long diagonal 1 s", 1.0, 220.0, |u| (w * (0.1 + 0.8 * u), h * (0.1 + 0.8 * u), 0.7));
+            // eframe's autosave, every 30 s, on the UI thread.
+            use eframe::App as _;
+            let t = Instant::now();
+            st.save(&mut MemStorage::default());
+            eprintln!("autosave (prefs only) {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -12162,5 +12518,180 @@ mod camera_rig_tests {
         st.set_camera_size(Some((640, 360)));
         st.load_project(Project::new(1280, 720, 24.0), None);
         assert_eq!(st.project.output_size(), (1280, 720));
+    }
+}
+
+/// The pen's drawing readied on the GPU while the pen rests: grown whole,
+/// so a stroke never re-makes its texture partway. See `sync_pen_tex`.
+#[cfg(test)]
+mod pen_tex_tests {
+    use super::*;
+
+    const W: u32 = 1280;
+    const H: u32 = 720;
+
+    /// Three drawings, each a small blob in the middle, so each texture is
+    /// cropped well inside its cell.
+    fn state() -> (AppState, egui::Context) {
+        let mut p = Project::new(W, H, 24.0);
+        for f in 0..3 {
+            if f > 0 {
+                p.add_frame();
+                p.insert_blank_key_here();
+            }
+            let id = p.ensure_active_cell();
+            let c = p.cell_mut(id).expect("keyed cell");
+            let px = c.pixels_mut();
+            for y in 340..380usize {
+                for x in 620..660usize {
+                    let i = (y * W as usize + x) * 4;
+                    px[i..i + 4].copy_from_slice(&[20, 20, 20, 255]);
+                }
+            }
+        }
+        p.goto(0);
+        let mut st = AppState::for_test();
+        st.load_project(p, None);
+        st.auto_key_draw = false;
+        st.load_brush(ActiveTool::Pencil);
+        st.brush.radius = 4.0;
+        (st, egui::Context::default())
+    }
+
+    /// One frame as `update` runs it, uploads and all.
+    fn frame(st: &mut AppState, ctx: &egui::Context) -> egui::TexturesDelta {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+            max_texture_side: Some(8192),
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| {
+            st.collect_cells();
+            st.pack_idle_cells();
+            st.warm_pre(ctx);
+            st.sync_textures(ctx);
+            ui::shell::draw(st, ctx);
+        })
+        .textures_delta
+    }
+
+    /// Longer than `WARM_REST` at egui's 60 Hz default step.
+    fn rest(st: &mut AppState, ctx: &egui::Context) {
+        for _ in 0..20 {
+            let _ = frame(st, ctx);
+        }
+    }
+
+    fn at(x: f32, y: f32) -> PointerSample {
+        PointerSample {
+            x,
+            y,
+            pressure: 0.8,
+            ..Default::default()
+        }
+    }
+
+    /// From the blob to the far corner, a frame per sample. Panics if the
+    /// drawing's texture is re-made or re-sent whole on the way; returns
+    /// how many frames sent it a patch.
+    fn stroke_without_rebuild(st: &mut AppState, ctx: &egui::Context, tex: egui::TextureId) -> usize {
+        st.pointer_down(at(640.0, 360.0));
+        let target = st.stroke_target.expect("a stroke");
+        let mut patches = 0;
+        for i in 1..=24 {
+            let u = i as f32 / 24.0;
+            st.pointer_move(at(640.0 + 620.0 * u, 360.0 + 350.0 * u));
+            let delta = frame(st, ctx);
+            for (id, d) in &delta.set {
+                if *id == tex {
+                    assert!(d.pos.is_some(), "move {i}: the whole drawing re-sent");
+                    patches += 1;
+                }
+            }
+            assert_eq!(st.cell_textures[&target].tex.id(), tex, "move {i}: the texture re-made");
+        }
+        st.pointer_up();
+        let _ = frame(st, ctx);
+        patches
+    }
+
+    #[test]
+    fn a_resting_pen_grows_its_drawing_whole_and_a_stroke_only_patches_it() {
+        let (mut st, ctx) = state();
+        let _ = frame(&mut st, &ctx);
+        let id = st.project.resolved_current().expect("a drawing");
+        assert_ne!(st.cell_textures[&id].rect, whole_rect(W, H), "cropped to start with");
+        rest(&mut st, &ctx);
+        assert_eq!(st.cell_textures[&id].rect, whole_rect(W, H));
+        let tex = st.cell_textures[&id].tex.id();
+        assert!(stroke_without_rebuild(&mut st, &ctx, tex) >= 20);
+        // Still whole after pen-up, ready for the next one.
+        rest(&mut st, &ctx);
+        assert_eq!(st.cell_textures[&id].tex.id(), tex);
+    }
+
+    /// Only the pen's drawing is kept whole: one per drawing outgrew the
+    /// texture budget in playback.
+    #[test]
+    fn moving_on_crops_the_drawing_left_behind() {
+        let (mut st, ctx) = state();
+        rest(&mut st, &ctx);
+        let first = st.project.resolved_current().unwrap();
+        assert_eq!(st.cell_textures[&first].rect, whole_rect(W, H));
+        st.project.goto(1);
+        rest(&mut st, &ctx);
+        let second = st.project.resolved_current().unwrap();
+        assert_eq!(st.cell_textures[&second].rect, whole_rect(W, H));
+        assert!(
+            st.cell_textures.get(&first).is_none_or(|t| t.rect != whole_rect(W, H)),
+            "the first is whole still"
+        );
+        let whole = st.cell_textures.values().filter(|t| t.rect == whole_rect(W, H)).count();
+        assert_eq!(whole, 1);
+        // Back on screen, it comes back cropped, then whole once rested on.
+        st.project.goto(0);
+        let _ = frame(&mut st, &ctx);
+        assert_ne!(st.cell_textures[&first].rect, whole_rect(W, H));
+        rest(&mut st, &ctx);
+        assert_eq!(st.cell_textures[&first].rect, whole_rect(W, H));
+    }
+
+    /// With auto-key, the press makes a new drawing: it takes the clear
+    /// whole texture readied for it, and its first stroke only patches it.
+    #[test]
+    fn auto_key_s_new_drawing_takes_the_spare() {
+        let (mut st, ctx) = state();
+        st.auto_key_draw = true;
+        st.project.goto(2);
+        st.project.add_frame();
+        let held = st.project.resolved_current().expect("holds the last drawing");
+        rest(&mut st, &ctx);
+        let spare = st.spare_tex.as_ref().map(|(t, s)| (t.id(), *s)).expect("a spare");
+        assert_eq!(spare.1, [W, H]);
+        assert!(stroke_without_rebuild(&mut st, &ctx, spare.0) >= 20);
+        let new = st.project.resolved_current().unwrap();
+        assert_ne!(new, held, "a new drawing");
+        assert_eq!(st.cell_textures[&new].tex.id(), spare.0);
+        assert_eq!(st.cell_textures[&new].rect, whole_rect(W, H));
+        assert!(st.spare_tex.is_none(), "used up");
+        rest(&mut st, &ctx);
+        assert_eq!(st.pen_tex_whole, Some(new));
+    }
+
+    /// Playing only shows the drawing: one the budget dropped comes back
+    /// cropped, not whole.
+    #[test]
+    fn playback_never_remakes_the_pen_s_drawing_whole() {
+        let (mut st, ctx) = state();
+        rest(&mut st, &ctx);
+        let id = st.project.resolved_current().unwrap();
+        st.play_pause(Some(0.0));
+        let t = st.cell_textures.remove(&id).unwrap();
+        st.retired_textures.push(t.tex);
+        st.cell_dirty.insert(id, Dirty::Full);
+        for _ in 0..3 {
+            let _ = frame(&mut st, &ctx);
+        }
+        assert_ne!(st.cell_textures[&id].rect, whole_rect(W, H));
     }
 }

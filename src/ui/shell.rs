@@ -175,7 +175,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             // brush-size lock and the stroke input filter both need it, and
             // only the canvas knows the fit-to-window base scale.
             state.view_scale = Xform::new(state, canvas_rect).scale;
-            paint_canvas(state, ui, canvas_rect);
+            let tail_slot = paint_canvas(state, ui, canvas_rect);
 
             // A live stroke is fed from the tablet packet queue, which is only
             // drained when a frame runs. eframe is reactive by default, so
@@ -525,6 +525,12 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             }
             // A warp's dabs from this frame's pen samples, resampled at once.
             state.flush_liquify();
+            // And a stroke's ink from them, sent now so it shows this frame,
+            // its tail with it, rather than a frame behind the pen.
+            state.stream_stroke(ctx);
+            if let Some(tail) = live_tail(state, canvas_rect) {
+                ui.painter_at(canvas_rect).set(tail_slot, tail);
+            }
             // A double-click closes a polygon, selection or fill, when both
             // its presses landed on one spot: its second press has put a
             // corner on top of the first. A double-click soon after the last
@@ -6300,7 +6306,8 @@ fn shape_kind_toggle(
     }
 }
 
-fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
+/// Returns where the live stroke's tail goes in the stack, for `live_tail`.
+fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) -> egui::layers::ShapeIdx {
     let painter = ui.painter_at(rect);
 
     let xf = Xform::new(state, rect);
@@ -6614,34 +6621,9 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
-    // Live-tail overlay: the committed stroke is already streamed into the
-    // cell texture via partial uploads, so only the short uncommitted span
-    // between the last rasterized spine node and the cursor needs an overlay
-    // (it hides the one-sample Catmull-Rom commit lag). Not for a Krita brush:
-    // a solid band would be nothing like its dabs, and Krita shows no tail.
-    if let Some(builder) = state.stroke.as_ref().filter(|b| b.brush.mode != BrushMode::Krita) {
-        if let (Some((tail, _)), Some(cur)) = (builder.live_tail(), builder.current_node()) {
-            let is_eraser = builder.tool == crate::tools::ActiveTool::Eraser;
-            let a = builder.brush.opacity.clamp(0.0, 1.0);
-            // Premultiplied in gamma space to match the CPU compositor (see
-            // `theme::premul`).
-            let gamma_premul = |c: [u8; 3], a: u8| theme::premul(c[0], c[1], c[2], a);
-            let fill = if is_eraser {
-                // Translucent cool-grey — reads as "lifting", not painting.
-                gamma_premul([150, 158, 172], (a * 80.0) as u8)
-            } else {
-                let c = builder.brush.color;
-                gamma_premul([c[0], c[1], c[2]], (a * 255.0) as u8)
-            };
-            let p0 = cell_to_screen(tail.x, tail.y);
-            let p1 = cell_to_screen(cur.x, cur.y);
-            let r0 = (tail.radius * scale * layer_scale).max(0.5);
-            let r1 = (cur.radius * scale * layer_scale).max(0.5);
-            painter.line_segment([p0, p1], Stroke::new(r0.min(r1) * 2.0, fill));
-            painter.circle_filled(p0, r0, fill);
-            painter.circle_filled(p1, r1, fill);
-        }
-    }
+    // Live-tail overlay: its place in the stack, kept here and filled once
+    // this frame's pen samples are in. See `live_tail`.
+    let tail_slot = painter.add(egui::Shape::Noop);
 
     // Krita's stabilizer delay circle, around the line's end while drawing.
     if let Some(b) = &state.stroke {
@@ -6976,6 +6958,50 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) {
     }
 
     draw_perspective_grids(state, &painter, &xf, rect);
+    tail_slot
+}
+
+/// The live stroke's uncommitted tail, as an overlay: the span between the
+/// last rasterized spine node and the pen, which the cell texture doesn't
+/// hold yet. Built after the frame's pen samples are in, like the texture
+/// patch `AppState::stream_stroke` sends, so the two agree; drawn into the
+/// slot `paint_canvas` kept for it. Not for a Krita brush: a solid band
+/// would be nothing like its dabs, and Krita shows no tail.
+fn live_tail(state: &AppState, rect: Rect) -> Option<egui::Shape> {
+    let builder = state.stroke.as_ref().filter(|b| b.brush.mode != BrushMode::Krita)?;
+    let (tail, _) = builder.live_tail()?;
+    let cur = builder.current_node()?;
+    let c = state.project.cell(state.stroke_target?)?;
+    let xf = Xform::new(state, rect);
+    let p = &state.project;
+    // Mapped as `paint_canvas` maps its previews: active-cell pixels,
+    // through the layer transform, to the screen.
+    let layer = state.display_transform(p.current_layer, p.current_frame);
+    let (cw, ch) = (c.width as f32, c.height as f32);
+    let cell_to_screen = |u: f32, v: f32| {
+        let (dx, dy) = layer.cell_to_doc(u, v, cw, ch, xf.cw, xf.ch);
+        xf.doc_to_screen(dx, dy)
+    };
+    let scale = xf.scale * layer.scale.abs();
+    let a = builder.brush.opacity.clamp(0.0, 1.0);
+    // Premultiplied in gamma space to match the CPU compositor (see
+    // `theme::premul`).
+    let fill = if builder.tool == ActiveTool::Eraser {
+        // Translucent cool-grey — reads as "lifting", not painting.
+        theme::premul(150, 158, 172, (a * 80.0) as u8)
+    } else {
+        let c = builder.brush.color;
+        theme::premul(c[0], c[1], c[2], (a * 255.0) as u8)
+    };
+    let p0 = cell_to_screen(tail.x, tail.y);
+    let p1 = cell_to_screen(cur.x, cur.y);
+    let r0 = (tail.radius * scale).max(0.5);
+    let r1 = (cur.radius * scale).max(0.5);
+    Some(egui::Shape::Vec(vec![
+        egui::Shape::line_segment([p0, p1], Stroke::new(r0.min(r1) * 2.0, fill)),
+        egui::Shape::circle_filled(p0, r0, fill),
+        egui::Shape::circle_filled(p1, r1, fill),
+    ]))
 }
 
 /// The composition guides inside a camera frame `q` (TL, TR, BR, BL on
@@ -11351,6 +11377,137 @@ mod stroke_source_tests {
         assert!(!path_passes_near(&beside, cursor, PEN_MOUSE_AGREEMENT));
         assert!(!path_passes_near(&[], cursor, PEN_MOUSE_AGREEMENT));
         assert!(path_passes_near(&[pos2(cursor.x + 3.0, cursor.y)], cursor, PEN_MOUSE_AGREEMENT));
+    }
+}
+
+/// A stroke drawn through the real canvas shows on the frame its samples
+/// arrive, not the frame after.
+#[cfg(test)]
+mod stroke_latency_tests {
+    use super::*;
+    use crate::app::Dirty;
+    use egui::{pos2, Pos2};
+
+    const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(1200.0, 800.0));
+
+    fn frame(ctx: &egui::Context, st: &mut AppState, events: Vec<egui::Event>) {
+        let _ = run(ctx, st, events);
+    }
+
+    /// One frame as the app runs it: the texture sync, then the UI. What it
+    /// sent to the GPU.
+    fn run(ctx: &egui::Context, st: &mut AppState, events: Vec<egui::Event>) -> egui::TexturesDelta {
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            max_texture_side: Some(8192),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| {
+            st.sync_textures(ctx);
+            draw(st, ctx);
+        })
+        .textures_delta
+    }
+
+    fn button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Press at `a`, move to `b` in `steps`, let go. `each` sees every move
+    /// frame's state and uploads.
+    fn stroke(
+        ctx: &egui::Context,
+        st: &mut AppState,
+        a: Pos2,
+        b: Pos2,
+        steps: usize,
+        mut each: impl FnMut(&AppState, &egui::TexturesDelta, usize),
+    ) {
+        frame(ctx, st, vec![egui::Event::PointerMoved(a), button(a, true)]);
+        for i in 1..=steps {
+            let delta = run(ctx, st, vec![egui::Event::PointerMoved(a + (b - a) * (i as f32 / steps as f32))]);
+            each(st, &delta, i);
+        }
+        frame(ctx, st, vec![button(b, false)]);
+        frame(ctx, st, vec![]);
+    }
+
+    /// Every brush engine: each move frame sends its own ink, and leaves
+    /// nothing for the next frame to send. The regression this pins: the
+    /// texture sync ran before the frame's samples were painted, so every
+    /// stroke showed a frame behind the pen.
+    #[test]
+    fn a_stroke_s_ink_goes_up_on_the_frame_it_is_drawn() {
+        for mode in [BrushMode::Ribbon, BrushMode::Dab, BrushMode::Krita] {
+            let mut st = AppState::for_test();
+            st.show_panels = false;
+            st.show_mini_timeline = false;
+            st.auto_key_draw = false;
+            st.load_brush(ActiveTool::Pencil);
+            st.brush.mode = mode;
+            st.brush.radius = 6.0;
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                frame(&ctx, &mut st, vec![]);
+            }
+            // The first stroke gives the frame its drawing and a texture.
+            stroke(&ctx, &mut st, pos2(300.0, 300.0), pos2(500.0, 320.0), 3, |_, _, _| {});
+            let mut sent = 0;
+            stroke(&ctx, &mut st, pos2(400.0, 400.0), pos2(700.0, 440.0), 6, |st, delta, i| {
+                let target = st.stroke_target.expect("a stroke under way");
+                assert!(st.preview_upload_rect.is_none(), "{mode:?}, move {i}: ink left for the next frame");
+                assert_eq!(st.cell_dirty.get(&target), Some(&Dirty::Clean), "{mode:?}, move {i}");
+                let (_, tex, _) = st.layer_texture(st.project.current_layer).expect("drawn");
+                if delta.set.iter().any(|(id, _)| *id == tex.id()) {
+                    sent += 1;
+                }
+            });
+            assert!(sent >= 5, "{mode:?}: only {sent} of 6 move frames sent ink");
+        }
+    }
+
+    /// The live tail goes where `paint_canvas` kept its place — under the
+    /// overlays painted after it, not on top of everything.
+    #[test]
+    fn the_live_tail_draws_in_its_slot() {
+        let mut st = AppState::for_test();
+        st.show_panels = false;
+        st.show_mini_timeline = false;
+        st.load_brush(ActiveTool::Pencil);
+        st.brush.mode = BrushMode::Ribbon;
+        st.brush.radius = 8.0;
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut st, vec![]);
+        let (a, b) = (pos2(400.0, 400.0), pos2(600.0, 400.0));
+        frame(&ctx, &mut st, vec![egui::Event::PointerMoved(a), button(a, true)]);
+        let raw = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            max_texture_side: Some(8192),
+            events: vec![egui::Event::PointerMoved(b)],
+            ..Default::default()
+        };
+        let out = ctx.run(raw, |ctx| {
+            st.sync_textures(ctx);
+            draw(&mut st, ctx);
+        });
+        let (tail, _) = st.stroke.as_ref().and_then(|s| s.live_tail()).expect("a tail");
+        assert!(tail.x > 0.0);
+        // A filled circle the brush's size, at the pen, among the shapes.
+        let near_pen = |s: &egui::Shape| match s {
+            egui::Shape::Circle(c) => c.center.distance(b) < 2.0 && c.fill != Color32::TRANSPARENT,
+            _ => false,
+        };
+        let found = out.shapes.iter().any(|c| match &c.shape {
+            egui::Shape::Vec(v) => v.iter().any(near_pen),
+            _ => false,
+        });
+        assert!(found, "no tail at the pen this frame");
     }
 }
 
