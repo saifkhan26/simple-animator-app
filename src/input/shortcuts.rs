@@ -16,8 +16,22 @@ use crate::input::button_drag::ButtonDrag;
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
+    /// Pick pen slot 1. The name is from when it was the pencil, kept so a
+    /// `shortcuts.toml` that binds it still binds the same slot.
     ToolPencil,
+    /// Pick pen slot 2, which was the ink.
     ToolInk,
+    /// Pick pen slots 3 to 6. Unbound by default.
+    ToolPen3,
+    ToolPen4,
+    ToolPen5,
+    ToolPen6,
+    /// The next pen slot along the row, or the one before, round at the
+    /// ends; from another tool, back to the pen used last.
+    PenNext,
+    PenPrev,
+    /// Back to the pen slot used before this one. Unbound by default.
+    PenSwap,
     ToolEraser,
     ToolFill,
     /// Retired — the in-canvas eyedropper was folded into `PickScreenColor`.
@@ -46,6 +60,9 @@ pub enum Action {
     FrameAdd,
     FrameDuplicate,
     FrameDelete,
+    /// Insert the step size's worth of frames before the playhead, on every
+    /// layer. Unbound by default.
+    FrameInsertBefore,
     OnionToggle,
     LayerAdd,
     LayerDelete,
@@ -85,6 +102,12 @@ pub enum Action {
     Hold,
     SizeDown,
     SizeUp,
+    /// Swap to the brush size drawn at last, and back. Unbound by default.
+    SizeSwap,
+    /// Turn the active pen's Stabilizer on, or back to the smoothing it had.
+    StabilizerToggle,
+    /// Step the active pen's smoothing on: None, Basic, Weighted, Stabilizer.
+    SmoothingCycle,
     Undo,
     Redo,
     ClearCell,
@@ -94,6 +117,9 @@ pub enum Action {
     ToggleCheckerBg,
     TogglePanels,
     ToggleMiniTimeline,
+    /// Swap what Shift holds a drag to between the canvas's axes and the
+    /// screen's. Unbound by default.
+    ToggleLockAxes,
     ZoomReset,
     PanReset,
     RotateReset,
@@ -127,12 +153,19 @@ pub enum Action {
     FillLassoErase,
     FillLassoEnclose,
     FillPolygonSnap,
+    // Pressed partway through a shape, a selection box or the camera box:
+    // slide it along under the pointer, or grow it from where it was pressed
+    // as its middle. Held like the others, but read only mid-drag.
+    ShapeMove,
+    ShapeCentre,
     // Timeline tracks: the drawings selected there.
     TrackClear,
     TrackCloseGap,
     SaveProject,
     SaveProjectAs,
     OpenProject,
+    /// File → Copy frame to clipboard. Unbound by default.
+    CopyFrame,
     // Canvas drag gestures: held as a canvas drag starts — a key, bare
     // modifiers, or both. The names predate the key option and stay, so old
     // shortcut files keep loading.
@@ -163,6 +196,13 @@ impl Action {
     pub const ALL: &'static [Action] = &[
         Action::ToolPencil,
         Action::ToolInk,
+        Action::ToolPen3,
+        Action::ToolPen4,
+        Action::ToolPen5,
+        Action::ToolPen6,
+        Action::PenNext,
+        Action::PenPrev,
+        Action::PenSwap,
         Action::ToolEraser,
         Action::ToolFill,
         Action::PickScreenColor,
@@ -183,6 +223,7 @@ impl Action {
         Action::FrameAdd,
         Action::FrameDuplicate,
         Action::FrameDelete,
+        Action::FrameInsertBefore,
         Action::OnionToggle,
         Action::LayerAdd,
         Action::LayerDelete,
@@ -215,12 +256,16 @@ impl Action {
         Action::Hold,
         Action::SizeDown,
         Action::SizeUp,
+        Action::SizeSwap,
+        Action::StabilizerToggle,
+        Action::SmoothingCycle,
         Action::Undo,
         Action::Redo,
         Action::ClearCell,
         Action::PasteImage,
         Action::TogglePanels,
         Action::ToggleMiniTimeline,
+        Action::ToggleLockAxes,
         Action::ZoomReset,
         Action::PanReset,
         Action::RotateReset,
@@ -248,11 +293,14 @@ impl Action {
         Action::FillLassoErase,
         Action::FillLassoEnclose,
         Action::FillPolygonSnap,
+        Action::ShapeMove,
+        Action::ShapeCentre,
         Action::TrackClear,
         Action::TrackCloseGap,
         Action::SaveProject,
         Action::SaveProjectAs,
         Action::OpenProject,
+        Action::CopyFrame,
         Action::CanvasZoom,
         Action::CanvasPan,
         Action::CanvasRotate,
@@ -274,8 +322,15 @@ impl Action {
 
     pub fn label(self) -> &'static str {
         match self {
-            Action::ToolPencil => "Tool: Pencil",
-            Action::ToolInk => "Tool: Ink",
+            Action::ToolPencil => "Tool: pen slot 1",
+            Action::ToolInk => "Tool: pen slot 2",
+            Action::ToolPen3 => "Tool: pen slot 3",
+            Action::ToolPen4 => "Tool: pen slot 4",
+            Action::ToolPen5 => "Tool: pen slot 5",
+            Action::ToolPen6 => "Tool: pen slot 6",
+            Action::PenNext => "Next pen slot",
+            Action::PenPrev => "Previous pen slot",
+            Action::PenSwap => "Swap to the pen slot used before",
             Action::ToolEraser => "Tool: Eraser",
             Action::ToolFill => "Tool: Fill",
             Action::ToolColorPicker => "Tool: Color picker (retired)",
@@ -297,6 +352,7 @@ impl Action {
             Action::FrameAdd => "Add frame (hold)",
             Action::FrameDuplicate => "Duplicate frame",
             Action::FrameDelete => "Delete frame",
+            Action::FrameInsertBefore => "Insert frames before",
             Action::OnionToggle => "Toggle onion skin",
             Action::LayerAdd => "Add layer",
             Action::LayerDelete => "Delete layer",
@@ -329,6 +385,9 @@ impl Action {
             Action::Hold => "Hold (delete key)",
             Action::SizeDown => "Brush size down",
             Action::SizeUp => "Brush size up",
+            Action::SizeSwap => "Brush size: swap to the one drawn at last",
+            Action::StabilizerToggle => "Stabilizer on / off (this pen)",
+            Action::SmoothingCycle => "Smoothing: next kind (this pen)",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
             Action::ClearCell => "Clear current cell",
@@ -336,6 +395,7 @@ impl Action {
             Action::ToggleCheckerBg => "Toggle checker backdrop (retired)",
             Action::TogglePanels => "Toggle floating panels",
             Action::ToggleMiniTimeline => "Toggle mini timeline",
+            Action::ToggleLockAxes => "Shift lock: canvas / screen axes",
             Action::ZoomReset => "Reset zoom",
             Action::PanReset => "Reset pan",
             Action::RotateReset => "Reset rotation",
@@ -363,11 +423,14 @@ impl Action {
             Action::FillLassoErase => "Lasso fill: erase the shape instead (hold)",
             Action::FillLassoEnclose => "Lasso fill: switch Enclose & fill (hold)",
             Action::FillPolygonSnap => "Lasso fill: polygon edges in 15° steps (hold)",
+            Action::ShapeMove => "Shape / box being dragged: move it (hold)",
+            Action::ShapeCentre => "Shape / box being dragged: from the centre (hold)",
             Action::TrackClear => "Timeline: delete drawings (leave blank)",
             Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
             Action::SaveProject => "Save project",
             Action::SaveProjectAs => "Save project as…",
             Action::OpenProject => "Open project",
+            Action::CopyFrame => "Copy frame to clipboard",
             Action::CanvasZoom => "Canvas: zoom (drag)",
             Action::CanvasPan => "Canvas: pan (drag)",
             Action::CanvasRotate => "Canvas: rotate (drag)",
@@ -386,6 +449,21 @@ impl Action {
             Action::CameraKeyPrev => "Previous camera key",
             Action::CameraKeyNext => "Next camera key",
         }
+    }
+
+    /// The actions that pick each pen slot, slot 1 first.
+    pub const PENS: [Action; 6] = [
+        Action::ToolPencil,
+        Action::ToolInk,
+        Action::ToolPen3,
+        Action::ToolPen4,
+        Action::ToolPen5,
+        Action::ToolPen6,
+    ];
+
+    /// The pen slot this action picks, from 0, if it picks one.
+    pub fn pen_slot(self) -> Option<usize> {
+        Self::PENS.iter().position(|&a| a == self)
     }
 
     /// `Some(n)` for the "select layer n" actions: n counts rows down from
@@ -418,7 +496,15 @@ impl Action {
                     | Action::FillLassoErase
                     | Action::FillLassoEnclose
                     | Action::FillPolygonSnap
+                    | Action::ShapeMove
+                    | Action::ShapeCentre
             )
+    }
+
+    /// Read only once a drag is under way, never at its press: the press
+    /// holds on the same keys keep their meaning there.
+    pub fn is_mid_drag(self) -> bool {
+        matches!(self, Action::ShapeMove | Action::ShapeCentre)
     }
 
     /// The drag a hold action starts. `None` for everything else, the
@@ -725,6 +811,10 @@ fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
         | (Action::SelModeIntersect, Action::FillPolygonSnap) => {
             Some("the Lasso tool reads one, the Fill tool's lasso the other")
         }
+        (a, b) if a.is_mid_drag() != b.is_mid_drag() => Some(
+            "pressed partway through a shape or box drag it moves or centres that; \
+             anywhere else the other has it",
+        ),
         _ => None,
     }
 }
@@ -738,6 +828,9 @@ fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str> {
 /// different from binding any other key.
 fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str> {
     use egui::Key as K;
+    if action.is_mid_drag() && c.key.is_none() && c.shift {
+        return Some("Shift partway through a drag also squares it up");
+    }
     match c.key? {
         K::Z if c.ctrl && c.shift && action != Action::Redo => {
             Some("Ctrl+Shift+Z always redoes as well")
@@ -1033,6 +1126,9 @@ impl Default for ShortcutMap {
         b.insert(Action::ToolInk, KeyCombo::plain(K::W));
         b.insert(Action::ToolEraser, KeyCombo::plain(K::E));
         b.insert(Action::ToolFill, KeyCombo::plain(K::R));
+        // Round the pen slots: the shifted siblings of the first two.
+        b.insert(Action::PenPrev, KeyCombo::shift(K::Q));
+        b.insert(Action::PenNext, KeyCombo::shift(K::W));
         // One picker now: it samples the canvas and anything behind the window.
         b.insert(Action::PickScreenColor, KeyCombo::plain(K::C));
         b.insert(Action::ToolShape, KeyCombo::plain(K::G));
@@ -1121,6 +1217,9 @@ impl Default for ShortcutMap {
         // Brush size — bracket keys (Photoshop / Krita convention).
         b.insert(Action::SizeDown, KeyCombo::plain(K::OpenBracket));
         b.insert(Action::SizeUp, KeyCombo::plain(K::CloseBracket));
+        // Smoothing, for the pen in hand.
+        b.insert(Action::StabilizerToggle, KeyCombo::plain(K::U));
+        b.insert(Action::SmoothingCycle, KeyCombo::shift(K::U));
         // History.
         b.insert(Action::Undo, KeyCombo::ctrl(K::Z));
         b.insert(Action::Redo, KeyCombo::ctrl(K::Y));
@@ -1179,6 +1278,8 @@ impl Default for ShortcutMap {
         b.insert(Action::SaveProject, KeyCombo::ctrl(K::S));
         b.insert(Action::SaveProjectAs, KeyCombo::ctrl_shift(K::S));
         b.insert(Action::OpenProject, KeyCombo::ctrl(K::O));
+        // CopyFrame starts unbound: Ctrl+C is the selection's, and the File
+        // menu has it.
         // Canvas navigation gestures (held during a canvas drag).
         b.insert(Action::CanvasZoom, KeyCombo::modifier_only(true, false, false));
         b.insert(Action::CanvasPan, KeyCombo::modifier_only(false, true, false));
@@ -1186,6 +1287,9 @@ impl Default for ShortcutMap {
             Action::CanvasRotate,
             KeyCombo::modifier_only(false, false, true),
         );
+        // Mid-drag, on the same keys: by then those have done their job.
+        b.insert(Action::ShapeMove, KeyCombo::plain(K::Space));
+        b.insert(Action::ShapeCentre, KeyCombo::modifier_only(false, false, true));
         // Layer transform editing.
         b.insert(Action::LayerTransformToggle, KeyCombo::plain(K::B));
         b.insert(Action::TransformKeyAdd, KeyCombo::plain(K::K));
@@ -1281,6 +1385,22 @@ impl ShortcutMap {
             }
         }
         best
+    }
+
+    /// The keys the mid-drag holds are on. While a shape or box is being
+    /// dragged, a press bound to one of them is theirs, not the press's.
+    pub fn mid_drag_keys(&self) -> Vec<egui::Key> {
+        self.bindings
+            .iter()
+            .filter(|(a, _)| a.is_mid_drag())
+            .filter_map(|(_, c)| c.key)
+            .collect()
+    }
+
+    /// Whether `action`'s hold is down now, extra modifiers allowed: Shift
+    /// going down on top to square the box mustn't let go of the move.
+    pub fn still_held(&self, action: Action, i: &egui::InputState) -> bool {
+        self.get(action).is_some_and(|c| c.still_held(i))
     }
 
     /// Keys some hold binding uses. A press on one fires only on its first
@@ -1816,6 +1936,26 @@ mod tests {
     }
 
     #[test]
+    fn the_mid_drag_keys_share_the_press_holds_on_purpose() {
+        let map = ShortcutMap::default();
+        assert_eq!(map.get(Action::ShapeMove), Some(KeyCombo::plain(egui::Key::Space)));
+        assert_eq!(map.get(Action::ShapeCentre), Some(KeyCombo::modifier_only(false, false, true)));
+        let c = map.clashes();
+        assert!(matches!(c[&Action::ShapeMove][..], [Clash::Shared(Action::PlayPause, _)]));
+        assert!(matches!(c[&Action::ShapeCentre][..], [Clash::Shared(Action::CanvasRotate, _)]));
+        assert_eq!(map.mid_drag_keys(), vec![egui::Key::Space]);
+        // Never a press: Space still plays, and only through PlayPause.
+        assert!(Action::ShapeMove.is_hold() && Action::ShapeMove.hold_drag().is_none());
+
+        // On each other, or on Shift, they are a real conflict.
+        let mut map = map;
+        map.set(Action::ShapeCentre, KeyCombo::plain(egui::Key::Space));
+        assert!(map.clashes()[&Action::ShapeMove].contains(&Clash::Action(Action::ShapeCentre)));
+        map.set(Action::ShapeCentre, KeyCombo::modifier_only(false, true, false));
+        assert!(map.clashes()[&Action::ShapeCentre].iter().any(|c| matches!(c, Clash::Builtin(_))));
+    }
+
+    #[test]
     fn clashes_name_the_other_action_and_note_the_delete_pair() {
         let mut map = ShortcutMap::default();
         map.set(Action::FlipHorizontal, KeyCombo::plain(egui::Key::Num9));
@@ -2176,6 +2316,8 @@ mod tests {
     #[test]
     fn hold_and_press_on_one_combo_clash() {
         let mut map = ShortcutMap::default();
+        // Moving a shape mid-drag shares Space on purpose; not this pair.
+        map.clear(Action::ShapeMove);
         map.set(Action::CanvasPan, KeyCombo::plain(egui::Key::Space));
         map.set(Action::PlayPause, KeyCombo::plain(egui::Key::Space));
         let c = map.clashes();

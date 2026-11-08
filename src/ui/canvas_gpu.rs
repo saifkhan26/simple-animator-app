@@ -639,6 +639,47 @@ mod tests {
         (over, off, n)
     }
 
+    /// What a cell upload costs on this machine's GPU, through egui's own
+    /// renderer, until the GPU has it: a whole 2160×3840 drawing made new (a
+    /// live stroke outgrowing its texture), the same re-sent into its handle,
+    /// and a stroke-sized patch. Not a pass/fail test — run it for the
+    /// numbers: `cargo test --release perf_cell_upload -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn perf_cell_upload() {
+        use std::time::Instant;
+        let Some(mut g) = gpu() else { return };
+        let (w, h) = (2160usize, 3840usize);
+        let image = ColorImage::new([w, h], egui::Color32::from_black_alpha(128));
+        let patch = ColorImage::new([96, 96], egui::Color32::from_black_alpha(128));
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        let finish = |g: &mut Gpu| {
+            g.queue.submit([]);
+            g.device.poll(wgpu::Maintain::Wait);
+        };
+        for round in 0..4 {
+            let id = TextureId::Managed(1000 + round);
+            let t = Instant::now();
+            g.renderer.update_texture(&g.device, &g.queue, id, &ImageDelta::full(image.clone(), TextureOptions::LINEAR));
+            let queued = ms(t);
+            finish(&mut g);
+            let fresh = ms(t);
+            let t = Instant::now();
+            g.renderer.update_texture(&g.device, &g.queue, id, &ImageDelta::full(image.clone(), TextureOptions::LINEAR));
+            finish(&mut g);
+            let refill = ms(t);
+            let t = Instant::now();
+            let d = ImageDelta::partial([500, 900], patch.clone(), TextureOptions::LINEAR);
+            g.renderer.update_texture(&g.device, &g.queue, id, &d);
+            finish(&mut g);
+            let small = ms(t);
+            g.renderer.free_texture(&id);
+            eprintln!(
+                "round {round}: new {w}x{h} {fresh:>6.1} ms ({queued:.1} to queue) | re-sent {refill:>6.1} ms | 96x96 patch {small:>5.2} ms"
+            );
+        }
+    }
+
     /// At 1:1 on whole pixels every sample is a texel centre, where the two
     /// pipelines must agree: the canvas at 100% looks exactly as it did.
     #[test]

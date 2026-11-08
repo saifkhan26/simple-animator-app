@@ -414,7 +414,7 @@ mod tests {
         let (mut st, g) = grouped();
         st.project.current_layer = g;
         let steps = st.history.undo_len();
-        st.set_tool(crate::tools::ActiveTool::Ink);
+        st.set_tool(crate::tools::ActiveTool::INK);
         st.pointer_down(st.make_sample(10.0, 10.0, 0.0));
         st.pointer_move(st.make_sample(40.0, 10.0, 0.1));
         st.pointer_up();

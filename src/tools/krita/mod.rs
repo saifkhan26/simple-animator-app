@@ -1364,11 +1364,11 @@ mod tests {
     fn a_wash_stroke_does_not_darken_where_it_crosses_itself() {
         let mut once = Canvas::new(200, 80);
         let mut ws = StrokeWorkspace::new();
-        wash_stroke(&mut once, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |_| {});
+        wash_stroke(&mut once, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::PENCIL, 1.0, &line(20.0, 180.0, 40.0), |_| {});
         let mut there_and_back = Canvas::new(200, 80);
         let mut path = line(20.0, 180.0, 40.0);
         path.extend(line(180.0, 20.0, 40.0));
-        wash_stroke(&mut there_and_back, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &path, |_| {});
+        wash_stroke(&mut there_and_back, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::PENCIL, 1.0, &path, |_| {});
         let a = alpha_at(&once, 100, 40);
         let b = alpha_at(&there_and_back, 100, 40);
         assert!(a > 0, "painted");
@@ -1381,9 +1381,9 @@ mod tests {
     fn the_opacity_slider_sets_the_merge() {
         let mut ws = StrokeWorkspace::new();
         let mut full = Canvas::new(200, 80);
-        wash_stroke(&mut full, &mut ws, "b)_Basic-5_Size_default.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |_| {});
+        wash_stroke(&mut full, &mut ws, "b)_Basic-5_Size_default.kpp", ActiveTool::PENCIL, 1.0, &line(20.0, 180.0, 40.0), |_| {});
         let mut half = Canvas::new(200, 80);
-        wash_stroke(&mut half, &mut ws, "b)_Basic-5_Size_default.kpp", ActiveTool::Pencil, 0.5, &line(20.0, 180.0, 40.0), |_| {});
+        wash_stroke(&mut half, &mut ws, "b)_Basic-5_Size_default.kpp", ActiveTool::PENCIL, 0.5, &line(20.0, 180.0, 40.0), |_| {});
         let (f, h) = (alpha_at(&full, 100, 40) as f32, alpha_at(&half, 100, 40) as f32);
         assert!(f > 200.0, "{f}");
         assert!((h - f * 0.5).abs() <= 2.0, "{f} → {h}");
@@ -1401,7 +1401,7 @@ mod tests {
             h: 80,
             cov: vec![255; 100 * 80],
         });
-        wash_stroke(&mut c, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |ws| {
+        wash_stroke(&mut c, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::PENCIL, 1.0, &line(20.0, 180.0, 40.0), |ws| {
             ws.set_clip(Some(clip.clone()))
         });
         assert!(alpha_at(&c, 60, 40) > 0);
@@ -1418,7 +1418,7 @@ mod tests {
             }
         }
         let mut ws = StrokeWorkspace::new();
-        wash_stroke(&mut c, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |ws| {
+        wash_stroke(&mut c, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::PENCIL, 1.0, &line(20.0, 180.0, 40.0), |ws| {
             ws.set_alpha_lock(true)
         });
         let px = |x: u32, y: u32| {
@@ -1440,7 +1440,7 @@ mod tests {
                 p.copy_from_slice(&[10, 10, 10, 255]);
             }
             let mut ws = StrokeWorkspace::new();
-            wash_stroke(&mut c, &mut ws, preset, ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |_| {});
+            wash_stroke(&mut c, &mut ws, preset, ActiveTool::PENCIL, 1.0, &line(20.0, 180.0, 40.0), |_| {});
             assert!(alpha_at(&c, 100, 40) < 30, "{preset}: {}", alpha_at(&c, 100, 40));
             assert_eq!(alpha_at(&c, 100, 2), 255, "{preset}: untouched away from the stroke");
         }
@@ -1452,11 +1452,11 @@ mod tests {
     fn the_wash_buffer_is_cleared_between_strokes() {
         let mut ws = StrokeWorkspace::new();
         let mut first = Canvas::new(200, 80);
-        wash_stroke(&mut first, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 40.0), |_| {});
+        wash_stroke(&mut first, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::PENCIL, 1.0, &line(20.0, 180.0, 40.0), |_| {});
         let mut second = Canvas::new(200, 80);
-        wash_stroke(&mut second, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 60.0), |_| {});
+        wash_stroke(&mut second, &mut ws, "b)_Basic-2_Opacity.kpp", ActiveTool::PENCIL, 1.0, &line(20.0, 180.0, 60.0), |_| {});
         let mut fresh = Canvas::new(200, 80);
-        wash_stroke(&mut fresh, &mut StrokeWorkspace::new(), "b)_Basic-2_Opacity.kpp", ActiveTool::Pencil, 1.0, &line(20.0, 180.0, 60.0), |_| {});
+        wash_stroke(&mut fresh, &mut StrokeWorkspace::new(), "b)_Basic-2_Opacity.kpp", ActiveTool::PENCIL, 1.0, &line(20.0, 180.0, 60.0), |_| {});
         assert_eq!(second.pixels(), fresh.pixels());
     }
 
@@ -1537,7 +1537,7 @@ mod tests {
             };
             let pre = c.pixels().into_owned();
             ws.begin(240, 80, &settings);
-            let mut b = StrokeBuilder::new_with_krita(settings, ActiveTool::Ink, 1.0, SmoothingOptions::default(), brush);
+            let mut b = StrokeBuilder::new_with_krita(settings, ActiveTool::INK, 1.0, SmoothingOptions::default(), brush);
             b.seed_random(1);
             for i in 0..=100 {
                 let mut s = PointerSample::at(20.0 + i as f32 * 2.0, 40.0, 0.8);
@@ -1572,7 +1572,7 @@ mod tests {
             };
             let pre = c.pixels().into_owned();
             ws.begin(240, 100, &settings);
-            let mut s = StrokeBuilder::new_with_krita(settings, ActiveTool::Pencil, 1.0, SmoothingOptions::default(), b.clone());
+            let mut s = StrokeBuilder::new_with_krita(settings, ActiveTool::PENCIL, 1.0, SmoothingOptions::default(), b.clone());
             s.seed_random(3);
             for &(x, y) in &line(20.0, 220.0, 50.0) {
                 s.push(PointerSample::at(x, y, 0.4));

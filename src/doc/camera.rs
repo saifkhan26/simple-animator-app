@@ -86,7 +86,10 @@ pub struct CameraOpts {
     pub size: Option<(u32, u32)>,
     /// Hold the whole frame on the canvas: pushed in and moved over by the
     /// least that takes, so no frame — keyed, tweened or dragged — shows
-    /// past the canvas's edge. See [`Camera::kept_inside`].
+    /// past the canvas's edge. See [`Camera::kept_inside`]. Off here; the
+    /// app turns it on for each project it starts or opens, unless that
+    /// project's camera already leaves the canvas
+    /// ([`crate::doc::project::Project::keep_inside_by_default`]).
     pub keep_inside: bool,
     /// Curve through the keys instead of turning a corner at each: see
     /// [`Camera::resolve_at`]. Changes nothing until there are three keys.

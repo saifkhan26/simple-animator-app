@@ -1,5 +1,6 @@
 //! Drawing tools — pencil, ink, eraser, fill.
 
+pub mod axis_lock;
 pub mod dab;
 pub mod fill;
 #[cfg(test)]
@@ -11,17 +12,21 @@ pub mod noise;
 pub mod perspective;
 pub mod paper;
 pub mod ribbon;
+pub mod scan;
 pub mod select_mask;
 pub mod selection;
 pub mod shape;
 pub mod stabilizer;
 pub mod stroke;
 pub mod tap_lasso;
+pub mod wand;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActiveTool {
-    Pencil,
-    Ink,
+    /// A pen slot, by its place in the row: each holds any brush, with its
+    /// own size, smoothing, colour, name and icon (`AppState::pens`). The
+    /// first two start as the pencil and the ink.
+    Pen(u8),
     Eraser,
     Fill,
     Shape,
@@ -37,18 +42,48 @@ pub enum ActiveTool {
 }
 
 impl ActiveTool {
-    pub fn idx(self) -> usize {
+    /// The first pen slot, which starts as the pencil.
+    pub const PENCIL: ActiveTool = ActiveTool::Pen(0);
+    /// The second pen slot, which starts as the ink.
+    #[cfg(test)]
+    pub const INK: ActiveTool = ActiveTool::Pen(1);
+
+    /// The tools that are not pen slots, in [`Self::idx`] order.
+    pub const OTHERS: [ActiveTool; 7] = [
+        ActiveTool::Eraser,
+        ActiveTool::Fill,
+        ActiveTool::Shape,
+        ActiveTool::Tracker,
+        ActiveTool::Lasso,
+        ActiveTool::Perspective,
+        ActiveTool::Liquify,
+    ];
+
+    /// Where a tool that is not a pen keeps its brush and sizes in the
+    /// per-tool arrays. `None` for a pen: each pen slot keeps its own.
+    pub fn idx(self) -> Option<usize> {
+        Some(match self {
+            ActiveTool::Pen(_) => return None,
+            ActiveTool::Eraser => 0,
+            ActiveTool::Fill => 1,
+            ActiveTool::Shape => 2,
+            ActiveTool::Tracker => 3,
+            ActiveTool::Lasso => 4,
+            ActiveTool::Perspective => 5,
+            ActiveTool::Liquify => 6,
+        })
+    }
+
+    /// The pen slot this is, if it is one.
+    pub fn pen(self) -> Option<usize> {
         match self {
-            ActiveTool::Pencil => 0,
-            ActiveTool::Ink => 1,
-            ActiveTool::Eraser => 2,
-            ActiveTool::Fill => 3,
-            ActiveTool::Shape => 4,
-            ActiveTool::Tracker => 5,
-            ActiveTool::Lasso => 6,
-            ActiveTool::Perspective => 7,
-            ActiveTool::Liquify => 8,
+            ActiveTool::Pen(i) => Some(i as usize),
+            _ => None,
         }
+    }
+
+    pub fn is_pen(self) -> bool {
+        self.pen().is_some()
     }
 }
 

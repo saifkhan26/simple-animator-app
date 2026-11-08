@@ -1,14 +1,17 @@
 //! Top-level application state. Wires project (timeline + layers), tools, UI.
 
+pub mod brush_sizes;
 mod button_drag;
 mod grids;
 mod groups;
 mod lasso_fill;
 mod liquify;
 mod orient;
+pub mod pen_slots;
 mod select;
 
 pub use button_drag::ButtonDragState;
+pub use pen_slots::PenSlot;
 pub use lasso_fill::{FillMode, LassoHeld};
 pub use select::SelGesture;
 
@@ -39,14 +42,16 @@ use crate::io::kra::{self, KraDoc};
 use crate::krita_link::{self, KritaLink, Pulled};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep};
 use crate::timeline::playback::Playback;
+use crate::tools::axis_lock;
 use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
 use crate::tools::perspective::{self, GridGrab, PerspectiveConfig};
 use crate::tools::select_mask::{SelOp, SelShape, SelectionMask};
+use crate::tools::wand::WandOptions;
 use crate::tools::selection::{Grab, Pose, Selection};
 use crate::tools::stroke::StrokeBuilder;
 use crate::tools::shape::GridPlane;
-use crate::tools::{ActiveTool, BrushSettings, ShapeKind, SmoothingOptions};
+use crate::tools::{ActiveTool, BrushSettings, ShapeKind, Smoothing, SmoothingOptions};
 use crate::ui;
 use crate::ui::canvas_gpu::CanvasGpu;
 use crate::ui::theme::{BaseColors, Scheme};
@@ -60,6 +65,9 @@ pub struct NewProjectConfig {
     pub preset_name: String,
     /// In-progress inline rename of a saved preset.
     pub preset_rename: Option<LayerRename>,
+    /// The size of the image on the system clipboard, for the Clipboard
+    /// preset.
+    pub clipboard: crate::io::image_import::ClipboardWatch,
 }
 
 /// A saved New project size. A workspace preference, not project data: the
@@ -252,12 +260,44 @@ struct SnapLock {
     dir: Option<[f32; 2]>,
 }
 
+/// A hold read partway through a drag (the move and centre keys), sampled
+/// once a frame like Shift. Down at the drag's press, it chose that drag (a
+/// pan, a rotate, a brush adjust) and counts only once let go and pressed
+/// again — the rule [`AppState::axis_lock_on`] keeps for Shift.
+#[derive(Clone, Copy, Default)]
+struct MidKey {
+    held: bool,
+    stale: bool,
+}
+
+impl MidKey {
+    fn on(self) -> bool {
+        self.held && !self.stale
+    }
+
+    fn read(&mut self, held: bool) {
+        self.held = held;
+        self.stale &= held;
+    }
+
+    fn began(&mut self) {
+        self.stale = self.held;
+    }
+}
+
+/// A stroke held to an axis by Shift: the point it is held from, in document
+/// space, and — once the pointer has moved far enough to tell — the angle of
+/// the axis it keeps to.
+#[derive(Clone, Copy)]
+struct StrokeAxis {
+    from: [f32; 2],
+    angle: Option<f32>,
+}
+
 #[derive(Clone, Copy)]
 pub struct SelDrag {
     grab: Grab,
-    /// Where the pointer was, in cell space. A move updates this as it goes,
-    /// because a move accumulates in whole pixels; a scale or rotation leaves
-    /// it at the press.
+    /// Where the pointer pressed, in cell space.
     start: (f32, f32),
     pose: Pose,
 }
@@ -312,6 +352,14 @@ const DEFAULT_BG_COLOR: [f32; 3] = [0.12, 0.12, 0.13];
 
 /// The longest side a camera frame may have — a canvas's limit too.
 const MAX_CAMERA_SIDE: u32 = 16384;
+/// Settings > Appearance's panel padding, as it starts.
+pub const DEFAULT_PANEL_PADDING: u8 = 8;
+/// The most panel padding Settings offers.
+pub const MAX_PANEL_PADDING: u8 = 48;
+
+/// The smallest side a free camera box gives the camera, so a drag along
+/// one axis doesn't leave it a sliver.
+pub const MIN_FREE_CAMERA_SIDE: u32 = 16;
 
 /// The camera's frame held by one of its handles: what was grabbed, where,
 /// and the camera as it was — every step of the drag is solved from that,
@@ -377,6 +425,8 @@ struct UiPrefs {
     frame_step: usize,
     show_camera_guide: bool,
     dim_outside_camera: bool,
+    /// Draw camera mode's box takes any shape, and sets the camera's size.
+    camera_box_free: bool,
     show_layer_bounds: bool,
     lock_brush_to_view: bool,
     /// Onion skin is a workspace preference, not project data — tints and
@@ -388,6 +438,10 @@ struct UiPrefs {
     /// down advances. A workspace preference — wheel direction is muscle
     /// memory carried from whatever editor the artist came from.
     invert_timeline_scroll: bool,
+    /// Whether Shift partway through a drag holds it to the screen's
+    /// horizontal and vertical rather than the canvas's. Off (default): the
+    /// canvas's, whichever way the view is turned.
+    lock_screen_axes: bool,
     /// What a middle- and a right-button drag do on the canvas. Pen barrel
     /// buttons arrive as those buttons, so this is muscle memory too.
     middle_drag: ButtonDrag,
@@ -396,17 +450,35 @@ struct UiPrefs {
     /// range and frame stepping wraps at both ends. Off: playback runs once
     /// and stops, and stepping clamps.
     loop_timeline: bool,
-    /// Line smoothing. A workspace preference: how much the app fights the
-    /// hand is a matter of taste, and of what the artist is used to.
+    /// Line smoothing as it was before each pen had its own: read only to
+    /// seed `pen_smoothing` from a prefs file older than it, and written as
+    /// the first pen slot's for a build older than this one.
     smoothing: SmoothingOptions,
-    /// Per-tool brush settings. A tuned brush is worth as much as a tuned
+    /// Line smoothing per freehand tool from before the pen slots: the
+    /// pencil, the ink and the eraser. A workspace preference: how much the
+    /// app fights the hand is a matter of taste, and of the tool. Empty in a
+    /// prefs file older than it, which gives every tool `smoothing`. Still
+    /// where the eraser's is kept; the first two are written from the first
+    /// two slots for an older build.
+    pen_smoothing: Vec<SmoothingOptions>,
+    /// Per-tool brush settings, pencil and ink first, then the other tools
+    /// in `ActiveTool::idx` order. A tuned brush is worth as much as a tuned
     /// palette and was previously thrown away on exit. `None` from an
     /// older prefs blob, or from one whose tool list has since changed,
-    /// falls back to the built-in defaults.
+    /// falls back to the built-in defaults. The first two are written from
+    /// the first two pen slots, for an older build; this one reads `pens`.
     tool_brushes: Option<Vec<BrushSettings>>,
+    /// The pen slots, each with its brush, smoothing, sizes, name and icon.
+    /// Empty in a prefs file from before the slots, which makes the first
+    /// two from that file's pencil and ink.
+    pens: Vec<PenSlot>,
     /// Pinned colour swatches. A workspace preference, not project data: a
     /// palette follows the artist between files.
     palette: Vec<[u8; 3]>,
+    /// The sizes each tool's brush was drawn at, and the ones pinned, laid
+    /// out as `tool_brushes` is. The first two are written from the first
+    /// two pen slots, for an older build; each slot keeps its own in `pens`.
+    brush_sizes: Vec<brush_sizes::SizeMemory>,
     /// Frame column width in the timeline tracks — how zoomed in the artist
     /// likes to work.
     track_frame_w: f32,
@@ -428,6 +500,8 @@ struct UiPrefs {
     /// takes. Workspace preferences, like the tool brushes.
     sel_shape: SelShape,
     sel_amount: u32,
+    /// The magic select's tolerance, gap, expand and switches.
+    wand: WandOptions,
     /// The Fill tool's mode and its lasso's two switches. Workspace
     /// preferences, like the selection shape.
     fill_mode: FillMode,
@@ -452,6 +526,8 @@ struct UiPrefs {
     hidden_panels: Vec<PanelId>,
     /// Bumped by Reset panel layout; see [`AppState::panel_layout_gen`].
     panel_layout_gen: u32,
+    /// See [`AppState::panel_padding`].
+    panel_padding: u8,
     /// The colours the UI is drawn in, and the five a Custom scheme is
     /// made from — kept while another scheme is picked, so switching back
     /// finds them as they were.
@@ -479,8 +555,15 @@ impl Default for FadeOthers {
     }
 }
 
-/// Number of tools, and so of slots in the per-tool brush array.
+/// Slots in the per-tool brush array the prefs keep: the pencil and the ink
+/// from before the pen slots, then the other tools.
 const TOOL_COUNT: usize = 9;
+/// The pens at the head of that array, now the first two pen slots.
+const LEGACY_PENS: usize = 2;
+/// The tools that are not pens, each with its own brush in
+/// `AppState::tool_brushes`.
+const OTHER_TOOLS: usize = ActiveTool::OTHERS.len();
+const _: () = assert!(LEGACY_PENS + OTHER_TOOLS == TOOL_COUNT);
 
 /// The built-in per-tool brushes.
 fn default_tool_brushes() -> [BrushSettings; TOOL_COUNT] {
@@ -499,16 +582,16 @@ fn default_tool_brushes() -> [BrushSettings; TOOL_COUNT] {
     ]
 }
 
-/// Saved brushes, or the defaults. A blob from a build with a different
-/// number of tools is discarded rather than padded: the array is indexed by
-/// `ActiveTool::idx`, so a short one would silently reassign brushes to the
-/// wrong tools. The exception is a blob from before the tools that were
-/// appended last (Perspective, then Liquify): the older slots still line up,
-/// and only the new tools' own are missing.
+/// Saved brushes, or the defaults, in the prefs' layout. A blob from a build
+/// with a different number of tools is discarded rather than padded: the
+/// array is indexed by tool, so a short one would silently reassign brushes
+/// to the wrong tools. The exception is a blob from before the tools that
+/// were appended last (Perspective, then Liquify): the older slots still
+/// line up, and only the new tools' own are missing.
 fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; TOOL_COUNT] {
     match saved {
         Some(mut v) => {
-            if v.len() >= ActiveTool::Perspective.idx() {
+            if v.len() >= LEGACY_PENS + ActiveTool::Perspective.idx().unwrap_or(0) {
                 while v.len() < TOOL_COUNT {
                     v.push(default_tool_brushes()[v.len()].clone());
                 }
@@ -519,6 +602,28 @@ fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; TO
     }
 }
 
+/// The brushes of the tools that aren't pens, out of the prefs' layout.
+fn other_brushes(legacy: &[BrushSettings; TOOL_COUNT]) -> [BrushSettings; OTHER_TOOLS] {
+    std::array::from_fn(|k| legacy[LEGACY_PENS + k].clone())
+}
+
+/// The freehand tools from before the pen slots, in `pen_smoothing` order:
+/// the pencil, the ink and the eraser.
+const LEGACY_SMOOTHING: usize = 3;
+/// The eraser's place in `pen_smoothing`.
+const ERASER_SMOOTHING: usize = 2;
+
+/// Saved smoothing per freehand tool, in `pen_smoothing` order. A prefs file
+/// from before each tool had its own gives all of them the one setting it
+/// kept.
+fn restore_pen_smoothing(prefs: &UiPrefs) -> [SmoothingOptions; LEGACY_SMOOTHING] {
+    let mut out = [prefs.smoothing; LEGACY_SMOOTHING];
+    for (slot, saved) in out.iter_mut().zip(&prefs.pen_smoothing) {
+        *slot = *saved;
+    }
+    out
+}
+
 impl Default for UiPrefs {
     fn default() -> Self {
         Self {
@@ -527,18 +632,23 @@ impl Default for UiPrefs {
             frame_step: 1,
             show_camera_guide: true,
             dim_outside_camera: true,
+            camera_box_free: false,
             show_layer_bounds: true,
             lock_brush_to_view: false,
             onion: OnionConfig::default(),
             auto_key_transform: false,
             auto_key_draw: false,
             invert_timeline_scroll: false,
+            lock_screen_axes: false,
             middle_drag: ButtonDrag::Scrub,
             right_drag: ButtonDrag::SwatchPie,
             loop_timeline: true,
             smoothing: SmoothingOptions::default(),
+            pen_smoothing: Vec::new(),
             tool_brushes: None,
+            pens: Vec::new(),
             palette: Vec::new(),
+            brush_sizes: Vec::new(),
             track_frame_w: crate::ui::tracks::DEFAULT_FRAME_W,
             perspective: PerspectiveConfig::default(),
             grid_files: Vec::new(),
@@ -547,6 +657,7 @@ impl Default for UiPrefs {
             project_presets: Vec::new(),
             sel_shape: SelShape::Freehand,
             sel_amount: 4,
+            wand: WandOptions::default(),
             fill_mode: FillMode::Bucket,
             fill_enclose: false,
             fill_behind: false,
@@ -557,6 +668,7 @@ impl Default for UiPrefs {
             last_camera_size: None,
             hidden_panels: Vec::new(),
             panel_layout_gen: 0,
+            panel_padding: DEFAULT_PANEL_PADDING,
             color_scheme: Scheme::default(),
             custom_colors: BaseColors::default(),
         }
@@ -678,6 +790,16 @@ fn tex_rect(content: Option<DirtyRect>, cw: u32, ch: u32) -> DirtyRect {
     }
 }
 
+/// All of a `cw`×`ch` cell.
+fn whole_rect(cw: u32, ch: u32) -> DirtyRect {
+    DirtyRect {
+        min_x: 0,
+        min_y: 0,
+        max_x: cw,
+        max_y: ch,
+    }
+}
+
 /// `r` lies wholly inside `outer`.
 fn rect_within(r: DirtyRect, outer: DirtyRect) -> bool {
     r.min_x >= outer.min_x && r.min_y >= outer.min_y && r.max_x <= outer.max_x && r.max_y <= outer.max_y
@@ -700,6 +822,19 @@ fn tex_dims(rect: DirtyRect) -> [usize; 2] {
         (rect.max_x - rect.min_x).max(1) as usize,
         (rect.max_y - rect.min_y).max(1) as usize,
     ]
+}
+
+/// What the drawing the pen would paint needs on the GPU so a stroke never
+/// re-makes its texture partway: a texture holding the whole cell. A stroke
+/// that reached past a cropped one re-sent the whole drawing in one frame —
+/// 32 MB at 2160×3840, ~20 ms, the pen running on ahead of the ink. Readied
+/// while the pen rests instead. See `AppState::sync_pen_tex`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PenTex {
+    /// This drawing's own texture, grown to its whole cell.
+    Cell(CellId),
+    /// A clear texture of this size, for the new drawing a press would make.
+    Blank([u32; 2]),
 }
 
 /// How a cropped texture catches up with its cell. See `plan_upload`.
@@ -918,6 +1053,7 @@ impl Default for NewProjectConfig {
             fps: 24.0,
             preset_name: String::new(),
             preset_rename: None,
+            clipboard: Default::default(),
         }
     }
 }
@@ -1086,6 +1222,13 @@ pub struct AppState {
     /// Pinned swatches, most recently added last. Capped at
     /// [`AppState::MAX_SWATCHES`].
     pub palette: Vec<[u8; 3]>,
+    /// The sizes each tool that isn't a pen was drawn at, and the ones
+    /// pinned, by `ActiveTool::idx`; each pen slot keeps its own. See
+    /// [`brush_sizes`].
+    pub brush_sizes: Vec<brush_sizes::SizeMemory>,
+    /// The last size swap: the tool whose sizes it was, the size swapped to,
+    /// and the one swapped from, which the next swap goes back to.
+    size_swap: Option<(ActiveTool, f32, f32)>,
     /// The Color panel's harmony set. Its scheme is a workspace preference;
     /// the base follows the brush colour.
     pub harmony: HarmonySet,
@@ -1141,6 +1284,13 @@ pub struct AppState {
     pub sel_all_frames: bool,
     /// What a selection drag draws.
     pub sel_shape: SelShape,
+    /// How the magic select picks.
+    pub wand: WandOptions,
+    /// A magic select press still under the pen.
+    wand_drag: Option<select::WandDrag>,
+    /// Where a plain press on the selection with the magic select landed: if
+    /// it lets go without moving the pixels, it picks there instead.
+    wand_repick: Option<(f32, f32)>,
     /// Whether a Fill press floods or draws a lasso.
     pub fill_mode: FillMode,
     /// A lasso fill fills only what its lines shut in.
@@ -1158,6 +1308,14 @@ pub struct AppState {
     /// Floating pixels lifted through the selection, if any. Bound to one
     /// cell: changing frame or layer lands them first.
     pub selection: Option<Selection>,
+    /// The same selection lifted off the other picked layers, moving with
+    /// `selection`. Empty with one layer picked.
+    pub sel_followers: Vec<select::Follower>,
+    /// The float's own layer, which leads: the active one unless that has
+    /// nothing to lift.
+    pub float_layer: usize,
+    /// The active layer when the float was made. Picking another lands it.
+    float_cur: usize,
     /// A Liquify warp under way, until it lands or is cancelled.
     pub liquify: Option<liquify::LiquifySession>,
     /// The float's cell as it was before the lift, so landing records lift
@@ -1168,19 +1326,34 @@ pub struct AppState {
     float_lift_rect: Option<DirtyRect>,
     /// In-flight drag on the selection's transform box, or `None`.
     sel_drag: Option<SelDrag>,
-    /// Selection clipboard: mask plus lifted pixels.
-    pixel_clip: Option<(Mask, Vec<u8>)>,
+    /// Selection clipboard: mask plus lifted pixels, per layer copied from,
+    /// the lead's first. Empty before any copy.
+    pixel_clip: Vec<select::ClipPart>,
     /// Set when the floating pixels changed and their texture must be rebuilt.
     /// Posing does *not* set it — the pose moves the quad, and the GPU samples
     /// the same texture through it.
     sel_tex_stale: bool,
     /// GPU texture for the floating pixels.
     pub selection_tex: Option<TextureHandle>,
-    /// Per-tool brush settings preserved across tool switches.
-    pub tool_brushes: [BrushSettings; TOOL_COUNT],
-    /// Pencil or Ink, whichever was active last: the pen whose size Shape
-    /// draws at. Session-only; the app comes back on the pencil anyway.
+    /// The brushes of the tools that aren't pens, by `ActiveTool::idx`,
+    /// preserved across tool switches.
+    pub tool_brushes: [BrushSettings; OTHER_TOOLS],
+    /// The pen slots, in the order of the row: one to
+    /// [`pen_slots::MAX_PENS`]. See [`pen_slots`].
+    pub pens: Vec<PenSlot>,
+    /// The pen slot made the tool last: the pen whose size Shape draws at,
+    /// and where the pen keys go back to from another tool. Session-only;
+    /// the app comes back on the first slot anyway.
     pub last_pen: ActiveTool,
+    /// The pen slot in hand before `last_pen`, for the swap key.
+    /// Session-only.
+    prev_pen: Option<ActiveTool>,
+    /// The search box of a pen slot's right-click brush picker, apart from
+    /// the Brush panel's.
+    pub pen_menu_search: String,
+    /// The pen slot whose menu has had Remove clicked once: the next click
+    /// removes it. Cleared whenever a slot's menu opens.
+    pub pen_remove_armed: Option<usize>,
     /// The colour wheel is pinned: every tool paints in one colour, and the
     /// wheel's set leads the swatch pie. Session-only.
     wheel_pinned: bool,
@@ -1197,8 +1370,25 @@ pub struct AppState {
     /// packets rather than egui events, so they have no `InputState` of their
     /// own to ask; a selection scale reads this to keep its proportions.
     shift_held: bool,
+    /// Shift was already down when the drag in hand began, and hasn't been
+    /// let go since: it chose the drag (a pan, a selection mode), so it
+    /// doesn't lock it too. See [`Self::axis_lock_on`].
+    shift_stale: bool,
+    /// Where a stroke held to an axis by Shift is held, or `None` while it
+    /// isn't. See [`Self::stroke_point_doc`].
+    stroke_axis: Option<StrokeAxis>,
+    /// The stroke's last point, in document space: where a Shift lock taken
+    /// partway through holds it from.
+    stroke_last_doc: Option<[f32; 2]>,
     /// Alt, likewise: a selection scale about the box centre.
     alt_held: bool,
+    /// The keys that slide a shape or box along mid-drag, and grow it from
+    /// its middle. See [`Self::move_on`], [`Self::centre_on`].
+    move_key: MidKey,
+    centre_key: MidKey,
+    /// A Shape drag's pointer, in document space before any snap: what the
+    /// move key slides the shape by.
+    shape_pointer_doc: Option<[f32; 2]>,
     /// Perspective grids and their display/snap switches.
     pub perspective: PerspectiveConfig,
     /// In-flight drag on a perspective grid, or `None`.
@@ -1260,14 +1450,21 @@ pub struct AppState {
     pub frame_step: usize,
     /// Invert the mouse-wheel scrub direction. Off: wheel down advances.
     pub invert_timeline_scroll: bool,
+    /// Shift partway through a drag holds it to the screen's axes, not the
+    /// canvas's. See [`Self::lock_basis_doc`].
+    pub lock_screen_axes: bool,
     /// What a middle-button drag on the canvas does.
     pub middle_drag: ButtonDrag,
     /// What a right-button drag on the canvas does.
     pub right_drag: ButtonDrag,
     /// A middle- or right-button drag under way on the canvas.
     pub button_drag: Option<ButtonDragState>,
-    /// Line smoothing, latched into every new stroke. See `tools::Smoothing`.
-    pub smoothing: SmoothingOptions,
+    /// The eraser's line smoothing, latched into every new stroke; each pen
+    /// slot keeps its own. See `tools::Smoothing` and [`Self::smoothing`].
+    pub eraser_smoothing: SmoothingOptions,
+    /// The smoothing the eraser had before the Stabilizer key turned it on,
+    /// for the key to turn it back to. Session-only.
+    eraser_before_stabilizer: Smoothing,
     /// Whether the timeline wraps. Gates playback, wheel scrub and the frame
     /// step actions alike, so one toggle means one behaviour everywhere.
     pub loop_timeline: bool,
@@ -1338,6 +1535,15 @@ pub struct AppState {
     /// when, while waiting to take its snapshot ahead of the pen. See
     /// `warm_pre`.
     warm_wait: Option<(Option<CellId>, f64)>,
+    /// What `warm_pre` last asked the GPU to have ready for the pen. See
+    /// `sync_pen_tex`.
+    pen_tex_want: Option<PenTex>,
+    /// The drawing whose texture holds its whole cell for the pen, to be
+    /// cropped again once the pen has moved on.
+    pen_tex_whole: Option<CellId>,
+    /// A clear texture the size of a whole cell, ready to become the new
+    /// drawing a press makes (auto-key, an empty slot). See `adopt_spare_tex`.
+    spare_tex: Option<(TextureHandle, [u32; 2])>,
     /// Under a stroke, where the target cell held anything before the
     /// stroke began (`None`: blank). With the stroke's own `Canvas::dirty`
     /// it bounds the drawing, so the texture can grow without a scan.
@@ -1379,6 +1585,12 @@ pub struct AppState {
     /// for. Reset panel layout moves to a new one, so every panel opens as if
     /// for the first time; 0 is the ids panels have always had.
     pub panel_layout_gen: u32,
+    /// How far, in points, the panels and the top bar keep from the window's
+    /// edges. Settings > Appearance.
+    pub panel_padding: u8,
+    /// The padding the panels were last laid out to, so a change moves the
+    /// ones it held. Kept with `viewport_rect`, on frames that draw panels.
+    pub panel_padding_laid: u8,
     /// Settings > Appearance. Applied with [`AppState::apply_scheme`].
     pub color_scheme: Scheme,
     pub custom_colors: BaseColors,
@@ -1409,6 +1621,10 @@ pub struct AppState {
     /// The same for an opacity drag in the Layers panel, which may change
     /// several layers at once.
     layer_opacity_before: Option<undo::TimelineState>,
+    /// The layer whose row % is being dragged or typed into: its % stays on
+    /// the row until it is let go, even at 100%, and the slider over the
+    /// list leaves the undo step the row opened alone.
+    pub opacity_row_uid: Option<u64>,
     /// What a group being transformed turns and scales about, in document
     /// space: the middle of its layers when the drag started.
     group_pivot: Option<(f32, f32)>,
@@ -1431,6 +1647,10 @@ pub struct AppState {
     /// and keys it on this frame. Never on with `camera_edit` — both claim
     /// the plain drag.
     pub camera_box: bool,
+    /// Draw camera mode's box takes any shape: its size, at zoom 1, becomes
+    /// the camera's own — the size exports come out at. Off, the box keeps
+    /// the camera's shape. A workspace preference.
+    pub camera_box_free: bool,
     /// The box, while one is being dragged out.
     pub cam_box: Option<CamBox>,
     /// A camera key, while it is being dragged along the timeline ruler.
@@ -1562,12 +1782,18 @@ impl AppState {
     /// Everything `new` does that doesn't need the window.
     /// `brush_root`: where imported Krita presets live (none in tests).
     fn with_prefs(prefs: UiPrefs, max_tex: u32, brush_root: Option<PathBuf>) -> Self {
-        let project = Project::new(1280, 720, 24.0);
+        let mut project = Project::new(1280, 720, 24.0);
+        project.keep_inside_by_default();
         let (shortcuts, shortcuts_err) = shortcuts::load();
         let mut cell_dirty = HashMap::new();
         for id in 0..project.cells.len() {
             cell_dirty.insert(id, Dirty::Full);
         }
+        let pen_smoothing = restore_pen_smoothing(&prefs);
+        let legacy_brushes = restore_tool_brushes(prefs.tool_brushes.clone());
+        let pens = pen_slots::restore_pens(&prefs, &legacy_brushes);
+        let first_brush = pens[0].brush.clone();
+        let other_sizes = prefs.brush_sizes.get(LEGACY_PENS..).map(<[_]>::to_vec).unwrap_or_default();
         Self {
             project,
             project_path: None,
@@ -1593,16 +1819,17 @@ impl AppState {
             group_used: HashMap::new(),
             ghost_tex_used: HashMap::new(),
             playhead_rest: (usize::MAX, 0.0),
-            tool: ActiveTool::Pencil,
-            brush: restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()]
-                .clone(),
+            tool: ActiveTool::PENCIL,
+            brush: first_brush.clone(),
             brush_library: BrushLibrary::new(brush_root),
             brush_search: String::new(),
             brush_thumbs: HashMap::new(),
             krita_import: None,
             palette: prefs.palette,
+            brush_sizes: other_sizes,
+            size_swap: None,
             harmony: {
-                let c = restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()].color;
+                let c = first_brush.color;
                 HarmonySet::new(prefs.harmony, [c[0], c[1], c[2]])
             },
             project_presets: prefs.project_presets,
@@ -1624,6 +1851,9 @@ impl AppState {
             sel_op: SelOp::Replace,
             sel_all_frames: false,
             sel_shape: prefs.sel_shape,
+            wand: prefs.wand,
+            wand_drag: None,
+            wand_repick: None,
             fill_mode: prefs.fill_mode,
             fill_enclose: prefs.fill_enclose,
             fill_behind: prefs.fill_behind,
@@ -1632,23 +1862,36 @@ impl AppState {
             tint_outside: prefs.tint_outside,
             sel_tint: None,
             selection: None,
+            sel_followers: Vec::new(),
+            float_layer: 0,
+            float_cur: 0,
             liquify: None,
             float_pre: Vec::new(),
             float_pre_live: false,
             float_lift_rect: None,
             sel_drag: None,
-            pixel_clip: None,
+            pixel_clip: Vec::new(),
             sel_tex_stale: false,
             selection_tex: None,
-            tool_brushes: restore_tool_brushes(prefs.tool_brushes.clone()),
-            last_pen: ActiveTool::Pencil,
+            tool_brushes: other_brushes(&legacy_brushes),
+            pens,
+            last_pen: ActiveTool::PENCIL,
+            prev_pen: None,
+            pen_menu_search: String::new(),
+            pen_remove_armed: None,
             wheel_pinned: false,
             stroke: None,
             stroke_target: None,
             shape_drag: None,
             fill_drag: None,
             shift_held: false,
+            shift_stale: false,
+            stroke_axis: None,
+            stroke_last_doc: None,
             alt_held: false,
+            move_key: MidKey::default(),
+            centre_key: MidKey::default(),
+            shape_pointer_doc: None,
             perspective: {
                 let mut cfg = prefs.perspective.clone();
                 cfg.ensure_ids();
@@ -1674,11 +1917,13 @@ impl AppState {
             auto_key_draw: prefs.auto_key_draw,
             frame_step: prefs.frame_step,
             invert_timeline_scroll: prefs.invert_timeline_scroll,
+            lock_screen_axes: prefs.lock_screen_axes,
             middle_drag: prefs.middle_drag,
             right_drag: prefs.right_drag,
             button_drag: None,
             loop_timeline: prefs.loop_timeline,
-            smoothing: prefs.smoothing,
+            eraser_smoothing: pen_smoothing[ERASER_SMOOTHING],
+            eraser_before_stabilizer: Smoothing::Basic,
             pen_outlier_logged: false,
             pen_batches_rejected: 0,
             pen_packets_dropped: 0,
@@ -1702,6 +1947,9 @@ impl AppState {
             pre_inked: None,
             pre_w: 0,
             warm_wait: None,
+            pen_tex_want: None,
+            pen_tex_whole: None,
+            spare_tex: None,
             stroke_base: None,
             stroke_clock: None,
             stroke_ws: StrokeWorkspace::new(),
@@ -1718,6 +1966,8 @@ impl AppState {
             show_panels: prefs.show_panels,
             hidden_panels: prefs.hidden_panels.into_iter().filter(|&p| p != PanelId::Color).collect(),
             panel_layout_gen: prefs.panel_layout_gen,
+            panel_padding: prefs.panel_padding,
+            panel_padding_laid: prefs.panel_padding,
             color_scheme: prefs.color_scheme,
             custom_colors: prefs.custom_colors,
             show_mini_timeline: prefs.show_mini_timeline,
@@ -1731,6 +1981,7 @@ impl AppState {
             nav_to_layer: false,
             layer_xform_before: None,
             layer_opacity_before: None,
+            opacity_row_uid: None,
             group_pivot: None,
             xform_sync_last: None,
             camera_edit: false,
@@ -1738,6 +1989,7 @@ impl AppState {
             camera_drag_before: None,
             cam_drag: None,
             camera_box: false,
+            camera_box_free: prefs.camera_box_free,
             cam_box: None,
             cam_key_drag: None,
             shot_cam: None,
@@ -1766,7 +2018,7 @@ impl AppState {
             startup_maximize: true,
             screen_pick: false,
             screen_pick_arm: false,
-            screen_pick_return_tool: ActiveTool::Pencil,
+            screen_pick_return_tool: ActiveTool::PENCIL,
             screen_pick_tex: None,
         }
     }
@@ -1786,6 +2038,7 @@ impl AppState {
         self.stop_krita_link();
         self.stash_grids();
         self.project = Project::new(width, height, fps);
+        self.project.keep_inside_by_default();
         // Forget the old file, or the next Save silently overwrites the project
         // the user just navigated away from.
         self.project_path = None;
@@ -1800,9 +2053,9 @@ impl AppState {
             self.cell_dirty.insert(id, Dirty::Full);
         }
         // Brushes are the artist's, not the project's: keep every tool's,
-        // the active one included, and come back on the pencil.
+        // the active one included, and come back on the first pen slot.
         self.stash_brush();
-        self.load_brush(ActiveTool::Pencil);
+        self.load_brush(ActiveTool::PENCIL);
         self.grid_drag = None;
         self.snap_lock = None;
         self.stroke = None;
@@ -1844,6 +2097,7 @@ impl AppState {
         self.nav_to_layer = false;
         self.layer_xform_before = None;
         self.layer_opacity_before = None;
+        self.opacity_row_uid = None;
         self.xform_sync_last = None;
         // Camera guide / dim / bounds are view preferences, kept like the panel
         // toggles above; only the transient edit + lock modes reset.
@@ -2177,6 +2431,7 @@ impl AppState {
         self.history.for_each_cell(&mut keep);
         self.stroke_target.into_iter().for_each(&mut keep);
         self.selection.as_ref().map(|s| s.cell).into_iter().for_each(&mut keep);
+        self.sel_followers.iter().for_each(|fl| keep(fl.sel.cell));
         // The link maps Krita's drawings, old ones included, onto cells.
         let link = self.krita.as_ref().and_then(|k| k.baseline.as_ref());
         for &id in link.into_iter().flat_map(|b| b.layers.iter().flat_map(|l| l.by_hash.values())) {
@@ -2222,7 +2477,7 @@ impl AppState {
         let active = p.layers.get(p.current_layer).and_then(|l| l.resolve(p.current_frame));
         let hot = [self.stroke_target, active, self.selection.as_ref().map(|s| s.cell)];
         for (id, cell) in self.project.cells.iter_mut().enumerate() {
-            if cell.is_packed() || hot.contains(&Some(id)) {
+            if cell.is_packed() || hot.contains(&Some(id)) || self.sel_followers.iter().any(|fl| fl.sel.cell == id) {
                 continue;
             }
             // Shared with a save in flight or an undo step: packing would
@@ -2310,6 +2565,13 @@ impl AppState {
     /// All other structural edits leave the cell pool intact, so a cheap
     /// `TimelineState` snapshot is enough.
     pub fn structural_edit(&mut self, capture_cells: bool, edit: impl FnOnce(&mut Project)) {
+        let cmd = self.structural_command(capture_cells, edit);
+        self.history.push(cmd);
+    }
+
+    /// [`AppState::structural_edit`]'s edit, with its undo step handed back
+    /// rather than recorded, for a caller with more to add to the step.
+    fn structural_command(&mut self, capture_cells: bool, edit: impl FnOnce(&mut Project)) -> undo::Command {
         // Floating pixels belong to a cell that may be about to move.
         self.land_float();
         // Keys may move under the track selection; the track edits that want
@@ -2344,14 +2606,89 @@ impl AppState {
         // texture. The rest are exactly as uploaded — the timeline around them
         // moved, not them.
         let changed: Vec<CellId> = cell_pixels.iter().map(|d| d.cell).collect();
-        self.history.push(undo::Command::Structural {
-            before,
-            after,
-            cell_pixels,
-        });
         for id in changed {
             self.mark_dirty(id);
         }
+        undo::Command::Structural {
+            before,
+            after,
+            cell_pixels,
+        }
+    }
+
+    /// A structural edit that inserts or removes whole frames on every
+    /// layer. The project's own keys move inside `edit`; the perspective
+    /// grids' keys live on the app, so `grids` moves them, in the same undo
+    /// step.
+    fn frame_edit(
+        &mut self,
+        capture_cells: bool,
+        grids: impl Fn(&mut perspective::PerspectiveGrid),
+        edit: impl FnOnce(&mut Project),
+    ) {
+        let mut cmds = vec![self.structural_command(capture_cells, edit)];
+        for g in &mut self.perspective.grids {
+            let before = g.clone();
+            grids(g);
+            if *g != before {
+                cmds.push(undo::Command::Grid {
+                    before: Box::new(before),
+                    after: Box::new(g.clone()),
+                });
+            }
+        }
+        // Keyed grids take the pose their keys now give this frame.
+        self.grid_sync_last = None;
+        self.history.push(if cmds.len() == 1 { cmds.remove(0) } else { undo::Command::Compound(cmds) });
+    }
+
+    /// The step size's worth of held frames after the playhead, on every
+    /// layer. One undo step for all of them.
+    pub fn add_frames(&mut self) {
+        let n = self.frame_step_count();
+        let at = (self.project.current_frame + 1).min(self.project.frame_count);
+        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| {
+            for _ in 0..n {
+                p.add_frame();
+            }
+        });
+    }
+
+    /// The step size's worth of copies of this frame after it, on every
+    /// layer.
+    pub fn duplicate_frames(&mut self) {
+        let n = self.frame_step_count();
+        let at = (self.project.current_frame + 1).min(self.project.frame_count);
+        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| {
+            for _ in 0..n {
+                p.duplicate_frame();
+            }
+        });
+    }
+
+    /// Delete the frame under the playhead from every layer. The only frame
+    /// left is cleared instead.
+    pub fn delete_frame(&mut self) {
+        let wipes_pixels = self.project.frame_count <= 1;
+        let at = self.project.current_frame;
+        self.frame_edit(
+            wipes_pixels,
+            |g| {
+                if !wipes_pixels {
+                    g.keys_remove_frames(at, 1);
+                }
+            },
+            Project::delete_frame,
+        );
+    }
+
+    /// The step size's worth of frames before the playhead, on every layer
+    /// — blank ones at the start — with every key from the playhead on,
+    /// the grids' too, moved along. The playhead stays on its drawing.
+    pub fn insert_frames_before(&mut self) {
+        let n = self.frame_step_count();
+        let at = self.project.current_frame.min(self.project.frame_count);
+        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| p.insert_frames_before(n));
     }
 
     /// Insert `cells` as a brand-new layer *below* the active layer, recorded as
@@ -2681,11 +3018,11 @@ impl AppState {
         });
     }
 
-    /// File → Copy frame to clipboard: the current frame as Save PNG writes it,
-    /// on the system clipboard for another app to paste.
+    /// File → Copy frame to clipboard: the current frame as the screen shows
+    /// it, on the system clipboard for another app to paste.
     pub fn copy_frame(&mut self) {
         let frame = self.project.current_frame;
-        let flat = crate::io::composite::flatten_frame(&self.project, frame);
+        let flat = self.clipboard_frame();
         match crate::io::png_save::copy_to_clipboard(&flat) {
             Ok(()) => {
                 self.save_toast = Some((format!("Copied frame {}", frame + 1), Instant::now() + Self::TOAST_TTL));
@@ -2695,6 +3032,16 @@ impl AppState {
                 self.krita_notice(format!("Couldn't copy the frame: {e:#}"), true);
             }
         }
+    }
+
+    /// What Copy frame puts on the clipboard: the current frame through the
+    /// camera its guide is drawn with — a nudge not yet keyed, or where a
+    /// move stretched over loops has got to while it plays. Save PNG and the
+    /// exports keep to the keyed camera.
+    fn clipboard_frame(&self) -> Canvas {
+        let frame = self.project.current_frame;
+        let cam = self.display_camera(frame);
+        crate::io::composite::flatten_through(&self.project, frame, Some(cam))
     }
 
     /// File → Import video…: pick a file, then probe its frame count / fps on a
@@ -3331,10 +3678,16 @@ impl AppState {
         true
     }
 
-    /// The held frame's drag has reached document point `p`.
+    /// The held frame's drag has reached document point `p`. Shift, pressed
+    /// partway through a move, holds it to the horizontal or vertical.
     pub fn camera_frame_move(&mut self, p: (f32, f32)) {
         let Some(d) = self.cam_drag else {
             return;
+        };
+        let p = if d.grab == CamGrab::Move && self.axis_lock_on() {
+            axis_lock::lock_hv(d.from, p, self.lock_basis_doc())
+        } else {
+            p
         };
         self.project.camera = d.start.dragged(d.grab, d.from, p, self.canvas_size());
         self.hold_camera_inside();
@@ -3377,10 +3730,15 @@ impl AppState {
         true
     }
 
-    /// The box's drag has reached document point `p`.
+    /// The box's drag has reached document point `p`. The move key slides
+    /// the whole box along with it.
     pub fn camera_box_move(&mut self, p: (f32, f32)) {
         let tap = CAMERA_TAP_PX / self.view_scale.max(1e-6);
+        let slide = self.move_on();
         if let Some(b) = &mut self.cam_box {
+            if slide {
+                b.from = (b.from.0 + p.0 - b.to.0, b.from.1 + p.1 - b.to.1);
+            }
             b.to = p;
             b.moved |= (p.0 - b.from.0).hypot(p.1 - b.from.1) > tap;
         }
@@ -3389,29 +3747,79 @@ impl AppState {
     /// The camera the box being dragged out gives: what its preview shows
     /// and what letting go keys. `None` while it is still a tap, or brought
     /// back to one.
+    #[cfg(test)]
     pub fn camera_box_camera(&self) -> Option<Camera> {
+        self.camera_box_frame().map(|(cam, _)| cam)
+    }
+
+    /// [`AppState::camera_box_camera`], and the size of the frame it has:
+    /// the camera's own, or with a free box, the box's — at zoom 1, in
+    /// even pixels, and no smaller than [`MIN_FREE_CAMERA_SIDE`]. While the
+    /// centre key holds, the press point is the frame's middle.
+    pub fn camera_box_frame(&self) -> Option<(Camera, (u32, u32))> {
         let b = self.cam_box.filter(|b| b.moved)?;
         let tap = CAMERA_TAP_PX / self.view_scale.max(1e-6);
         if (b.to.0 - b.from.0).hypot(b.to.1 - b.from.1) <= tap {
             return None;
         }
-        let cam = self
-            .project
-            .camera
-            .boxed(b.from, b.to, self.canvas_size(), self.camera_frame_size());
-        Some(self.project.held_inside(cam))
+        let centre = self.centre_on().then_some(b.from);
+        let b = match centre {
+            Some(c) => CamBox {
+                from: axis_lock::mirror(c, b.to),
+                ..b
+            },
+            None => b,
+        };
+        let canvas = self.canvas_size();
+        let (cam, size) = if self.camera_box_free {
+            // Measured along the frame's own axes, as `Camera::boxed` does.
+            let rot = self.project.camera.rot;
+            let (s, c) = rot.sin_cos();
+            let (dx, dy) = (b.to.0 - b.from.0, b.to.1 - b.from.1);
+            let (u, v) = (dx * c + dy * s, dy * c - dx * s);
+            let side = |d: f32| ((d.abs() * 0.5).round() as u32 * 2).clamp(MIN_FREE_CAMERA_SIDE, MAX_CAMERA_SIDE);
+            let mid = ((b.from.0 + b.to.0) * 0.5, (b.from.1 + b.to.1) * 0.5);
+            let cam = Camera {
+                tx: mid.0 - canvas.0 * 0.5,
+                ty: mid.1 - canvas.1 * 0.5,
+                zoom: 1.0,
+                rot,
+            };
+            (cam, (side(u), side(v)))
+        } else {
+            let cam = self.project.camera.boxed(b.from, b.to, canvas, self.camera_frame_size());
+            // Kept to the frame's shape, the box may reach further one way
+            // than dragged: hold its middle where it was pressed.
+            let cam = match centre {
+                Some(c) => cam.centred_on(c, canvas),
+                None => cam,
+            };
+            (cam, self.project.output_size())
+        };
+        // Held on the canvas as the frame it will have, not the one it has.
+        let cam = if self.project.camera_opts.keep_inside {
+            cam.kept_inside(canvas, (size.0 as f32, size.1 as f32))
+        } else {
+            cam
+        };
+        Some((cam, size))
     }
 
     /// Let go of the box: key its camera on this frame. A tap keys the
     /// camera as it was, centred where it landed. A box dragged back to
     /// nothing is let go of, and keys nothing.
     pub fn camera_box_up(&mut self) {
-        let boxed = self.camera_box_camera();
+        let boxed = self.camera_box_frame();
         let Some(b) = self.cam_box.take() else {
             return;
         };
         let cam = match boxed {
-            Some(cam) => cam,
+            Some((cam, size)) => {
+                if self.camera_box_free {
+                    self.set_camera_size(Some(size));
+                }
+                cam
+            }
             None if !b.moved => {
                 let cam = self.project.camera.centred_on(b.from, self.canvas_size());
                 self.project.held_inside(cam)
@@ -4044,37 +4452,24 @@ impl AppState {
 
         // During an active stroke, stream only the flushed sub-rect to the
         // GPU as a partial texture update — exact WYSIWYG feedback without
-        // full-buffer uploads on large canvases.
+        // full-buffer uploads on large canvases. Mostly sent already, by
+        // `stream_stroke` straight after last frame's pen samples; what's
+        // left is what the stabilizer's timer painted since.
         if self.stroke.is_some() {
-            let Some(target) = self.stroke_target else {
+            if self.stroke_target.is_none() {
                 return;
-            };
-            // Painting a clipped layer, or a base something is clipped to:
-            // what shows is the clipped texture, so take the full path below,
-            // which redoes just the changed rect of it.
-            let cur = self.project.current_layer;
-            let clipping = self.project.clip_base(cur).is_some()
-                || (0..self.project.layers.len()).any(|i| self.project.clip_base(i) == Some(cur))
-                || self.feeds_group_image(cur);
-            if !clipping && self.cell_textures.contains_key(&target) {
-                self.cell_tex_used.insert(target, now);
-                // What the stroke flushed, and anything left over from
-                // before it. Sent now, so pen-up has only the last flush left
-                // to send rather than the whole stroke again.
-                let pending = self.cell_dirty.insert(target, Dirty::Clean).unwrap_or(Dirty::Full);
-                let dirty = match self.preview_upload_rect.take() {
-                    Some(r) => pending.with(Dirty::Rect(r)),
-                    None => pending,
-                };
-                if dirty != Dirty::Clean {
-                    self.upload_cell(ctx, target, dirty);
-                }
+            }
+            if self.stream_stroke(ctx) {
                 return;
             }
             // No texture for the target cell yet — fall through so the full
             // upload below creates it.
             self.preview_upload_rect = None;
         }
+
+        // Before the drawings on screen: a drawing the pen left is dropped
+        // here to be remade cropped below.
+        self.sync_pen_tex(ctx);
 
         // Only what's drawn. Onion ghosts are drawn from their own silhouette
         // textures, so a ghosted cell's plain texture isn't needed at all.
@@ -4133,24 +4528,8 @@ impl AppState {
         // change: a move shifts the quad, not the texture.
         match &self.selection {
             Some(sel) if self.sel_tex_stale || self.selection_tex.is_none() => {
-                let dims = [sel.mask.w as usize, sel.mask.h as usize];
-                let image = premultiplied_image(dims, &sel.pixels);
-                match self.selection_tex.as_mut() {
-                    Some(tex) if tex.size() == dims => {
-                        tex.set(image, TextureOptions::LINEAR);
-                        self.fresh_full.insert(tex.id());
-                    }
-                    _ => {
-                        if let Some(old) = self.selection_tex.take() {
-                            self.retired_textures.push(old);
-                        }
-                        self.selection_tex = Some(ctx.load_texture(
-                            "selection",
-                            image,
-                            TextureOptions::LINEAR,
-                        ));
-                    }
-                }
+                let (retired, fresh) = (&mut self.retired_textures, &mut self.fresh_full);
+                sync_float_tex(ctx, &mut self.selection_tex, sel, retired, fresh);
                 self.sel_tex_stale = false;
             }
             None if self.selection_tex.is_some() => {
@@ -4160,10 +4539,167 @@ impl AppState {
             }
             _ => {}
         }
+        for fl in self.sel_followers.iter_mut().filter(|fl| fl.tex_stale || fl.tex.is_none()) {
+            sync_float_tex(ctx, &mut fl.tex, &fl.sel, &mut self.retired_textures, &mut self.fresh_full);
+            fl.tex_stale = false;
+        }
 
         self.sync_tint(ctx);
         self.sync_ghosts(ctx, now);
         self.enforce_texture_budget();
+    }
+
+    /// Send what the live stroke has painted and not yet sent, as a patch of
+    /// its drawing's texture. `false` when it can't stream — painting a
+    /// clipped layer, or a base something is clipped to, shows the clipped
+    /// texture instead; and a drawing with no texture yet needs one made —
+    /// both left to the full sync.
+    ///
+    /// The canvas calls this once the frame's pen samples are painted, so
+    /// they show on this frame: egui applies texture changes before it draws.
+    /// Left to the next frame's sync, every stroke showed a frame behind the
+    /// pen — at a slow frame's length, a visible gap.
+    pub fn stream_stroke(&mut self, ctx: &egui::Context) -> bool {
+        let Some(target) = self.stroke_target.filter(|_| self.stroke.is_some()) else {
+            return false;
+        };
+        if self.paints_through_clip() || !self.cell_textures.contains_key(&target) {
+            return false;
+        }
+        self.cell_tex_used.insert(target, self.sync_frame);
+        // What the stroke flushed, and anything left over from before it.
+        // Sent now, so pen-up has only the last flush left to send rather
+        // than the whole stroke again.
+        let pending = self.cell_dirty.insert(target, Dirty::Clean).unwrap_or(Dirty::Full);
+        let dirty = match self.preview_upload_rect.take() {
+            Some(r) => pending.with(Dirty::Rect(r)),
+            None => pending,
+        };
+        if dirty != Dirty::Clean {
+            self.upload_cell(ctx, target, dirty);
+        }
+        true
+    }
+
+    /// Whether the active layer shows through a texture other than its
+    /// drawing's own: clipped, a base something is clipped to, or inside a
+    /// group drawn as one image. Its cell texture isn't what's on screen.
+    fn paints_through_clip(&self) -> bool {
+        let p = &self.project;
+        let cur = p.current_layer;
+        p.clip_base(cur).is_some() || (0..p.layers.len()).any(|i| p.clip_base(i) == Some(cur)) || self.feeds_group_image(cur)
+    }
+
+    /// Whether drawing `id` has a texture holding its whole cell (or is
+    /// nothing anyone can draw on, so never will).
+    fn whole_tex(&self, id: CellId) -> bool {
+        let Some(c) = self.project.cell(id).filter(|c| c.width > 0 && c.height > 0) else {
+            return true;
+        };
+        self.cell_textures
+            .get(&id)
+            .is_some_and(|t| t.cell == [c.width, c.height] && t.rect == whole_rect(c.width, c.height))
+    }
+
+    /// Whether what `want` names is on the GPU, asked for and made.
+    fn pen_tex_ready(&self, want: PenTex) -> bool {
+        if self.pen_tex_want != Some(want) {
+            return false;
+        }
+        if self.paints_through_clip() {
+            return true;
+        }
+        match want {
+            PenTex::Cell(id) => self.whole_tex(id),
+            PenTex::Blank(size) => self.spare_tex.as_ref().is_some_and(|(_, s)| *s == size),
+        }
+    }
+
+    /// Make what `warm_pre` asked for, while the pen rests: the drawing it
+    /// would paint grown to a whole-cell texture, or a clear whole-cell one
+    /// for the new drawing a press would make. Only one drawing is kept whole:
+    /// the one before is cropped again, by dropping its texture — remade
+    /// cropped below if it's on screen, or when next it is. A whole cell per
+    /// drawing outgrew `TEXTURE_BUDGET` in playback; see `CellTex`.
+    fn sync_pen_tex(&mut self, ctx: &egui::Context) {
+        let Some(want) = self.pen_tex_want else {
+            return;
+        };
+        let clip = self.paints_through_clip();
+        let keep = match want {
+            PenTex::Cell(id) if !clip => Some(id),
+            _ => None,
+        };
+        if let Some(old) = self.pen_tex_whole.filter(|&o| Some(o) != keep) {
+            self.pen_tex_whole = None;
+            if let Some(t) = self.cell_textures.remove(&old) {
+                self.retired_textures.push(t.tex);
+                self.cell_tex_used.remove(&old);
+                self.cell_dirty.insert(old, Dirty::Full);
+            }
+        }
+        // A spare is only for a press about to make a new drawing.
+        if !matches!(want, PenTex::Blank(_)) || clip {
+            if let Some((tex, _)) = self.spare_tex.take() {
+                self.retired_textures.push(tex);
+            }
+        }
+        if clip {
+            return;
+        }
+        // Made once, while the pen rests on it: not again for a drawing
+        // the playhead has left without resting, nor while playing, where
+        // the budget may drop it and remaking it would cost every pass.
+        if self.playback.playing {
+            return;
+        }
+        match want {
+            PenTex::Cell(id) => {
+                self.pen_tex_whole = Some(id);
+                if !self.whole_tex(id) && self.project.resolved_current() == Some(id) {
+                    // `upload_cell` rebuilds the pen's drawing whole.
+                    self.upload_cell(ctx, id, Dirty::Full);
+                    self.cell_dirty.insert(id, Dirty::Clean);
+                    self.cell_tex_used.insert(id, self.sync_frame);
+                }
+            }
+            PenTex::Blank(size) => {
+                if self.spare_tex.as_ref().is_some_and(|(_, s)| *s == size) || size[0] == 0 || size[1] == 0 {
+                    return;
+                }
+                if let Some((tex, _)) = self.spare_tex.take() {
+                    self.retired_textures.push(tex);
+                }
+                let image = ColorImage::new([size[0] as usize, size[1] as usize], Color32::TRANSPARENT);
+                self.spare_tex = Some((ctx.load_texture("pen_spare", image, TextureOptions::LINEAR), size));
+            }
+        }
+    }
+
+    /// A press just made `target`, a new blank drawing: give it the clear
+    /// whole-cell texture readied for it, so its first stroke streams as
+    /// patches from the start rather than outgrowing a texture made to fit
+    /// its first dab.
+    fn adopt_spare_tex(&mut self, target: CellId) {
+        if self.stroke_base.is_some() || self.cell_textures.contains_key(&target) || self.paints_through_clip() {
+            return;
+        }
+        let Some(size) = self.project.cell(target).map(|c| [c.width, c.height]) else {
+            return;
+        };
+        if !self.spare_tex.as_ref().is_some_and(|(_, s)| *s == size) {
+            return;
+        }
+        let Some((tex, _)) = self.spare_tex.take() else {
+            return;
+        };
+        let rect = whole_rect(size[0], size[1]);
+        self.cell_textures.insert(target, CellTex { tex, rect, cell: size });
+        self.cell_dirty.insert(target, Dirty::Clean);
+        self.cell_tex_used.insert(target, self.sync_frame);
+        // Kept whole, and the drawing kept whole before cropped, once the
+        // stroke is down.
+        self.pen_tex_want = Some(PenTex::Cell(target));
     }
 
     /// Layer `li`, clipped to `b`, as it shows on the current frame: its
@@ -4300,7 +4836,16 @@ impl AppState {
         // Expanding a layer's canvas resizes cells under their textures, so
         // only a texture made for this size can be patched.
         let have = self.cell_textures.get(&id).filter(|t| t.cell == cell).map(|t| t.rect);
-        match plan_upload(c, have, dirty, stroke) {
+        let plan = match plan_upload(c, have, dirty, stroke) {
+            // The pen's drawing stays whole, however it's remade: see
+            // `sync_pen_tex`.
+            // Not while playing, which only shows it.
+            TexPlan::Rebuild(_) if self.pen_tex_whole == Some(id) && !self.playback.playing => {
+                TexPlan::Rebuild(whole_rect(c.width, c.height))
+            }
+            plan => plan,
+        };
+        match plan {
             TexPlan::Keep => {}
             TexPlan::Patch(r) => {
                 if let Some(t) = self.cell_textures.get_mut(&id) {
@@ -4548,7 +5093,17 @@ impl AppState {
     /// The cell a paint edit on the active slot should write to, allocating
     /// it if the slot is empty. `None` on a locked or reference layer.
     fn begin_edit_cell(&mut self) -> Option<CellId> {
-        if !self.project.paintable(self.project.current_layer) {
+        let (id, key) = self.edit_cell_on(self.project.current_layer)?;
+        if let Some(cmd) = key {
+            self.history.push(cmd);
+        }
+        Some(id)
+    }
+
+    /// [`AppState::begin_edit_cell`] for layer `li`, with the undo step of a
+    /// key auto-key adds handed back rather than recorded.
+    fn edit_cell_on(&mut self, li: usize) -> Option<(CellId, Option<undo::Command>)> {
+        if !self.project.paintable(li) {
             return None;
         }
         // Auto-key: break the hold first, so the stroke starts a drawing of
@@ -4557,20 +5112,22 @@ impl AppState {
         // drawing without reaching for the X-sheet, and a duplicate would put
         // the previous drawing's strokes on the new frame. Seeing the previous
         // drawing is what onion skin is for.
+        let f = self.project.current_frame;
+        let mut key = None;
         if self.auto_key_draw {
-            let f = self.project.current_frame;
             let holding = self
                 .project
                 .layers
-                .get(self.project.current_layer)
+                .get(li)
                 .is_some_and(|l| l.resolve(f).is_some() && !l.is_key(f));
             if holding {
-                self.structural_edit(false, |p| {
-                    p.insert_blank_key_here();
-                });
+                key = Some(self.structural_command(false, |p| {
+                    let id = p.alloc_cell_for(li);
+                    p.layers[li].set_key(f, id);
+                }));
             }
         }
-        Some(self.project.ensure_active_cell())
+        Some((self.project.ensure_cell(li, f), key))
     }
 
     pub fn pointer_down(&mut self, sample: PointerSample) {
@@ -4596,6 +5153,7 @@ impl AppState {
         if let Some(c) = self.project.cell_mut(target) {
             c.dirty = None;
         }
+        self.adopt_spare_tex(target);
 
         if self.tool == ActiveTool::Fill {
             let opts = crate::tools::fill::FillOptions {
@@ -4678,8 +5236,9 @@ impl AppState {
         let mut brush = self.brush.clone();
         brush.radius = self.effective_radius();
         let krita = self.krita_brush();
+        let smoothing = self.smoothing().copied().unwrap_or_default();
         let mut builder =
-            StrokeBuilder::new_with_krita(brush, self.tool, self.cell_view_scale(), self.smoothing, krita);
+            StrokeBuilder::new_with_krita(brush, self.tool, self.cell_view_scale(), smoothing, krita);
         let (rotation, mirrored) = self.cell_screen_orientation();
         builder.orient(rotation, mirrored);
         self.stroke_clock = Some(Instant::now());
@@ -4736,6 +5295,8 @@ impl AppState {
     pub fn pointer_up(&mut self) {
         self.finish_grid_drag();
         self.snap_lock = None;
+        self.stroke_axis = None;
+        self.stroke_last_doc = None;
         // A warp has no stroke to finish, and its snapshot must outlive the
         // pen-up: the session goes on until it lands.
         if self.liquify.is_some() {
@@ -4753,6 +5314,7 @@ impl AppState {
             return;
         };
         let mut paints = false;
+        let mut drew = false;
         if let Some(drag) = self.shape_drag.take() {
             // Rasterise the final shape now; undo records the dirty rect below.
             let outline = self.shape_outline(&drag);
@@ -4774,6 +5336,7 @@ impl AppState {
             }
             self.mark_dirty(target);
             paints = true;
+            drew = true;
         } else if let Some(mut builder) = self.stroke.take() {
             if let Some(t0) = self.stroke_clock.take() {
                 builder.tick(t0.elapsed().as_secs_f64() * 1000.0);
@@ -4791,6 +5354,10 @@ impl AppState {
                 self.mark_region(target, Dirty::Rect(r));
             }
             paints = self.tool != ActiveTool::Eraser;
+            drew = true;
+        }
+        if drew {
+            self.remember_size();
         }
         self.preview_upload_rect = None;
         // Only a stroke that changed something marks the drawing as painted:
@@ -4813,14 +5380,17 @@ impl AppState {
     /// The new values stay in the sliders.
     ///
     /// Expand steps a pixel at a time. The gap climbs a ladder whose rungs
-    /// spread out as it grows, so its whole range fits in a drag.
+    /// spread out as it grows, so its whole range fits in a drag. Shift,
+    /// pressed partway, holds the drag to one of the two, the other going
+    /// back to where it was.
     pub fn fill_drag_to(&mut self, at: egui::Pos2) {
         use crate::input::button_drag::drag_steps;
         use crate::tools::fill::{step_gap, MAX_EXPAND};
-        let (Some(drag), Some(target)) = (&mut self.fill_drag, self.stroke_target) else {
+        let Some(anchor) = self.fill_drag.as_ref().and_then(|d| d.anchor) else {
             return;
         };
-        let Some(anchor) = drag.anchor else {
+        let at = self.lock_screen_drag(anchor, at);
+        let (Some(drag), Some(target)) = (&mut self.fill_drag, self.stroke_target) else {
             return;
         };
         let gap = step_gap(drag.base_gap, drag_steps(at.x - anchor.x));
@@ -5006,8 +5576,7 @@ impl AppState {
     fn warm_pre(&mut self, ctx: &egui::Context) {
         let paints = matches!(
             self.tool,
-            ActiveTool::Pencil
-                | ActiveTool::Ink
+            ActiveTool::Pen(_)
                 | ActiveTool::Eraser
                 | ActiveTool::Fill
                 | ActiveTool::Shape
@@ -5025,7 +5594,19 @@ impl AppState {
             self.warm_wait = None;
             return;
         };
+        // And its texture, grown to the whole cell — or for a new drawing,
+        // a clear one ready to be its texture. A warp makes no new drawing.
+        let want = match target {
+            Some(id) => Some(PenTex::Cell(id)),
+            None if self.tool == ActiveTool::Liquify => None,
+            None => {
+                let p = &self.project;
+                let (w, h) = p.draw_cell_size(p.current_layer, p.current_frame);
+                Some(PenTex::Blank([w, h]))
+            }
+        };
         let ready = self.stroke_ws.is_clear()
+            && want.is_none_or(|w| self.pen_tex_ready(w))
             && match target {
                 Some(id) => self
                     .project
@@ -5052,6 +5633,10 @@ impl AppState {
         }
         self.warm_wait = None;
         self.stroke_ws.clear_last();
+        // Made by the texture sync, straight after this.
+        if want.is_some() {
+            self.pen_tex_want = want;
+        }
         match target {
             Some(id) => {
                 // Snapshot first, from the packed drawing: just its rect.
@@ -5403,7 +5988,7 @@ impl AppState {
     /// instead (see [`Self::shape_plane`]).
     pub fn snapping(&self) -> bool {
         let stroke_tool = match self.tool {
-            ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser => true,
+            ActiveTool::Pen(_) | ActiveTool::Eraser => true,
             ActiveTool::Shape => self.brush.shape_kind == ShapeKind::Line,
             _ => false,
         };
@@ -5445,10 +6030,14 @@ impl AppState {
 
     /// The polyline a shape drag draws, in cell pixels: on its grid when it
     /// has one and the box stays in front of the horizon, flat otherwise.
-    /// Shift, held once the drag is under way, squares it up on the grid.
+    /// Shift, pressed once the drag is under way, squares a box up — on the
+    /// grid, in grid cells — and turns a line to a 15° step; the centre key
+    /// makes the press point its middle, and the far end mirrors the pointer.
     /// Preview and pixels both come from here, so they always agree.
     pub fn shape_outline(&self, drag: &ShapeDrag) -> Vec<(f32, f32)> {
         let radius = self.effective_radius();
+        let lock = self.axis_lock_on();
+        let centred = self.centre_on();
         drag.plane
             .and_then(|plane| {
                 crate::tools::shape::outline_on_plane(
@@ -5456,18 +6045,217 @@ impl AppState {
                     drag.start,
                     drag.end,
                     &plane,
-                    self.shift_held,
+                    lock,
+                    centred,
                     radius,
                 )
             })
-            .unwrap_or_else(|| crate::tools::shape::outline(drag.kind, drag.start, drag.end, radius))
+            .unwrap_or_else(|| {
+                let end = match (lock, drag.kind) {
+                    (false, _) => drag.end,
+                    (true, ShapeKind::Line) => axis_lock::snap_dir(
+                        drag.start,
+                        drag.end,
+                        self.lock_basis_cell(),
+                        axis_lock::LINE_STEP,
+                    ),
+                    (true, _) => axis_lock::square(drag.start, drag.end),
+                };
+                let start = if centred {
+                    axis_lock::mirror(drag.start, end)
+                } else {
+                    drag.start
+                };
+                crate::tools::shape::outline(drag.kind, start, end, radius)
+            })
+    }
+
+    /// A Shape drag's pointer has reached document point `p`. While the move
+    /// key holds, the shape slides with it — along its grid, when it lies on
+    /// one — and a snapped line's lock goes along, aimed afresh from where it
+    /// lands.
+    fn slide_shape(&mut self, p: [f32; 2]) {
+        let last = self.shape_pointer_doc.replace(p);
+        let Some(last) = last.filter(|_| self.move_on() && self.shape_drag.is_some()) else {
+            return;
+        };
+        let from = self.doc_to_active_cell((last[0], last[1]));
+        let to = self.doc_to_active_cell((p[0], p[1]));
+        if let Some(drag) = &mut self.shape_drag {
+            drag.start = crate::tools::shape::slide(drag.start, from, to, drag.plane.as_ref());
+        }
+        let Some(mut lock) = self.snap_lock else {
+            return;
+        };
+        lock.start = [lock.start[0] + p[0] - last[0], lock.start[1] + p[1] - last[1]];
+        if let Some(dir) = lock.dir {
+            // The family it was heading for, from here: a line slid across a
+            // one-point floor still runs to the vanishing point.
+            let f = self.project.current_frame;
+            let dirs = self
+                .perspective
+                .active_grid()
+                .map(|g| {
+                    let s = self.grid_space(g, f);
+                    g.snap_dirs(&s, lock.start, self.perspective.snap_vertical)
+                })
+                .unwrap_or_default();
+            lock.dir = perspective::pick_dir(&dirs, dir).or(Some(dir));
+        }
+        self.snap_lock = Some(lock);
     }
 
     /// Start of a stroke at document point `p`. Arms perspective snap when it
     /// is on; the first point itself is never moved.
     pub fn snap_begin(&mut self, p: [f32; 2]) -> [f32; 2] {
         self.snap_lock = self.snapping().then_some(SnapLock { start: p, dir: None });
+        self.stroke_axis = None;
+        self.stroke_last_doc = Some(p);
+        self.shape_pointer_doc = Some(p);
         p
+    }
+
+    /// Shift is held, and went down after the drag in hand began: hold the
+    /// drag to an axis, a shape's line to a 15° step, a box to a square.
+    /// Shift already down at the press chose the drag instead — a pan, a
+    /// selection mode — and counts only once let go and pressed again.
+    pub fn axis_lock_on(&self) -> bool {
+        self.shift_held && !self.shift_stale
+    }
+
+    /// A drag begins. Shift down now chose it, so locks nothing yet, and the
+    /// move and centre keys likewise.
+    pub fn drag_began(&mut self) {
+        self.shift_stale = self.shift_held;
+        self.move_key.began();
+        self.centre_key.began();
+    }
+
+    /// This frame's Shift and Alt. A Shift let go no longer chose anything.
+    pub(crate) fn read_modifiers(&mut self, m: egui::Modifiers) {
+        (self.shift_held, self.alt_held) = (m.shift, m.alt);
+        self.shift_stale &= self.shift_held;
+    }
+
+    /// This frame's modifiers and mid-drag keys, as the app's update reads
+    /// them before anything else.
+    pub(crate) fn read_input(&mut self, i: &egui::InputState) {
+        self.read_modifiers(i.modifiers);
+        self.move_key.read(self.shortcuts.still_held(Action::ShapeMove, i));
+        self.centre_key.read(self.shortcuts.still_held(Action::ShapeCentre, i));
+    }
+
+    /// The move and centre keys as a frame would read them, for tests that
+    /// drive the state without a frame.
+    #[cfg(test)]
+    pub(crate) fn hold_mid_keys(&mut self, slide: bool, centre: bool) {
+        self.move_key.read(slide);
+        self.centre_key.read(centre);
+    }
+
+    /// The move key went down partway through the drag in hand: the shape
+    /// or box slides along under the pointer instead of growing.
+    pub fn move_on(&self) -> bool {
+        self.move_key.on()
+    }
+
+    /// The centre key went down partway through: the shape or box grows
+    /// from where it was pressed as its middle.
+    pub fn centre_on(&self) -> bool {
+        self.centre_key.on()
+    }
+
+    /// A shape, a rectangle or ellipse selection, or a camera box is being
+    /// dragged out — what the move and centre keys work on.
+    fn mid_drag_under_way(&self) -> bool {
+        self.shape_drag.is_some()
+            || self.cam_box.is_some()
+            || matches!(self.sel_gesture, Some(SelGesture::Drag { .. }))
+    }
+
+    /// The angle, in document space, of the horizontal a Shift lock keeps
+    /// to: the canvas's own, or with [`Self::lock_screen_axes`] the screen's,
+    /// brought back through the view's turn and mirror.
+    pub fn lock_basis_doc(&self) -> f32 {
+        if !self.lock_screen_axes {
+            return 0.0;
+        }
+        // As `Xform` draws: mirrored first, then turned.
+        let rot = if self.camera_look_through {
+            -self.look_through_camera().rot
+        } else {
+            self.view.rotation
+        };
+        let sign = |on: bool| if on { -1.0 } else { 1.0 };
+        let (s, c) = rot.sin_cos();
+        (-sign(self.view.flip_y) * s).atan2(sign(self.view.flip_x) * c)
+    }
+
+    /// [`Self::lock_basis_doc`] in the active drawing's own pixels, which its
+    /// layer may turn.
+    pub fn lock_basis_cell(&self) -> f32 {
+        let a = self.lock_basis_doc();
+        let o = self.doc_to_active_cell((0.0, 0.0));
+        let d = self.doc_to_active_cell((100.0 * a.cos(), 100.0 * a.sin()));
+        (d.1 - o.1).atan2(d.0 - o.0)
+    }
+
+    /// Screen point `at` of a drag that went down at `anchor`, held to the
+    /// screen's horizontal or vertical while Shift locks it. For the drags
+    /// whose two directions set two different things (a Fill press's gap and
+    /// expand): those are the screen's, whichever way the view is turned.
+    pub fn lock_screen_drag(&self, anchor: egui::Pos2, at: egui::Pos2) -> egui::Pos2 {
+        if !self.axis_lock_on() {
+            return at;
+        }
+        let (x, y) = axis_lock::lock_hv((anchor.x, anchor.y), (at.x, at.y), 0.0);
+        egui::pos2(x, y)
+    }
+
+    /// A stroke point at document point `p`: held to an axis while Shift
+    /// locks (see [`Self::axis_lock_on`]), else snapped to the perspective
+    /// grid.
+    ///
+    /// The lock holds from the stroke's last point when Shift went down, so
+    /// what is drawn stays joined, and picks its axis once, when the pointer
+    /// has gone far enough to show which — re-picking per point would
+    /// zigzag a hand heading near the diagonal. Let go, the stroke follows
+    /// the pen again, and grid snap picks afresh from there. A shape passes
+    /// its points through: its outline makes its own (see
+    /// [`Self::shape_outline`]).
+    pub fn stroke_point_doc(&mut self, p: [f32; 2]) -> [f32; 2] {
+        const DECIDE_PX: f32 = 6.0;
+        if self.tool == ActiveTool::Shape {
+            self.slide_shape(p);
+        }
+        let out = if !self.axis_lock_on() {
+            if self.stroke_axis.take().is_some() {
+                if let (Some(lock), Some(at)) = (self.snap_lock.as_mut(), self.stroke_last_doc) {
+                    *lock = SnapLock { start: at, dir: None };
+                }
+            }
+            self.snap_doc(p)
+        } else if self.tool == ActiveTool::Shape {
+            p
+        } else {
+            let from = self.stroke_last_doc.unwrap_or(p);
+            let mut lock = self.stroke_axis.unwrap_or(StrokeAxis { from, angle: None });
+            let from = (lock.from[0], lock.from[1]);
+            if lock.angle.is_none() {
+                let far = (p[0] - from.0).hypot(p[1] - from.1) * self.view_scale >= DECIDE_PX;
+                lock.angle = far.then(|| axis_lock::hv_angle(from, (p[0], p[1]), self.lock_basis_doc()));
+            }
+            self.stroke_axis = Some(lock);
+            match lock.angle {
+                Some(a) => {
+                    let (x, y) = axis_lock::onto(from, a, (p[0], p[1]));
+                    [x, y]
+                }
+                None => lock.from,
+            }
+        };
+        self.stroke_last_doc = Some(out);
+        out
     }
 
     /// A stroke point at document point `p`, snapped to the active grid.
@@ -5515,20 +6303,41 @@ impl AppState {
     pub const MAX_SWATCHES: usize = 32;
 
     /// Set the brush colour everywhere it is mirrored. `brush` alone is not
-    /// enough: the per-tool copy in `tool_brushes` is what a tool switch
-    /// restores from, so writing only one of them loses the colour on the next
-    /// tool change. Same reasoning as `commit_screen_pick`.
+    /// enough: the per-tool copy in `tool_brushes` or the pen slot is what a
+    /// tool switch restores from, so writing only one of them loses the
+    /// colour on the next tool change. Same reasoning as `commit_screen_pick`.
     pub fn set_brush_color(&mut self, rgb: [u8; 3]) {
         let c = [rgb[0], rgb[1], rgb[2], 255];
         self.brush.color = c;
         if self.wheel_pinned {
-            for b in &mut self.tool_brushes {
+            for b in self.every_brush_mut() {
                 b.color = c;
             }
         } else {
-            let idx = self.tool.idx();
-            self.tool_brushes[idx].color = c;
+            self.brush_of_mut(self.tool).color = c;
         }
+    }
+
+    /// The brush `t` keeps between tool switches: its pen slot's, or its own.
+    pub fn brush_of(&self, t: ActiveTool) -> &BrushSettings {
+        match (t.pen(), t.idx()) {
+            (Some(i), _) => &self.pens[i].brush,
+            (None, Some(k)) => &self.tool_brushes[k],
+            (None, None) => unreachable!("a tool is a pen or has an index"),
+        }
+    }
+
+    pub fn brush_of_mut(&mut self, t: ActiveTool) -> &mut BrushSettings {
+        match (t.pen(), t.idx()) {
+            (Some(i), _) => &mut self.pens[i].brush,
+            (None, Some(k)) => &mut self.tool_brushes[k],
+            (None, None) => unreachable!("a tool is a pen or has an index"),
+        }
+    }
+
+    /// Every tool's kept brush, every pen slot's among them.
+    fn every_brush_mut(&mut self) -> impl Iterator<Item = &mut BrushSettings> {
+        self.tool_brushes.iter_mut().chain(self.pens.iter_mut().map(|p| &mut p.brush))
     }
 
     /// Whether the colour wheel is pinned.
@@ -5564,28 +6373,88 @@ impl AppState {
     /// to restore from. Shape has no size of its own, so its Thickness goes
     /// to the pen it follows too.
     pub(crate) fn stash_brush(&mut self) {
-        self.tool_brushes[self.tool.idx()] = self.brush.clone();
-        match self.tool {
-            ActiveTool::Pencil | ActiveTool::Ink => self.last_pen = self.tool,
-            ActiveTool::Shape => self.tool_brushes[self.last_pen.idx()].radius = self.brush.radius,
-            _ => {}
+        *self.brush_of_mut(self.tool) = self.brush.clone();
+        if self.tool == ActiveTool::Shape {
+            self.brush_of_mut(self.last_pen).radius = self.brush.radius;
         }
     }
 
+    /// `tool`'s own line smoothing, for a tool that draws freehand: a pen
+    /// slot's, or the eraser's.
+    pub fn smoothing_for(&self, tool: ActiveTool) -> Option<&SmoothingOptions> {
+        match tool {
+            ActiveTool::Pen(i) => self.pens.get(i as usize).map(|p| &p.smoothing),
+            ActiveTool::Eraser => Some(&self.eraser_smoothing),
+            _ => None,
+        }
+    }
+
+    /// The active tool's own line smoothing, for a tool that draws freehand.
+    pub fn smoothing(&self) -> Option<&SmoothingOptions> {
+        self.smoothing_for(self.tool)
+    }
+
+    pub fn smoothing_mut(&mut self) -> Option<&mut SmoothingOptions> {
+        self.smoothing_and_before_mut().map(|(o, _)| o)
+    }
+
+    /// The active tool's smoothing, and the kind it had before the
+    /// Stabilizer key turned it on.
+    fn smoothing_and_before_mut(&mut self) -> Option<(&mut SmoothingOptions, &mut Smoothing)> {
+        match self.tool {
+            ActiveTool::Pen(i) => self.pens.get_mut(i as usize).map(|p| (&mut p.smoothing, &mut p.before_stabilizer)),
+            ActiveTool::Eraser => Some((&mut self.eraser_smoothing, &mut self.eraser_before_stabilizer)),
+            _ => None,
+        }
+    }
+
+    /// Turn the active pen's Stabilizer on, or off again to the smoothing it
+    /// had before. The next stroke takes it; one under way keeps its own.
+    fn toggle_stabilizer(&mut self) {
+        let Some((o, before)) = self.smoothing_and_before_mut() else { return };
+        if o.kind == Smoothing::Stabilizer {
+            o.kind = *before;
+        } else {
+            *before = o.kind;
+            o.kind = Smoothing::Stabilizer;
+        }
+    }
+
+    /// Step the active pen's smoothing on to the next kind, round to None
+    /// after the Stabilizer.
+    fn cycle_smoothing(&mut self) {
+        let Some((o, before)) = self.smoothing_and_before_mut() else { return };
+        let next = match o.kind {
+            Smoothing::None => Smoothing::Basic,
+            Smoothing::Basic => Smoothing::Weighted,
+            Smoothing::Weighted => Smoothing::Stabilizer,
+            Smoothing::Stabilizer => Smoothing::None,
+        };
+        if next == Smoothing::Stabilizer {
+            *before = o.kind;
+        }
+        o.kind = next;
+    }
+
     /// Make `t` the active tool with its stored brush. Shape draws at the
-    /// size of the pen used last, not at a size of its own.
+    /// size of the pen used last, not at a size of its own. A pen slot
+    /// becomes the pen used last.
     pub(crate) fn load_brush(&mut self, t: ActiveTool) {
         // A pinned wheel's colour goes with the pen to the next tool, however
         // it was set.
         let shared = self.wheel_pinned.then_some(self.brush.color);
         self.tool = t;
-        self.brush = self.tool_brushes[t.idx()].clone();
+        self.brush = self.brush_of(t).clone();
         if let Some(c) = shared {
             self.brush.color = c;
-            self.tool_brushes[t.idx()].color = c;
+            self.brush_of_mut(t).color = c;
+        }
+        if t.is_pen() && t != self.last_pen {
+            self.prev_pen = Some(self.last_pen);
+            self.last_pen = t;
         }
         if t == ActiveTool::Shape {
-            self.brush.radius = self.tool_brushes[self.last_pen.idx()].radius;
+            self.brush.radius = self.brush_of(self.last_pen).radius;
         }
     }
 
@@ -5622,20 +6491,20 @@ impl AppState {
         self.stash_brush();
         // Apply to the active brush and every tool's stored colour so the sample
         // sticks across tool switches.
-        for b in &mut self.tool_brushes {
+        for b in self.every_brush_mut() {
             b.color = color;
         }
         let tool = self.screen_pick_return_tool;
         self.load_brush(tool);
         self.brush.color = color;
-        self.tool_brushes[tool.idx()].color = color;
+        self.brush_of_mut(tool).color = color;
         self.end_screen_pick();
     }
 
     #[allow(dead_code)]
     pub fn apply_picked_color(&mut self, color: [u8; 4]) {
         self.brush.color = color;
-        for b in &mut self.tool_brushes {
+        for b in self.every_brush_mut() {
             b.color = color;
         }
     }
@@ -5838,6 +6707,17 @@ impl AppState {
         }
     }
 
+    /// Set layer `i`'s opacity alone, from the % on its row. One undo step
+    /// per drag, as with [`AppState::set_selected_opacity`].
+    pub fn set_layer_opacity(&mut self, i: usize, v: f32) {
+        if self.layer_opacity_before.is_none() {
+            self.layer_opacity_before = Some(undo::TimelineState::capture(&self.project));
+        }
+        if let Some(l) = self.project.layers.get_mut(i) {
+            l.opacity = v.clamp(0.0, 1.0);
+        }
+    }
+
     /// Close the undo step an opacity drag opened. Nothing when it changed
     /// nothing.
     pub fn commit_layer_opacity(&mut self) {
@@ -5959,8 +6839,19 @@ impl AppState {
             return;
         }
         match action {
-            Action::ToolPencil => self.set_tool(ActiveTool::Pencil),
-            Action::ToolInk => self.set_tool(ActiveTool::Ink),
+            Action::ToolPencil
+            | Action::ToolInk
+            | Action::ToolPen3
+            | Action::ToolPen4
+            | Action::ToolPen5
+            | Action::ToolPen6 => {
+                if let Some(i) = action.pen_slot() {
+                    self.select_pen(i);
+                }
+            }
+            Action::PenNext => self.step_pen(true),
+            Action::PenPrev => self.step_pen(false),
+            Action::PenSwap => self.swap_pen(),
             Action::ToolEraser => self.set_tool(ActiveTool::Eraser),
             // Again while Fill is the tool, it swaps the bucket and the lasso.
             Action::ToolFill if self.tool == ActiveTool::Fill => self.toggle_fill_mode(),
@@ -6008,28 +6899,11 @@ impl AppState {
                     self.project.goto(f);
                 }
             }
-            // Insert the user's step size worth of frames. One `structural_edit`
-            // wraps the whole loop, so N frames cost one undo entry, not N.
-            Action::FrameAdd => {
-                let n = self.frame_step_count();
-                self.structural_edit(false, |p| {
-                    for _ in 0..n {
-                        p.add_frame();
-                    }
-                });
-            }
-            Action::FrameDuplicate => {
-                let n = self.frame_step_count();
-                self.structural_edit(false, |p| {
-                    for _ in 0..n {
-                        p.duplicate_frame();
-                    }
-                });
-            }
-            Action::FrameDelete => {
-                let wipes_pixels = self.project.frame_count <= 1;
-                self.structural_edit(wipes_pixels, Project::delete_frame);
-            }
+            // Insert the user's step size worth of frames, as one undo entry.
+            Action::FrameAdd => self.add_frames(),
+            Action::FrameDuplicate => self.duplicate_frames(),
+            Action::FrameDelete => self.delete_frame(),
+            Action::FrameInsertBefore => self.insert_frames_before(),
             Action::OnionToggle => self.onion.enabled = !self.onion.enabled,
             Action::LayerAdd => self.structural_edit(false, |p| {
                 p.add_layer_above_active();
@@ -6096,12 +6970,16 @@ impl AppState {
             Action::SizeUp => {
                 self.brush.radius = (self.brush.radius * 1.18).min(256.0);
             }
+            Action::SizeSwap => self.swap_size(),
+            Action::StabilizerToggle => self.toggle_stabilizer(),
+            Action::SmoothingCycle => self.cycle_smoothing(),
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::ClearCell => self.clear_active(),
             Action::PasteImage => self.paste_image_as_background(),
             Action::TogglePanels => self.show_panels = !self.show_panels,
             Action::ToggleMiniTimeline => self.show_mini_timeline = !self.show_mini_timeline,
+            Action::ToggleLockAxes => self.lock_screen_axes = !self.lock_screen_axes,
             Action::ZoomReset => self.view.zoom = 1.0,
             Action::PanReset => self.view.pan = egui::Vec2::ZERO,
             Action::RotateReset => {
@@ -6142,6 +7020,7 @@ impl AppState {
                 Ok(None) => {}
                 Err(e) => log::error!("Open project failed: {e:#}"),
             },
+            Action::CopyFrame => self.copy_frame(),
             // Held, not pressed: read by the canvas input code as a drag
             // starts, never dispatched.
             Action::CanvasZoom
@@ -6156,7 +7035,9 @@ impl AppState {
             | Action::SelModeIntersect
             | Action::FillLassoErase
             | Action::FillLassoEnclose
-            | Action::FillPolygonSnap => {}
+            | Action::FillPolygonSnap
+            | Action::ShapeMove
+            | Action::ShapeCentre => {}
             Action::LayerTransformToggle => self.layer_xform = !self.layer_xform,
             Action::TransformKeyAdd => self.add_transform_key(),
             Action::TransformKeyDelete => self.delete_transform_key(),
@@ -6297,6 +7178,13 @@ impl AppState {
         self.project_path = path;
         self.save_toast = None;
         self.save_error = None;
+        if !self.project.keep_inside_by_default() {
+            self.save_toast = Some((
+                "Keep inside canvas is off: this camera already goes past the canvas".to_string(),
+                // A sentence to read, not a word to glance at.
+                Instant::now() + Self::TOAST_TTL * 3,
+            ));
+        }
         self.retire_cell_textures();
         self.retire_all_ghosts();
         self.cell_dirty.clear();
@@ -6447,7 +7335,17 @@ impl AppState {
                 // Backspace takes back a polygon corner while one is being
                 // placed, rather than clearing the drawing under it.
                 let polygon = self.polygon_active() || self.fill_polygon_active();
+                // Space moving a shape mustn't also play.
+                let mid_keys = if self.mid_drag_under_way() {
+                    self.shortcuts.mid_drag_keys()
+                } else {
+                    Vec::new()
+                };
                 for a in actions {
+                    let key = self.shortcuts.get(a).and_then(|c| c.key);
+                    if key.is_some_and(|k| mid_keys.contains(&k)) {
+                        continue;
+                    }
                     match a {
                         Action::TrackClear if !tracks_own_delete => continue,
                         Action::SelectionDelete if tracks_own_delete => continue,
@@ -6556,7 +7454,7 @@ impl eframe::App for AppState {
         // change made since the last switch lives in `brush` alone until this
         // stashes it.
         self.stash_brush();
-        let tool_brushes = self.tool_brushes.to_vec();
+        let (tool_brushes, pen_smoothing, brush_sizes) = self.legacy_tool_prefs();
         eframe::set_value(
             storage,
             UI_PREFS_KEY,
@@ -6566,18 +7464,23 @@ impl eframe::App for AppState {
                 frame_step: self.frame_step,
                 show_camera_guide: self.show_camera_guide,
                 dim_outside_camera: self.dim_outside_camera,
+                camera_box_free: self.camera_box_free,
                 show_layer_bounds: self.show_layer_bounds,
                 lock_brush_to_view: self.lock_brush_to_view,
                 onion: self.onion,
                 auto_key_transform: self.auto_key_transform,
                 auto_key_draw: self.auto_key_draw,
                 invert_timeline_scroll: self.invert_timeline_scroll,
+                lock_screen_axes: self.lock_screen_axes,
                 middle_drag: self.middle_drag,
                 right_drag: self.right_drag,
                 loop_timeline: self.loop_timeline,
-                smoothing: self.smoothing,
+                smoothing: self.pens[0].smoothing,
+                pen_smoothing,
                 tool_brushes: Some(tool_brushes),
+                pens: self.pens.clone(),
                 palette: self.palette.clone(),
+                brush_sizes,
                 track_frame_w: self.track_frame_w,
                 perspective: PerspectiveConfig {
                     grids: self.grid_seed.clone(),
@@ -6589,6 +7492,7 @@ impl eframe::App for AppState {
                 krita_path: self.krita_path.clone(),
                 project_presets: self.project_presets.clone(),
                 sel_shape: self.sel_shape,
+                wand: self.wand,
                 fill_mode: self.fill_mode,
                 fill_enclose: self.fill_enclose,
                 fill_behind: self.fill_behind,
@@ -6600,6 +7504,7 @@ impl eframe::App for AppState {
                 last_camera_size: self.last_camera_size,
                 hidden_panels: self.hidden_panels.clone(),
                 panel_layout_gen: self.panel_layout_gen,
+                panel_padding: self.panel_padding,
                 color_scheme: self.color_scheme,
                 custom_colors: self.custom_colors,
             },
@@ -6689,7 +7594,7 @@ impl eframe::App for AppState {
         }
         // Sampled here rather than in the pointer handlers: those run off
         // tablet packets and never see an `InputState`.
-        (self.shift_held, self.alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
+        ctx.input(|i| self.read_input(i));
 
         let tab_focus = self.handle_keys(ctx);
 
@@ -6741,6 +7646,29 @@ impl eframe::App for AppState {
 /// them in gamma space — light strokes get a white rim. The same rim comes
 /// back between texels if they are *mixed* in linear light, as egui's
 /// sampler does, so the canvas draws them through `ui::canvas_gpu`.
+/// Bring floating pixels' texture in `slot` up to `sel`'s pixels: re-filled
+/// in place while the size holds, else made anew and the old one retired.
+fn sync_float_tex(
+    ctx: &egui::Context,
+    slot: &mut Option<TextureHandle>,
+    sel: &Selection,
+    retired: &mut Vec<TextureHandle>,
+    fresh_full: &mut HashSet<egui::TextureId>,
+) {
+    let dims = [sel.mask.w as usize, sel.mask.h as usize];
+    let image = premultiplied_image(dims, &sel.pixels);
+    match slot.as_mut() {
+        Some(tex) if tex.size() == dims => {
+            tex.set(image, TextureOptions::LINEAR);
+            fresh_full.insert(tex.id());
+        }
+        _ => {
+            retired.extend(slot.take());
+            *slot = Some(ctx.load_texture("selection", image, TextureOptions::LINEAR));
+        }
+    }
+}
+
 pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
     let pixels = rgba.chunks_exact(4).map(premultiplied).collect();
     ColorImage { size, pixels }
@@ -7931,7 +8859,7 @@ mod tests {
         assert!(st.show_panels);
         assert_eq!(ctx.memory(|m| m.focused()), None, "Tab left a panel widget focused");
         frame(&mut st, Some(egui::Key::Q));
-        assert_eq!(st.tool, ActiveTool::Pencil);
+        assert_eq!(st.tool, ActiveTool::PENCIL);
     }
 
     /// Settings takes a bare Shift for a hold binding once it comes back up,
@@ -8040,25 +8968,25 @@ mod tests {
     #[test]
     fn a_pinned_wheel_gives_every_tool_one_colour() {
         let mut st = AppState::for_test();
-        st.set_tool(ActiveTool::Pencil);
+        st.set_tool(ActiveTool::PENCIL);
         st.set_brush_color([200, 0, 0]);
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.set_brush_color([0, 0, 200]);
-        st.set_tool(ActiveTool::Pencil);
+        st.set_tool(ActiveTool::PENCIL);
         assert_eq!(st.brush.color, [200, 0, 0, 255], "unpinned: each its own");
 
         st.set_wheel_pinned(true);
         st.set_tool(ActiveTool::Fill);
         assert_eq!(st.brush.color, [200, 0, 0, 255], "pinning hands the colour on");
         st.set_brush_color([0, 150, 0]);
-        for t in [ActiveTool::Ink, ActiveTool::Shape, ActiveTool::Pencil] {
+        for t in [ActiveTool::INK, ActiveTool::Shape, ActiveTool::PENCIL] {
             st.set_tool(t);
             assert_eq!(st.brush.color, [0, 150, 0, 255], "{t:?}");
         }
 
         st.set_wheel_pinned(false);
         st.set_brush_color([9, 9, 9]);
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         assert_eq!(st.brush.color, [0, 150, 0, 255], "let go: tools drift apart again");
         st.dispatch(Action::WheelPinToggle);
         assert!(st.wheel_pinned());
@@ -8872,7 +9800,7 @@ mod tests {
         for mode in [BrushMode::Ribbon, BrushMode::Krita] {
             let mut st = AppState::for_test();
             st.load_project(Project::new(3000, 4000, 24.0), None);
-            st.tool = ActiveTool::Pencil;
+            st.tool = ActiveTool::PENCIL;
             st.brush.mode = mode;
             st.brush.radius = 6.0;
             let ctx = egui::Context::default();
@@ -9047,6 +9975,47 @@ mod tests {
         assert!(near(grid_centre_doc(&state, 0), c0), "back to the one key's pose");
         state.redo();
         assert_eq!(state.perspective.grids[0].keys.len(), 2);
+    }
+
+    /// Frames inserted before the playhead move the grids' keys along with
+    /// the camera's and the drawings, and one undo puts all of it back.
+    #[test]
+    fn inserting_frames_before_moves_grid_keys_in_one_undo() {
+        let mut state = perspective_state();
+        state.project.ensure_frame_count(30);
+        state.sync_grid_buffers();
+        state.project.goto(4);
+        state.add_grid_key();
+        state.add_camera_key();
+        let grid_keys = |s: &AppState| s.perspective.grids[0].keys.iter().map(|k| k.frame).collect::<Vec<_>>();
+        state.frame_step = 3;
+        let steps = state.history.undo_len();
+
+        state.project.goto(2);
+        state.dispatch(Action::FrameInsertBefore);
+        assert_eq!(grid_keys(&state), vec![7]);
+        assert_eq!(state.project.camera_keys[0].frame, 7);
+        assert_eq!((state.project.frame_count, state.project.current_frame), (33, 5));
+        assert_eq!(state.history.undo_len(), steps + 1, "one step");
+
+        state.undo();
+        assert_eq!(grid_keys(&state), vec![4]);
+        assert_eq!(state.project.camera_keys[0].frame, 4);
+        assert_eq!(state.project.frame_count, 30);
+        state.redo();
+        assert_eq!(grid_keys(&state), vec![7]);
+
+        // The other frame buttons move them too.
+        state.project.goto(8);
+        state.dispatch(Action::FrameDelete);
+        assert_eq!(grid_keys(&state), vec![7]);
+        state.project.goto(7);
+        state.dispatch(Action::FrameDelete);
+        assert!(grid_keys(&state).is_empty(), "the key on the deleted frame went with it");
+        state.undo();
+        state.project.goto(0);
+        state.dispatch(Action::FrameAdd);
+        assert_eq!(grid_keys(&state), vec![10]);
     }
 
     #[test]
@@ -9482,6 +10451,250 @@ mod tests {
         assert_eq!(state.snap_doc([190.0, 165.0]), [190.0, 165.0]);
     }
 
+    // --- Shift partway through a drag ---
+
+    /// The Shape tool drawing flat: no grid to lie on.
+    fn flat_shapes(kind: ShapeKind) -> AppState {
+        let mut state = AppState::for_test();
+        state.view_scale = 1.0;
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = kind;
+        state.brush.radius = 3.0;
+        state
+    }
+
+    fn shift(down: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            shift: down,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn shift_down_at_the_press_locks_only_once_pressed_again() {
+        let mut state = AppState::for_test();
+        state.read_modifiers(shift(true));
+        state.drag_began();
+        assert!(!state.axis_lock_on(), "it chose the drag: a pan, a selection mode");
+        state.read_modifiers(shift(true));
+        assert!(!state.axis_lock_on(), "still the same press of it");
+        state.read_modifiers(shift(false));
+        state.read_modifiers(shift(true));
+        assert!(state.axis_lock_on(), "pressed again partway");
+        // Up at the press, down partway: locks at once.
+        state.read_modifiers(shift(false));
+        state.drag_began();
+        state.read_modifiers(shift(true));
+        assert!(state.axis_lock_on());
+    }
+
+    #[test]
+    fn shift_partway_turns_a_shape_line_to_a_fifteen_degree_step() {
+        let mut state = flat_shapes(ShapeKind::Line);
+        let a = 50f32.to_radians();
+        let end = (100.0 + 120.0 * a.cos(), 100.0 + 120.0 * a.sin());
+        state.pointer_down(state.make_sample(100.0, 100.0, 0.0));
+        state.pointer_move(state.make_sample(end.0, end.1, 0.1));
+        let angle = |o: &[(f32, f32)]| (o[1].1 - o[0].1).atan2(o[1].0 - o[0].0).to_degrees();
+        let drag = state.shape_drag.unwrap();
+        assert!((angle(&state.shape_outline(&drag)) - 50.0).abs() < 1e-3, "free");
+        state.read_modifiers(shift(true));
+        assert!((angle(&state.shape_outline(&drag)) - 45.0).abs() < 1e-3, "45°, not 50°");
+        state.pointer_up();
+        let on = 80.0 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!(alpha(&state, (100.0 + on, 100.0 + on)) > 200, "drawn down the diagonal");
+        assert_eq!(alpha(&state, (100.0 + 80.0 * a.cos(), 100.0 + 80.0 * a.sin())), 0);
+    }
+
+    /// A layer turned on the canvas: the line stays level on the canvas, or
+    /// on the screen over a turned view, as asked.
+    #[test]
+    fn a_held_line_is_level_on_the_canvas_or_the_screen() {
+        let mut state = flat_shapes(ShapeKind::Line);
+        state.project.layers[0].transform.rot = 20f32.to_radians();
+        state.view.rotation = 35f32.to_radians();
+        for (screen, want) in [(false, 0.0f32), (true, -35.0)] {
+            state.lock_screen_axes = screen;
+            let a = state.lock_basis_doc().to_degrees();
+            assert!((a - want).abs() < 1e-3, "basis {a} for screen={screen}");
+            // In the layer's pixels, the canvas's horizontal is turned back
+            // by the layer's 20°.
+            let c = state.lock_basis_cell().to_degrees();
+            assert!((c - (want - 20.0)).abs() < 1e-3, "cell basis {c}");
+        }
+    }
+
+    #[test]
+    fn shift_partway_squares_a_flat_rect() {
+        let mut state = flat_shapes(ShapeKind::Rect);
+        state.pointer_down(state.make_sample(100.0, 100.0, 0.0));
+        state.pointer_move(state.make_sample(200.0, 140.0, 0.1));
+        state.read_modifiers(shift(true));
+        state.pointer_up();
+        assert!(alpha(&state, (200.0, 190.0)) > 200, "the right side runs on down");
+        assert!(alpha(&state, (150.0, 200.0)) > 200, "to a bottom as far as it is wide");
+        assert_eq!(alpha(&state, (150.0, 140.0)), 0, "not where the drag left it");
+    }
+
+    // --- The move and centre keys partway through a drag ---
+
+    /// A Shape drag's next point as the canvas feeds it: through
+    /// `stroke_point_doc`, where the move key slides the shape.
+    fn shape_to(state: &mut AppState, p: [f32; 2], t: f32) {
+        let [x, y] = state.stroke_point_doc(p);
+        state.pointer_move(state.make_sample(x, y, t));
+    }
+
+    /// And its press.
+    fn shape_from(state: &mut AppState, p: [f32; 2]) {
+        let [x, y] = state.snap_begin(p);
+        state.pointer_down(state.make_sample(x, y, 0.0));
+    }
+
+    #[test]
+    fn a_mid_key_down_at_the_press_counts_only_once_pressed_again() {
+        let mut state = AppState::for_test();
+        state.hold_mid_keys(true, true);
+        state.drag_began();
+        assert!(!state.move_on() && !state.centre_on(), "they chose the drag");
+        state.hold_mid_keys(false, false);
+        state.hold_mid_keys(true, true);
+        assert!(state.move_on() && state.centre_on(), "pressed again partway");
+    }
+
+    #[test]
+    fn the_move_key_partway_slides_a_flat_rect() {
+        let mut state = flat_shapes(ShapeKind::Rect);
+        shape_from(&mut state, [100.0, 100.0]);
+        shape_to(&mut state, [150.0, 130.0], 0.1);
+        state.hold_mid_keys(true, false);
+        shape_to(&mut state, [180.0, 150.0], 0.2);
+        let drag = state.shape_drag.unwrap();
+        assert_eq!((drag.start, drag.end), ((130.0, 120.0), (180.0, 150.0)), "slid, same size");
+        // Let go, it grows again from where it was slid to.
+        state.hold_mid_keys(false, false);
+        shape_to(&mut state, [200.0, 170.0], 0.3);
+        assert_eq!(state.shape_drag.unwrap().start, (130.0, 120.0));
+        state.pointer_up();
+        assert!(alpha(&state, (130.0, 145.0)) > 200, "left side where it was slid to");
+        assert_eq!(alpha(&state, (100.0, 145.0)), 0, "not where it was pressed");
+    }
+
+    #[test]
+    fn the_centre_key_partway_grows_a_rect_from_the_press() {
+        let mut state = flat_shapes(ShapeKind::Rect);
+        shape_from(&mut state, [150.0, 150.0]);
+        shape_to(&mut state, [190.0, 170.0], 0.1);
+        state.hold_mid_keys(false, true);
+        let o = state.shape_outline(&state.shape_drag.unwrap());
+        assert_eq!((o[0], o[2]), ((110.0, 130.0), (190.0, 170.0)));
+        // With Shift too: a square round the press.
+        state.read_modifiers(shift(true));
+        let o = state.shape_outline(&state.shape_drag.unwrap());
+        assert_eq!((o[0], o[2]), ((110.0, 110.0), (190.0, 190.0)));
+        state.read_modifiers(shift(false));
+        state.pointer_up();
+        assert!(alpha(&state, (110.0, 150.0)) > 200, "reaches as far left of the press as right");
+        assert!(alpha(&state, (150.0, 130.0)) > 200, "top edge above the press");
+    }
+
+    #[test]
+    fn a_centred_line_runs_both_ways_from_the_press() {
+        let mut state = flat_shapes(ShapeKind::Line);
+        shape_from(&mut state, [150.0, 150.0]);
+        shape_to(&mut state, [200.0, 160.0], 0.1);
+        state.hold_mid_keys(false, true);
+        let o = state.shape_outline(&state.shape_drag.unwrap());
+        assert_eq!(o, vec![(100.0, 140.0), (200.0, 160.0)]);
+        // Slid as well: the middle goes with the pointer.
+        state.hold_mid_keys(true, true);
+        shape_to(&mut state, [210.0, 160.0], 0.2);
+        let o = state.shape_outline(&state.shape_drag.unwrap());
+        assert_eq!(o, vec![(110.0, 140.0), (210.0, 160.0)]);
+    }
+
+    #[test]
+    fn the_move_key_slides_a_rect_along_its_grid() {
+        let mut state = shape_state(ShapeKind::Rect);
+        shape_from(&mut state, [130.0, 380.0]);
+        shape_to(&mut state, [170.0, 340.0], 0.1);
+        let plane = state.shape_drag.unwrap().plane.expect("on the floor");
+        let span = |state: &AppState| {
+            let o = state.shape_outline(&state.shape_drag.unwrap());
+            let [u0, v0] = plane.h.unmap([o[0].0, o[0].1]).unwrap();
+            let [u1, v1] = plane.h.unmap([o[2].0, o[2].1]).unwrap();
+            (u1 - u0, v1 - v0)
+        };
+        let before = span(&state);
+        state.hold_mid_keys(true, false);
+        shape_to(&mut state, [160.0, 250.0], 0.2);
+        let after = span(&state);
+        assert!((before.0 - after.0).abs() < 1e-4 && (before.1 - after.1).abs() < 1e-4,
+            "as many cells across: {before:?} {after:?}");
+        let drag = state.shape_drag.unwrap();
+        let (w0, w1) = (40.0, (drag.end.0 - drag.start.0).abs());
+        assert!(w1 < w0, "smaller up the floor, nearer the horizon: {w1}");
+    }
+
+    #[test]
+    fn a_snapped_line_slid_stays_snapped_from_where_it_went() {
+        let mut state = shape_state(ShapeKind::Line);
+        let (w, h) = state.frame_size();
+        let sq = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]];
+        state.perspective.grids[0].set_doc_corners(sq, &perspective::Space::flat(w, h));
+        shape_from(&mut state, [150.0, 150.0]);
+        shape_to(&mut state, [190.0, 165.0], 0.1);
+        let end = |s: &AppState| [s.shape_drag.unwrap().end.0, s.shape_drag.unwrap().end.1];
+        assert!(near(end(&state), [190.0, 150.0]), "on the row");
+        state.hold_mid_keys(true, false);
+        shape_to(&mut state, [190.0, 185.0], 0.2);
+        let start = state.shape_drag.unwrap().start;
+        assert!(near([start.0, start.1], [150.0, 170.0]), "slid down a row: {start:?}");
+        assert!(near(end(&state), [190.0, 170.0]), "and the end with it");
+        state.hold_mid_keys(false, false);
+        shape_to(&mut state, [215.0, 178.0], 0.3);
+        assert!(near(end(&state), [215.0, 170.0]), "still on the row it went to");
+        state.pointer_up();
+        assert!(alpha(&state, (200.0, 170.0)) > 200);
+        assert_eq!(alpha(&state, (170.0, 150.0)), 0, "nothing left on the first row");
+    }
+
+    #[test]
+    fn shift_partway_holds_a_stroke_to_an_axis_from_where_it_was() {
+        let mut state = AppState::for_test();
+        state.view_scale = 1.0;
+        state.dispatch(Action::ToolInk);
+        state.snap_begin([100.0, 100.0]);
+        assert_eq!(state.stroke_point_doc([120.0, 110.0]), [120.0, 110.0], "free");
+        state.read_modifiers(shift(true));
+        assert_eq!(state.stroke_point_doc([122.0, 112.0]), [120.0, 110.0], "still, till it shows a way");
+        let p = state.stroke_point_doc([125.0, 140.0]);
+        assert!(near(p, [120.0, 140.0]), "down from where Shift went down: {p:?}");
+        let p = state.stroke_point_doc([160.0, 150.0]);
+        assert!(near(p, [120.0, 150.0]), "and kept to, heading across too: {p:?}");
+        state.read_modifiers(shift(false));
+        assert_eq!(state.stroke_point_doc([160.0, 150.0]), [160.0, 150.0], "free again");
+        // Pressed again: a new hold, from where the stroke is now.
+        state.read_modifiers(shift(true));
+        state.stroke_point_doc([200.0, 152.0]);
+        let p = state.stroke_point_doc([230.0, 155.0]);
+        assert!(near(p, [230.0, 150.0]), "across this time: {p:?}");
+    }
+
+    #[test]
+    fn shift_partway_holds_a_grid_move_to_an_axis() {
+        let mut state = perspective_state();
+        state.perspective_down([150.0, 150.0]);
+        state.perspective_move([170.0, 156.0]);
+        assert!(near(doc_corners(&state, 0)[0], [120.0, 106.0]), "free");
+        state.read_modifiers(shift(true));
+        state.perspective_move([190.0, 158.0]);
+        assert!(near(doc_corners(&state, 0)[0], [140.0, 100.0]), "held across");
+        state.perspective_move([153.0, 190.0]);
+        assert!(near(doc_corners(&state, 0)[0], [100.0, 140.0]), "held down");
+        state.pointer_up();
+    }
+
     #[test]
     fn next_grid_cycles_the_visible_grids_and_wraps() {
         let mut state = AppState::for_test();
@@ -9591,9 +10804,15 @@ mod tests {
         assert!(!prefs.show_panels);
         assert_eq!(prefs.frame_step, 3);
         assert_eq!(format!("{:?}", prefs.smoothing), format!("{:?}", want.smoothing));
+        assert_eq!(
+            format!("{:?}", restore_pen_smoothing(&prefs)),
+            format!("{:?}", [want.smoothing; LEGACY_SMOOTHING]),
+            "every pen gets the one smoothing there was"
+        );
         assert_eq!(prefs.palette, want.palette);
         assert_eq!(prefs.krita_path, want.krita_path);
         assert_eq!(prefs.bg_color, want.bg_color);
+        assert_eq!(prefs.panel_padding, DEFAULT_PANEL_PADDING, "a padding it never had");
         assert!(prefs.hidden_panels.is_empty() && prefs.panel_layout_gen == 0, "every panel where it was");
         assert_eq!(prefs.color_scheme, Scheme::Graphite);
         // The onion sliders it saved (Prev 1, Next 1, Max α 0.75) become the
@@ -9603,7 +10822,7 @@ mod tests {
         let brushes = restore_tool_brushes(prefs.tool_brushes);
         assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
         assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
-        let fill = &brushes[ActiveTool::Fill.idx()];
+        let fill = &other_brushes(&brushes)[ActiveTool::Fill.idx().unwrap()];
         assert_eq!(
             (fill.fill_grain, fill.fill_grain_size, fill.fill_grain_contrast, fill.fill_grain_boil),
             (0.0, 1.0, 1.0, false),
@@ -9622,9 +10841,106 @@ mod tests {
         let mut storage = MemStorage::default();
         st.save(&mut storage);
         let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
-        let pencil = &restore_tool_brushes(prefs.tool_brushes)[ActiveTool::Pencil.idx()];
+        let pencil = &restore_tool_brushes(prefs.tool_brushes)[0];
         assert_eq!(pencil.mode, crate::tools::BrushMode::Krita);
         assert_eq!(pencil.radius, 33.0);
+    }
+
+    /// Each pen's smoothing is saved as its own.
+    #[test]
+    fn each_pen_s_smoothing_outlasts_a_restart() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolInk);
+        st.dispatch(Action::StabilizerToggle);
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let kinds = restore_pen_smoothing(&prefs).map(|o| o.kind);
+        assert_eq!(kinds, [Smoothing::Basic, Smoothing::Stabilizer, Smoothing::Basic]);
+    }
+
+    /// The pen slots outlast a restart: how many, and each one's name, icon,
+    /// brush, smoothing and sizes. The app comes back on the first.
+    #[test]
+    fn the_pen_slots_outlast_a_restart() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        assert_eq!(st.add_pen(), Some(2));
+        st.pens[2].name = "Rough".into();
+        st.pens[2].icon = "feather".into();
+        st.brush = BrushSettings::airbrush();
+        st.dispatch(Action::StabilizerToggle);
+        st.toggle_pinned_size(14.0);
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let back = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(back.pens.len(), 3);
+        let p = &back.pens[2];
+        assert_eq!((p.name.as_str(), p.icon.as_str()), ("Rough", "feather"));
+        assert_eq!(p.brush.radius, BrushSettings::airbrush().radius);
+        assert_eq!(p.smoothing.kind, Smoothing::Stabilizer);
+        assert_eq!(p.sizes.pinned, vec![14.0]);
+        assert_eq!(back.tool, ActiveTool::PENCIL);
+        assert_eq!(back.pen_name(1), "Ink");
+    }
+
+    /// A build from before the slots finds the first two where the pencil
+    /// and the ink always were, and the eraser where it was; and prefs from
+    /// such a build come back the same.
+    #[test]
+    fn the_first_two_slots_are_written_where_an_older_build_reads_them() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.brush.radius = 31.0;
+        st.toggle_pinned_size(3.0);
+        st.set_tool(ActiveTool::INK);
+        st.brush.radius = 11.0;
+        st.set_tool(ActiveTool::Eraser);
+        st.smoothing_mut().unwrap().kind = Smoothing::Weighted;
+        st.brush.radius = 50.0;
+        st.toggle_pinned_size(40.0);
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let eraser = LEGACY_PENS + ActiveTool::Eraser.idx().unwrap();
+        let brushes = restore_tool_brushes(prefs.tool_brushes.clone());
+        assert_eq!([brushes[0].radius, brushes[1].radius, brushes[eraser].radius], [31.0, 11.0, 50.0]);
+        let kinds = restore_pen_smoothing(&prefs).map(|o| o.kind);
+        assert_eq!(kinds, [Smoothing::Basic, Smoothing::Basic, Smoothing::Weighted]);
+        assert_eq!(prefs.brush_sizes[0].pinned, vec![3.0]);
+        assert_eq!(prefs.brush_sizes[eraser].pinned, vec![40.0]);
+
+        let mut old = prefs;
+        old.pens.clear();
+        let back = AppState::with_prefs(old, 8192, None);
+        assert_eq!(back.pens.len(), 2);
+        assert_eq!([back.pens[0].brush.radius, back.pens[1].brush.radius], [31.0, 11.0]);
+        assert_eq!(back.pens[0].sizes.pinned, vec![3.0]);
+        assert_eq!(back.eraser_smoothing.kind, Smoothing::Weighted);
+        assert_eq!(back.brush_of(ActiveTool::Eraser).radius, 50.0);
+    }
+
+    /// A prefs file from before the pen slots gives its pencil and ink as
+    /// the first two slots, and every other tool its own brush, as they were.
+    #[test]
+    fn prefs_from_before_the_pen_slots_make_the_pencil_and_ink_slots() {
+        let mut storage = MemStorage::default();
+        let text = std::fs::read_to_string(PREFS_FIXTURE).expect("fixture");
+        eframe::Storage::set_string(&mut storage, UI_PREFS_KEY, text);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).expect("prefs reset");
+        let st = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!((st.pen_name(0), st.pen_name(1)), ("Pencil".into(), "Ink".into()));
+        assert_eq!(st.pens[0].brush.mode, crate::tools::BrushMode::Krita);
+        assert_eq!(st.pens[0].brush.radius, 21.0);
+        assert_eq!(st.brush.radius, 21.0, "in hand");
+        assert_eq!(st.pens[1].brush.radius, 7.5);
+        assert!(matches!(st.pens[1].brush.cap, crate::tools::StrokeCap::Flat));
+        assert_eq!(st.pens[0].smoothing.kind, Smoothing::Weighted);
+        assert_eq!(st.brush_of(ActiveTool::Eraser).opacity, 0.5);
+        assert_eq!(st.brush_of(ActiveTool::Fill).fill_gap, 4);
+        assert_eq!(st.brush_of(ActiveTool::Shape).shape_kind, ShapeKind::Ellipse);
     }
 
     #[test]
@@ -9678,12 +10994,12 @@ mod tests {
     fn a_new_project_keeps_the_brushes() {
         let mut st = AppState::for_test();
         st.brush.radius = 33.0;
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.brush.radius = 9.0;
         st.reset_with(640, 480, 24.0);
-        assert_eq!(st.tool, ActiveTool::Pencil);
+        assert_eq!(st.tool, ActiveTool::PENCIL);
         assert_eq!(st.brush.radius, 33.0);
-        assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
+        assert_eq!(st.brush_of(ActiveTool::INK).radius, 9.0);
     }
 
     /// Shape draws at the size of the pen used last, and its Thickness goes
@@ -9692,7 +11008,7 @@ mod tests {
     fn shape_shares_its_size_with_the_last_pen() {
         let mut st = AppState::for_test();
         st.brush.radius = 12.0;
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.brush.radius = 4.0;
         st.set_tool(ActiveTool::Shape);
         assert_eq!(st.brush.radius, 4.0, "from the ink");
@@ -9700,9 +11016,9 @@ mod tests {
         st.set_tool(ActiveTool::Fill);
         st.set_tool(ActiveTool::Shape);
         assert_eq!(st.brush.radius, 7.0, "kept through another tool");
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         assert_eq!(st.brush.radius, 7.0, "Thickness went back to the ink");
-        st.set_tool(ActiveTool::Pencil);
+        st.set_tool(ActiveTool::PENCIL);
         assert_eq!(st.brush.radius, 12.0, "the pencil kept its own");
         st.set_tool(ActiveTool::Shape);
         assert_eq!(st.brush.radius, 12.0, "now from the pencil");
@@ -9745,7 +11061,7 @@ mod tests {
         };
         frame(&mut st, None);
         frame(&mut st, Some(egui::Key::W));
-        assert_eq!(st.tool, ActiveTool::Ink);
+        assert_eq!(st.tool, ActiveTool::INK);
         let start = st.brush.radius;
         for _ in 0..3 {
             frame(&mut st, Some(egui::Key::CloseBracket));
@@ -9782,7 +11098,7 @@ mod tests {
     #[test]
     fn a_screen_pick_on_shape_keeps_the_pen_size() {
         let mut st = AppState::for_test();
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.brush.radius = 5.0;
         st.set_tool(ActiveTool::Shape);
         st.brush.radius = 9.0;
@@ -9790,7 +11106,7 @@ mod tests {
         st.commit_screen_pick([1, 2, 3, 255]);
         assert_eq!(st.tool, ActiveTool::Shape);
         assert_eq!(st.brush.radius, 9.0);
-        assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
+        assert_eq!(st.brush_of(ActiveTool::INK).radius, 9.0);
     }
 
     /// A stabilized stroke through the app: pen-up finishes the line even
@@ -9799,7 +11115,7 @@ mod tests {
     fn a_stabilized_stroke_finishes_at_pen_up() {
         let mut st = AppState::for_test();
         st.dispatch(Action::ToolPencil);
-        st.smoothing = SmoothingOptions {
+        *st.smoothing_mut().unwrap() = SmoothingOptions {
             kind: crate::tools::Smoothing::Stabilizer,
             use_delay: false,
             ..SmoothingOptions::default()
@@ -9817,6 +11133,61 @@ mod tests {
         let alpha = |x: u32, y: u32| cell.pixels()[((y * cell.width + x) * 4 + 3) as usize];
         assert!(alpha(250, 100) > 0, "the line runs on to where the pen lifted");
         assert_eq!(alpha(275, 100), 0);
+    }
+
+    /// Each pen keeps its own smoothing: a stabilized Ink leaves the Pencil
+    /// and the Eraser drawing as they did.
+    #[test]
+    fn each_pen_keeps_its_own_smoothing() {
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolInk);
+        st.smoothing_mut().unwrap().kind = Smoothing::Stabilizer;
+        let stabilized = |st: &mut AppState, tool: Action| {
+            st.dispatch(tool);
+            st.pointer_down(st.make_sample(100.0, 100.0, 0.0));
+            for i in 1..=10 {
+                st.pointer_move(st.make_sample(100.0 + i as f32 * 4.0, 100.0, i as f32 * 0.004));
+            }
+            let on = st.stroke.as_ref().expect("a stroke").stabilized();
+            st.pointer_up();
+            on
+        };
+        assert!(!stabilized(&mut st, Action::ToolPencil));
+        assert!(stabilized(&mut st, Action::ToolInk));
+        assert!(!stabilized(&mut st, Action::ToolEraser));
+        st.dispatch(Action::ToolFill);
+        assert!(st.smoothing().is_none(), "Fill has no smoothing");
+    }
+
+    /// The Stabilizer key turns the pen in hand's on, and off to what it had;
+    /// the cycle key steps through every kind. Neither touches the other
+    /// pens, and neither does anything on a tool with no smoothing.
+    #[test]
+    fn the_smoothing_keys_change_the_pen_in_hand() {
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolPencil);
+        st.smoothing_mut().unwrap().kind = Smoothing::Weighted;
+        st.dispatch(Action::StabilizerToggle);
+        assert_eq!(st.smoothing().unwrap().kind, Smoothing::Stabilizer);
+        assert_eq!(st.smoothing_for(ActiveTool::INK).unwrap().kind, Smoothing::Basic);
+        st.dispatch(Action::StabilizerToggle);
+        assert_eq!(st.smoothing().unwrap().kind, Smoothing::Weighted, "back to what it had");
+
+        st.dispatch(Action::ToolEraser);
+        let seen: Vec<_> = (0..4)
+            .map(|_| {
+                st.dispatch(Action::SmoothingCycle);
+                st.smoothing().unwrap().kind
+            })
+            .collect();
+        assert_eq!(seen, [Smoothing::Weighted, Smoothing::Stabilizer, Smoothing::None, Smoothing::Basic]);
+        assert_eq!(st.smoothing_for(ActiveTool::PENCIL).unwrap().kind, Smoothing::Weighted);
+
+        let before = format!("{:?}", (st.pens.iter().map(|p| p.smoothing).collect::<Vec<_>>(), st.eraser_smoothing));
+        st.dispatch(Action::ToolFill);
+        st.dispatch(Action::StabilizerToggle);
+        st.dispatch(Action::SmoothingCycle);
+        assert_eq!(format!("{:?}", (st.pens.iter().map(|p| p.smoothing).collect::<Vec<_>>(), st.eraser_smoothing)), before);
     }
 
     #[test]
@@ -9884,6 +11255,37 @@ mod tests {
         // the three back, and Next was 1 then.
         let old: UiPrefs = toml::from_str("[onion]\nprev = 3\n").unwrap();
         assert_eq!((old.onion.prev_shown, old.onion.next_shown), (0b111, 0b1));
+    }
+
+    #[test]
+    fn the_magic_select_settings_round_trip_and_old_prefs_get_defaults() {
+        let mut prefs = UiPrefs::default();
+        prefs.sel_shape = SelShape::Wand;
+        prefs.wand = WandOptions {
+            tolerance: 40,
+            gap: 6,
+            expand: 2,
+            any_paint: true,
+            contiguous: false,
+            all_visible: true,
+        };
+        let back: UiPrefs = toml::from_str(&toml::to_string(&prefs).unwrap()).unwrap();
+        let st = AppState::with_prefs(back, 8192, None);
+        assert_eq!(st.sel_shape, SelShape::Wand);
+        assert_eq!(st.wand, prefs.wand);
+        // Prefs from before the wand, or with only some of its settings.
+        let old: UiPrefs = toml::from_str("show_panels = false").unwrap();
+        assert_eq!(old.wand, WandOptions::default());
+        let part: UiPrefs = toml::from_str("[wand]\ngap = 3\n").unwrap();
+        assert_eq!(part.wand, WandOptions { gap: 3, ..WandOptions::default() });
+        // And through the app's own save, as a drag left them.
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.wand.gap = 9;
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let saved: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        assert_eq!(saved.wand.gap, 9);
     }
 
     /// The active layer and those with their onion on ghost — of those
@@ -10596,7 +11998,7 @@ mod tests {
             // As drawn with: one ghost each side.
             st.onion.enabled = true;
             st.onion.light(1, 1);
-            st.tool = ActiveTool::Pencil;
+            st.tool = ActiveTool::PENCIL;
             st.brush.mode = mode;
             st.brush.radius = 30.0;
             let ctx = egui::Context::default();
@@ -10631,6 +12033,161 @@ mod tests {
                 .and_then(Canvas::content_bounds)
                 .map_or((cx, cy), |r| ((r.min_x + r.max_x) as f32 / 2.0, (r.min_y + r.max_y) as f32 / 2.0));
             probe_stroke(&mut st, &ctx, "old drawing, 600 px", (mid.0 - 300.0, mid.1), (mid.0 + 300.0, mid.1 + 100.0));
+        }
+    }
+
+    /// One wall-clock stroke: samples come due at `hz` against real time, so
+    /// a slow frame takes more of them, as in the app. Prints the frame-time
+    /// spread and the worst frames, phase by phase.
+    fn wall_stroke(
+        st: &mut AppState,
+        ctx: &egui::Context,
+        label: &str,
+        secs: f32,
+        hz: f32,
+        at: impl Fn(f32) -> (f32, f32, f32),
+    ) {
+        let n = (secs * hz).ceil() as usize;
+        let sample = |i: usize| {
+            let (x, y, p) = at(i as f32 / n as f32);
+            PointerSample {
+                x,
+                y,
+                pressure: p,
+                tilt_x: 25.0,
+                tilt_y: 10.0,
+                t: i as f32 / hz,
+                time_ms: i as f64 * 1000.0 / hz as f64,
+                ..Default::default()
+            }
+        };
+        let raw = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0))),
+            max_texture_side: Some(8192),
+            ..Default::default()
+        };
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        let t0 = Instant::now();
+        st.pointer_down(sample(0));
+        let down = ms(t0);
+        let mut fed = 1;
+        // (fed this frame, sync, ui, tessellate, input, bytes)
+        let mut frames: Vec<(usize, f64, f64, f64, f64, usize)> = Vec::new();
+        while fed <= n {
+            let (mut sync, mut ui) = (0.0, 0.0);
+            let start = Instant::now();
+            let out = ctx.run(raw(), |ctx| {
+                st.collect_cells();
+                st.pack_idle_cells();
+                st.warm_pre(ctx);
+                let s = Instant::now();
+                st.sync_textures(ctx);
+                sync = ms(s);
+                let s = Instant::now();
+                ui::shell::draw(st, ctx);
+                ui = ms(s);
+            });
+            let s = Instant::now();
+            std::hint::black_box(ctx.tessellate(out.shapes, out.pixels_per_point));
+            let tess = ms(s);
+            let _ = start;
+            // The app feeds this frame's packets inside `draw`; here, after it.
+            let due = ((t0.elapsed().as_secs_f32() * hz) as usize).min(n);
+            let s = Instant::now();
+            let before = fed;
+            while fed <= due {
+                st.pointer_move(sample(fed));
+                fed += 1;
+            }
+            let input = ms(s);
+            let bytes = out.textures_delta.set.iter().map(|(_, d)| d.image.width() * d.image.height() * 4).sum();
+            frames.push((fed - before, sync, ui, tess, input, bytes));
+        }
+        let s = Instant::now();
+        st.pointer_up();
+        let up = ms(s);
+        let total = |f: &(usize, f64, f64, f64, f64, usize)| f.1 + f.2 + f.3 + f.4;
+        let mut times: Vec<f64> = frames.iter().map(total).collect();
+        times.sort_by(f64::total_cmp);
+        let pct = |p: f64| times[((times.len() - 1) as f64 * p) as usize];
+        eprintln!(
+            "{label:<34} down {down:>5.1} | {} frames, p50 {:>5.1} p95 {:>5.1} max {:>6.1} | up {up:>5.1}",
+            frames.len(),
+            pct(0.5),
+            pct(0.95),
+            pct(1.0),
+        );
+        let mut worst: Vec<(usize, &(usize, f64, f64, f64, f64, usize))> = frames.iter().enumerate().collect();
+        worst.sort_by(|a, b| total(b.1).total_cmp(&total(a.1)));
+        for (i, f) in worst.into_iter().take(4) {
+            eprintln!(
+                "    frame {i:>3}: {:>6.1} ms = sync {:>5.1} ui {:>5.1} tess {:>4.1} input {:>5.1} ({} samples) | sent {:>5.2} MB",
+                total(f),
+                f.1,
+                f.2,
+                f.3,
+                f.4,
+                f.0,
+                f.5 as f64 / (1024.0 * 1024.0),
+            );
+        }
+    }
+
+    /// The user's own pens (from a `ui_prefs` blob) on a real project, as
+    /// wall-clock strokes. Not a pass/fail test — run it for the numbers:
+    /// `PREFS_PROBE=<ui_prefs.ron> ANIM_PROBE=<x.anim> cargo test --release
+    /// perf_user_strokes -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn perf_user_strokes() {
+        let prefs = || -> UiPrefs {
+            let Some(p) = std::env::var_os("PREFS_PROBE") else { return UiPrefs::default() };
+            let mut storage = MemStorage::default();
+            eframe::Storage::set_string(&mut storage, UI_PREFS_KEY, std::fs::read_to_string(p).expect("prefs file"));
+            eframe::get_value(&storage, UI_PREFS_KEY).expect("prefs parse")
+        };
+        let project = || match std::env::var_os("ANIM_PROBE") {
+            Some(p) => crate::io::project_file::load_from(std::path::Path::new(&p)).expect("probe project"),
+            None => probe_project(2160, 2880, 3),
+        };
+        for tool in [ActiveTool::PENCIL, ActiveTool::INK, ActiveTool::Eraser] {
+            let mut st = AppState::with_prefs(prefs(), 8192, None);
+            st.load_project(project(), None);
+            st.load_brush(tool);
+            let ctx = egui::Context::default();
+            let settle = |st: &mut AppState| {
+                for _ in 0..30 {
+                    probe_frame(st, &ctx);
+                }
+            };
+            settle(&mut st);
+            let (w, h) = (st.project.width as f32, st.project.height as f32);
+            eprintln!(
+                "\n{tool:?}: {:?} r {:.1}, smoothing {:?}, {}x{}, view scale {:.3}. Times in ms.",
+                st.brush.mode,
+                st.brush.radius,
+                st.smoothing().map(|s| s.kind),
+                w,
+                h,
+                st.view_scale,
+            );
+            let wave = |x0: f32, x1: f32, y: f32, amp: f32, waves: f32| {
+                move |u: f32| {
+                    let p = 0.3 + 0.6 * (u * std::f32::consts::PI).sin();
+                    (x0 + (x1 - x0) * u, y + amp * (u * waves * std::f32::consts::TAU).sin(), p)
+                }
+            };
+            wall_stroke(&mut st, &ctx, "quick 0.4 s across", 0.4, 220.0, wave(w * 0.2, w * 0.8, h * 0.4, h * 0.05, 1.0));
+            settle(&mut st);
+            wall_stroke(&mut st, &ctx, "slow 3 s scribble", 3.0, 220.0, wave(w * 0.15, w * 0.85, h * 0.55, h * 0.2, 6.0));
+            settle(&mut st);
+            wall_stroke(&mut st, &ctx, "right after (no rest)", 0.6, 220.0, wave(w * 0.85, w * 0.1, h * 0.3, h * 0.1, 2.0));
+            wall_stroke(&mut st, &ctx, "long diagonal 1 s", 1.0, 220.0, |u| (w * (0.1 + 0.8 * u), h * (0.1 + 0.8 * u), 0.7));
+            // eframe's autosave, every 30 s, on the UI thread.
+            use eframe::App as _;
+            let t = Instant::now();
+            st.save(&mut MemStorage::default());
+            eprintln!("autosave (prefs only) {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
         }
     }
 }
@@ -10700,6 +12257,134 @@ mod camera_rig_tests {
         assert_eq!(UiPrefs::default().last_camera_size, None);
     }
 
+    /// A free camera box gives the camera the box's size, in even pixels,
+    /// framed at zoom 1 and centred on it; a drag along one axis leaves no
+    /// sliver; letting go keys it.
+    #[test]
+    fn a_free_camera_box_sets_the_camera_size() {
+        let mut st = AppState::for_test();
+        let canvas = (st.project.width as f32, st.project.height as f32);
+        st.set_camera_box(true);
+        st.camera_box_free = true;
+        assert!(st.camera_box_down((100.0, 100.0)));
+        st.camera_box_move((501.0, 251.0));
+        let (_, size) = st.camera_box_frame().expect("a box");
+        assert_eq!(size, (402, 152));
+        assert_eq!(st.project.output_size(), (st.project.width, st.project.height), "not till let go");
+        st.camera_box_up();
+        assert_eq!(st.project.output_size(), (402, 152));
+        assert_eq!(st.last_camera_size, Some((402, 152)));
+        let k = st.project.camera_keys.iter().find(|k| k.frame == 0).expect("keyed").camera;
+        assert_eq!(k.zoom, 1.0);
+        assert!((k.tx - (300.5 - canvas.0 * 0.5)).abs() < 1e-3, "{k:?}");
+        assert!((k.ty - (175.5 - canvas.1 * 0.5)).abs() < 1e-3, "{k:?}");
+
+        st.camera_box_down((100.0, 100.0));
+        st.camera_box_move((400.0, 101.0));
+        assert_eq!(st.camera_box_frame().unwrap().1, (300, MIN_FREE_CAMERA_SIDE));
+        st.cam_box = None;
+
+        // Hanging off the top left, it is held on the canvas as that frame.
+        st.camera_box_down((-100.0, -100.0));
+        st.camera_box_move((300.0, 200.0));
+        let (cam, size) = st.camera_box_frame().unwrap();
+        assert_eq!(size, (400, 300));
+        assert_eq!((cam.tx, cam.ty), (200.0 - canvas.0 * 0.5, 150.0 - canvas.1 * 0.5));
+        st.cam_box = None;
+
+        // Off, the box keeps the camera's shape.
+        st.camera_box_free = false;
+        st.camera_box_down((100.0, 100.0));
+        st.camera_box_move((501.0, 251.0));
+        assert_eq!(st.camera_box_frame().unwrap().1, (402, 152), "the size set above");
+        st.camera_box_up();
+        assert_eq!(st.project.output_size(), (402, 152));
+    }
+
+    /// The centre key partway makes the press the box's middle, free or
+    /// kept to the camera's shape; the move key slides it.
+    #[test]
+    fn a_camera_box_grows_from_its_middle_and_slides() {
+        let mut st = AppState::for_test();
+        let canvas = (st.project.width as f32, st.project.height as f32);
+        st.set_camera_box(true);
+        st.camera_box_free = true;
+        st.camera_box_down((300.0, 200.0));
+        st.camera_box_move((400.0, 260.0));
+        st.hold_mid_keys(false, true);
+        let (cam, size) = st.camera_box_frame().expect("a box");
+        assert_eq!(size, (200, 120), "as far again the other way");
+        assert_eq!((cam.tx, cam.ty), (300.0 - canvas.0 * 0.5, 200.0 - canvas.1 * 0.5));
+        // Kept to the camera's shape, it may reach further one way than
+        // dragged; its middle still holds on the press.
+        st.camera_box_free = false;
+        let cam = st.camera_box_frame().unwrap().0;
+        assert_eq!((cam.tx, cam.ty), (300.0 - canvas.0 * 0.5, 200.0 - canvas.1 * 0.5));
+        st.hold_mid_keys(true, false);
+        st.camera_box_move((450.0, 300.0));
+        let b = st.cam_box.unwrap();
+        assert_eq!((b.from, b.to), ((350.0, 240.0), (450.0, 300.0)));
+        st.cam_box = None;
+    }
+
+    /// Free shape and the panel padding are workspace preferences.
+    #[test]
+    fn free_camera_box_and_panel_padding_are_kept_between_runs() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        assert!(!st.camera_box_free);
+        assert_eq!(st.panel_padding, DEFAULT_PANEL_PADDING);
+        st.camera_box_free = true;
+        st.panel_padding = 20;
+        let mut storage = tests::MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let next = AppState::with_prefs(prefs, 8192, None);
+        assert!(next.camera_box_free);
+        assert_eq!((next.panel_padding, next.panel_padding_laid), (20, 20));
+    }
+
+    /// Each brush's pinned and recent sizes are kept between runs.
+    #[test]
+    fn brush_sizes_are_kept_between_runs() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolEraser);
+        st.toggle_pinned_size(6.5);
+        let mut storage = tests::MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let mut next = AppState::with_prefs(prefs, 8192, None);
+        next.dispatch(Action::ToolEraser);
+        assert_eq!(next.size_memory().pinned, vec![6.5]);
+        next.dispatch(Action::ToolInk);
+        assert!(next.size_memory().pinned.is_empty(), "the eraser's alone");
+    }
+
+    /// Keep inside canvas is on at launch and for a new project, and for an
+    /// opened one whose camera stays on the canvas. One keyed past the edge
+    /// opens with it off, and says so.
+    #[test]
+    fn keep_inside_is_on_for_every_project_unless_its_camera_leaves_the_canvas() {
+        let mut st = AppState::for_test();
+        assert!(st.project.camera_opts.keep_inside, "at launch");
+        st.project.camera_opts.keep_inside = false;
+        st.reset_with(640, 360, 24.0);
+        assert!(st.project.camera_opts.keep_inside, "a new project");
+
+        let inside = Project::new(640, 360, 24.0);
+        st.load_project(inside, None);
+        assert!(st.project.camera_opts.keep_inside, "opened, on the canvas");
+        assert!(st.save_toast.is_none());
+
+        let mut wide = Project::new(640, 360, 24.0);
+        wide.camera.zoom = 0.5;
+        st.load_project(wide, None);
+        assert!(!st.project.camera_opts.keep_inside, "opened, framed past the edge");
+        assert_eq!(st.project.camera.zoom, 0.5, "and left as it was");
+        assert!(st.save_toast.as_ref().is_some_and(|(t, _)| t.contains("Keep inside canvas is off")));
+    }
+
     /// A 1280×720 canvas with a 640×360 frame in the middle of it: x
     /// 320..960, y 180..540, the centre at (640, 360).
     fn framed() -> AppState {
@@ -10723,6 +12408,18 @@ mod camera_rig_tests {
         assert_eq!(st.history.undo_len(), 1);
         st.undo();
         assert!(st.project.camera.is_identity());
+    }
+
+    #[test]
+    fn shift_partway_holds_a_camera_move_to_an_axis() {
+        let mut st = framed();
+        assert!(st.camera_frame_down((600.0, 300.0)));
+        st.camera_frame_move((650.0, 320.0));
+        st.read_modifiers(egui::Modifiers::SHIFT);
+        st.camera_frame_move((700.0, 330.0));
+        st.camera_frame_up();
+        let cam = st.project.camera;
+        assert_eq!((cam.tx, cam.ty), (100.0, 0.0));
     }
 
     #[test]
@@ -10895,6 +12592,54 @@ mod camera_rig_tests {
         assert!(st.shot_cam.is_none());
     }
 
+    /// A bar down the drawing at x 40..44, for a pan to move.
+    fn mark(st: &mut AppState) {
+        let id = st.project.layers[0].resolve(0).unwrap();
+        let c = st.project.cell_mut(id).unwrap();
+        let (w, h) = (c.width, c.height);
+        let px = c.pixels_mut();
+        for y in 0..h {
+            for x in 40..44 {
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+
+    /// Copy frame copies the camera as it shows: nudged off its keys and not
+    /// keyed, the nudge — where Save PNG and the exports keep to the keys.
+    #[test]
+    fn copy_frame_takes_an_unkeyed_nudge_of_the_camera() {
+        use crate::io::composite::{flatten_frame, flatten_through};
+        let mut st = panning();
+        mark(&mut st);
+        st.sync_camera_buffer();
+        assert!(st.clipboard_frame().pixels() == flatten_frame(&st.project, 0).pixels(), "on its key");
+        st.project.camera.tx = 25.0;
+        let copied = st.clipboard_frame();
+        let shown = flatten_through(&st.project, 0, Some(st.project.camera));
+        assert!(copied.pixels() == shown.pixels());
+        assert!(copied.pixels() != flatten_frame(&st.project, 0).pixels(), "not the keyed camera");
+    }
+
+    /// Mid-play through a move stretched over loops, Copy frame takes the
+    /// camera where the move has got to, not the one keyed on the drawing
+    /// showing.
+    #[test]
+    fn copy_frame_mid_stretched_move_takes_where_the_move_has_got() {
+        use crate::io::composite::{flatten_frame, flatten_through};
+        let mut st = panning();
+        mark(&mut st);
+        st.project.camera_opts.loops = 3;
+        let (_, cams) = play(&mut st, 9);
+        let f = st.project.current_frame;
+        assert!((cams[8] - st.project.resolve_camera(f).tx).abs() > 1.0, "{cams:?}");
+        let shown = flatten_through(&st.project, f, Some(st.display_camera(f)));
+        let copied = st.clipboard_frame();
+        assert!(copied.pixels() == shown.pixels());
+        assert!(copied.pixels() != flatten_frame(&st.project, f).pixels(), "not the frame's own camera");
+    }
+
     #[test]
     fn an_export_of_a_stretched_move_gives_each_frame_its_camera() {
         let mut st = panning();
@@ -10951,5 +12696,180 @@ mod camera_rig_tests {
         st.set_camera_size(Some((640, 360)));
         st.load_project(Project::new(1280, 720, 24.0), None);
         assert_eq!(st.project.output_size(), (1280, 720));
+    }
+}
+
+/// The pen's drawing readied on the GPU while the pen rests: grown whole,
+/// so a stroke never re-makes its texture partway. See `sync_pen_tex`.
+#[cfg(test)]
+mod pen_tex_tests {
+    use super::*;
+
+    const W: u32 = 1280;
+    const H: u32 = 720;
+
+    /// Three drawings, each a small blob in the middle, so each texture is
+    /// cropped well inside its cell.
+    fn state() -> (AppState, egui::Context) {
+        let mut p = Project::new(W, H, 24.0);
+        for f in 0..3 {
+            if f > 0 {
+                p.add_frame();
+                p.insert_blank_key_here();
+            }
+            let id = p.ensure_active_cell();
+            let c = p.cell_mut(id).expect("keyed cell");
+            let px = c.pixels_mut();
+            for y in 340..380usize {
+                for x in 620..660usize {
+                    let i = (y * W as usize + x) * 4;
+                    px[i..i + 4].copy_from_slice(&[20, 20, 20, 255]);
+                }
+            }
+        }
+        p.goto(0);
+        let mut st = AppState::for_test();
+        st.load_project(p, None);
+        st.auto_key_draw = false;
+        st.load_brush(ActiveTool::PENCIL);
+        st.brush.radius = 4.0;
+        (st, egui::Context::default())
+    }
+
+    /// One frame as `update` runs it, uploads and all.
+    fn frame(st: &mut AppState, ctx: &egui::Context) -> egui::TexturesDelta {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+            max_texture_side: Some(8192),
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| {
+            st.collect_cells();
+            st.pack_idle_cells();
+            st.warm_pre(ctx);
+            st.sync_textures(ctx);
+            ui::shell::draw(st, ctx);
+        })
+        .textures_delta
+    }
+
+    /// Longer than `WARM_REST` at egui's 60 Hz default step.
+    fn rest(st: &mut AppState, ctx: &egui::Context) {
+        for _ in 0..20 {
+            let _ = frame(st, ctx);
+        }
+    }
+
+    fn at(x: f32, y: f32) -> PointerSample {
+        PointerSample {
+            x,
+            y,
+            pressure: 0.8,
+            ..Default::default()
+        }
+    }
+
+    /// From the blob to the far corner, a frame per sample. Panics if the
+    /// drawing's texture is re-made or re-sent whole on the way; returns
+    /// how many frames sent it a patch.
+    fn stroke_without_rebuild(st: &mut AppState, ctx: &egui::Context, tex: egui::TextureId) -> usize {
+        st.pointer_down(at(640.0, 360.0));
+        let target = st.stroke_target.expect("a stroke");
+        let mut patches = 0;
+        for i in 1..=24 {
+            let u = i as f32 / 24.0;
+            st.pointer_move(at(640.0 + 620.0 * u, 360.0 + 350.0 * u));
+            let delta = frame(st, ctx);
+            for (id, d) in &delta.set {
+                if *id == tex {
+                    assert!(d.pos.is_some(), "move {i}: the whole drawing re-sent");
+                    patches += 1;
+                }
+            }
+            assert_eq!(st.cell_textures[&target].tex.id(), tex, "move {i}: the texture re-made");
+        }
+        st.pointer_up();
+        let _ = frame(st, ctx);
+        patches
+    }
+
+    #[test]
+    fn a_resting_pen_grows_its_drawing_whole_and_a_stroke_only_patches_it() {
+        let (mut st, ctx) = state();
+        let _ = frame(&mut st, &ctx);
+        let id = st.project.resolved_current().expect("a drawing");
+        assert_ne!(st.cell_textures[&id].rect, whole_rect(W, H), "cropped to start with");
+        rest(&mut st, &ctx);
+        assert_eq!(st.cell_textures[&id].rect, whole_rect(W, H));
+        let tex = st.cell_textures[&id].tex.id();
+        assert!(stroke_without_rebuild(&mut st, &ctx, tex) >= 20);
+        // Still whole after pen-up, ready for the next one.
+        rest(&mut st, &ctx);
+        assert_eq!(st.cell_textures[&id].tex.id(), tex);
+    }
+
+    /// Only the pen's drawing is kept whole: one per drawing outgrew the
+    /// texture budget in playback.
+    #[test]
+    fn moving_on_crops_the_drawing_left_behind() {
+        let (mut st, ctx) = state();
+        rest(&mut st, &ctx);
+        let first = st.project.resolved_current().unwrap();
+        assert_eq!(st.cell_textures[&first].rect, whole_rect(W, H));
+        st.project.goto(1);
+        rest(&mut st, &ctx);
+        let second = st.project.resolved_current().unwrap();
+        assert_eq!(st.cell_textures[&second].rect, whole_rect(W, H));
+        assert!(
+            st.cell_textures.get(&first).is_none_or(|t| t.rect != whole_rect(W, H)),
+            "the first is whole still"
+        );
+        let whole = st.cell_textures.values().filter(|t| t.rect == whole_rect(W, H)).count();
+        assert_eq!(whole, 1);
+        // Back on screen, it comes back cropped, then whole once rested on.
+        st.project.goto(0);
+        let _ = frame(&mut st, &ctx);
+        assert_ne!(st.cell_textures[&first].rect, whole_rect(W, H));
+        rest(&mut st, &ctx);
+        assert_eq!(st.cell_textures[&first].rect, whole_rect(W, H));
+    }
+
+    /// With auto-key, the press makes a new drawing: it takes the clear
+    /// whole texture readied for it, and its first stroke only patches it.
+    #[test]
+    fn auto_key_s_new_drawing_takes_the_spare() {
+        let (mut st, ctx) = state();
+        st.auto_key_draw = true;
+        st.project.goto(2);
+        st.project.add_frame();
+        let held = st.project.resolved_current().expect("holds the last drawing");
+        rest(&mut st, &ctx);
+        let spare = st.spare_tex.as_ref().map(|(t, s)| (t.id(), *s)).expect("a spare");
+        assert_eq!(spare.1, [W, H]);
+        assert!(stroke_without_rebuild(&mut st, &ctx, spare.0) >= 20);
+        let new = st.project.resolved_current().unwrap();
+        assert_ne!(new, held, "a new drawing");
+        assert_eq!(st.cell_textures[&new].tex.id(), spare.0);
+        assert_eq!(st.cell_textures[&new].rect, whole_rect(W, H));
+        assert!(st.spare_tex.is_none(), "used up");
+        rest(&mut st, &ctx);
+        assert_eq!(st.pen_tex_whole, Some(new));
+    }
+
+    /// Playing only shows the drawing: one the budget dropped comes back
+    /// cropped, not whole.
+    #[test]
+    fn playback_never_remakes_the_pen_s_drawing_whole() {
+        let (mut st, ctx) = state();
+        rest(&mut st, &ctx);
+        let id = st.project.resolved_current().unwrap();
+        st.play_pause(Some(0.0));
+        let t = st.cell_textures.remove(&id).unwrap();
+        st.retired_textures.push(t.tex);
+        st.cell_dirty.insert(id, Dirty::Full);
+        for _ in 0..3 {
+            let _ = frame(&mut st, &ctx);
+        }
+        assert_ne!(st.cell_textures[&id].rect, whole_rect(W, H));
     }
 }

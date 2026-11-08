@@ -193,7 +193,7 @@ fn brushes() -> Vec<(&'static str, BrushSettings, ActiveTool)> {
         .iter()
         .map(|&(label, _, build)| {
             let b = build();
-            let tool = if label == "G-Pen" { ActiveTool::Ink } else { ActiveTool::Pencil };
+            let tool = if label == "G-Pen" { ActiveTool::INK } else { ActiveTool::PENCIL };
             (label, b, tool)
         })
         .collect();
@@ -233,7 +233,7 @@ fn cases() -> Vec<Case> {
 
     // Every brush × gesture × condition.
     for (label, brush, tool) in brushes() {
-        let painting_tool = if tool == ActiveTool::Eraser { ActiveTool::Pencil } else { tool };
+        let painting_tool = if tool == ActiveTool::Eraser { ActiveTool::PENCIL } else { tool };
         for input in ["s", "line", "tap", "tilt"] {
             for (cond, ground, hold) in [
                 ("clear", Ground::Clear, Hold::Free),
@@ -322,7 +322,7 @@ fn cases() -> Vec<Case> {
         out.push(freehand_case(
             format!("Pencil-5/pencil/{input}/clear/rot90-mirror"),
             BrushSettings::pencil5_krita(),
-            ActiveTool::Pencil,
+            ActiveTool::PENCIL,
             Ground::Clear,
             Hold::Free,
             input,
@@ -339,7 +339,7 @@ fn cases() -> Vec<Case> {
         out.push(freehand_case(
             format!("G-Pen-flat/ink/{input}/clear"),
             b,
-            ActiveTool::Ink,
+            ActiveTool::INK,
             Ground::Clear,
             Hold::Free,
             input,
@@ -414,7 +414,7 @@ fn cases() -> Vec<Case> {
                     }
                     let mut b = StrokeBuilder::new_with_krita(
                         settings.clone(),
-                        ActiveTool::Pencil,
+                        ActiveTool::PENCIL,
                         1.0,
                         SmoothingOptions::default(),
                         brush.clone(),
@@ -475,8 +475,8 @@ fn cases() -> Vec<Case> {
 
 fn tool_name(t: ActiveTool) -> &'static str {
     match t {
-        ActiveTool::Pencil => "pencil",
-        ActiveTool::Ink => "ink",
+        ActiveTool::PENCIL => "pencil",
+        ActiveTool::INK => "ink",
         ActiveTool::Eraser => "eraser",
         _ => "other",
     }
@@ -617,11 +617,11 @@ fn noise_render() {
     };
     let grainy = BrushSettings::grainy_airbrush();
     let tiles: [(BrushSettings, ActiveTool); 6] = [
-        (BrushSettings::airbrush(), ActiveTool::Pencil),
-        (grainy.clone(), ActiveTool::Pencil),
-        (BrushSettings { noise_size: 2.5, ..grainy.clone() }, ActiveTool::Pencil),
-        (BrushSettings { noise_source: NoiseSource::Paper, ..grainy.clone() }, ActiveTool::Pencil),
-        (BrushSettings { noise: 1.0, noise_stipple: true, ..grainy.clone() }, ActiveTool::Pencil),
+        (BrushSettings::airbrush(), ActiveTool::PENCIL),
+        (grainy.clone(), ActiveTool::PENCIL),
+        (BrushSettings { noise_size: 2.5, ..grainy.clone() }, ActiveTool::PENCIL),
+        (BrushSettings { noise_source: NoiseSource::Paper, ..grainy.clone() }, ActiveTool::PENCIL),
+        (BrushSettings { noise: 1.0, noise_stipple: true, ..grainy.clone() }, ActiveTool::PENCIL),
         (BrushSettings { color: [0, 0, 0, 0], ..grainy }, ActiveTool::Eraser),
     ];
     let (w, h, gap, z) = (256u32, 160u32, 8u32, 2u32);
@@ -713,7 +713,7 @@ fn perf_brushes_1080p() {
             let pre = c.pixels().into_owned();
             let mut ws = StrokeWorkspace::new();
             ws.begin(c.width, c.height, &settings);
-            let mut b = StrokeBuilder::new_with_krita(settings.clone(), ActiveTool::Pencil, 1.0, SmoothingOptions::default(), kb.clone());
+            let mut b = StrokeBuilder::new_with_krita(settings.clone(), ActiveTool::PENCIL, 1.0, SmoothingOptions::default(), kb.clone());
             b.seed_random(1);
             let t0 = std::time::Instant::now();
             let mut worst = std::time::Duration::ZERO;
@@ -798,5 +798,47 @@ fn perf_brushes_1080p() {
     }
     if std::env::var_os("PERF_STRICT").is_some() {
         assert!(slow.is_empty(), "slower than baseline:\n{}", slow.join("\n"));
+    }
+}
+
+/// Paper grain and noise riddle a pencil line with pixels under half
+/// covered. The bucket pressed inside a ring drawn with one fills the ring,
+/// and not the page round it.
+#[test]
+fn a_grainy_pencil_ring_holds_the_bucket() {
+    let pencil = BrushSettings { radius: 13.5, noise: 0.37, ..BrushSettings::default_pencil() };
+    let at = |i: usize| {
+        let a = i as f32 / 140.0 * std::f32::consts::TAU;
+        (300.0 + 55.0 * a.cos(), 300.0 + 55.0 * a.sin())
+    };
+    for pressure in [0.3, 0.6] {
+        let mut st = AppState::for_test();
+        st.dispatch(Action::ToolPencil);
+        st.brush = BrushSettings { color: st.brush.color, ..pencil.clone() };
+        for i in 0..=150 {
+            let (x, y) = at(i);
+            let mut p = st.make_sample(x, y, i as f32 * 0.01);
+            p.pressure = pressure;
+            if i == 0 {
+                st.pointer_down(p);
+            } else {
+                st.pointer_move(p);
+            }
+        }
+        st.pointer_up();
+        st.dispatch(Action::ToolFill);
+        st.pointer_down(st.make_sample(300.0, 300.0, 2.0));
+        st.pointer_up();
+
+        let id = st.project.resolved_current().expect("a drawing");
+        let cell = st.project.cell(id).expect("its cell");
+        let alpha = |x: u32, y: u32| cell.pixels()[((y * cell.width + x) * 4 + 3) as usize];
+        assert_eq!(alpha(300, 300), 255, "pressure {pressure}: the middle fills");
+        for k in 0..64 {
+            let a = k as f32 / 64.0 * std::f32::consts::TAU;
+            let (x, y) = (300.0 + 85.0 * a.cos(), 300.0 + 85.0 * a.sin());
+            assert_eq!(alpha(x as u32, y as u32), 0, "pressure {pressure}: ({x:.0}, {y:.0}) is past the ring");
+        }
+        assert_eq!(alpha(5, 5), 0, "pressure {pressure}: the page stays bare");
     }
 }

@@ -9,7 +9,7 @@ use crate::brush_library::{Group, Source, Status};
 use crate::tools::krita::sensors::SensorKind;
 use crate::tools::krita::tip::auto::{Profile, Shape};
 use crate::tools::krita::{PixelBrush, Tip};
-use crate::tools::{BrushMode, BrushSettings};
+use crate::tools::{ActiveTool, BrushMode, BrushSettings};
 use crate::ui::theme;
 
 /// Thumbnail size on screen.
@@ -74,46 +74,102 @@ fn sync_thumbs(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
-/// Pick `id`: an app preset replaces the brush, a Krita preset sets the
-/// Krita engine on it at the preset's own size. The colour stays.
-pub fn pick(state: &mut AppState, id: &str) {
-    let Some(entry) = state.brush_library.entry(id).cloned() else { return };
-    let color = state.brush.color;
-    match entry.source {
-        Source::App(i) => state.brush = (BrushSettings::PRESETS[i].2)(),
+/// The brush `id` makes, in `color`: an app preset as it is, a Krita preset
+/// on the Krita engine at the preset's own size.
+fn brush_for(state: &AppState, id: &str, color: [u8; 4]) -> Option<BrushSettings> {
+    let entry = state.brush_library.entry(id)?;
+    let mut brush = match entry.source {
+        Source::App(i) => (BrushSettings::PRESETS[i].2)(),
         _ => {
-            let Some(b) = state.brush_library.brush(id) else { return };
-            state.brush = BrushSettings {
+            let b = state.brush_library.brush(id)?;
+            BrushSettings {
                 radius: (b.diameter() / 2.0) as f32,
                 mode: BrushMode::Krita,
                 krita_id: Some(id.to_owned()),
                 ..BrushSettings::default()
-            };
+            }
         }
+    };
+    brush.color = color;
+    Some(brush)
+}
+
+/// Pick `id`: an app preset replaces the brush, a Krita preset sets the
+/// Krita engine on it at the preset's own size. The colour stays.
+pub fn pick(state: &mut AppState, id: &str) {
+    if let Some(b) = brush_for(state, id, state.brush.color) {
+        state.brush = b;
     }
-    state.brush.color = color;
+}
+
+/// Pick `id` into pen slot `slot`, as [`pick`] does into the brush in hand.
+pub fn pick_for_pen(state: &mut AppState, slot: usize, id: &str) {
+    let color = slot_brush(state, slot).color;
+    if let Some(b) = brush_for(state, id, color) {
+        state.set_pen_brush(slot, b);
+    }
+}
+
+/// Pen slot `slot`'s brush as it is now: the live one while it's in hand.
+fn slot_brush(state: &AppState, slot: usize) -> &BrushSettings {
+    let t = ActiveTool::Pen(slot as u8);
+    if state.tool == t {
+        &state.brush
+    } else {
+        state.brush_of(t)
+    }
+}
+
+/// The Krita preset `b` paints with, for the grid to mark it.
+fn krita_id(b: &BrushSettings) -> Option<String> {
+    (b.mode == BrushMode::Krita).then(|| b.krita_id.clone()).flatten()
 }
 
 pub fn brush_grid(state: &mut AppState, ui: &mut egui::Ui) {
     sync_thumbs(state, ui.ctx());
-    ui.horizontal(|ui| {
-        ui.label(theme::icon_text(egui_phosphor::regular::MAGNIFYING_GLASS, ""));
-        ui.add(egui::TextEdit::singleline(&mut state.brush_search).hint_text("Search brushes").desired_width(f32::INFINITY));
-    });
+    search_box(ui, &mut state.brush_search);
     let needle = state.brush_search.trim().to_lowercase();
+    let current = krita_id(&state.brush);
     let mut picked = None;
     // Its own scroll area, so the controls below stay in view.
     egui::ScrollArea::vertical()
         .id_salt("brush-grid")
         .max_height(260.0)
         .auto_shrink([false, true])
-        .show(ui, |ui| groups(state, ui, &needle, &mut picked));
+        .show(ui, |ui| groups(state, ui, &needle, current.as_deref(), &mut picked));
     if let Some(id) = picked {
         pick(state, &id);
     }
 }
 
-fn groups(state: &AppState, ui: &mut egui::Ui, needle: &str, picked: &mut Option<String>) {
+/// The grid in a pen slot's right-click menu: the same brushes, picked into
+/// that slot whether it is in hand or not, with a search box of its own.
+pub fn pen_brush_grid(state: &mut AppState, ui: &mut egui::Ui, slot: usize) {
+    sync_thumbs(state, ui.ctx());
+    search_box(ui, &mut state.pen_menu_search);
+    let needle = state.pen_menu_search.trim().to_lowercase();
+    let current = krita_id(slot_brush(state, slot));
+    let mut picked = None;
+    egui::ScrollArea::vertical()
+        .id_salt("pen-brush-grid")
+        .max_height(260.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| groups(state, ui, &needle, current.as_deref(), &mut picked));
+    if let Some(id) = picked {
+        pick_for_pen(state, slot, &id);
+    }
+}
+
+fn search_box(ui: &mut egui::Ui, text: &mut String) {
+    ui.horizontal(|ui| {
+        ui.label(theme::icon_text(egui_phosphor::regular::MAGNIFYING_GLASS, ""));
+        ui.add(egui::TextEdit::singleline(text).hint_text("Search brushes").desired_width(f32::INFINITY));
+    });
+}
+
+/// The library's groups of tiles, `current` marked: the Krita preset the
+/// brush being picked for paints with.
+fn groups(state: &AppState, ui: &mut egui::Ui, needle: &str, current: Option<&str>, picked: &mut Option<String>) {
     for group in [Group::App, Group::Krita, Group::Imported] {
         let entries: Vec<_> = state
             .brush_library
@@ -132,7 +188,7 @@ fn groups(state: &AppState, ui: &mut egui::Ui, needle: &str, picked: &mut Option
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
                     for e in &entries {
-                        let selected = state.brush.mode == BrushMode::Krita && state.brush.krita_id.as_deref() == Some(&e.id);
+                        let selected = current == Some(e.id.as_str());
                         let ready = e.status == Status::Ready;
                         let r = tile(ui, state.brush_thumbs.get(&e.id), &e.name, selected, ready);
                         let r = match &e.status {

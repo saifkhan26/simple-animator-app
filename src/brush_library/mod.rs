@@ -158,7 +158,7 @@ fn krita_picture(brush: Arc<PixelBrush>, size: u32) -> image::RgbaImage {
     let pre = c.pixels().into_owned();
     let mut ws = StrokeWorkspace::new();
     ws.begin(size, size, &b);
-    let mut s = StrokeBuilder::new_with_krita(b, ActiveTool::Pencil, 1.0, SmoothingOptions::default(), brush);
+    let mut s = StrokeBuilder::new_with_krita(b, ActiveTool::PENCIL, 1.0, SmoothingOptions::default(), brush);
     let f = size as f32;
     for i in 0..=60 {
         let t = i as f32 / 60.0;
@@ -234,7 +234,7 @@ fn app_thumbnail(brush: BrushSettings) -> egui::ColorImage {
     let pre = c.pixels().into_owned();
     let mut ws = StrokeWorkspace::new();
     ws.begin(w, h, &b);
-    let mut s = StrokeBuilder::new(b, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+    let mut s = StrokeBuilder::new(b, ActiveTool::PENCIL, 1.0, SmoothingOptions::default());
     for i in 0..=40 {
         let t = i as f32 / 40.0;
         let p = (t * std::f32::consts::PI).sin().powf(0.6).clamp(0.05, 1.0);

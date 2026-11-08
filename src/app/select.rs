@@ -13,16 +13,26 @@
 //!   mask, moving under a pose. It exists only while pixels are being moved
 //!   and lands back into its cell — taking the mask along to where it landed —
 //!   before anything else edits.
+//!
+//! With several layers picked in the Layers panel, the float has followers
+//! (`sel_followers`): the same selection lifted out of each other picked
+//! layer's drawing, moving with it. The float leads — its box is the one
+//! dragged — and every follower is posed to move the same way on screen.
 
 use std::sync::Arc;
 
+use egui::TextureHandle;
+
 use super::{AppState, SelDrag, SelTint};
+use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::layer::CellId;
+use crate::tools::axis_lock;
 use crate::tools::fill::{self, Grain};
 use crate::tools::lasso::{self, Mask};
 use crate::tools::select_mask::{self, SelOp, SelShape, SelectionMask};
 use crate::tools::selection::{self, Grab, Placement, Pose, Selection, HANDLE_PX};
 use crate::tools::tap_lasso::TapLasso;
+use crate::tools::wand::{self, WandPick};
 use crate::tools::ActiveTool;
 use crate::undo;
 
@@ -41,6 +51,106 @@ pub enum SelGesture {
     /// The lasso: dragged freehand, or tapped out as a polygon with
     /// freehand stretches between corners. See [`TapLasso`].
     Lasso { op: SelOp, lasso: TapLasso },
+}
+
+/// A magic select press still under the pen: what it reads and the selection
+/// it started from, so a drag can retune it and Esc can put things back.
+pub struct WandDrag {
+    pick: WandPick,
+    /// Where the pixels it reads sit: the active cell, or `None` for the
+    /// document itself when it reads every visible layer.
+    at: Option<Placement>,
+    op: SelOp,
+    /// The selection before the press.
+    before: Option<SelectionMask>,
+    /// Where on screen the press landed; a drag counts from here.
+    anchor: Option<egui::Pos2>,
+    base_tolerance: u8,
+    base_gap: u8,
+}
+
+/// Another picked layer's pixels, lifted through the selection with the
+/// float and moving under its box.
+pub struct Follower {
+    /// Its layer. Stable while it floats: every structural edit lands it
+    /// first.
+    pub li: usize,
+    pub sel: Selection,
+    /// Its pixels on the GPU, rebuilt only when they change, as the float's.
+    pub tex: Option<TextureHandle>,
+    pub(super) tex_stale: bool,
+    /// Its drawing under the mask's box before the lift, rows of `pre_rect`
+    /// packed: what an undo while floating puts back, and the "before" its
+    /// landing records. `None` until lifted, and for pasted pixels.
+    pre: Vec<u8>,
+    pre_rect: Option<DirtyRect>,
+}
+
+impl Follower {
+    fn new(li: usize, sel: Selection) -> Self {
+        Self {
+            li,
+            sel,
+            tex: None,
+            tex_stale: true,
+            pre: Vec::new(),
+            pre_rect: None,
+        }
+    }
+}
+
+/// Rows `r` of `pixels`, a buffer `width` pixels wide, packed.
+fn crop_rows(pixels: &[u8], width: u32, r: DirtyRect) -> Vec<u8> {
+    let (stride, x0, x1) = (width as usize * 4, r.min_x as usize * 4, r.max_x as usize * 4);
+    let mut out = Vec::with_capacity((x1 - x0) * (r.max_y - r.min_y) as usize);
+    for y in r.min_y as usize..r.max_y as usize {
+        out.extend_from_slice(&pixels[y * stride + x0..y * stride + x1]);
+    }
+    out
+}
+
+/// Put rows cropped by [`crop_rows`] back where they came from.
+fn uncrop_rows(pixels: &mut [u8], width: u32, r: DirtyRect, rows: &[u8]) {
+    let (stride, x0, x1) = (width as usize * 4, r.min_x as usize * 4, r.max_x as usize * 4);
+    for (y, src) in (r.min_y as usize..r.max_y as usize).zip(rows.chunks_exact(x1 - x0)) {
+        pixels[y * stride + x0..y * stride + x1].copy_from_slice(src);
+    }
+}
+
+/// `mask`'s box clipped to `canvas`, or `None` where they don't meet.
+fn mask_rect(mask: &Mask, canvas: &Canvas) -> Option<DirtyRect> {
+    let r = DirtyRect {
+        min_x: mask.x.min(canvas.width),
+        min_y: mask.y.min(canvas.height),
+        max_x: (mask.x + mask.w).min(canvas.width),
+        max_y: (mask.y + mask.h).min(canvas.height),
+    };
+    (r.max_x > r.min_x && r.max_y > r.min_y).then_some(r)
+}
+
+/// What Copy took from one layer: its pixels through the selection, and the
+/// layer, by uid, a multi-layer paste puts them back on.
+#[derive(Clone)]
+pub struct ClipPart {
+    pub layer: u64,
+    pub mask: Mask,
+    pub pixels: Vec<u8>,
+}
+
+/// `shape` combined into `before` by `op`. `None` is a shape that covered
+/// nothing: Replace with it selects nothing, Intersect leaves nothing, and Add
+/// or Remove leave `before` as it was.
+fn combined(
+    op: SelOp,
+    before: Option<&SelectionMask>,
+    shape: Option<SelectionMask>,
+) -> Option<SelectionMask> {
+    match (op, shape) {
+        (SelOp::Replace, m) => m,
+        (SelOp::Intersect, None) => None,
+        (_, None) => before.cloned(),
+        (op, Some(b)) => SelectionMask::combine(before, &b, op),
+    }
 }
 
 /// What the cached cell mask was built for: the selection's version and where
@@ -98,7 +208,12 @@ impl AppState {
     /// Where the active cell sits in the document right now: the layer's live
     /// transform and the size of the cell a stroke here would paint into.
     pub fn active_placement(&self) -> Placement {
-        let li = self.project.current_layer;
+        self.placement_of(self.project.current_layer)
+    }
+
+    /// Where layer `li`'s drawing on this frame sits, as
+    /// [`AppState::active_placement`] says for the active one.
+    pub fn placement_of(&self, li: usize) -> Placement {
         let f = self.project.current_frame;
         let (cw, ch) = self.project.draw_cell_size(li, f);
         Placement {
@@ -115,6 +230,74 @@ impl AppState {
         let p = self.active_placement();
         p.xf
             .doc_to_cell(doc.0, doc.1, p.cw as f32, p.ch as f32, p.pw, p.ph)
+    }
+
+    /// The layers a selection edit works on, bottom first: the active one
+    /// whenever it may be edited, as ever, and each other layer picked with
+    /// it in the Layers panel — a picked group's layers among them — that
+    /// shows and may be edited. Nothing hidden moves.
+    pub fn sel_layers(&self) -> Vec<usize> {
+        let p = &self.project;
+        let cur = p.current_layer;
+        self.selected_drawing_layers()
+            .into_iter()
+            .filter(|&li| p.paintable(li) && (li == cur || p.shows(li)))
+            .collect()
+    }
+
+    /// The [`AppState::sel_layers`] with a drawing on this frame — what a
+    /// lift takes pixels from — the lead first: the active layer, or with
+    /// that one unable to lead (a group, locked, nothing drawn here), the
+    /// topmost of the rest. Empty when there is nothing to lift.
+    pub(super) fn lift_layers(&self) -> Vec<usize> {
+        let p = &self.project;
+        let f = p.current_frame;
+        let cur = p.current_layer;
+        let mut out: Vec<usize> = self
+            .sel_layers()
+            .into_iter()
+            .filter(|&li| p.layers[li].resolve(f).is_some())
+            .collect();
+        let lead = out.iter().position(|&li| li == cur).or(out.len().checked_sub(1));
+        if let Some(i) = lead {
+            let li = out.remove(i);
+            out.insert(0, li);
+        }
+        out
+    }
+
+    /// Where the drawing the transform box belongs to sits: the float's, or
+    /// with nothing floating the one a lift would lead with. Every press,
+    /// drag and handle on the box is in its pixels.
+    pub fn lead_placement(&self) -> Placement {
+        if let Some(sel) = &self.selection {
+            return sel.placement;
+        }
+        match self.lift_layers().first() {
+            Some(&li) => self.placement_of(li),
+            None => self.active_placement(),
+        }
+    }
+
+    /// A document point in the lead drawing's pixel space.
+    pub fn doc_to_lead_cell(&self, doc: (f32, f32)) -> (f32, f32) {
+        let p = self.lead_placement();
+        p.xf
+            .doc_to_cell(doc.0, doc.1, p.cw as f32, p.ch as f32, p.pw, p.ph)
+    }
+
+    /// Screen pixels per lead-drawing pixel, as
+    /// [`AppState::cell_view_scale`] for the active one.
+    fn lead_view_scale(&self) -> f32 {
+        (self.view_scale * self.lead_placement().xf.scale.abs()).max(1e-6)
+    }
+
+    /// [`AppState::lock_basis_doc`] in the lead drawing's pixels.
+    fn lock_basis_lead(&self) -> f32 {
+        let a = self.lock_basis_doc();
+        let o = self.doc_to_lead_cell((0.0, 0.0));
+        let d = self.doc_to_lead_cell((100.0 * a.cos(), 100.0 * a.sin()));
+        (d.1 - o.1).atan2(d.0 - o.0)
     }
 
     // --- The mask ---
@@ -151,11 +334,22 @@ impl AppState {
     /// selection, the layer's placement or the cell size changes — a stroke
     /// asks at every pen-down.
     pub fn active_cell_mask(&mut self) -> Option<Arc<Mask>> {
+        let at = self.active_placement();
+        self.cell_mask_at(at)
+    }
+
+    /// The selection as the lead drawing sees it — the one the transform box
+    /// is drawn in. The active cell's, unless another picked layer leads.
+    pub fn lead_cell_mask(&mut self) -> Option<Arc<Mask>> {
+        let at = self.lead_placement();
+        self.cell_mask_at(at)
+    }
+
+    /// The selection as a drawing placed `at` sees it, through the one-slot
+    /// cache.
+    fn cell_mask_at(&mut self, at: Placement) -> Option<Arc<Mask>> {
         let m = self.sel_mask.as_ref()?;
-        let key = ClipKey {
-            ver: self.sel_ver,
-            at: self.active_placement(),
-        };
+        let key = ClipKey { ver: self.sel_ver, at };
         if let Some((k, c)) = &self.clip_cache {
             if *k == key {
                 return Some(c.clone());
@@ -167,6 +361,23 @@ impl AppState {
         Some(c)
     }
 
+    /// The selection as layer `li`'s drawing here sees it. The cache's when
+    /// it was built for that drawing; cut afresh otherwise, leaving the
+    /// cache to the active or lead drawing, which ask every frame.
+    fn layer_cell_mask(&mut self, li: usize) -> Option<Arc<Mask>> {
+        let at = self.placement_of(li);
+        if li == self.project.current_layer {
+            return self.cell_mask_at(at);
+        }
+        if let Some((k, c)) = &self.clip_cache {
+            if *k == (ClipKey { ver: self.sel_ver, at }) {
+                return Some(c.clone());
+            }
+        }
+        let m = self.sel_mask.as_ref()?;
+        Some(Arc::new(m.to_cell(&at.xf, at.cw, at.ch, at.pw, at.ph)))
+    }
+
     /// The clip a paint edit on the active cell is held to. `None` means paint
     /// freely: nothing is selected, or everything is.
     pub fn active_cell_clip(&mut self) -> Option<Arc<Mask>> {
@@ -176,27 +387,25 @@ impl AppState {
         self.active_cell_mask()
     }
 
-    /// The cached cell mask, but only while it is current — for drawing, which
-    /// has no `&mut` to build one with. [`AppState::sync_selection`] keeps it
-    /// warm while the Lasso tool needs it.
+    /// The lead drawing's cell mask, but only while it is current — for
+    /// drawing the transform box, which has no `&mut` to build one with.
+    /// [`AppState::sync_selection`] keeps it warm while the Lasso tool needs
+    /// it.
     pub fn cached_cell_mask(&self) -> Option<&Mask> {
         let (k, m) = self.clip_cache.as_ref()?;
         let now = ClipKey {
             ver: self.sel_ver,
-            at: self.active_placement(),
+            at: self.lead_placement(),
         };
         (*k == now).then_some(m.as_ref())
     }
 
     /// Whether a plain press on the selection lifts its pixels. Only for a
-    /// bounded selection on an editable drawing: after Select All or Invert,
-    /// every drag would turn into a move and there would be no way left to
-    /// draw a new selection.
+    /// bounded selection with an editable drawing to lift from: after Select
+    /// All or Invert, every drag would turn into a move and there would be no
+    /// way left to draw a new selection.
     pub fn mask_is_grabbable(&self) -> bool {
-        self.sel_mask.as_ref().is_some_and(|m| m.outside == 0)
-            && !self.active_layer_locked()
-            && !self.active_layer_is_reference()
-            && self.project.resolved_current().is_some()
+        self.sel_mask.as_ref().is_some_and(|m| m.outside == 0) && !self.lift_layers().is_empty()
     }
 
     /// Per-frame upkeep: land a float whose cell stopped being the active one,
@@ -204,7 +413,7 @@ impl AppState {
     pub(super) fn sync_selection(&mut self) {
         self.land_float_if_orphaned();
         if self.tool == ActiveTool::Lasso && self.selection.is_none() && self.mask_is_grabbable() {
-            let _ = self.active_cell_mask();
+            let _ = self.lead_cell_mask();
         }
     }
 
@@ -240,12 +449,7 @@ impl AppState {
     /// `None` is a shape that covered nothing.
     pub fn apply_op(&mut self, op: SelOp, shape: Option<SelectionMask>) {
         self.land_float();
-        let next = match (op, shape) {
-            (SelOp::Replace, m) => m,
-            (SelOp::Intersect, None) => None,
-            (_, None) => self.sel_mask.clone(),
-            (op, Some(b)) => SelectionMask::combine(self.sel_mask.as_ref(), &b, op),
-        };
+        let next = combined(op, self.sel_mask.as_ref(), shape);
         self.set_mask(next, true);
     }
 
@@ -273,6 +477,13 @@ impl AppState {
         // starts a new shape, even inside — that is how you add to a
         // selection from within it.
         if held.is_none() && op == SelOp::Replace && self.try_grab(doc) {
+            if self.sel_shape == SelShape::Wand {
+                self.wand_repick = Some(doc);
+            }
+            return;
+        }
+        if self.sel_shape == SelShape::Wand {
+            self.wand_down(doc, op);
             return;
         }
         self.land_float();
@@ -294,7 +505,7 @@ impl AppState {
     /// Selection drag to document point `doc`.
     pub fn select_move(&mut self, doc: (f32, f32)) {
         if let Some(drag) = self.sel_drag {
-            let (cx, cy) = self.doc_to_active_cell(doc);
+            let (cx, cy) = self.doc_to_lead_cell(doc);
             self.drag_selection(drag, cx, cy);
             return;
         }
@@ -303,6 +514,7 @@ impl AppState {
         // more samples than the polygon needs.
         let step = (1.0 / self.view_scale.max(1e-6)).min(1.0);
         let tap = CLICK_PX / self.view_scale.max(1e-6);
+        let slide = self.move_on();
         match &mut self.sel_gesture {
             Some(SelGesture::Drag {
                 start,
@@ -310,6 +522,10 @@ impl AppState {
                 max_dist,
                 ..
             }) => {
+                // The move key slides the whole box along with the pointer.
+                if slide {
+                    *start = (start.0 + doc.0 - end.0, start.1 + doc.1 - end.1);
+                }
                 *end = doc;
                 *max_dist = max_dist.max(dist(*start, doc));
             }
@@ -320,13 +536,23 @@ impl AppState {
 
     /// Selection release.
     pub fn select_up(&mut self) {
+        let repick = self.wand_repick.take();
         if self.sel_drag.take().is_some() {
             // A press on the selection that never moved lifted nothing: put
-            // the candidate float away and leave everything as it was.
+            // the candidate float away and leave everything as it was — or,
+            // with the magic select, pick afresh where it pressed.
             if self.selection.as_ref().is_some_and(|s| !s.lifted) {
                 self.selection = None;
                 self.retire_float_tex();
+                self.drop_followers();
+                if let Some(doc) = repick {
+                    self.wand_down(doc, SelOp::Replace);
+                    self.wand_up();
+                }
             }
+            return;
+        }
+        if self.wand_up() {
             return;
         }
         match self.sel_gesture.take() {
@@ -343,10 +569,7 @@ impl AppState {
                     }
                     return;
                 }
-                let path = match shape {
-                    SelShape::Ellipse => select_mask::ellipse_path(start, end),
-                    _ => select_mask::rect_path(start, end),
-                };
+                let path = self.sel_drag_path(shape, start, end);
                 let m = SelectionMask::from_path(&path, self.selection_universe());
                 self.apply_op(op, m);
             }
@@ -359,6 +582,27 @@ impl AppState {
                 }
             }
             None => {}
+        }
+    }
+
+    /// The outline a rectangle or ellipse selection dragged from `start` to
+    /// `end` makes, in document space — a square or circle while Shift
+    /// locks, and round `start` as its middle while the centre key holds.
+    /// What the drag shows and what it lands are both this.
+    pub fn sel_drag_path(&self, shape: SelShape, start: (f32, f32), end: (f32, f32)) -> Vec<(f32, f32)> {
+        let end = if self.axis_lock_on() {
+            axis_lock::square(start, end)
+        } else {
+            end
+        };
+        let start = if self.centre_on() {
+            axis_lock::mirror(start, end)
+        } else {
+            start
+        };
+        match shape {
+            SelShape::Ellipse => select_mask::ellipse_path(start, end),
+            _ => select_mask::rect_path(start, end),
         }
     }
 
@@ -416,7 +660,158 @@ impl AppState {
     pub fn cancel_gesture(&mut self) -> bool {
         // The Fill tool's lasso too: it ends the same ways.
         let fill = self.fill_lasso.take().is_some();
-        self.sel_gesture.take().is_some() || fill
+        self.wand_repick = None;
+        // A magic select press puts back the selection it found.
+        let wand = match self.wand_drag.take() {
+            Some(d) => {
+                self.sel_mask = d.before;
+                self.mask_changed();
+                true
+            }
+            None => false,
+        };
+        self.sel_gesture.take().is_some() || fill || wand
+    }
+
+    // --- Magic select ---
+
+    /// A magic select press at `doc`: pick what joins the pixel there and show
+    /// it at once, combined by `op`. The pen may stay down to retune it with
+    /// [`AppState::wand_drag_to`]; [`AppState::wand_up`] lands it as one undo
+    /// step.
+    fn wand_down(&mut self, doc: (f32, f32), op: SelOp) {
+        self.land_float();
+        let any_paint = self.wand.any_paint;
+        let (pick, at) = if self.wand.all_visible {
+            // What the artist sees, in document space.
+            let c = crate::io::composite::flatten_doc(&self.project, self.project.current_frame);
+            let size = (c.width, c.height);
+            let seed = (doc.0.floor() as i32, doc.1.floor() as i32);
+            (WandPick::new(&c.pixels(), size, seed, any_paint), None)
+        } else {
+            let at = self.active_placement();
+            let (cx, cy) = self.doc_to_active_cell(doc);
+            let seed = (cx.floor() as i32, cy.floor() as i32);
+            let size = (at.cw, at.ch);
+            let cell = self.project.resolved_current().and_then(|id| self.project.cell(id));
+            // Read in place: the press keeps only what it works out.
+            let pick = match cell {
+                Some(c) if (c.width, c.height) == size => {
+                    WandPick::new(&c.pixels(), size, seed, any_paint)
+                }
+                // No drawing here yet: all bare canvas.
+                _ => WandPick::new(&vec![0; at.cw as usize * at.ch as usize * 4], size, seed, any_paint),
+            };
+            (pick, Some(at))
+        };
+        let Some(pick) = pick else {
+            // Off the pixels: a shape that covered nothing.
+            self.apply_op(op, None);
+            return;
+        };
+        let mut drag = WandDrag {
+            pick,
+            at,
+            op,
+            before: self.sel_mask.clone(),
+            anchor: None,
+            base_tolerance: self.wand.tolerance,
+            base_gap: self.wand.gap,
+        };
+        self.wand_show(&mut drag);
+        self.wand_drag = Some(drag);
+    }
+
+    /// Show what `drag` picks at the wand's settings now, combined into the
+    /// selection it started from. Not recorded: [`AppState::wand_up`] does that
+    /// once.
+    fn wand_show(&mut self, drag: &mut WandDrag) {
+        let p = drag.pick.pick(&self.wand);
+        let shape = match &drag.at {
+            // A whole-pixel placement moves the pick as it is, uncopied —
+            // what `from_cell` does there, less the copies.
+            Some(at) => match select_mask::integer_offset(&at.xf, at.cw, at.ch, at.pw, at.ph) {
+                Some((ox, oy)) => SelectionMask {
+                    x: p.x + ox,
+                    y: p.y + oy,
+                    w: p.w,
+                    h: p.h,
+                    cov: p.cov,
+                    outside: 0,
+                }
+                .normalize(),
+                None => SelectionMask::from_cell(
+                    p.x, p.y, p.w, p.h, &p.cov, &at.xf, at.cw, at.ch, at.pw, at.ph,
+                ),
+            },
+            None => SelectionMask {
+                x: p.x,
+                y: p.y,
+                w: p.w,
+                h: p.h,
+                cov: p.cov,
+                outside: 0,
+            }
+            .normalize(),
+        };
+        let next = combined(drag.op, drag.before.as_ref(), shape);
+        if next != self.sel_mask {
+            self.sel_mask = next;
+            self.mask_changed();
+        }
+    }
+
+    /// Remember where on screen a magic select press landed: its drag counts
+    /// from here.
+    pub fn wand_anchor(&mut self, at: egui::Pos2) {
+        if let Some(d) = &mut self.wand_drag {
+            d.anchor.get_or_insert(at);
+        }
+    }
+
+    /// The pen, still down on a magic select press, is at screen point `at`.
+    /// Sideways steps the tolerance and up and down the gap, each away from
+    /// its value at the press, the way a Fill press steps its gap and expand;
+    /// a change picks again so the outline follows. The new values stay in the
+    /// sliders.
+    pub fn wand_drag_to(&mut self, at: egui::Pos2) {
+        use crate::input::button_drag::drag_steps;
+        let Some(mut drag) = self.wand_drag.take() else {
+            return;
+        };
+        if let Some(anchor) = drag.anchor {
+            // Shift, pressed partway, keeps to one of the two.
+            let at = self.lock_screen_drag(anchor, at);
+            let tolerance = wand::step_tolerance(drag.base_tolerance, drag_steps(at.x - anchor.x));
+            // Screen y grows downward, and up means more.
+            let gap = fill::step_gap(drag.base_gap, drag_steps(anchor.y - at.y));
+            if (tolerance, gap) != (self.wand.tolerance, self.wand.gap) {
+                self.wand.tolerance = tolerance;
+                self.wand.gap = gap;
+                self.wand_show(&mut drag);
+            }
+        }
+        self.wand_drag = Some(drag);
+    }
+
+    /// Whether a magic select press is still under the pen.
+    pub fn wand_dragging(&self) -> bool {
+        self.wand_drag.is_some()
+    }
+
+    /// Land a magic select press as one undo step, from the selection it found
+    /// to the one it leaves. `true` if there was one.
+    fn wand_up(&mut self) -> bool {
+        let Some(drag) = self.wand_drag.take() else {
+            return false;
+        };
+        if self.sel_mask != drag.before {
+            self.history.push(undo::Command::Selection {
+                before: drag.before.as_ref().map(SelectionMask::pack),
+                after: self.sel_mask.as_ref().map(SelectionMask::pack),
+            });
+        }
+        true
     }
 
     /// A press on the float's transform box, or on the selection itself when
@@ -430,21 +825,21 @@ impl AppState {
         if self.polygon_active() || self.sel_op != SelOp::Replace {
             return None;
         }
-        let (cx, cy) = self.doc_to_active_cell(doc);
-        let tol = HANDLE_PX / self.cell_view_scale();
+        let (cx, cy) = self.doc_to_lead_cell(doc);
+        let tol = HANDLE_PX / self.lead_view_scale();
         if let Some(sel) = &self.selection {
             return sel.grab_at(cx, cy, tol);
         }
         if !self.mask_is_grabbable() {
             return None;
         }
-        let clip = self.active_cell_mask()?;
+        let clip = self.lead_cell_mask()?;
         selection::grab_at(&clip, &Pose::default(), cx, cy, tol).filter(|g| *g != Grab::Move)
     }
 
     fn try_grab(&mut self, doc: (f32, f32)) -> bool {
-        let (cx, cy) = self.doc_to_active_cell(doc);
-        let tol = HANDLE_PX / self.cell_view_scale();
+        let (cx, cy) = self.doc_to_lead_cell(doc);
+        let tol = HANDLE_PX / self.lead_view_scale();
         if let Some(sel) = &self.selection {
             let Some(grab) = sel.grab_at(cx, cy, tol) else {
                 return false;
@@ -459,7 +854,7 @@ impl AppState {
         if !self.mask_is_grabbable() {
             return false;
         }
-        let Some(clip) = self.active_cell_mask() else {
+        let Some(clip) = self.lead_cell_mask() else {
             return false;
         };
         let Some(grab) = selection::grab_at(&clip, &Pose::default(), cx, cy, tol) else {
@@ -527,7 +922,7 @@ impl AppState {
         if self.tool == ActiveTool::Fill {
             &mut self.brush.opacity
         } else {
-            &mut self.tool_brushes[ActiveTool::Fill.idx()].opacity
+            &mut self.brush_of_mut(ActiveTool::Fill).opacity
         }
     }
 
@@ -538,7 +933,7 @@ impl AppState {
         let b = if self.tool == ActiveTool::Fill {
             &self.brush
         } else {
-            &self.tool_brushes[ActiveTool::Fill.idx()]
+            self.brush_of(ActiveTool::Fill)
         };
         let (s, c) = (fill::GRAIN_SIZES, fill::GRAIN_CONTRASTS);
         let grain = Grain {
@@ -555,7 +950,8 @@ impl AppState {
     }
 
     /// Fill the selection with the brush colour at the Fill tool's opacity, on
-    /// the active drawing.
+    /// the drawing here of every [`AppState::sel_layers`] layer. One undo
+    /// step, any keys auto-key adds for it included.
     pub fn fill_selection(&mut self) {
         let opacity = *self.fill_opacity_mut();
         if self.sel_mask.is_none() || opacity <= 0.0 {
@@ -563,68 +959,51 @@ impl AppState {
         }
         self.cancel_gesture();
         self.land_float();
-        let Some(target) = self.begin_edit_cell() else {
-            return;
-        };
-        let Some(clip) = self.active_cell_mask() else {
-            return;
-        };
         let color = self.brush.color;
-        let alpha_lock = self.active_alpha_lock();
-        let grain = self.fill_grain(target);
-        self.snapshot_pre(target);
-        if let Some(c) = self.project.cell_mut(target) {
-            c.dirty = None;
-            fill::fill_masked(c, &clip, color, opacity, alpha_lock, false, grain);
+        let mut parts = Vec::new();
+        for li in self.sel_layers() {
+            let Some((target, key)) = self.edit_cell_on(li) else {
+                continue;
+            };
+            parts.extend(key);
+            let Some(clip) = self.layer_cell_mask(li) else {
+                continue;
+            };
+            let alpha_lock = self.project.layers[li].alpha_lock;
+            let grain = self.fill_grain(target);
+            self.snapshot_pre(target);
+            if let Some(c) = self.project.cell_mut(target) {
+                c.dirty = None;
+                fill::fill_masked(c, &clip, color, opacity, alpha_lock, false, grain);
+            }
+            self.mark_dirty(target);
+            if let Some(patch) = self.take_patch(target) {
+                parts.push(patch);
+                self.painted(target);
+            }
         }
-        self.mark_dirty(target);
-        if self.commit_undo(target) {
-            self.painted(target);
-        }
+        self.push_parts(parts);
     }
 
-    /// Clear the active drawing — only inside the selection when there is one.
-    /// One undo step either way.
+    /// Clear the drawing here on every [`AppState::sel_layers`] layer — only
+    /// inside the selection when there is one. One undo step either way.
     pub fn clear_active(&mut self) {
         self.cancel_gesture();
         self.land_float();
-        if self.active_layer_locked() || self.active_layer_is_reference() {
-            return;
-        }
-        let Some(id) = self.project.resolved_current() else {
-            return;
-        };
-        let clip = match self.sel_mask {
-            Some(_) => match self.active_cell_mask() {
-                Some(m) => Some(m),
-                None => return,
-            },
-            None => None,
-        };
-        self.snapshot_pre(id);
-        if let Some(c) = self.project.cell_mut(id) {
-            c.dirty = None;
-            match &clip {
-                Some(m) => {
-                    lasso::erase_masked(c, m);
-                }
-                None => c.clear(),
-            }
-        }
-        if self.project.cell(id).is_some_and(|c| c.dirty.is_some()) {
-            self.mark_dirty(id);
-        }
-        self.commit_undo(id);
+        self.erase_sel_layers(true);
     }
 
-    /// Erase what is selected. A float is simply dropped — its pixels already
-    /// left the cell when it lifted. The selection itself stays, as in Krita.
+    /// Erase what is selected, on every [`AppState::sel_layers`] layer. A
+    /// float is simply dropped — its pixels already left their drawings when
+    /// it lifted. The selection itself stays, as in Krita.
     pub fn delete_selection(&mut self) {
         if let Some(sel) = self.selection.take() {
             self.sel_drag = None;
             self.retire_float_tex();
+            let followers = std::mem::take(&mut self.sel_followers);
             if sel.lifted {
-                // Record the lift, which nothing else now will.
+                // Record the lifts, which nothing else now will.
+                let mut parts = Vec::new();
                 if std::mem::take(&mut self.float_pre_live) && self.project.cell(sel.cell).is_some() {
                     std::mem::swap(&mut self.stroke_pre_pixels, &mut self.float_pre);
                     self.pre_replaced(sel.cell);
@@ -633,81 +1012,175 @@ impl AppState {
                     if let Some(c) = self.project.cell_mut(sel.cell) {
                         c.dirty = rect;
                     }
-                    self.commit_undo(sel.cell);
+                    parts.extend(self.take_patch(sel.cell));
                 }
+                for fl in &followers {
+                    parts.extend(self.land_follower(fl, false));
+                }
+                self.retire_follower_texs(followers);
+                self.push_parts(parts);
                 return;
             }
+            self.retire_follower_texs(followers);
         }
-        if self.sel_mask.is_none() || self.active_layer_locked() || self.active_layer_is_reference() {
+        if self.sel_mask.is_none() {
             return;
         }
-        let Some(id) = self.project.resolved_current() else {
-            return;
-        };
-        let Some(clip) = self.active_cell_mask() else {
-            return;
-        };
-        self.snapshot_pre(id);
-        if let Some(c) = self.project.cell_mut(id) {
-            c.dirty = None;
-            lasso::erase_masked(c, &clip);
-        }
-        if self.project.cell(id).is_some_and(|c| c.dirty.is_some()) {
-            self.mark_dirty(id);
-        }
-        self.commit_undo(id);
+        self.erase_sel_layers(false);
     }
 
-    /// Copy the selected pixels to the selection clipboard.
+    /// Erase the drawing here on every [`AppState::sel_layers`] layer through
+    /// the selection — or, with `whole` and nothing selected, all of it. One
+    /// undo step.
+    fn erase_sel_layers(&mut self, whole: bool) {
+        if self.sel_mask.is_none() && !whole {
+            return;
+        }
+        let f = self.project.current_frame;
+        let mut parts = Vec::new();
+        for li in self.sel_layers() {
+            let Some(id) = self.project.layers[li].resolve(f) else {
+                continue;
+            };
+            let clip = match self.sel_mask {
+                Some(_) => match self.layer_cell_mask(li) {
+                    Some(m) => Some(m),
+                    None => continue,
+                },
+                None => None,
+            };
+            self.snapshot_pre(id);
+            if let Some(c) = self.project.cell_mut(id) {
+                c.dirty = None;
+                match &clip {
+                    Some(m) => {
+                        lasso::erase_masked(c, m);
+                    }
+                    None => c.clear(),
+                }
+            }
+            if self.project.cell(id).is_some_and(|c| c.dirty.is_some()) {
+                self.mark_dirty(id);
+            }
+            parts.extend(self.take_patch(id));
+        }
+        self.push_parts(parts);
+    }
+
+    /// Record `parts` as one undo step — or as itself, when there is one.
+    fn push_parts(&mut self, mut parts: Vec<undo::Command>) {
+        match parts.len() {
+            0 => {}
+            1 => self.history.push(parts.remove(0)),
+            _ => self.history.push(undo::Command::Compound(parts)),
+        }
+    }
+
+    /// Copy the selected pixels to the selection clipboard: on each layer a
+    /// lift would take them from, the lead's first, each kept apart with the
+    /// layer it came from.
     ///
     /// A scaled or rotated float is baked first: what the user is looking at
     /// is what they expect to paste. A pixel-aligned one keeps its pristine
     /// buffer, so an ordinary copy still costs nothing and loses nothing.
     pub fn copy_selection(&mut self) {
+        let uid = |st: &Self, li: usize| st.project.layers.get(li).map_or(0, |l| l.uid);
+        let part = |layer: u64, sel: &Selection| {
+            let (mask, pixels) = sel.bake().unwrap_or_else(|| (sel.mask.clone(), sel.pixels.clone()));
+            ClipPart { layer, mask, pixels }
+        };
         if let Some(sel) = &self.selection {
-            self.pixel_clip = Some(
-                sel.bake()
-                    .unwrap_or_else(|| (sel.mask.clone(), sel.pixels.clone())),
-            );
+            let mut parts = vec![part(uid(self, self.float_layer), sel)];
+            for fl in &self.sel_followers {
+                parts.push(part(uid(self, fl.li), &fl.sel));
+            }
+            self.pixel_clip = parts;
             return;
         }
         if self.sel_mask.is_none() {
             return;
         }
-        let Some(id) = self.project.resolved_current() else {
-            return;
-        };
-        let Some(clip) = self.active_cell_mask() else {
-            return;
-        };
-        if clip.w == 0 || clip.h == 0 {
-            return;
+        let f = self.project.current_frame;
+        let mut parts = Vec::new();
+        for li in self.lift_layers() {
+            let Some(id) = self.project.layers[li].resolve(f) else {
+                continue;
+            };
+            let Some(clip) = self.layer_cell_mask(li) else {
+                continue;
+            };
+            if clip.w == 0 || clip.h == 0 {
+                continue;
+            }
+            let Some(canvas) = self.project.cell(id) else {
+                continue;
+            };
+            let s = Selection::new(id, canvas, (*clip).clone(), Placement::default());
+            parts.push(ClipPart {
+                layer: uid(self, li),
+                mask: s.mask,
+                pixels: s.pixels,
+            });
         }
-        let Some(canvas) = self.project.cell(id) else {
-            return;
-        };
-        let s = Selection::new(id, canvas, (*clip).clone(), Placement::default());
-        self.pixel_clip = Some((s.mask, s.pixels));
+        if !parts.is_empty() {
+            self.pixel_clip = parts;
+        }
     }
 
-    /// Drop the clipboard pixels onto the active drawing as a float, so they
-    /// can be placed before they land. Works across frames and layers, since
-    /// it targets whatever cell is active now.
+    /// Drop the clipboard pixels in as a float, so they can be placed before
+    /// they land. Pixels copied off one layer go onto the active drawing,
+    /// across frames and layers alike. Copied off several, each layer's go
+    /// back onto that layer's drawing here, moving as one; with none of
+    /// those layers left to take them, the lead's go onto the active one.
     pub fn paste_selection(&mut self) {
-        let Some((mask, pixels)) = self.pixel_clip.clone() else {
+        if self.pixel_clip.is_empty() {
             return;
-        };
-        if self.active_layer_locked() || self.active_layer_is_reference() {
-            return;
+        }
+        let p = &self.project;
+        let mut homes: Vec<(usize, ClipPart)> = Vec::new();
+        if self.pixel_clip.len() > 1 {
+            for part in &self.pixel_clip {
+                let Some(li) = p.layers.iter().position(|l| l.uid == part.layer) else {
+                    continue;
+                };
+                let shows = li == p.current_layer || p.shows(li);
+                if p.paintable(li) && shows && !homes.iter().any(|(h, _)| *h == li) {
+                    homes.push((li, part.clone()));
+                }
+            }
+        }
+        if homes.is_empty() {
+            if self.active_layer_locked() || self.active_layer_is_reference() {
+                return;
+            }
+            homes.push((p.current_layer, self.pixel_clip[0].clone()));
+        }
+        // The active layer's pixels lead when it has some.
+        if let Some(i) = homes.iter().position(|(li, _)| *li == p.current_layer) {
+            let lead = homes.remove(i);
+            homes.insert(0, lead);
         }
         self.cancel_gesture();
         self.land_float();
-        let cell = self.project.ensure_active_cell();
-        let placement = self.active_placement();
-        self.selection = Some(Selection::from_clip(cell, mask, pixels, placement));
+        let f = self.project.current_frame;
+        let mut homes = homes.into_iter();
+        let Some((lead, part)) = homes.next() else {
+            return;
+        };
+        let cell = self.project.ensure_cell(lead, f);
+        let placement = self.placement_of(lead);
+        self.selection = Some(Selection::from_clip(cell, part.mask, part.pixels, placement));
+        self.float_layer = lead;
+        self.float_cur = self.project.current_layer;
         // Clipboard pixels left no hole: landing records only the stamp.
         self.float_pre_live = false;
         self.sel_tex_stale = true;
+        for (li, part) in homes {
+            let id = self.project.ensure_cell(li, f);
+            let placement = self.placement_of(li);
+            let sel = Selection::from_clip(id, part.mask, part.pixels, placement);
+            self.sel_followers.push(Follower::new(li, sel));
+        }
     }
 
     /// Switch tool. Lands a float and abandons a selection gesture first: the
@@ -726,21 +1199,24 @@ impl AppState {
 
     // --- The float ---
 
-    /// Lift the selection on the active drawing into a float, if there isn't
-    /// one already — for the arrow keys, which move pixels without a press.
+    /// Lift the selection into a float, if there isn't one already — for the
+    /// arrow keys, which move pixels without a press.
     pub fn make_float(&mut self) -> bool {
         if self.selection.is_some() {
             return true;
         }
-        if self.sel_mask.is_none() || self.active_layer_locked() || self.active_layer_is_reference() {
+        if self.sel_mask.is_none() || self.lift_layers().is_empty() {
             return false;
         }
-        let Some(clip) = self.active_cell_mask() else {
+        let Some(clip) = self.lead_cell_mask() else {
             return false;
         };
         self.make_float_from(&clip)
     }
 
+    /// Cut a float through `clip`, the lead drawing's view of the selection,
+    /// and a follower on each other drawing a lift takes pixels from. Nothing
+    /// leaves any drawing until the float first moves.
     fn make_float_from(&mut self, clip: &Mask) -> bool {
         if clip.w == 0 || clip.h == 0 {
             return false;
@@ -748,16 +1224,40 @@ impl AppState {
         // Lifting from a drawing mid-warp would lift the preview and leave
         // the warp's snapshot behind; the warp lands first.
         self.commit_liquify();
-        let Some(cell) = self.project.resolved_current() else {
+        let layers = self.lift_layers();
+        let f = self.project.current_frame;
+        let Some((&lead, rest)) = layers.split_first() else {
             return false;
         };
-        let placement = self.active_placement();
+        let Some(cell) = self.project.layers[lead].resolve(f) else {
+            return false;
+        };
+        let placement = self.placement_of(lead);
         let Some(canvas) = self.project.cell(cell) else {
             return false;
         };
         self.selection = Some(Selection::new(cell, canvas, clip.clone(), placement));
+        self.float_layer = lead;
+        self.float_cur = self.project.current_layer;
         self.float_pre_live = false;
         self.sel_tex_stale = true;
+        self.drop_followers();
+        let mut cells = vec![cell];
+        for &li in rest {
+            let Some(id) = self.project.layers[li].resolve(f).filter(|id| !cells.contains(id)) else {
+                continue;
+            };
+            let Some(mask) = self.layer_cell_mask(li).filter(|m| m.w > 0 && m.h > 0) else {
+                continue;
+            };
+            let placement = self.placement_of(li);
+            let Some(canvas) = self.project.cell(id) else {
+                continue;
+            };
+            let sel = Selection::new(id, canvas, (*mask).clone(), placement);
+            self.sel_followers.push(Follower::new(li, sel));
+            cells.push(id);
+        }
         true
     }
 
@@ -774,6 +1274,11 @@ impl AppState {
             return false;
         };
         sel.orient(o);
+        for fl in self.sel_followers.iter_mut().filter(|fl| fl.sel.lifted) {
+            fl.sel.orient(o);
+            fl.tex_stale = true;
+        }
+        self.pose_followers();
         self.sel_drag = None;
         self.sel_tex_stale = true;
         true
@@ -797,45 +1302,58 @@ impl AppState {
         };
         self.sel_drag = None;
         self.retire_float_tex();
-        // Never lifted means never moved: the cell was left untouched, and the
-        // selection is where it was.
+        let followers = std::mem::take(&mut self.sel_followers);
+        // Never lifted means never moved: the cells were left untouched, and
+        // the selection is where it was.
         if !sel.lifted {
             self.float_pre_live = false;
+            self.retire_follower_texs(followers);
             return;
         }
         let cell = sel.cell;
-        if self.project.cell(cell).is_none() {
-            self.float_pre_live = false;
-            return;
-        }
         let from_lift = std::mem::take(&mut self.float_pre_live);
-        if from_lift {
-            // The "before" is the cell as it was before the pixels left it.
-            std::mem::swap(&mut self.stroke_pre_pixels, &mut self.float_pre);
-            self.pre_replaced(cell);
-            self.stroke_pre_live = true;
-            let rect = self.float_lift_rect;
-            if let Some(c) = self.project.cell_mut(cell) {
-                c.dirty = rect;
+        let mut parts: Vec<undo::Command> = Vec::new();
+        if self.project.cell(cell).is_some() {
+            if from_lift {
+                // The "before" is the cell as it was before the pixels left it.
+                std::mem::swap(&mut self.stroke_pre_pixels, &mut self.float_pre);
+                self.pre_replaced(cell);
+                self.stroke_pre_live = true;
+                let rect = self.float_lift_rect;
+                if let Some(c) = self.project.cell_mut(cell) {
+                    c.dirty = rect;
+                }
+            } else {
+                // Pasted pixels: nothing was lifted, only the stamp to record.
+                self.snapshot_pre(cell);
+                if let Some(c) = self.project.cell_mut(cell) {
+                    c.dirty = None;
+                }
             }
-        } else {
-            // Pasted pixels: nothing was lifted, only the stamp to record.
-            self.snapshot_pre(cell);
             if let Some(c) = self.project.cell_mut(cell) {
-                c.dirty = None;
+                sel.stamp(c);
+            }
+            self.mark_dirty(cell);
+            parts.extend(self.take_patch(cell));
+            // All frames: the same move, through the same selection, on every
+            // other drawing of the layer — while `sel_mask` still says where
+            // the pixels were picked up. Pasted pixels came from no drawing,
+            // so they stay put.
+            if self.sel_all_frames && from_lift {
+                parts.extend(self.land_on_other_drawings(&sel));
             }
         }
-        if let Some(c) = self.project.cell_mut(cell) {
-            sel.stamp(c);
+        // The other picked layers, each the same way.
+        for fl in &followers {
+            parts.extend(self.land_follower(fl, true));
+            if self.sel_all_frames && fl.pre_rect.is_some() {
+                parts.extend(self.land_on_other_drawings(&fl.sel));
+            }
         }
-        self.mark_dirty(cell);
-
-        let mut parts: Vec<undo::Command> = self.take_patch(cell).into_iter().collect();
-        // All frames: the same move, through the same selection, on every other
-        // drawing of the layer — while `sel_mask` still says where the pixels
-        // were picked up. Pasted pixels came from no drawing, so they stay put.
-        if self.sel_all_frames && from_lift {
-            parts.extend(self.land_on_other_drawings(&sel));
+        self.retire_follower_texs(followers);
+        if self.project.cell(cell).is_none() {
+            self.push_parts(parts);
+            return;
         }
         let (x, y, w, h, cov) = sel.posed_cov();
         let p = sel.placement;
@@ -848,11 +1366,32 @@ impl AppState {
             self.sel_mask = after;
             self.mask_changed();
         }
-        match parts.len() {
-            0 => {}
-            1 => self.history.push(parts.remove(0)),
-            _ => self.history.push(undo::Command::Compound(parts)),
+        self.push_parts(parts);
+    }
+
+    /// Record follower `fl`'s lift and, with `stamp`, put its pixels down
+    /// where they float. Its undo patch, for the caller's one step.
+    fn land_follower(&mut self, fl: &Follower, stamp: bool) -> Option<undo::Command> {
+        let cell = fl.sel.cell;
+        if !fl.sel.lifted {
+            return None;
         }
+        let width = self.project.cell(cell)?.width;
+        // The "before" is the drawing as it was before its pixels left it:
+        // as it is now, with what the lift erased put back.
+        self.snapshot_pre(cell);
+        if let Some(r) = fl.pre_rect {
+            uncrop_rows(&mut self.stroke_pre_pixels, width, r, &fl.pre);
+        }
+        let c = self.project.cell_mut(cell)?;
+        c.dirty = fl.pre_rect;
+        if stamp {
+            fl.sel.stamp(c);
+        }
+        if c.dirty.is_some() {
+            self.mark_dirty(cell);
+        }
+        self.take_patch(cell)
     }
 
     /// Each distinct drawing on layer `li`, with the first frame it shows on.
@@ -953,11 +1492,25 @@ impl AppState {
             }
         }
         self.float_pre_live = false;
+        let followers = std::mem::take(&mut self.sel_followers);
+        for fl in &followers {
+            let Some(r) = fl.pre_rect else {
+                continue;
+            };
+            let Some(c) = self.project.cell_mut(fl.sel.cell) else {
+                continue;
+            };
+            let width = c.width;
+            uncrop_rows(c.pixels_mut(), width, r, &fl.pre);
+            c.dirty = Some(r);
+            self.mark_dirty(fl.sel.cell);
+        }
+        self.retire_follower_texs(followers);
         true
     }
 
-    /// Nudge the float by whole pixels (arrow keys, and the plain drag). Stays
-    /// integral, so a move alone never reaches the resampler.
+    /// Nudge the float by whole pixels (arrow keys). Stays integral, so a
+    /// move alone never reaches the resampler.
     pub fn nudge_selection(&mut self, dx: i32, dy: i32) {
         let Some(sel) = self.selection.as_mut() else {
             return;
@@ -969,24 +1522,29 @@ impl AppState {
 
     /// Apply a transform-box drag to the float.
     ///
-    /// A move accumulates in whole pixels, exactly as it always has — the drag
-    /// anchor walks with the pointer and sub-pixel remainders are dropped, so
-    /// dragging a selection around is still lossless. A scale or rotation is
-    /// re-solved from the pose recorded at the press, so it depends only on
-    /// where the pointer is now.
+    /// Every drag is re-solved from the pose recorded at the press, so it
+    /// depends only on where the pointer is now. A move goes in whole pixels,
+    /// so dragging a selection around is still lossless, and Shift pressed
+    /// partway holds it to the horizontal or vertical through the press.
     pub(super) fn drag_selection(&mut self, drag: SelDrag, x: f32, y: f32) {
         if let Grab::Move = drag.grab {
-            let (dx, dy) = (
-                (x - drag.start.0).round() as i32,
-                (y - drag.start.1).round() as i32,
+            let to = if self.axis_lock_on() {
+                axis_lock::lock_hv(drag.start, (x, y), self.lock_basis_lead())
+            } else {
+                (x, y)
+            };
+            let offset = (
+                drag.pose.offset.0 + (to.0 - drag.start.0).round(),
+                drag.pose.offset.1 + (to.1 - drag.start.1).round(),
             );
-            if dx == 0 && dy == 0 {
+            let Some(sel) = self.selection.as_mut() else {
+                return;
+            };
+            if offset == sel.pose.offset {
                 return;
             }
-            if let Some(d) = self.sel_drag.as_mut() {
-                d.start = (x, y);
-            }
-            self.nudge_selection(dx, dy);
+            sel.pose.offset = offset;
+            self.touch_selection();
             return;
         }
         let mods = selection::DragMods {
@@ -1006,18 +1564,66 @@ impl AppState {
         self.touch_selection();
     }
 
-    /// Note that the float has been posed, erasing the source behind it the
-    /// first time that happens. Shared by every gesture, so a first *rotate*
-    /// lifts exactly like a first move does.
+    /// Note that the float has been posed, erasing the source behind it — and
+    /// behind every follower — the first time that happens, and taking the
+    /// followers along. Shared by every gesture, so a first *rotate* lifts
+    /// exactly like a first move does.
     fn touch_selection(&mut self) {
         let Some(sel) = self.selection.as_ref() else {
             return;
         };
-        if sel.lifted {
-            return;
+        if !sel.lifted {
+            let cell = sel.cell;
+            self.lift_selection_source(cell);
+            self.lift_followers();
         }
-        let cell = sel.cell;
-        self.lift_selection_source(cell);
+        self.pose_followers();
+    }
+
+    /// Erase each follower's source behind it, once, keeping what was there
+    /// in its `pre` as the float keeps its cell in `float_pre` — but only
+    /// under the mask's box, not the whole drawing.
+    fn lift_followers(&mut self) {
+        let mut lifted = Vec::new();
+        for fl in self.sel_followers.iter_mut().filter(|fl| !fl.sel.lifted) {
+            let Some(c) = self.project.cell_mut(fl.sel.cell) else {
+                continue;
+            };
+            if let Some(r) = mask_rect(&fl.sel.mask, c) {
+                let width = c.width;
+                fl.pre = crop_rows(c.pixels_mut(), width, r);
+                fl.pre_rect = Some(r);
+            }
+            c.dirty = None;
+            fl.sel.lift_source(c);
+            if c.dirty.is_some() {
+                lifted.push(fl.sel.cell);
+            }
+        }
+        for id in lifted {
+            self.mark_dirty(id);
+        }
+    }
+
+    /// Pose every follower to move the way the float has, on screen.
+    fn pose_followers(&mut self) {
+        let Some(lead) = &self.selection else {
+            return;
+        };
+        for fl in &mut self.sel_followers {
+            fl.sel.pose = pose_for(lead, &fl.sel.placement, &fl.sel.mask);
+        }
+    }
+
+    /// Forget the followers, their pixels unlanded — for a float that never
+    /// lifted.
+    fn drop_followers(&mut self) {
+        let followers = std::mem::take(&mut self.sel_followers);
+        self.retire_follower_texs(followers);
+    }
+
+    fn retire_follower_texs(&mut self, followers: Vec<Follower>) {
+        self.retired_textures.extend(followers.into_iter().filter_map(|fl| fl.tex));
     }
 
     /// Erase the source region behind the float, once. Not recorded yet: the
@@ -1048,14 +1654,20 @@ impl AppState {
         }
     }
 
-    /// Land a float whose cell is no longer the active one — scrubbing to
-    /// another frame must not leave pixels hovering over a drawing they do not
-    /// belong to.
+    /// Land a float whose drawings are no longer the ones showing, or picked
+    /// from another active layer — scrubbing to another frame must not leave
+    /// pixels hovering over a drawing they do not belong to.
     fn land_float_if_orphaned(&mut self) {
         let Some(sel) = &self.selection else {
             return;
         };
-        if self.project.resolved_current() != Some(sel.cell) {
+        let p = &self.project;
+        let f = p.current_frame;
+        let shows = |li: usize, cell: CellId| p.layers.get(li).and_then(|l| l.resolve(f)) == Some(cell);
+        let orphaned = p.current_layer != self.float_cur
+            || !shows(self.float_layer, sel.cell)
+            || self.sel_followers.iter().any(|fl| !shows(fl.li, fl.sel.cell));
+        if orphaned {
             self.land_float();
         }
     }
@@ -1072,6 +1684,7 @@ impl AppState {
         self.selection = None;
         self.sel_drag = None;
         self.retire_float_tex();
+        self.drop_followers();
         self.float_pre_live = false;
         self.sel_gesture = None;
         self.fill_lasso = None;
@@ -1188,7 +1801,7 @@ mod tests {
 
     /// An Ink stroke along `y`, from `x0` to `x1`, in cell space.
     fn ink_line(st: &mut AppState, y: f32, x0: f32, x1: f32) {
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.brush.radius = 3.0;
         st.pointer_down(st.make_sample(x0, y, 0.0));
         for i in 1..=40 {
@@ -1256,6 +1869,84 @@ mod tests {
         assert_eq!(at(&st, 95, 120), 255);
     }
 
+    /// Shift pressed partway through a move holds the float to the line
+    /// through the press, whichever way it has gone further; let go, it
+    /// follows the pointer again. Every step stays in whole pixels.
+    #[test]
+    fn shift_partway_holds_a_move_to_an_axis() {
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), [200, 0, 0, 255]);
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        st.select_down((120.0, 120.0), None);
+        let offset = |st: &AppState| st.selection.as_ref().unwrap().pose.offset;
+        st.select_move((130.4, 124.2));
+        assert_eq!(offset(&st), (10.0, 4.0), "free");
+        st.read_modifiers(egui::Modifiers::SHIFT);
+        st.select_move((150.0, 127.0));
+        assert_eq!(offset(&st), (30.0, 0.0), "held across");
+        st.select_move((126.0, 170.0));
+        assert_eq!(offset(&st), (0.0, 50.0), "held down");
+        st.read_modifiers(egui::Modifiers::NONE);
+        st.select_move((131.0, 170.0));
+        assert_eq!(offset(&st), (11.0, 50.0), "free again");
+        st.select_up();
+        st.land_float();
+        assert_eq!(px(&st, 125, 175), [200, 0, 0, 255]);
+    }
+
+    #[test]
+    fn shift_partway_squares_a_rectangle_selection() {
+        let mut st = lasso();
+        st.select_down((100.0, 100.0), None);
+        st.select_move((200.0, 140.0));
+        st.read_modifiers(egui::Modifiers::SHIFT);
+        st.select_move((200.0, 140.0));
+        st.select_up();
+        assert_eq!(at(&st, 150, 190), 255, "as tall as it is wide");
+        assert_eq!(at(&st, 150, 210), 0);
+    }
+
+    #[test]
+    fn the_move_key_partway_slides_a_rectangle_selection() {
+        let mut st = lasso();
+        st.select_down((100.0, 100.0), None);
+        st.select_move((140.0, 130.0));
+        st.hold_mid_keys(true, false);
+        st.select_move((180.0, 150.0));
+        st.hold_mid_keys(false, false);
+        st.select_move((190.0, 160.0));
+        st.select_up();
+        assert_eq!(at(&st, 145, 125), 255, "slid by (40, 20), then grown");
+        assert_eq!(at(&st, 120, 115), 0, "not where it was pressed");
+    }
+
+    #[test]
+    fn the_centre_key_partway_grows_an_ellipse_selection_from_the_press() {
+        let mut st = lasso();
+        st.sel_shape = SelShape::Ellipse;
+        st.select_down((150.0, 150.0), None);
+        st.select_move((190.0, 170.0));
+        st.hold_mid_keys(false, true);
+        st.select_move((190.0, 170.0));
+        st.select_up();
+        assert_eq!(at(&st, 150, 150), 255, "the press is its middle");
+        assert_eq!(at(&st, 115, 150), 255, "as wide left of it as right");
+        assert_eq!(at(&st, 150, 133), 255);
+        assert_eq!(at(&st, 150, 125), 0);
+    }
+
+    /// A selection mode held as the drag starts has Shift in it: that Shift
+    /// chose the mode, so the box isn't squared.
+    #[test]
+    fn a_held_mode_with_shift_in_it_doesnt_square() {
+        let mut st = lasso();
+        st.read_modifiers(egui::Modifiers::SHIFT | egui::Modifiers::CTRL);
+        st.drag_began();
+        drag(&mut st, (100.0, 100.0), (200.0, 140.0), Some(SelOp::Add));
+        assert_eq!(at(&st, 150, 120), 255);
+        assert_eq!(at(&st, 150, 170), 0, "not squared");
+    }
+
     /// Once an edit lands, the stroke snapshot either is the cell it names,
     /// byte for byte, or names none: the next edit trusts it uncopied.
     fn assert_pre_mirrors(st: &AppState, what: &str) {
@@ -1286,12 +1977,12 @@ mod tests {
         let orig = st.project.cell(id).unwrap().pixels().into_owned();
         let steps = st.history.undo_len();
 
-        stroke_with(&mut st, ActiveTool::Ink, 50.0);
+        stroke_with(&mut st, ActiveTool::INK, 50.0);
         let rev = st.project.cell(id).unwrap().rev();
         assert_eq!(st.pre_mirror, Some((id, rev)), "a landed stroke leaves it mirrored");
         assert_pre_mirrors(&st, "a stroke");
         // The next one starts from the mirror, copying nothing.
-        stroke_with(&mut st, ActiveTool::Ink, 70.0);
+        stroke_with(&mut st, ActiveTool::INK, 70.0);
         assert_pre_mirrors(&st, "a stroke from the mirror");
         stroke_with(&mut st, ActiveTool::Eraser, 50.0);
         assert_pre_mirrors(&st, "an eraser stroke");
@@ -1302,7 +1993,7 @@ mod tests {
         // An undo writes the cell, so the mirror no longer counts.
         st.undo();
         assert_ne!(st.pre_mirror.map(|m| m.1), Some(st.project.cell(id).unwrap().rev()));
-        stroke_with(&mut st, ActiveTool::Ink, 90.0);
+        stroke_with(&mut st, ActiveTool::INK, 90.0);
         assert_pre_mirrors(&st, "a stroke after an undo");
 
         st.set_tool(ActiveTool::Lasso);
@@ -1318,10 +2009,10 @@ mod tests {
         let other = st.project.cells.len();
         st.project.cells.push(crate::doc::canvas::Canvas::new(st.project.width, st.project.height).into());
         st.project.layers[0].set_key(0, other);
-        stroke_with(&mut st, ActiveTool::Ink, 300.0);
+        stroke_with(&mut st, ActiveTool::INK, 300.0);
         assert_pre_mirrors(&st, "a stroke on another drawing");
         st.project.layers[0].set_key(0, id);
-        stroke_with(&mut st, ActiveTool::Ink, 310.0);
+        stroke_with(&mut st, ActiveTool::INK, 310.0);
         assert_pre_mirrors(&st, "a stroke back on the first");
 
         while st.history.undo_len() > steps {
@@ -1774,7 +2465,7 @@ mod tests {
     fn fill_selection_takes_the_fill_tools_grain() {
         let mut st = lasso();
         drag(&mut st, (100.0, 100.0), (200.0, 200.0), None);
-        st.tool_brushes[ActiveTool::Fill.idx()].fill_grain = 1.0;
+        st.brush_of_mut(ActiveTool::Fill).fill_grain = 1.0;
         st.brush.color = [255, 0, 0, 255];
         st.fill_selection();
         let row: Vec<[u8; 4]> = (110..190).map(|x| px(&st, x, 150)).collect();
@@ -1784,7 +2475,7 @@ mod tests {
 
         // Boil: a patch of paper per drawing, the same one every time.
         assert_eq!(st.fill_grain(0).offset, (0, 0));
-        st.tool_brushes[ActiveTool::Fill.idx()].fill_grain_boil = true;
+        st.brush_of_mut(ActiveTool::Fill).fill_grain_boil = true;
         assert_ne!(st.fill_grain(0).offset, st.fill_grain(1).offset);
         assert_eq!(st.fill_grain(1), st.fill_grain(1));
         // The bucket shows the same settings.
@@ -1873,5 +2564,538 @@ mod tests {
         gesture(&mut st, ctrl);
         assert_eq!(st.sel_mask, added, "Ctrl alone is not a selection mode");
         assert!((st.view.zoom - zoom).abs() > 1e-3, "it still zooms");
+    }
+
+    // --- Magic select ---
+
+    /// A fresh state with the Lasso up as the magic select.
+    fn wand() -> AppState {
+        let mut st = lasso();
+        st.sel_shape = SelShape::Wand;
+        st
+    }
+
+    /// A one-pixel square outline from `(a, a)` to `(b, b)` on the active cell.
+    fn ring(st: &mut AppState, a: u32, b: u32, rgba: [u8; 4]) {
+        paint(st, (a, a, b + 1, a + 1), rgba);
+        paint(st, (a, b, b + 1, b + 1), rgba);
+        paint(st, (a, a, a + 1, b + 1), rgba);
+        paint(st, (b, a, b + 1, b + 1), rgba);
+    }
+
+    fn click(st: &mut AppState, doc: (f32, f32), held: Option<SelOp>) {
+        st.select_down(doc, held);
+        st.select_up();
+    }
+
+    fn area(st: &AppState) -> usize {
+        st.sel_mask.as_ref().map_or(0, |m| m.cov.iter().filter(|&&c| c >= 128).count())
+    }
+
+    #[test]
+    fn a_wand_click_picks_what_joins_it_as_one_undo_step() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        let steps = st.history.undo_len();
+        click(&mut st, (120.5, 120.5), None);
+        assert_eq!(area(&st), 39 * 39, "the inside of the ring");
+        assert_eq!(at(&st, 101, 101), 255);
+        assert_eq!(at(&st, 100, 120), 0, "not the line");
+        assert_eq!(st.history.undo_len(), steps + 1);
+        assert!(!st.wand_dragging());
+        st.undo();
+        assert!(st.sel_mask.is_none());
+    }
+
+    #[test]
+    fn held_modes_combine_wand_picks() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        paint(&mut st, (200, 200, 220, 220), RED);
+        click(&mut st, (120.5, 120.5), None);
+        click(&mut st, (210.5, 210.5), Some(SelOp::Add));
+        assert_eq!(at(&st, 120, 120), 255);
+        assert_eq!(at(&st, 210, 210), 255);
+        click(&mut st, (120.5, 120.5), Some(SelOp::Subtract));
+        assert_eq!(at(&st, 120, 120), 0);
+        assert_eq!(at(&st, 210, 210), 255);
+    }
+
+    #[test]
+    fn any_paint_takes_the_lines_and_the_colour_inside_together() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, [10, 10, 10, 255]);
+        paint(&mut st, (101, 101, 140, 140), RED);
+        st.wand.any_paint = true;
+        click(&mut st, (120.5, 120.5), None);
+        assert_eq!(area(&st), 41 * 41);
+        assert_eq!(at(&st, 100, 100), 255);
+    }
+
+    #[test]
+    fn a_click_inside_the_selection_picks_again_and_a_drag_moves_it() {
+        let mut st = wand();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        click(&mut st, (120.5, 120.5), None);
+        assert_eq!(area(&st), 40 * 40);
+        // A click back on it picks afresh there, at the settings now.
+        st.wand.expand = 2;
+        let steps = st.history.undo_len();
+        click(&mut st, (120.5, 120.5), None);
+        assert!(st.selection.is_none(), "nothing lifted");
+        assert_eq!(area(&st), 44 * 44);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        // A drag from it moves the pixels.
+        drag(&mut st, (120.5, 120.5), (150.5, 120.5), None);
+        assert!(st.selection.is_some(), "floating");
+        st.land_float();
+        assert_eq!(px(&st, 165, 120), RED);
+        assert_eq!(px(&st, 105, 120)[3], 0);
+    }
+
+    #[test]
+    fn dragging_a_wand_press_retunes_it_live_and_lands_once() {
+        let mut st = wand();
+        paint(&mut st, (100, 100, 120, 140), [100, 100, 100, 255]);
+        paint(&mut st, (120, 100, 140, 140), [130, 100, 100, 255]);
+        st.wand.tolerance = 8;
+        let steps = st.history.undo_len();
+        st.select_down((110.5, 120.5), None);
+        let at0 = egui::pos2(400.0, 300.0);
+        st.wand_anchor(at0);
+        assert_eq!(area(&st), 20 * 40, "shown at the press");
+        // Sideways: tolerance climbs its ladder, and the pick follows.
+        st.wand_drag_to(at0 + egui::vec2(200.0, 0.0));
+        assert!(st.wand.tolerance >= 30, "tolerance {}", st.wand.tolerance);
+        assert_eq!(area(&st), 40 * 40);
+        // Up: the gap climbs.
+        st.wand_drag_to(at0 + egui::vec2(200.0, -40.0));
+        assert!(st.wand.gap > 0);
+        st.select_up();
+        assert_eq!(st.history.undo_len(), steps + 1, "one step for the whole press");
+        st.undo();
+        assert!(st.sel_mask.is_none());
+    }
+
+    #[test]
+    fn esc_mid_press_puts_the_old_selection_back() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        click(&mut st, (120.5, 120.5), None);
+        let kept = st.sel_mask.clone();
+        let steps = st.history.undo_len();
+        st.select_down((10.5, 10.5), None);
+        assert_ne!(st.sel_mask, kept, "the new pick shows");
+        assert!(st.cancel_gesture());
+        assert_eq!(st.sel_mask, kept);
+        st.select_up();
+        assert_eq!(st.history.undo_len(), steps, "nothing recorded");
+    }
+
+    #[test]
+    fn a_wand_click_off_the_drawing_picks_nothing() {
+        let mut st = wand();
+        click(&mut st, (10.5, 10.5), None);
+        assert!(st.sel_mask.is_some(), "a blank drawing is all bare canvas");
+        click(&mut st, (-500.0, 300.0), Some(SelOp::Add));
+        assert!(st.sel_mask.is_some(), "Add with nothing keeps what was there");
+        click(&mut st, (-500.0, 300.0), None);
+        assert!(st.sel_mask.is_none(), "Replace with nothing selects nothing");
+    }
+
+    #[test]
+    fn a_wand_pick_lands_where_a_moved_layer_shows_it() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        st.project.layers[0].transform.tx = 10.0;
+        // Cell u is document u - 10.
+        click(&mut st, (130.5, 120.5), None);
+        assert_eq!(at(&st, 111, 120), 255, "cell 101");
+        assert_eq!(at(&st, 110, 120), 0, "cell 100, the line");
+        assert_eq!(at(&st, 149, 120), 255, "cell 139");
+        assert_eq!(at(&st, 150, 120), 0, "cell 140, the line");
+    }
+
+    #[test]
+    fn all_visible_picks_by_the_lines_on_another_layer() {
+        let mut st = wand();
+        ring(&mut st, 100, 140, RED);
+        st.dispatch(Action::LayerAdd);
+        assert_eq!(st.project.current_layer, 1, "drawing on a new, empty layer");
+        click(&mut st, (120.5, 120.5), None);
+        assert!(at(&st, 30, 30) == 255, "on its own the empty layer is all bare");
+        st.wand.all_visible = true;
+        click(&mut st, (120.5, 120.5), None);
+        assert_eq!(area(&st), 39 * 39);
+        assert_eq!(at(&st, 30, 30), 0);
+    }
+
+    /// The canvas hands a press and its drag to the wand in screen points.
+    #[test]
+    fn the_canvas_drags_a_wand_press_in_screen_points() {
+        let mut st = wand();
+        st.show_panels = false;
+        st.show_mini_timeline = false;
+        st.wand.tolerance = 8;
+        st.wand.gap = 0;
+        let steps = st.history.undo_len();
+        let ctx = egui::Context::default();
+        let run = |st: &mut AppState, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                let tab_focus = st.handle_keys(ctx);
+                crate::ui::shell::draw(st, ctx);
+                st.drop_stray_focus(ctx, tab_focus);
+            });
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (from, to) = (egui::pos2(500.0, 300.0), egui::pos2(700.0, 260.0));
+        run(&mut st, vec![egui::Event::PointerMoved(from)]);
+        run(&mut st, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=8 {
+            let p = from + (to - from) * (i as f32 / 8.0);
+            run(&mut st, vec![egui::Event::PointerMoved(p)]);
+        }
+        assert!(st.wand_dragging(), "still under the pen");
+        run(&mut st, vec![button(to, false)]);
+        run(&mut st, vec![]);
+        assert!(!st.wand_dragging());
+        assert!(st.wand.tolerance > 8, "sideways retuned it: {}", st.wand.tolerance);
+        assert!(st.wand.gap > 0, "up retuned the gap");
+        assert!(st.sel_mask.is_some());
+        assert_eq!(st.history.undo_len(), steps + 1);
+    }
+
+    // --- Several layers picked ---
+
+    /// Layer `li`'s pixel at `(x, y)` on frame `f`.
+    fn px_at(st: &AppState, li: usize, f: usize, x: u32, y: u32) -> [u8; 4] {
+        let id = st.project.layers[li].resolve(f).expect("a drawing on this frame");
+        let c = st.project.cell(id).unwrap();
+        let i = ((y * c.width + x) * 4) as usize;
+        [c.pixels()[i], c.pixels()[i + 1], c.pixels()[i + 2], c.pixels()[i + 3]]
+    }
+
+    /// Paint on layer `li` instead of the active one.
+    fn paint_on(st: &mut AppState, li: usize, rect: (u32, u32, u32, u32), rgba: [u8; 4]) {
+        let cur = std::mem::replace(&mut st.project.current_layer, li);
+        paint(st, rect, rgba);
+        st.project.current_layer = cur;
+    }
+
+    /// A red square on layer 0 and a blue one on layer 1, both at 100..140;
+    /// layer 1 active, layer 0 picked with it, a selection around the squares.
+    fn two_layers() -> AppState {
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        st.project.add_layer();
+        paint(&mut st, (100, 100, 140, 140), BLUE);
+        st.selected_layers.insert(st.project.layers[0].uid);
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        st
+    }
+
+    #[test]
+    fn a_move_takes_every_picked_layer_along_in_one_undo() {
+        let mut st = two_layers();
+        let steps = st.history.undo_len();
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        assert_eq!(st.sel_followers.len(), 1, "layer 0 floats with it");
+        assert_eq!(px_at(&st, 0, 0, 105, 120)[3], 0, "lifted live, not on release");
+        st.land_float();
+        for (li, rgba) in [(0, RED), (1, BLUE)] {
+            assert_eq!(px_at(&st, li, 0, 165, 120), rgba, "layer {li} moved");
+            assert_eq!(px_at(&st, li, 0, 105, 120)[3], 0, "layer {li}'s hole");
+        }
+        assert_eq!(at(&st, 170, 120), 255, "the selection went with them");
+        assert_eq!(st.history.undo_len(), steps + 1, "one undo step for both");
+        st.undo();
+        for (li, rgba) in [(0, RED), (1, BLUE)] {
+            assert_eq!(px_at(&st, li, 0, 105, 120), rgba, "layer {li} back");
+            assert_eq!(px_at(&st, li, 0, 165, 120)[3], 0);
+        }
+        st.redo();
+        assert_eq!(px_at(&st, 0, 0, 165, 120), RED);
+    }
+
+    #[test]
+    fn undo_while_floating_puts_every_layer_back() {
+        let mut st = two_layers();
+        let steps = st.history.undo_len();
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.undo();
+        assert!(st.selection.is_none() && st.sel_followers.is_empty());
+        assert_eq!(px_at(&st, 0, 0, 105, 120), RED);
+        assert_eq!(px_at(&st, 1, 0, 105, 120), BLUE);
+        assert_eq!(st.history.undo_len(), steps, "nothing was recorded");
+    }
+
+    #[test]
+    fn a_press_that_never_moves_lifts_nothing_anywhere() {
+        let mut st = two_layers();
+        let steps = st.history.undo_len();
+        drag(&mut st, (120.0, 120.0), (120.0, 120.0), None);
+        assert!(st.selection.is_none() && st.sel_followers.is_empty());
+        assert_eq!(px_at(&st, 0, 0, 105, 120), RED);
+        assert_eq!(st.history.undo_len(), steps);
+    }
+
+    #[test]
+    fn hidden_locked_and_unpicked_layers_stay_put() {
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        for _ in 0..3 {
+            st.project.add_layer();
+            paint(&mut st, (100, 100, 140, 140), BLUE);
+        }
+        // Layer 3 active; 0 picked but hidden, 1 picked but locked, 2 not
+        // picked at all.
+        st.selected_layers.extend([st.project.layers[0].uid, st.project.layers[1].uid]);
+        st.project.layers[0].visible = false;
+        st.project.layers[1].locked = true;
+        assert_eq!(st.sel_layers(), [3]);
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_eq!(px_at(&st, 3, 0, 165, 120), BLUE, "the active layer moved");
+        assert_eq!(px_at(&st, 0, 0, 105, 120), RED);
+        for li in 1..=2 {
+            assert_eq!(px_at(&st, li, 0, 105, 120), BLUE, "layer {li} stayed");
+        }
+    }
+
+    #[test]
+    fn a_picked_group_moves_its_layers() {
+        let mut st = two_layers();
+        st.selected_layers.clear();
+        let mut g = None;
+        st.structural_edit(false, |p| g = p.group_layers(&[0, 1]));
+        // The group's row picked: there is no drawing of its own to lead,
+        // so its top layer does.
+        st.project.current_layer = g.expect("grouped");
+        assert!(st.mask_is_grabbable());
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_eq!(px_at(&st, 0, 0, 165, 120), RED);
+        assert_eq!(px_at(&st, 1, 0, 165, 120), BLUE);
+    }
+
+    #[test]
+    fn a_moved_picked_layer_moves_the_same_on_screen() {
+        use crate::doc::transform::Transform;
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        st.project.add_layer();
+        // Layer 1 sits 15 px right: its square is at 100..140 on screen.
+        st.project.layers[1].transform = Transform { tx: 15.0, ..Transform::default() };
+        paint(&mut st, (85, 100, 125, 140), BLUE);
+        st.selected_layers.insert(st.project.layers[0].uid);
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_eq!(px_at(&st, 0, 0, 135, 120), RED);
+        assert_eq!(px_at(&st, 1, 0, 120, 120), BLUE, "115..155 in its own pixels");
+        assert_eq!(px_at(&st, 1, 0, 110, 120)[3], 0);
+        assert_eq!(px_at(&st, 1, 0, 160, 120)[3], 0);
+    }
+
+    #[test]
+    fn all_frames_reaches_every_drawing_of_every_picked_layer() {
+        let mut st = lasso();
+        paint(&mut st, (100, 100, 140, 140), RED);
+        new_drawing(&mut st);
+        paint(&mut st, (100, 100, 140, 140), RED);
+        st.project.goto(0);
+        st.project.add_layer();
+        paint(&mut st, (100, 100, 140, 140), BLUE);
+        st.selected_layers.insert(st.project.layers[0].uid);
+        st.sel_all_frames = true;
+        drag(&mut st, (90.0, 90.0), (150.0, 150.0), None);
+        let steps = st.history.undo_len();
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_eq!(px_at(&st, 0, 1, 165, 120), RED, "layer 0's other drawing");
+        assert_eq!(px_at(&st, 0, 1, 105, 120)[3], 0);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        assert_eq!(px_at(&st, 0, 1, 105, 120), RED);
+    }
+
+    #[test]
+    fn a_flip_turns_every_picked_layer() {
+        let mut st = lasso();
+        two_stripes(&mut st);
+        st.project.add_layer();
+        two_stripes(&mut st);
+        st.selected_layers.insert(st.project.layers[0].uid);
+        drag(&mut st, (95.0, 95.0), (145.0, 145.0), None);
+        let steps = st.history.undo_len();
+        st.orient_art(Orient::FLIP_H);
+        st.land_float();
+        for li in 0..2 {
+            assert_eq!(px_at(&st, li, 0, 105, 120), BLUE, "layer {li} flipped");
+            assert_eq!(px_at(&st, li, 0, 135, 120), RED);
+        }
+        assert_eq!(st.history.undo_len(), steps + 1);
+    }
+
+    #[test]
+    fn delete_and_clear_work_on_every_picked_layer() {
+        let mut st = two_layers();
+        paint_on(&mut st, 0, (0, 0, 20, 20), RED);
+        let steps = st.history.undo_len();
+        st.delete_selection();
+        assert_eq!(px_at(&st, 0, 0, 120, 120)[3], 0);
+        assert_eq!(px_at(&st, 1, 0, 120, 120)[3], 0);
+        assert_eq!(px_at(&st, 0, 0, 10, 10), RED, "outside the selection");
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        assert_eq!(px_at(&st, 0, 0, 120, 120), RED);
+        assert_eq!(px_at(&st, 1, 0, 120, 120), BLUE);
+
+        // Nothing selected: each picked drawing goes, whole.
+        st.deselect();
+        let steps = st.history.undo_len();
+        st.clear_active();
+        assert_eq!(px_at(&st, 0, 0, 10, 10)[3], 0);
+        assert_eq!(px_at(&st, 1, 0, 120, 120)[3], 0);
+        assert_eq!(st.history.undo_len(), steps + 1);
+    }
+
+    #[test]
+    fn fill_selection_fills_every_picked_layer_in_one_undo() {
+        let mut st = two_layers();
+        st.brush.color = [0, 200, 0, 255];
+        let steps = st.history.undo_len();
+        st.fill_selection();
+        assert_eq!(st.history.undo_len(), steps + 1);
+        assert_eq!(px_at(&st, 0, 0, 95, 95)[1], 200, "layer 0 filled");
+        assert_eq!(px_at(&st, 1, 0, 95, 95)[1], 200, "layer 1 filled");
+        st.undo();
+        assert_eq!(px_at(&st, 0, 0, 95, 95)[3], 0);
+        assert_eq!(px_at(&st, 1, 0, 95, 95)[3], 0);
+    }
+
+    #[test]
+    fn a_fill_with_auto_key_keys_every_picked_layer() {
+        let mut st = two_layers();
+        st.structural_edit(false, |p| p.add_frame());
+        st.project.goto(1);
+        st.auto_key_draw = true;
+        let steps = st.history.undo_len();
+        st.fill_selection();
+        assert!(st.project.layers.iter().all(|l| l.is_key(1)), "each held drawing got its own");
+        assert_eq!(px_at(&st, 0, 0, 95, 95)[3], 0, "the held drawing is untouched");
+        assert!(px_at(&st, 0, 1, 95, 95)[3] > 0);
+        assert_eq!(st.history.undo_len(), steps + 1, "keys and fills, one step");
+        st.undo();
+        assert!(!st.project.layers.iter().any(|l| l.is_key(1)));
+    }
+
+    #[test]
+    fn pasted_pixels_go_back_on_the_layers_they_came_from() {
+        let mut st = two_layers();
+        st.copy_selection();
+        st.delete_selection();
+        let steps = st.history.undo_len();
+        st.paste_selection();
+        assert_eq!(st.sel_followers.len(), 1);
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_eq!(px_at(&st, 0, 0, 165, 120), RED);
+        assert_eq!(px_at(&st, 1, 0, 165, 120), BLUE);
+        assert_eq!(px_at(&st, 1, 0, 105, 120)[3], 0);
+        assert_eq!(st.history.undo_len(), steps + 1);
+    }
+
+    #[test]
+    fn pixels_copied_off_one_layer_paste_onto_the_active_one() {
+        let mut st = two_layers();
+        st.selected_layers.clear();
+        st.copy_selection();
+        // Over to layer 0: one layer's pixels follow the active layer, as
+        // ever.
+        st.project.current_layer = 0;
+        st.paste_selection();
+        assert!(st.sel_followers.is_empty());
+        drag(&mut st, (120.0, 120.0), (150.0, 120.0), None);
+        st.land_float();
+        assert_eq!(px_at(&st, 0, 0, 165, 120), BLUE);
+        assert_eq!(px_at(&st, 1, 0, 165, 120)[3], 0);
+    }
+
+    #[test]
+    fn with_none_of_its_layers_left_a_paste_lands_on_the_active_one() {
+        let mut st = two_layers();
+        st.copy_selection();
+        st.selected_layers.clear();
+        st.structural_edit(false, |p| {
+            p.add_layer();
+        });
+        for l in &mut st.project.layers[..2] {
+            l.locked = true;
+        }
+        st.paste_selection();
+        assert!(st.sel_followers.is_empty());
+        st.nudge_selection(1, 0);
+        st.land_float();
+        assert_eq!(px_at(&st, 2, 0, 120, 120), BLUE, "the lead's pixels, layer 1's");
+    }
+
+    /// What a magic select press costs, end to end, on a 1080p and an 8K
+    /// frame: a click on the bare background, one inside a ring, and drag
+    /// steps, each with the frame after it. `cargo test --release wand_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn wand_timing() {
+        use std::time::Instant;
+        for (w, h) in [(1920u32, 1080u32), (7680, 4320)] {
+            let mut st = wand();
+            st.load_project(crate::doc::project::Project::new(w, h, 24.0), None);
+            st.sel_shape = SelShape::Wand;
+            let (r0, r1) = (h / 4, h / 2);
+            ring(&mut st, r0, r1, RED);
+            let mid = ((r0 + r1) as f32 * 0.5, (r0 + r1) as f32 * 0.5);
+            // Each step with the next frame's upkeep, which rebuilds the
+            // active cell's view of a changed selection.
+            let time = |label: &str, st: &mut AppState, f: &mut dyn FnMut(&mut AppState)| {
+                let t = Instant::now();
+                f(st);
+                st.sync_selection();
+                println!("{w}x{h} {label}: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            };
+            time("background click", &mut st, &mut |st| click(st, (5.5, 5.5), None));
+            time("ring click", &mut st, &mut |st| click(st, mid, Some(SelOp::Add)));
+            st.deselect();
+            let at0 = egui::pos2(400.0, 300.0);
+            time("background press", &mut st, &mut |st| {
+                st.select_down((5.5, 5.5), None);
+                st.wand_anchor(at0);
+            });
+            for i in 1..=3 {
+                time("  tolerance step", &mut st, &mut |st| {
+                    st.wand_drag_to(at0 + egui::vec2(8.0 + 12.0 * i as f32, 0.0))
+                });
+            }
+            time("  gap step (builds the field)", &mut st, &mut |st| {
+                st.wand_drag_to(at0 + egui::vec2(44.0, -20.0))
+            });
+            time("  gap step", &mut st, &mut |st| st.wand_drag_to(at0 + egui::vec2(44.0, -32.0)));
+            time("release", &mut st, &mut |st| st.select_up());
+            st.wand.all_visible = true;
+            time("all visible click", &mut st, &mut |st| click(st, mid, None));
+        }
     }
 }

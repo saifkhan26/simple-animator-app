@@ -866,6 +866,27 @@ impl PerspectiveGrid {
         self.keys.retain(|k| k.frame != frame);
     }
 
+    /// Keep the keys on their frames after `n` frames are inserted at `at`,
+    /// as the timeline's frame ops do for every other key.
+    pub fn keys_insert_frames(&mut self, at: usize, n: usize) {
+        for k in &mut self.keys {
+            if k.frame >= at {
+                k.frame += n;
+            }
+        }
+    }
+
+    /// Keep the keys on their frames after `[at, at + n)` is removed. A key
+    /// on a removed frame goes with it.
+    pub fn keys_remove_frames(&mut self, at: usize, n: usize) {
+        self.keys.retain(|k| !(at..at + n).contains(&k.frame));
+        for k in &mut self.keys {
+            if k.frame >= at + n {
+                k.frame -= n;
+            }
+        }
+    }
+
     pub fn set_key_ease(&mut self, frame: usize, ease: Ease) {
         if let Some(k) = self.keys.iter_mut().find(|k| k.frame == frame) {
             k.ease = ease;

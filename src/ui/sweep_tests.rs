@@ -104,6 +104,10 @@ impl Win {
                 if t == ActiveTool::Fill {
                     state.brush.fill_grain = 0.5;
                 }
+                // And the magic select, whose settings add rows to the Lasso's.
+                if t == ActiveTool::Lasso {
+                    state.sel_shape = crate::tools::select_mask::SelShape::Wand;
+                }
             }
             Win::MiniTimeline => {
                 state.show_panels = false;
@@ -130,7 +134,11 @@ impl Win {
                 use crate::brush_library::import::{KritaImport, KritaPlaces};
                 state.krita_import = Some(KritaImport::start(KritaPlaces::default(), None));
             }
-            Win::NewProject => state.show_new_project = true,
+            Win::NewProject => {
+                state.show_new_project = true;
+                // An image on the clipboard: the widest Clipboard label.
+                state.new_project_cfg.clipboard.size = Some((16384, 16384));
+            }
             Win::Export(kind) => {
                 state.show_export = true;
                 state.export_cfg.kind = kind;
@@ -154,10 +162,10 @@ impl Win {
 
     fn show(self, state: &mut AppState, ctx: &egui::Context) {
         match self {
-            Win::Panel(id) => panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None),
+            Win::Panel(id) => panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None, None),
             Win::ToolPanel(_) => {
                 let id = PanelId::Tools;
-                panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None)
+                panel_window(state, ctx, id, [40.0, 40.0], panel_width(id), true, None, None)
             }
             Win::Menu => menu_window(state, ctx),
             Win::MiniTimeline => mini_timeline_window(state, ctx),
@@ -513,12 +521,13 @@ fn every_window_is_clean_with_its_sections_open() {
 }
 
 /// A busier project — more layers, long names, cleanup chains, a group,
-/// a long scene, camera keys — leaves every window the size it was, and
-/// still clean.
+/// faded layers, a long scene, camera keys, a brush with many sizes
+/// remembered, brush values a drag left unrounded — leaves every window the
+/// size it was, and still clean.
 #[test]
 fn a_busy_project_leaves_every_window_its_size() {
     type Step = (&'static str, fn(&mut AppState));
-    let steps: [Step; 7] = [
+    let steps: [Step; 11] = [
         ("12 more layers", |s| {
             for k in 0..12 {
                 s.project.add_layer();
@@ -544,7 +553,27 @@ fn a_busy_project_leaves_every_window_its_size() {
             s.selected_layers.insert(other);
             s.group_selected_layers();
         }),
+        ("faded layers, the long name's too", |s| {
+            for l in &mut s.project.layers {
+                l.opacity = 0.35;
+            }
+        }),
         ("240 frames", |s| s.project.ensure_frame_count(240)),
+        ("brush values a drag left unrounded", |s| {
+            s.brush.radius = 16.892_37;
+            s.brush.opacity = 0.922_54;
+        }),
+        ("the largest brush size, a decimal short", |s| s.brush.radius = 127.9),
+        ("many brush sizes remembered", |s| {
+            let m = crate::app::brush_sizes::SizeMemory {
+                recent: vec![0.5, 3.3, 12.5, 64.0, 127.9],
+                pinned: vec![1.0, 2.5, 7.5, 100.0, 128.0],
+            };
+            s.brush_sizes = vec![m.clone(); 16];
+            for p in &mut s.pens {
+                p.sizes = m.clone();
+            }
+        }),
         ("camera keys", |s| {
             for f in [0, 12, 48, 200] {
                 s.project.current_frame = f;
@@ -699,6 +728,13 @@ fn the_brush_panel_keeps_its_rows_apart_at_its_narrowest() {
 /// looking at a layout without starting the app, which would share the
 /// real config folder.
 fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage {
+    let crop = rig.rect().expand(4.0);
+    snapshot_of(rig, ppp, crop)
+}
+
+/// [`snapshot`], cropped to `crop` rather than to the window: for a window
+/// with a menu open beside it.
+fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage {
     rig.ctx.set_pixels_per_point(ppp);
     rig.settle();
     let raw = egui::RawInput {
@@ -711,7 +747,7 @@ fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage {
     let font = rig.ctx.fonts(|f| f.image());
     let (fw, fh) = (font.width(), font.height());
     let tex: Vec<Color32> = font.srgba_pixels(None).collect();
-    let win_r = rig.rect().expand(4.0);
+    let win_r = crop;
     let (x0, y0) = ((win_r.min.x * ppp).floor() as i32, (win_r.min.y * ppp).floor() as i32);
     let (w, h) = ((win_r.width() * ppp).ceil() as i32, (win_r.height() * ppp).ceil() as i32);
     let bg = theme::palette().bg_base;
@@ -809,6 +845,37 @@ fn snapshots() {
     rig.settle();
     snapshot(&mut rig, 2.0).save(dir.join("fill_grain_lasso.png")).unwrap();
 
+    // The Tools panel: the pen slots and the eraser on the first row, the
+    // other tools on the second; then a slot's right-click menu.
+    let mut rig = Rig::new(Win::Panel(PanelId::Tools));
+    rig.state.add_pen();
+    rig.state.select_pen(0);
+    snapshot(&mut rig, 2.0).save(dir.join("tools.png")).unwrap();
+    let shapes = rig.settle();
+    let at = texts(&shapes).into_iter().find(|t| t.text == egui_phosphor::regular::PAINT_BRUSH).expect("the new slot").rect.center();
+    let right = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    rig.frame(vec![egui::Event::PointerMoved(at), right(true)]);
+    rig.frame(vec![right(false)]);
+    rig.settle();
+    let menu = rig.ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| l.order == egui::Order::Foreground)
+            .filter_map(|l| egui::AreaState::load(&rig.ctx, l.id).map(|s| s.rect()))
+            .fold(rig.rect(), |a, b| a.union(b))
+    });
+    snapshot_of(&mut rig, 2.0, menu.expand(4.0)).save(dir.join("tools_slot_menu.png")).unwrap();
+
+    // The Lasso with the magic select picked.
+    let mut rig = Rig::new(Win::ToolPanel(ActiveTool::Lasso));
+    snapshot(&mut rig, 2.0).save(dir.join("lasso_wand.png")).unwrap();
+
     // The onion strip: off, then on with a bar dragged and an offset soloed.
     let mut rig = Rig::new(Win::Panel(PanelId::Onion));
     snapshot(&mut rig, 2.0).save(dir.join("onion.png")).unwrap();
@@ -844,4 +911,13 @@ fn snapshots() {
         let name = if matches!(win, Win::Panel(PanelId::Layers)) { "layers.png" } else { "timeline.png" };
         snapshot(&mut rig, 2.0).save(dir.join(name)).unwrap();
     }
+
+    // New project with a Full HD image on the clipboard, then with none.
+    let mut rig = Rig::new(Win::NewProject);
+    rig.state.new_project_cfg.clipboard.size = Some((1920, 1080));
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("new_project_clipboard.png")).unwrap();
+    rig.state.new_project_cfg.clipboard.size = None;
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("new_project_no_clipboard.png")).unwrap();
 }
