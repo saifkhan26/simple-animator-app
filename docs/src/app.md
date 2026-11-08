@@ -1,6 +1,6 @@
 # `src/app.rs` — the app's central state (`AppState`)
 
-> **Source:** [src/app.rs](../../src/app.rs) · **Module:** `crate::app` · **Size:** 12876 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/app.rs](../../src/app.rs) · **Module:** `crate::app` · **Size:** 12876 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 
@@ -14,7 +14,7 @@ the live link to Krita and every workspace preference. If you think of the app a
 
 The app uses **egui**, an *immediate-mode* GUI: there is no retained DOM. Every frame (up to
 ~60 times a second) eframe calls `AppState::update` (in the `impl eframe::App for AppState`
-block near [line 7341](../../src/app.rs#L7341)). `update` does the per-frame housekeeping —
+block near [line 7435](../../src/app.rs#L7435)). `update` does the per-frame housekeeping —
 polls the pen tablet, reads keys and runs shortcuts, advances playback, keeps the
 transform/camera/grid edit buffers in step with the current frame, polls background jobs
 (imports, exports, saves, the Krita link), frees unreachable drawings, packs idle cells,
@@ -633,7 +633,7 @@ The **workspace preferences** that outlive a run but that egui's own memory does
 (Panel positions, sizes and collapse state are saved by egui/eframe automatically; these are
 plain `AppState` fields, so they are saved by hand.) `AppState::new` reads it from eframe
 storage under `UI_PREFS_KEY`; `eframe::App::save` (near
-[line 7358](../../src/app.rs#L7358)) writes it back on exit and every 30 s.
+[line 7452](../../src/app.rs#L7452)) writes it back on exit and every 30 s.
 `#[serde(default)]` is what keeps a prefs blob from an older build loadable after a field is
 added: without it, one missing key would fail the whole struct and silently reset every other
 preference too. Most fields copy straight into the `AppState` field of the same name.

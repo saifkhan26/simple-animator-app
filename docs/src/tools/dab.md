@@ -1,6 +1,6 @@
 # `src/tools/dab.rs` — brush dabs (one stamp of a brush)
 
-> **Source:** [src/tools/dab.rs](../../../src/tools/dab.rs) · **Module:** `crate::tools::dab` · **Size:** 171 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/tools/dab.rs](../../../src/tools/dab.rs) · **Module:** `crate::tools::dab` · **Size:** 171 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

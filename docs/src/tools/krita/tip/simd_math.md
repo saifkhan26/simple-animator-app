@@ -1,6 +1,6 @@
 # `src/tools/krita/tip/simd_math.rs` — Krita's exact floating-point maths
 
-> **Source:** [src/tools/krita/tip/simd_math.rs](../../../../../src/tools/krita/tip/simd_math.rs) · **Module:** `crate::tools::krita::tip::simd_math` · **Size:** 404 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/tools/krita/tip/simd_math.rs](../../../../../src/tools/krita/tip/simd_math.rs) · **Module:** `crate::tools::krita::tip::simd_math` · **Size:** 404 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

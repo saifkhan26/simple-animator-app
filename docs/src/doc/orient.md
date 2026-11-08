@@ -1,6 +1,6 @@
 # `src/doc/orient.rs` — lossless flips and quarter turns
 
-> **Source:** [src/doc/orient.rs](../../../src/doc/orient.rs) · **Module:** `crate::doc::orient` · **Size:** 192 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/doc/orient.rs](../../../src/doc/orient.rs) · **Module:** `crate::doc::orient` · **Size:** 192 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

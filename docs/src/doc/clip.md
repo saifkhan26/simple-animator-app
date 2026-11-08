@@ -1,6 +1,6 @@
 # `src/doc/clip.rs` — clipping masks and merged group images
 
-> **Source:** [src/doc/clip.rs](../../../src/doc/clip.rs) · **Module:** `crate::doc::clip` · **Size:** 646 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/doc/clip.rs](../../../src/doc/clip.rs) · **Module:** `crate::doc::clip` · **Size:** 646 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

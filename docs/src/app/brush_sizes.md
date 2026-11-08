@@ -1,6 +1,6 @@
 # `src/app/brush_sizes.rs` — remembered brush sizes (recent, pinned, swap, detents)
 
-> **Source:** [src/app/brush_sizes.rs](../../../src/app/brush_sizes.rs) · **Module:** `crate::app::brush_sizes` · **Size:** 281 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/app/brush_sizes.rs](../../../src/app/brush_sizes.rs) · **Module:** `crate::app::brush_sizes` · **Size:** 281 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 
@@ -413,14 +413,14 @@ Run with `cargo test app::brush_sizes`.
 
 | Test | What it checks |
 |---|---|
-| [`a_stop_holds_the_drag_then_lets_it_go_on_from_there`](../../../src/app/brush_sizes.rs#L166) | A stop holds the size for the detent, a size just past the stop is reachable, and the size never goes backwards as the drag goes on. |
-| [`stops_below_hold_a_drag_down`](../../../src/app/brush_sizes.rs#L187) | Smaller stops hold a drag to the left; stops on the other side are ignored; a second stop is reached one detent later than its size alone says. |
-| [`each_brush_remembers_the_sizes_it_drew_at`](../../../src/app/brush_sizes.rs#L207) | Each tool keeps its own recent sizes, newest first, five at most, no repeats; only drawing remembers; Shape shares the pen's list. |
-| [`swapping_goes_to_the_size_drawn_at_last_and_back`](../../../src/app/brush_sizes.rs#L227) | `SizeSwap` goes to the size drawn at last and back again, and at that size goes to the one before it. |
-| [`pins_toggle_and_stay_sorted`](../../../src/app/brush_sizes.rs#L246) | Pins toggle on and off (same to a tenth counts), stay sorted, and stop at `MAX_PINNED_SIZES`. |
-| [`labels_drop_a_trailing_zero`](../../../src/app/brush_sizes.rs#L260) | `size_label` shows `12`, `3.5` and `0.5`. |
+| [`a_stop_holds_the_drag_then_lets_it_go_on_from_there`](../../../src/app/brush_sizes.rs#L181) | A stop holds the size for the detent, a size just past the stop is reachable, and the size never goes backwards as the drag goes on. |
+| [`stops_below_hold_a_drag_down`](../../../src/app/brush_sizes.rs#L202) | Smaller stops hold a drag to the left; stops on the other side are ignored; a second stop is reached one detent later than its size alone says. |
+| [`each_brush_remembers_the_sizes_it_drew_at`](../../../src/app/brush_sizes.rs#L222) | Each tool keeps its own recent sizes, newest first, five at most, no repeats; only drawing remembers; Shape shares the pen's list. |
+| [`swapping_goes_to_the_size_drawn_at_last_and_back`](../../../src/app/brush_sizes.rs#L242) | `SizeSwap` goes to the size drawn at last and back again, and at that size goes to the one before it. |
+| [`pins_toggle_and_stay_sorted`](../../../src/app/brush_sizes.rs#L261) | Pins toggle on and off (same to a tenth counts), stay sorted, and stop at `MAX_PINNED_SIZES`. |
+| [`labels_drop_a_trailing_zero`](../../../src/app/brush_sizes.rs#L275) | `size_label` shows `12`, `3.5` and `0.5`. |
 
-**Test helpers:** `drawn` ([line 197](../../../src/app/brush_sizes.rs#L197)) — sets the brush
+**Test helpers:** `drawn` ([line 212](../../../src/app/brush_sizes.rs#L212)) — sets the brush
 size and draws a short stroke with `pointer_down` / `pointer_move` / `pointer_up`, so the
 size gets remembered. `PER` (line 160) — the 150-point-per-doubling value the detent tests
 use.

@@ -1,6 +1,6 @@
 # `src/app/pen_slots.rs` — the pen slots (the row of pens in the Tools panel)
 
-> **Source:** [src/app/pen_slots.rs](../../../src/app/pen_slots.rs) · **Module:** `crate::app::pen_slots` · **Size:** 503 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/app/pen_slots.rs](../../../src/app/pen_slots.rs) · **Module:** `crate::app::pen_slots` · **Size:** 503 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

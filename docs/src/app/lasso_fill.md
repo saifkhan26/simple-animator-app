@@ -1,6 +1,6 @@
 # `src/app/lasso_fill.rs` — the Fill tool's lasso mode
 
-> **Source:** [src/app/lasso_fill.rs](../../../src/app/lasso_fill.rs) · **Module:** `crate::app::lasso_fill` · **Size:** 441 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/app/lasso_fill.rs](../../../src/app/lasso_fill.rs) · **Module:** `crate::app::lasso_fill` · **Size:** 441 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

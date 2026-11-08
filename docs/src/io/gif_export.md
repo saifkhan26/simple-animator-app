@@ -1,6 +1,6 @@
 # `src/io/gif_export.rs` — write the animation as an animated GIF
 
-> **Source:** [src/io/gif_export.rs](../../../src/io/gif_export.rs) · **Module:** `crate::io::gif_export` · **Size:** 116 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/io/gif_export.rs](../../../src/io/gif_export.rs) · **Module:** `crate::io::gif_export` · **Size:** 116 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

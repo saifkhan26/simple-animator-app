@@ -1,6 +1,6 @@
 # `src/krita_helper.rs` — installing the Krita plugin and the mailbox files
 
-> **Source:** [src/krita_helper.rs](../../src/krita_helper.rs) · **Module:** `crate::krita_helper` · **Size:** 192 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/krita_helper.rs](../../src/krita_helper.rs) · **Module:** `crate::krita_helper` · **Size:** 192 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

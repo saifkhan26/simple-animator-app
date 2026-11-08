@@ -1,6 +1,6 @@
 # `src/io/webp_import.rs` — animated WebP import
 
-> **Source:** [src/io/webp_import.rs](../../../src/io/webp_import.rs) · **Module:** `crate::io::webp_import` · **Size:** 98 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/io/webp_import.rs](../../../src/io/webp_import.rs) · **Module:** `crate::io::webp_import` · **Size:** 98 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 

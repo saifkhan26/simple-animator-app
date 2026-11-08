@@ -1,6 +1,6 @@
 # `src/tools/krita/options.rs` — the list of curve options a Krita brush reads
 
-> **Source:** [src/tools/krita/options.rs](../../../../src/tools/krita/options.rs) · **Module:** `crate::tools::krita::options` · **Size:** 32 lines · Line links as of commit `67a7cb9`
+> **Source:** [src/tools/krita/options.rs](../../../../src/tools/krita/options.rs) · **Module:** `crate::tools::krita::options` · **Size:** 32 lines · Line links as of commit `36405ad`
 
 ## What this file is for
 
