@@ -1,6 +1,6 @@
 # `src/ui/tracks.rs` — the timeline's layer tracks
 
-> **Source:** [src/ui/tracks.rs](../../../src/ui/tracks.rs) · **Module:** `crate::ui::tracks` · **Size:** 1886 lines · Line links as of commit `1fa5845`
+> **Source:** [src/ui/tracks.rs](../../../src/ui/tracks.rs) · **Module:** `crate::ui::tracks` · **Size:** 1886 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

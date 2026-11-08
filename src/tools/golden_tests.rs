@@ -193,7 +193,7 @@ fn brushes() -> Vec<(&'static str, BrushSettings, ActiveTool)> {
         .iter()
         .map(|&(label, _, build)| {
             let b = build();
-            let tool = if label == "G-Pen" { ActiveTool::Ink } else { ActiveTool::Pencil };
+            let tool = if label == "G-Pen" { ActiveTool::INK } else { ActiveTool::PENCIL };
             (label, b, tool)
         })
         .collect();
@@ -233,7 +233,7 @@ fn cases() -> Vec<Case> {
 
     // Every brush × gesture × condition.
     for (label, brush, tool) in brushes() {
-        let painting_tool = if tool == ActiveTool::Eraser { ActiveTool::Pencil } else { tool };
+        let painting_tool = if tool == ActiveTool::Eraser { ActiveTool::PENCIL } else { tool };
         for input in ["s", "line", "tap", "tilt"] {
             for (cond, ground, hold) in [
                 ("clear", Ground::Clear, Hold::Free),
@@ -322,7 +322,7 @@ fn cases() -> Vec<Case> {
         out.push(freehand_case(
             format!("Pencil-5/pencil/{input}/clear/rot90-mirror"),
             BrushSettings::pencil5_krita(),
-            ActiveTool::Pencil,
+            ActiveTool::PENCIL,
             Ground::Clear,
             Hold::Free,
             input,
@@ -339,7 +339,7 @@ fn cases() -> Vec<Case> {
         out.push(freehand_case(
             format!("G-Pen-flat/ink/{input}/clear"),
             b,
-            ActiveTool::Ink,
+            ActiveTool::INK,
             Ground::Clear,
             Hold::Free,
             input,
@@ -414,7 +414,7 @@ fn cases() -> Vec<Case> {
                     }
                     let mut b = StrokeBuilder::new_with_krita(
                         settings.clone(),
-                        ActiveTool::Pencil,
+                        ActiveTool::PENCIL,
                         1.0,
                         SmoothingOptions::default(),
                         brush.clone(),
@@ -475,8 +475,8 @@ fn cases() -> Vec<Case> {
 
 fn tool_name(t: ActiveTool) -> &'static str {
     match t {
-        ActiveTool::Pencil => "pencil",
-        ActiveTool::Ink => "ink",
+        ActiveTool::PENCIL => "pencil",
+        ActiveTool::INK => "ink",
         ActiveTool::Eraser => "eraser",
         _ => "other",
     }
@@ -617,11 +617,11 @@ fn noise_render() {
     };
     let grainy = BrushSettings::grainy_airbrush();
     let tiles: [(BrushSettings, ActiveTool); 6] = [
-        (BrushSettings::airbrush(), ActiveTool::Pencil),
-        (grainy.clone(), ActiveTool::Pencil),
-        (BrushSettings { noise_size: 2.5, ..grainy.clone() }, ActiveTool::Pencil),
-        (BrushSettings { noise_source: NoiseSource::Paper, ..grainy.clone() }, ActiveTool::Pencil),
-        (BrushSettings { noise: 1.0, noise_stipple: true, ..grainy.clone() }, ActiveTool::Pencil),
+        (BrushSettings::airbrush(), ActiveTool::PENCIL),
+        (grainy.clone(), ActiveTool::PENCIL),
+        (BrushSettings { noise_size: 2.5, ..grainy.clone() }, ActiveTool::PENCIL),
+        (BrushSettings { noise_source: NoiseSource::Paper, ..grainy.clone() }, ActiveTool::PENCIL),
+        (BrushSettings { noise: 1.0, noise_stipple: true, ..grainy.clone() }, ActiveTool::PENCIL),
         (BrushSettings { color: [0, 0, 0, 0], ..grainy }, ActiveTool::Eraser),
     ];
     let (w, h, gap, z) = (256u32, 160u32, 8u32, 2u32);
@@ -713,7 +713,7 @@ fn perf_brushes_1080p() {
             let pre = c.pixels().into_owned();
             let mut ws = StrokeWorkspace::new();
             ws.begin(c.width, c.height, &settings);
-            let mut b = StrokeBuilder::new_with_krita(settings.clone(), ActiveTool::Pencil, 1.0, SmoothingOptions::default(), kb.clone());
+            let mut b = StrokeBuilder::new_with_krita(settings.clone(), ActiveTool::PENCIL, 1.0, SmoothingOptions::default(), kb.clone());
             b.seed_random(1);
             let t0 = std::time::Instant::now();
             let mut worst = std::time::Duration::ZERO;

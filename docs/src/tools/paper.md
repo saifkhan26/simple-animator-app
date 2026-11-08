@@ -1,6 +1,6 @@
 # `src/tools/paper.rs` — paper grain texture
 
-> **Source:** [src/tools/paper.rs](../../../src/tools/paper.rs) · **Module:** `crate::tools::paper` · **Size:** 198 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/paper.rs](../../../src/tools/paper.rs) · **Module:** `crate::tools::paper` · **Size:** 198 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

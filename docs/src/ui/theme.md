@@ -1,6 +1,6 @@
 # `src/ui/theme.rs` — colour schemes, fonts and icon buttons
 
-> **Source:** [src/ui/theme.rs](../../../src/ui/theme.rs) · **Module:** `crate::ui::theme` · **Size:** 601 lines · Line links as of commit `1fa5845`
+> **Source:** [src/ui/theme.rs](../../../src/ui/theme.rs) · **Module:** `crate::ui::theme` · **Size:** 601 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

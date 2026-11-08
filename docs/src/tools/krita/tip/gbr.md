@@ -1,6 +1,6 @@
 # `src/tools/krita/tip/gbr.rs` — GIMP brush tips (.gbr and .gih)
 
-> **Source:** [src/tools/krita/tip/gbr.rs](../../../../../src/tools/krita/tip/gbr.rs) · **Module:** `crate::tools::krita::tip::gbr` · **Size:** 318 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/krita/tip/gbr.rs](../../../../../src/tools/krita/tip/gbr.rs) · **Module:** `crate::tools::krita::tip::gbr` · **Size:** 318 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

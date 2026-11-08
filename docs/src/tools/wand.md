@@ -1,6 +1,6 @@
 # `src/tools/wand.rs` — magic select (the wand)
 
-> **Source:** [src/tools/wand.rs](../../../src/tools/wand.rs) · **Module:** `crate::tools::wand` · **Size:** 773 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/wand.rs](../../../src/tools/wand.rs) · **Module:** `crate::tools::wand` · **Size:** 773 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

@@ -7,9 +7,11 @@ mod groups;
 mod lasso_fill;
 mod liquify;
 mod orient;
+pub mod pen_slots;
 mod select;
 
 pub use button_drag::ButtonDragState;
+pub use pen_slots::PenSlot;
 pub use lasso_fill::{FillMode, LassoHeld};
 pub use select::SelGesture;
 
@@ -450,23 +452,32 @@ struct UiPrefs {
     loop_timeline: bool,
     /// Line smoothing as it was before each pen had its own: read only to
     /// seed `pen_smoothing` from a prefs file older than it, and written as
-    /// the pencil's for a build older than this one.
+    /// the first pen slot's for a build older than this one.
     smoothing: SmoothingOptions,
-    /// Line smoothing per freehand tool, in `PEN_TOOLS` order. A workspace
-    /// preference: how much the app fights the hand is a matter of taste,
-    /// and of the tool — a stabilized ink line, a free pencil. Empty in a
-    /// prefs file older than it, which gives every tool `smoothing`.
+    /// Line smoothing per freehand tool from before the pen slots: the
+    /// pencil, the ink and the eraser. A workspace preference: how much the
+    /// app fights the hand is a matter of taste, and of the tool. Empty in a
+    /// prefs file older than it, which gives every tool `smoothing`. Still
+    /// where the eraser's is kept; the first two are written from the first
+    /// two slots for an older build.
     pen_smoothing: Vec<SmoothingOptions>,
-    /// Per-tool brush settings. A tuned brush is worth as much as a tuned
+    /// Per-tool brush settings, pencil and ink first, then the other tools
+    /// in `ActiveTool::idx` order. A tuned brush is worth as much as a tuned
     /// palette and was previously thrown away on exit. `None` from an
     /// older prefs blob, or from one whose tool list has since changed,
-    /// falls back to the built-in defaults.
+    /// falls back to the built-in defaults. The first two are written from
+    /// the first two pen slots, for an older build; this one reads `pens`.
     tool_brushes: Option<Vec<BrushSettings>>,
+    /// The pen slots, each with its brush, smoothing, sizes, name and icon.
+    /// Empty in a prefs file from before the slots, which makes the first
+    /// two from that file's pencil and ink.
+    pens: Vec<PenSlot>,
     /// Pinned colour swatches. A workspace preference, not project data: a
     /// palette follows the artist between files.
     palette: Vec<[u8; 3]>,
-    /// The sizes each tool's brush was drawn at, and the ones pinned, by
-    /// `ActiveTool::idx`.
+    /// The sizes each tool's brush was drawn at, and the ones pinned, laid
+    /// out as `tool_brushes` is. The first two are written from the first
+    /// two pen slots, for an older build; each slot keeps its own in `pens`.
     brush_sizes: Vec<brush_sizes::SizeMemory>,
     /// Frame column width in the timeline tracks — how zoomed in the artist
     /// likes to work.
@@ -544,8 +555,15 @@ impl Default for FadeOthers {
     }
 }
 
-/// Number of tools, and so of slots in the per-tool brush array.
+/// Slots in the per-tool brush array the prefs keep: the pencil and the ink
+/// from before the pen slots, then the other tools.
 const TOOL_COUNT: usize = 9;
+/// The pens at the head of that array, now the first two pen slots.
+const LEGACY_PENS: usize = 2;
+/// The tools that are not pens, each with its own brush in
+/// `AppState::tool_brushes`.
+const OTHER_TOOLS: usize = ActiveTool::OTHERS.len();
+const _: () = assert!(LEGACY_PENS + OTHER_TOOLS == TOOL_COUNT);
 
 /// The built-in per-tool brushes.
 fn default_tool_brushes() -> [BrushSettings; TOOL_COUNT] {
@@ -564,16 +582,16 @@ fn default_tool_brushes() -> [BrushSettings; TOOL_COUNT] {
     ]
 }
 
-/// Saved brushes, or the defaults. A blob from a build with a different
-/// number of tools is discarded rather than padded: the array is indexed by
-/// `ActiveTool::idx`, so a short one would silently reassign brushes to the
-/// wrong tools. The exception is a blob from before the tools that were
-/// appended last (Perspective, then Liquify): the older slots still line up,
-/// and only the new tools' own are missing.
+/// Saved brushes, or the defaults, in the prefs' layout. A blob from a build
+/// with a different number of tools is discarded rather than padded: the
+/// array is indexed by tool, so a short one would silently reassign brushes
+/// to the wrong tools. The exception is a blob from before the tools that
+/// were appended last (Perspective, then Liquify): the older slots still
+/// line up, and only the new tools' own are missing.
 fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; TOOL_COUNT] {
     match saved {
         Some(mut v) => {
-            if v.len() >= ActiveTool::Perspective.idx() {
+            if v.len() >= LEGACY_PENS + ActiveTool::Perspective.idx().unwrap_or(0) {
                 while v.len() < TOOL_COUNT {
                     v.push(default_tool_brushes()[v.len()].clone());
                 }
@@ -584,14 +602,22 @@ fn restore_tool_brushes(saved: Option<Vec<BrushSettings>>) -> [BrushSettings; TO
     }
 }
 
-/// The tools that draw freehand, each with its own line smoothing, in
-/// `pen_smoothing` order.
-const PEN_TOOLS: [ActiveTool; 3] = [ActiveTool::Pencil, ActiveTool::Ink, ActiveTool::Eraser];
+/// The brushes of the tools that aren't pens, out of the prefs' layout.
+fn other_brushes(legacy: &[BrushSettings; TOOL_COUNT]) -> [BrushSettings; OTHER_TOOLS] {
+    std::array::from_fn(|k| legacy[LEGACY_PENS + k].clone())
+}
 
-/// Saved smoothing per freehand tool. A prefs file from before each tool had
-/// its own gives all of them the one setting it kept.
-fn restore_pen_smoothing(prefs: &UiPrefs) -> [SmoothingOptions; PEN_TOOLS.len()] {
-    let mut out = [prefs.smoothing; PEN_TOOLS.len()];
+/// The freehand tools from before the pen slots, in `pen_smoothing` order:
+/// the pencil, the ink and the eraser.
+const LEGACY_SMOOTHING: usize = 3;
+/// The eraser's place in `pen_smoothing`.
+const ERASER_SMOOTHING: usize = 2;
+
+/// Saved smoothing per freehand tool, in `pen_smoothing` order. A prefs file
+/// from before each tool had its own gives all of them the one setting it
+/// kept.
+fn restore_pen_smoothing(prefs: &UiPrefs) -> [SmoothingOptions; LEGACY_SMOOTHING] {
+    let mut out = [prefs.smoothing; LEGACY_SMOOTHING];
     for (slot, saved) in out.iter_mut().zip(&prefs.pen_smoothing) {
         *slot = *saved;
     }
@@ -620,6 +646,7 @@ impl Default for UiPrefs {
             smoothing: SmoothingOptions::default(),
             pen_smoothing: Vec::new(),
             tool_brushes: None,
+            pens: Vec::new(),
             palette: Vec::new(),
             brush_sizes: Vec::new(),
             track_frame_w: crate::ui::tracks::DEFAULT_FRAME_W,
@@ -1195,12 +1222,13 @@ pub struct AppState {
     /// Pinned swatches, most recently added last. Capped at
     /// [`AppState::MAX_SWATCHES`].
     pub palette: Vec<[u8; 3]>,
-    /// The sizes each tool's brush was drawn at, and the ones pinned, by
-    /// `ActiveTool::idx`. See [`brush_sizes`].
+    /// The sizes each tool that isn't a pen was drawn at, and the ones
+    /// pinned, by `ActiveTool::idx`; each pen slot keeps its own. See
+    /// [`brush_sizes`].
     pub brush_sizes: Vec<brush_sizes::SizeMemory>,
-    /// The last size swap: the brush slot, the size swapped to, and the one
-    /// swapped from, which the next swap goes back to.
-    size_swap: Option<(usize, f32, f32)>,
+    /// The last size swap: the tool whose sizes it was, the size swapped to,
+    /// and the one swapped from, which the next swap goes back to.
+    size_swap: Option<(ActiveTool, f32, f32)>,
     /// The Color panel's harmony set. Its scheme is a workspace preference;
     /// the base follows the brush colour.
     pub harmony: HarmonySet,
@@ -1307,11 +1335,25 @@ pub struct AppState {
     sel_tex_stale: bool,
     /// GPU texture for the floating pixels.
     pub selection_tex: Option<TextureHandle>,
-    /// Per-tool brush settings preserved across tool switches.
-    pub tool_brushes: [BrushSettings; TOOL_COUNT],
-    /// Pencil or Ink, whichever was active last: the pen whose size Shape
-    /// draws at. Session-only; the app comes back on the pencil anyway.
+    /// The brushes of the tools that aren't pens, by `ActiveTool::idx`,
+    /// preserved across tool switches.
+    pub tool_brushes: [BrushSettings; OTHER_TOOLS],
+    /// The pen slots, in the order of the row: one to
+    /// [`pen_slots::MAX_PENS`]. See [`pen_slots`].
+    pub pens: Vec<PenSlot>,
+    /// The pen slot made the tool last: the pen whose size Shape draws at,
+    /// and where the pen keys go back to from another tool. Session-only;
+    /// the app comes back on the first slot anyway.
     pub last_pen: ActiveTool,
+    /// The pen slot in hand before `last_pen`, for the swap key.
+    /// Session-only.
+    prev_pen: Option<ActiveTool>,
+    /// The search box of a pen slot's right-click brush picker, apart from
+    /// the Brush panel's.
+    pub pen_menu_search: String,
+    /// The pen slot whose menu has had Remove clicked once: the next click
+    /// removes it. Cleared whenever a slot's menu opens.
+    pub pen_remove_armed: Option<usize>,
     /// The colour wheel is pinned: every tool paints in one colour, and the
     /// wheel's set leads the swatch pie. Session-only.
     wheel_pinned: bool,
@@ -1417,12 +1459,12 @@ pub struct AppState {
     pub right_drag: ButtonDrag,
     /// A middle- or right-button drag under way on the canvas.
     pub button_drag: Option<ButtonDragState>,
-    /// Line smoothing per freehand tool, in `PEN_TOOLS` order, latched into
-    /// every new stroke. See `tools::Smoothing` and [`Self::smoothing`].
-    pub pen_smoothing: [SmoothingOptions; PEN_TOOLS.len()],
-    /// The smoothing each pen had before the Stabilizer key turned it on,
+    /// The eraser's line smoothing, latched into every new stroke; each pen
+    /// slot keeps its own. See `tools::Smoothing` and [`Self::smoothing`].
+    pub eraser_smoothing: SmoothingOptions,
+    /// The smoothing the eraser had before the Stabilizer key turned it on,
     /// for the key to turn it back to. Session-only.
-    smoothing_before_stabilizer: [Smoothing; PEN_TOOLS.len()],
+    eraser_before_stabilizer: Smoothing,
     /// Whether the timeline wraps. Gates playback, wheel scrub and the frame
     /// step actions alike, so one toggle means one behaviour everywhere.
     pub loop_timeline: bool,
@@ -1748,6 +1790,10 @@ impl AppState {
             cell_dirty.insert(id, Dirty::Full);
         }
         let pen_smoothing = restore_pen_smoothing(&prefs);
+        let legacy_brushes = restore_tool_brushes(prefs.tool_brushes.clone());
+        let pens = pen_slots::restore_pens(&prefs, &legacy_brushes);
+        let first_brush = pens[0].brush.clone();
+        let other_sizes = prefs.brush_sizes.get(LEGACY_PENS..).map(<[_]>::to_vec).unwrap_or_default();
         Self {
             project,
             project_path: None,
@@ -1773,18 +1819,17 @@ impl AppState {
             group_used: HashMap::new(),
             ghost_tex_used: HashMap::new(),
             playhead_rest: (usize::MAX, 0.0),
-            tool: ActiveTool::Pencil,
-            brush: restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()]
-                .clone(),
+            tool: ActiveTool::PENCIL,
+            brush: first_brush.clone(),
             brush_library: BrushLibrary::new(brush_root),
             brush_search: String::new(),
             brush_thumbs: HashMap::new(),
             krita_import: None,
             palette: prefs.palette,
-            brush_sizes: prefs.brush_sizes,
+            brush_sizes: other_sizes,
             size_swap: None,
             harmony: {
-                let c = restore_tool_brushes(prefs.tool_brushes.clone())[ActiveTool::Pencil.idx()].color;
+                let c = first_brush.color;
                 HarmonySet::new(prefs.harmony, [c[0], c[1], c[2]])
             },
             project_presets: prefs.project_presets,
@@ -1828,8 +1873,12 @@ impl AppState {
             pixel_clip: Vec::new(),
             sel_tex_stale: false,
             selection_tex: None,
-            tool_brushes: restore_tool_brushes(prefs.tool_brushes.clone()),
-            last_pen: ActiveTool::Pencil,
+            tool_brushes: other_brushes(&legacy_brushes),
+            pens,
+            last_pen: ActiveTool::PENCIL,
+            prev_pen: None,
+            pen_menu_search: String::new(),
+            pen_remove_armed: None,
             wheel_pinned: false,
             stroke: None,
             stroke_target: None,
@@ -1873,8 +1922,8 @@ impl AppState {
             right_drag: prefs.right_drag,
             button_drag: None,
             loop_timeline: prefs.loop_timeline,
-            pen_smoothing,
-            smoothing_before_stabilizer: [Smoothing::Basic; PEN_TOOLS.len()],
+            eraser_smoothing: pen_smoothing[ERASER_SMOOTHING],
+            eraser_before_stabilizer: Smoothing::Basic,
             pen_outlier_logged: false,
             pen_batches_rejected: 0,
             pen_packets_dropped: 0,
@@ -1969,7 +2018,7 @@ impl AppState {
             startup_maximize: true,
             screen_pick: false,
             screen_pick_arm: false,
-            screen_pick_return_tool: ActiveTool::Pencil,
+            screen_pick_return_tool: ActiveTool::PENCIL,
             screen_pick_tex: None,
         }
     }
@@ -2004,9 +2053,9 @@ impl AppState {
             self.cell_dirty.insert(id, Dirty::Full);
         }
         // Brushes are the artist's, not the project's: keep every tool's,
-        // the active one included, and come back on the pencil.
+        // the active one included, and come back on the first pen slot.
         self.stash_brush();
-        self.load_brush(ActiveTool::Pencil);
+        self.load_brush(ActiveTool::PENCIL);
         self.grid_drag = None;
         self.snap_lock = None;
         self.stroke = None;
@@ -5527,8 +5576,7 @@ impl AppState {
     fn warm_pre(&mut self, ctx: &egui::Context) {
         let paints = matches!(
             self.tool,
-            ActiveTool::Pencil
-                | ActiveTool::Ink
+            ActiveTool::Pen(_)
                 | ActiveTool::Eraser
                 | ActiveTool::Fill
                 | ActiveTool::Shape
@@ -5940,7 +5988,7 @@ impl AppState {
     /// instead (see [`Self::shape_plane`]).
     pub fn snapping(&self) -> bool {
         let stroke_tool = match self.tool {
-            ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser => true,
+            ActiveTool::Pen(_) | ActiveTool::Eraser => true,
             ActiveTool::Shape => self.brush.shape_kind == ShapeKind::Line,
             _ => false,
         };
@@ -6255,20 +6303,41 @@ impl AppState {
     pub const MAX_SWATCHES: usize = 32;
 
     /// Set the brush colour everywhere it is mirrored. `brush` alone is not
-    /// enough: the per-tool copy in `tool_brushes` is what a tool switch
-    /// restores from, so writing only one of them loses the colour on the next
-    /// tool change. Same reasoning as `commit_screen_pick`.
+    /// enough: the per-tool copy in `tool_brushes` or the pen slot is what a
+    /// tool switch restores from, so writing only one of them loses the
+    /// colour on the next tool change. Same reasoning as `commit_screen_pick`.
     pub fn set_brush_color(&mut self, rgb: [u8; 3]) {
         let c = [rgb[0], rgb[1], rgb[2], 255];
         self.brush.color = c;
         if self.wheel_pinned {
-            for b in &mut self.tool_brushes {
+            for b in self.every_brush_mut() {
                 b.color = c;
             }
         } else {
-            let idx = self.tool.idx();
-            self.tool_brushes[idx].color = c;
+            self.brush_of_mut(self.tool).color = c;
         }
+    }
+
+    /// The brush `t` keeps between tool switches: its pen slot's, or its own.
+    pub fn brush_of(&self, t: ActiveTool) -> &BrushSettings {
+        match (t.pen(), t.idx()) {
+            (Some(i), _) => &self.pens[i].brush,
+            (None, Some(k)) => &self.tool_brushes[k],
+            (None, None) => unreachable!("a tool is a pen or has an index"),
+        }
+    }
+
+    pub fn brush_of_mut(&mut self, t: ActiveTool) -> &mut BrushSettings {
+        match (t.pen(), t.idx()) {
+            (Some(i), _) => &mut self.pens[i].brush,
+            (None, Some(k)) => &mut self.tool_brushes[k],
+            (None, None) => unreachable!("a tool is a pen or has an index"),
+        }
+    }
+
+    /// Every tool's kept brush, every pen slot's among them.
+    fn every_brush_mut(&mut self) -> impl Iterator<Item = &mut BrushSettings> {
+        self.tool_brushes.iter_mut().chain(self.pens.iter_mut().map(|p| &mut p.brush))
     }
 
     /// Whether the colour wheel is pinned.
@@ -6304,18 +6373,20 @@ impl AppState {
     /// to restore from. Shape has no size of its own, so its Thickness goes
     /// to the pen it follows too.
     pub(crate) fn stash_brush(&mut self) {
-        self.tool_brushes[self.tool.idx()] = self.brush.clone();
-        match self.tool {
-            ActiveTool::Pencil | ActiveTool::Ink => self.last_pen = self.tool,
-            ActiveTool::Shape => self.tool_brushes[self.last_pen.idx()].radius = self.brush.radius,
-            _ => {}
+        *self.brush_of_mut(self.tool) = self.brush.clone();
+        if self.tool == ActiveTool::Shape {
+            self.brush_of_mut(self.last_pen).radius = self.brush.radius;
         }
     }
 
-    /// `tool`'s own line smoothing, for a tool that draws freehand.
+    /// `tool`'s own line smoothing, for a tool that draws freehand: a pen
+    /// slot's, or the eraser's.
     pub fn smoothing_for(&self, tool: ActiveTool) -> Option<&SmoothingOptions> {
-        let slot = PEN_TOOLS.iter().position(|&t| t == tool)?;
-        Some(&self.pen_smoothing[slot])
+        match tool {
+            ActiveTool::Pen(i) => self.pens.get(i as usize).map(|p| &p.smoothing),
+            ActiveTool::Eraser => Some(&self.eraser_smoothing),
+            _ => None,
+        }
     }
 
     /// The active tool's own line smoothing, for a tool that draws freehand.
@@ -6324,19 +6395,27 @@ impl AppState {
     }
 
     pub fn smoothing_mut(&mut self) -> Option<&mut SmoothingOptions> {
-        let slot = PEN_TOOLS.iter().position(|&t| t == self.tool)?;
-        Some(&mut self.pen_smoothing[slot])
+        self.smoothing_and_before_mut().map(|(o, _)| o)
+    }
+
+    /// The active tool's smoothing, and the kind it had before the
+    /// Stabilizer key turned it on.
+    fn smoothing_and_before_mut(&mut self) -> Option<(&mut SmoothingOptions, &mut Smoothing)> {
+        match self.tool {
+            ActiveTool::Pen(i) => self.pens.get_mut(i as usize).map(|p| (&mut p.smoothing, &mut p.before_stabilizer)),
+            ActiveTool::Eraser => Some((&mut self.eraser_smoothing, &mut self.eraser_before_stabilizer)),
+            _ => None,
+        }
     }
 
     /// Turn the active pen's Stabilizer on, or off again to the smoothing it
     /// had before. The next stroke takes it; one under way keeps its own.
     fn toggle_stabilizer(&mut self) {
-        let Some(slot) = PEN_TOOLS.iter().position(|&t| t == self.tool) else { return };
-        let o = &mut self.pen_smoothing[slot];
+        let Some((o, before)) = self.smoothing_and_before_mut() else { return };
         if o.kind == Smoothing::Stabilizer {
-            o.kind = self.smoothing_before_stabilizer[slot];
+            o.kind = *before;
         } else {
-            self.smoothing_before_stabilizer[slot] = o.kind;
+            *before = o.kind;
             o.kind = Smoothing::Stabilizer;
         }
     }
@@ -6344,8 +6423,7 @@ impl AppState {
     /// Step the active pen's smoothing on to the next kind, round to None
     /// after the Stabilizer.
     fn cycle_smoothing(&mut self) {
-        let Some(slot) = PEN_TOOLS.iter().position(|&t| t == self.tool) else { return };
-        let o = &mut self.pen_smoothing[slot];
+        let Some((o, before)) = self.smoothing_and_before_mut() else { return };
         let next = match o.kind {
             Smoothing::None => Smoothing::Basic,
             Smoothing::Basic => Smoothing::Weighted,
@@ -6353,25 +6431,30 @@ impl AppState {
             Smoothing::Stabilizer => Smoothing::None,
         };
         if next == Smoothing::Stabilizer {
-            self.smoothing_before_stabilizer[slot] = o.kind;
+            *before = o.kind;
         }
         o.kind = next;
     }
 
     /// Make `t` the active tool with its stored brush. Shape draws at the
-    /// size of the pen used last, not at a size of its own.
+    /// size of the pen used last, not at a size of its own. A pen slot
+    /// becomes the pen used last.
     pub(crate) fn load_brush(&mut self, t: ActiveTool) {
         // A pinned wheel's colour goes with the pen to the next tool, however
         // it was set.
         let shared = self.wheel_pinned.then_some(self.brush.color);
         self.tool = t;
-        self.brush = self.tool_brushes[t.idx()].clone();
+        self.brush = self.brush_of(t).clone();
         if let Some(c) = shared {
             self.brush.color = c;
-            self.tool_brushes[t.idx()].color = c;
+            self.brush_of_mut(t).color = c;
+        }
+        if t.is_pen() && t != self.last_pen {
+            self.prev_pen = Some(self.last_pen);
+            self.last_pen = t;
         }
         if t == ActiveTool::Shape {
-            self.brush.radius = self.tool_brushes[self.last_pen.idx()].radius;
+            self.brush.radius = self.brush_of(self.last_pen).radius;
         }
     }
 
@@ -6408,20 +6491,20 @@ impl AppState {
         self.stash_brush();
         // Apply to the active brush and every tool's stored colour so the sample
         // sticks across tool switches.
-        for b in &mut self.tool_brushes {
+        for b in self.every_brush_mut() {
             b.color = color;
         }
         let tool = self.screen_pick_return_tool;
         self.load_brush(tool);
         self.brush.color = color;
-        self.tool_brushes[tool.idx()].color = color;
+        self.brush_of_mut(tool).color = color;
         self.end_screen_pick();
     }
 
     #[allow(dead_code)]
     pub fn apply_picked_color(&mut self, color: [u8; 4]) {
         self.brush.color = color;
-        for b in &mut self.tool_brushes {
+        for b in self.every_brush_mut() {
             b.color = color;
         }
     }
@@ -6756,8 +6839,19 @@ impl AppState {
             return;
         }
         match action {
-            Action::ToolPencil => self.set_tool(ActiveTool::Pencil),
-            Action::ToolInk => self.set_tool(ActiveTool::Ink),
+            Action::ToolPencil
+            | Action::ToolInk
+            | Action::ToolPen3
+            | Action::ToolPen4
+            | Action::ToolPen5
+            | Action::ToolPen6 => {
+                if let Some(i) = action.pen_slot() {
+                    self.select_pen(i);
+                }
+            }
+            Action::PenNext => self.step_pen(true),
+            Action::PenPrev => self.step_pen(false),
+            Action::PenSwap => self.swap_pen(),
             Action::ToolEraser => self.set_tool(ActiveTool::Eraser),
             // Again while Fill is the tool, it swaps the bucket and the lasso.
             Action::ToolFill if self.tool == ActiveTool::Fill => self.toggle_fill_mode(),
@@ -7360,7 +7454,7 @@ impl eframe::App for AppState {
         // change made since the last switch lives in `brush` alone until this
         // stashes it.
         self.stash_brush();
-        let tool_brushes = self.tool_brushes.to_vec();
+        let (tool_brushes, pen_smoothing, brush_sizes) = self.legacy_tool_prefs();
         eframe::set_value(
             storage,
             UI_PREFS_KEY,
@@ -7381,11 +7475,12 @@ impl eframe::App for AppState {
                 middle_drag: self.middle_drag,
                 right_drag: self.right_drag,
                 loop_timeline: self.loop_timeline,
-                smoothing: self.pen_smoothing[0],
-                pen_smoothing: self.pen_smoothing.to_vec(),
+                smoothing: self.pens[0].smoothing,
+                pen_smoothing,
                 tool_brushes: Some(tool_brushes),
+                pens: self.pens.clone(),
                 palette: self.palette.clone(),
-                brush_sizes: self.brush_sizes.clone(),
+                brush_sizes,
                 track_frame_w: self.track_frame_w,
                 perspective: PerspectiveConfig {
                     grids: self.grid_seed.clone(),
@@ -8764,7 +8859,7 @@ mod tests {
         assert!(st.show_panels);
         assert_eq!(ctx.memory(|m| m.focused()), None, "Tab left a panel widget focused");
         frame(&mut st, Some(egui::Key::Q));
-        assert_eq!(st.tool, ActiveTool::Pencil);
+        assert_eq!(st.tool, ActiveTool::PENCIL);
     }
 
     /// Settings takes a bare Shift for a hold binding once it comes back up,
@@ -8873,25 +8968,25 @@ mod tests {
     #[test]
     fn a_pinned_wheel_gives_every_tool_one_colour() {
         let mut st = AppState::for_test();
-        st.set_tool(ActiveTool::Pencil);
+        st.set_tool(ActiveTool::PENCIL);
         st.set_brush_color([200, 0, 0]);
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.set_brush_color([0, 0, 200]);
-        st.set_tool(ActiveTool::Pencil);
+        st.set_tool(ActiveTool::PENCIL);
         assert_eq!(st.brush.color, [200, 0, 0, 255], "unpinned: each its own");
 
         st.set_wheel_pinned(true);
         st.set_tool(ActiveTool::Fill);
         assert_eq!(st.brush.color, [200, 0, 0, 255], "pinning hands the colour on");
         st.set_brush_color([0, 150, 0]);
-        for t in [ActiveTool::Ink, ActiveTool::Shape, ActiveTool::Pencil] {
+        for t in [ActiveTool::INK, ActiveTool::Shape, ActiveTool::PENCIL] {
             st.set_tool(t);
             assert_eq!(st.brush.color, [0, 150, 0, 255], "{t:?}");
         }
 
         st.set_wheel_pinned(false);
         st.set_brush_color([9, 9, 9]);
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         assert_eq!(st.brush.color, [0, 150, 0, 255], "let go: tools drift apart again");
         st.dispatch(Action::WheelPinToggle);
         assert!(st.wheel_pinned());
@@ -9705,7 +9800,7 @@ mod tests {
         for mode in [BrushMode::Ribbon, BrushMode::Krita] {
             let mut st = AppState::for_test();
             st.load_project(Project::new(3000, 4000, 24.0), None);
-            st.tool = ActiveTool::Pencil;
+            st.tool = ActiveTool::PENCIL;
             st.brush.mode = mode;
             st.brush.radius = 6.0;
             let ctx = egui::Context::default();
@@ -10711,7 +10806,7 @@ mod tests {
         assert_eq!(format!("{:?}", prefs.smoothing), format!("{:?}", want.smoothing));
         assert_eq!(
             format!("{:?}", restore_pen_smoothing(&prefs)),
-            format!("{:?}", [want.smoothing; PEN_TOOLS.len()]),
+            format!("{:?}", [want.smoothing; LEGACY_SMOOTHING]),
             "every pen gets the one smoothing there was"
         );
         assert_eq!(prefs.palette, want.palette);
@@ -10727,7 +10822,7 @@ mod tests {
         let brushes = restore_tool_brushes(prefs.tool_brushes);
         assert_eq!(format!("{:?}", brushes.to_vec()), format!("{:?}", fixture_brushes()));
         assert_eq!(brushes[0].mode, crate::tools::BrushMode::Krita);
-        let fill = &brushes[ActiveTool::Fill.idx()];
+        let fill = &other_brushes(&brushes)[ActiveTool::Fill.idx().unwrap()];
         assert_eq!(
             (fill.fill_grain, fill.fill_grain_size, fill.fill_grain_contrast, fill.fill_grain_boil),
             (0.0, 1.0, 1.0, false),
@@ -10746,7 +10841,7 @@ mod tests {
         let mut storage = MemStorage::default();
         st.save(&mut storage);
         let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
-        let pencil = &restore_tool_brushes(prefs.tool_brushes)[ActiveTool::Pencil.idx()];
+        let pencil = &restore_tool_brushes(prefs.tool_brushes)[0];
         assert_eq!(pencil.mode, crate::tools::BrushMode::Krita);
         assert_eq!(pencil.radius, 33.0);
     }
@@ -10763,6 +10858,89 @@ mod tests {
         let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
         let kinds = restore_pen_smoothing(&prefs).map(|o| o.kind);
         assert_eq!(kinds, [Smoothing::Basic, Smoothing::Stabilizer, Smoothing::Basic]);
+    }
+
+    /// The pen slots outlast a restart: how many, and each one's name, icon,
+    /// brush, smoothing and sizes. The app comes back on the first.
+    #[test]
+    fn the_pen_slots_outlast_a_restart() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        assert_eq!(st.add_pen(), Some(2));
+        st.pens[2].name = "Rough".into();
+        st.pens[2].icon = "feather".into();
+        st.brush = BrushSettings::airbrush();
+        st.dispatch(Action::StabilizerToggle);
+        st.toggle_pinned_size(14.0);
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let back = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!(back.pens.len(), 3);
+        let p = &back.pens[2];
+        assert_eq!((p.name.as_str(), p.icon.as_str()), ("Rough", "feather"));
+        assert_eq!(p.brush.radius, BrushSettings::airbrush().radius);
+        assert_eq!(p.smoothing.kind, Smoothing::Stabilizer);
+        assert_eq!(p.sizes.pinned, vec![14.0]);
+        assert_eq!(back.tool, ActiveTool::PENCIL);
+        assert_eq!(back.pen_name(1), "Ink");
+    }
+
+    /// A build from before the slots finds the first two where the pencil
+    /// and the ink always were, and the eraser where it was; and prefs from
+    /// such a build come back the same.
+    #[test]
+    fn the_first_two_slots_are_written_where_an_older_build_reads_them() {
+        use eframe::App as _;
+        let mut st = AppState::for_test();
+        st.brush.radius = 31.0;
+        st.toggle_pinned_size(3.0);
+        st.set_tool(ActiveTool::INK);
+        st.brush.radius = 11.0;
+        st.set_tool(ActiveTool::Eraser);
+        st.smoothing_mut().unwrap().kind = Smoothing::Weighted;
+        st.brush.radius = 50.0;
+        st.toggle_pinned_size(40.0);
+        let mut storage = MemStorage::default();
+        st.save(&mut storage);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).unwrap();
+        let eraser = LEGACY_PENS + ActiveTool::Eraser.idx().unwrap();
+        let brushes = restore_tool_brushes(prefs.tool_brushes.clone());
+        assert_eq!([brushes[0].radius, brushes[1].radius, brushes[eraser].radius], [31.0, 11.0, 50.0]);
+        let kinds = restore_pen_smoothing(&prefs).map(|o| o.kind);
+        assert_eq!(kinds, [Smoothing::Basic, Smoothing::Basic, Smoothing::Weighted]);
+        assert_eq!(prefs.brush_sizes[0].pinned, vec![3.0]);
+        assert_eq!(prefs.brush_sizes[eraser].pinned, vec![40.0]);
+
+        let mut old = prefs;
+        old.pens.clear();
+        let back = AppState::with_prefs(old, 8192, None);
+        assert_eq!(back.pens.len(), 2);
+        assert_eq!([back.pens[0].brush.radius, back.pens[1].brush.radius], [31.0, 11.0]);
+        assert_eq!(back.pens[0].sizes.pinned, vec![3.0]);
+        assert_eq!(back.eraser_smoothing.kind, Smoothing::Weighted);
+        assert_eq!(back.brush_of(ActiveTool::Eraser).radius, 50.0);
+    }
+
+    /// A prefs file from before the pen slots gives its pencil and ink as
+    /// the first two slots, and every other tool its own brush, as they were.
+    #[test]
+    fn prefs_from_before_the_pen_slots_make_the_pencil_and_ink_slots() {
+        let mut storage = MemStorage::default();
+        let text = std::fs::read_to_string(PREFS_FIXTURE).expect("fixture");
+        eframe::Storage::set_string(&mut storage, UI_PREFS_KEY, text);
+        let prefs: UiPrefs = eframe::get_value(&storage, UI_PREFS_KEY).expect("prefs reset");
+        let st = AppState::with_prefs(prefs, 8192, None);
+        assert_eq!((st.pen_name(0), st.pen_name(1)), ("Pencil".into(), "Ink".into()));
+        assert_eq!(st.pens[0].brush.mode, crate::tools::BrushMode::Krita);
+        assert_eq!(st.pens[0].brush.radius, 21.0);
+        assert_eq!(st.brush.radius, 21.0, "in hand");
+        assert_eq!(st.pens[1].brush.radius, 7.5);
+        assert!(matches!(st.pens[1].brush.cap, crate::tools::StrokeCap::Flat));
+        assert_eq!(st.pens[0].smoothing.kind, Smoothing::Weighted);
+        assert_eq!(st.brush_of(ActiveTool::Eraser).opacity, 0.5);
+        assert_eq!(st.brush_of(ActiveTool::Fill).fill_gap, 4);
+        assert_eq!(st.brush_of(ActiveTool::Shape).shape_kind, ShapeKind::Ellipse);
     }
 
     #[test]
@@ -10816,12 +10994,12 @@ mod tests {
     fn a_new_project_keeps_the_brushes() {
         let mut st = AppState::for_test();
         st.brush.radius = 33.0;
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.brush.radius = 9.0;
         st.reset_with(640, 480, 24.0);
-        assert_eq!(st.tool, ActiveTool::Pencil);
+        assert_eq!(st.tool, ActiveTool::PENCIL);
         assert_eq!(st.brush.radius, 33.0);
-        assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
+        assert_eq!(st.brush_of(ActiveTool::INK).radius, 9.0);
     }
 
     /// Shape draws at the size of the pen used last, and its Thickness goes
@@ -10830,7 +11008,7 @@ mod tests {
     fn shape_shares_its_size_with_the_last_pen() {
         let mut st = AppState::for_test();
         st.brush.radius = 12.0;
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.brush.radius = 4.0;
         st.set_tool(ActiveTool::Shape);
         assert_eq!(st.brush.radius, 4.0, "from the ink");
@@ -10838,9 +11016,9 @@ mod tests {
         st.set_tool(ActiveTool::Fill);
         st.set_tool(ActiveTool::Shape);
         assert_eq!(st.brush.radius, 7.0, "kept through another tool");
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         assert_eq!(st.brush.radius, 7.0, "Thickness went back to the ink");
-        st.set_tool(ActiveTool::Pencil);
+        st.set_tool(ActiveTool::PENCIL);
         assert_eq!(st.brush.radius, 12.0, "the pencil kept its own");
         st.set_tool(ActiveTool::Shape);
         assert_eq!(st.brush.radius, 12.0, "now from the pencil");
@@ -10883,7 +11061,7 @@ mod tests {
         };
         frame(&mut st, None);
         frame(&mut st, Some(egui::Key::W));
-        assert_eq!(st.tool, ActiveTool::Ink);
+        assert_eq!(st.tool, ActiveTool::INK);
         let start = st.brush.radius;
         for _ in 0..3 {
             frame(&mut st, Some(egui::Key::CloseBracket));
@@ -10920,7 +11098,7 @@ mod tests {
     #[test]
     fn a_screen_pick_on_shape_keeps_the_pen_size() {
         let mut st = AppState::for_test();
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.brush.radius = 5.0;
         st.set_tool(ActiveTool::Shape);
         st.brush.radius = 9.0;
@@ -10928,7 +11106,7 @@ mod tests {
         st.commit_screen_pick([1, 2, 3, 255]);
         assert_eq!(st.tool, ActiveTool::Shape);
         assert_eq!(st.brush.radius, 9.0);
-        assert_eq!(st.tool_brushes[ActiveTool::Ink.idx()].radius, 9.0);
+        assert_eq!(st.brush_of(ActiveTool::INK).radius, 9.0);
     }
 
     /// A stabilized stroke through the app: pen-up finishes the line even
@@ -10991,7 +11169,7 @@ mod tests {
         st.smoothing_mut().unwrap().kind = Smoothing::Weighted;
         st.dispatch(Action::StabilizerToggle);
         assert_eq!(st.smoothing().unwrap().kind, Smoothing::Stabilizer);
-        assert_eq!(st.smoothing_for(ActiveTool::Ink).unwrap().kind, Smoothing::Basic);
+        assert_eq!(st.smoothing_for(ActiveTool::INK).unwrap().kind, Smoothing::Basic);
         st.dispatch(Action::StabilizerToggle);
         assert_eq!(st.smoothing().unwrap().kind, Smoothing::Weighted, "back to what it had");
 
@@ -11003,13 +11181,13 @@ mod tests {
             })
             .collect();
         assert_eq!(seen, [Smoothing::Weighted, Smoothing::Stabilizer, Smoothing::None, Smoothing::Basic]);
-        assert_eq!(st.smoothing_for(ActiveTool::Pencil).unwrap().kind, Smoothing::Weighted);
+        assert_eq!(st.smoothing_for(ActiveTool::PENCIL).unwrap().kind, Smoothing::Weighted);
 
-        let before = format!("{:?}", st.pen_smoothing);
+        let before = format!("{:?}", (st.pens.iter().map(|p| p.smoothing).collect::<Vec<_>>(), st.eraser_smoothing));
         st.dispatch(Action::ToolFill);
         st.dispatch(Action::StabilizerToggle);
         st.dispatch(Action::SmoothingCycle);
-        assert_eq!(format!("{:?}", st.pen_smoothing), before);
+        assert_eq!(format!("{:?}", (st.pens.iter().map(|p| p.smoothing).collect::<Vec<_>>(), st.eraser_smoothing)), before);
     }
 
     #[test]
@@ -11820,7 +11998,7 @@ mod tests {
             // As drawn with: one ghost each side.
             st.onion.enabled = true;
             st.onion.light(1, 1);
-            st.tool = ActiveTool::Pencil;
+            st.tool = ActiveTool::PENCIL;
             st.brush.mode = mode;
             st.brush.radius = 30.0;
             let ctx = egui::Context::default();
@@ -11972,7 +12150,7 @@ mod tests {
             Some(p) => crate::io::project_file::load_from(std::path::Path::new(&p)).expect("probe project"),
             None => probe_project(2160, 2880, 3),
         };
-        for tool in [ActiveTool::Pencil, ActiveTool::Ink, ActiveTool::Eraser] {
+        for tool in [ActiveTool::PENCIL, ActiveTool::INK, ActiveTool::Eraser] {
             let mut st = AppState::with_prefs(prefs(), 8192, None);
             st.load_project(project(), None);
             st.load_brush(tool);
@@ -12553,7 +12731,7 @@ mod pen_tex_tests {
         let mut st = AppState::for_test();
         st.load_project(p, None);
         st.auto_key_draw = false;
-        st.load_brush(ActiveTool::Pencil);
+        st.load_brush(ActiveTool::PENCIL);
         st.brush.radius = 4.0;
         (st, egui::Context::default())
     }

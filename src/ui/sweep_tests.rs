@@ -527,7 +527,7 @@ fn every_window_is_clean_with_its_sections_open() {
 #[test]
 fn a_busy_project_leaves_every_window_its_size() {
     type Step = (&'static str, fn(&mut AppState));
-    let steps: [Step; 10] = [
+    let steps: [Step; 11] = [
         ("12 more layers", |s| {
             for k in 0..12 {
                 s.project.add_layer();
@@ -563,12 +563,16 @@ fn a_busy_project_leaves_every_window_its_size() {
             s.brush.radius = 16.892_37;
             s.brush.opacity = 0.922_54;
         }),
+        ("the largest brush size, a decimal short", |s| s.brush.radius = 127.9),
         ("many brush sizes remembered", |s| {
             let m = crate::app::brush_sizes::SizeMemory {
                 recent: vec![0.5, 3.3, 12.5, 64.0, 127.9],
                 pinned: vec![1.0, 2.5, 7.5, 100.0, 128.0],
             };
-            s.brush_sizes = vec![m; 16];
+            s.brush_sizes = vec![m.clone(); 16];
+            for p in &mut s.pens {
+                p.sizes = m.clone();
+            }
         }),
         ("camera keys", |s| {
             for f in [0, 12, 48, 200] {
@@ -724,6 +728,13 @@ fn the_brush_panel_keeps_its_rows_apart_at_its_narrowest() {
 /// looking at a layout without starting the app, which would share the
 /// real config folder.
 fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage {
+    let crop = rig.rect().expand(4.0);
+    snapshot_of(rig, ppp, crop)
+}
+
+/// [`snapshot`], cropped to `crop` rather than to the window: for a window
+/// with a menu open beside it.
+fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage {
     rig.ctx.set_pixels_per_point(ppp);
     rig.settle();
     let raw = egui::RawInput {
@@ -736,7 +747,7 @@ fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage {
     let font = rig.ctx.fonts(|f| f.image());
     let (fw, fh) = (font.width(), font.height());
     let tex: Vec<Color32> = font.srgba_pixels(None).collect();
-    let win_r = rig.rect().expand(4.0);
+    let win_r = crop;
     let (x0, y0) = ((win_r.min.x * ppp).floor() as i32, (win_r.min.y * ppp).floor() as i32);
     let (w, h) = ((win_r.width() * ppp).ceil() as i32, (win_r.height() * ppp).ceil() as i32);
     let bg = theme::palette().bg_base;
@@ -833,6 +844,33 @@ fn snapshots() {
     rig.state.set_fill_mode(crate::app::FillMode::Lasso);
     rig.settle();
     snapshot(&mut rig, 2.0).save(dir.join("fill_grain_lasso.png")).unwrap();
+
+    // The Tools panel: the pen slots and the eraser on the first row, the
+    // other tools on the second; then a slot's right-click menu.
+    let mut rig = Rig::new(Win::Panel(PanelId::Tools));
+    rig.state.add_pen();
+    rig.state.select_pen(0);
+    snapshot(&mut rig, 2.0).save(dir.join("tools.png")).unwrap();
+    let shapes = rig.settle();
+    let at = texts(&shapes).into_iter().find(|t| t.text == egui_phosphor::regular::PAINT_BRUSH).expect("the new slot").rect.center();
+    let right = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    rig.frame(vec![egui::Event::PointerMoved(at), right(true)]);
+    rig.frame(vec![right(false)]);
+    rig.settle();
+    let menu = rig.ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| l.order == egui::Order::Foreground)
+            .filter_map(|l| egui::AreaState::load(&rig.ctx, l.id).map(|s| s.rect()))
+            .fold(rig.rect(), |a, b| a.union(b))
+    });
+    snapshot_of(&mut rig, 2.0, menu.expand(4.0)).save(dir.join("tools_slot_menu.png")).unwrap();
 
     // The Lasso with the magic select picked.
     let mut rig = Rig::new(Win::ToolPanel(ActiveTool::Lasso));

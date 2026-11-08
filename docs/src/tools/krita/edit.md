@@ -1,6 +1,6 @@
 # `src/tools/krita/edit.rs` — editing a Krita preset as a list of overrides
 
-> **Source:** [src/tools/krita/edit.rs](../../../../src/tools/krita/edit.rs) · **Module:** `crate::tools::krita::edit` · **Size:** 152 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/krita/edit.rs](../../../../src/tools/krita/edit.rs) · **Module:** `crate::tools::krita::edit` · **Size:** 152 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

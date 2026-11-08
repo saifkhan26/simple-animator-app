@@ -1,6 +1,6 @@
 # `src/io/kra/mod.rs` — reading and writing Krita .kra files
 
-> **Source:** [src/io/kra/mod.rs](../../../../src/io/kra/mod.rs) · **Module:** `crate::io::kra` · **Size:** 1314 lines · Line links as of commit `1fa5845`
+> **Source:** [src/io/kra/mod.rs](../../../../src/io/kra/mod.rs) · **Module:** `crate::io::kra` · **Size:** 1314 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

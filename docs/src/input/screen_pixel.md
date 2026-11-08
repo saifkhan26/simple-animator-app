@@ -1,6 +1,6 @@
 # `src/input/screen_pixel.rs` — read the OS cursor position and grab screen pixels
 
-> **Source:** [src/input/screen_pixel.rs](../../../src/input/screen_pixel.rs) · **Module:** `crate::input::screen_pixel` · **Size:** 152 lines · Line links as of commit `1fa5845`
+> **Source:** [src/input/screen_pixel.rs](../../../src/input/screen_pixel.rs) · **Module:** `crate::input::screen_pixel` · **Size:** 152 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

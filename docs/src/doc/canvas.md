@@ -1,6 +1,6 @@
 # `src/doc/canvas.rs` — Pixel storage for one drawing (a cell)
 
-> **Source:** [src/doc/canvas.rs](../../../src/doc/canvas.rs) · **Module:** `crate::doc::canvas` · **Size:** 831 lines · Line links as of commit `1fa5845`
+> **Source:** [src/doc/canvas.rs](../../../src/doc/canvas.rs) · **Module:** `crate::doc::canvas` · **Size:** 831 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

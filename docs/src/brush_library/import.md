@@ -1,6 +1,6 @@
 # `src/brush_library/import.rs` — importing presets from an installed Krita
 
-> **Source:** [src/brush_library/import.rs](../../../src/brush_library/import.rs) · **Module:** `crate::brush_library::import` · **Size:** 843 lines · Line links as of commit `1fa5845`
+> **Source:** [src/brush_library/import.rs](../../../src/brush_library/import.rs) · **Module:** `crate::brush_library::import` · **Size:** 843 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

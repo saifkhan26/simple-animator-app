@@ -1,6 +1,6 @@
 # `src/io/image_import.rs` — importing a still image (file or clipboard)
 
-> **Source:** [src/io/image_import.rs](../../../src/io/image_import.rs) · **Module:** `crate::io::image_import` · **Size:** 202 lines · Line links as of commit `1fa5845`
+> **Source:** [src/io/image_import.rs](../../../src/io/image_import.rs) · **Module:** `crate::io::image_import` · **Size:** 202 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

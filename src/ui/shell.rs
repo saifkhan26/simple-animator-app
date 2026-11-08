@@ -8,6 +8,7 @@ use crate::app::{
     AppState, CameraFraming, ExportKind, FillMode, LassoHeld, NavKind, PanelId, SelGesture, MP4_PRESETS,
 };
 use crate::app::brush_sizes::{same_size, size_label};
+use crate::app::pen_slots::{pen_action, MAX_PENS, PEN_ICONS};
 use crate::color::{fmt_rgb, parse_color};
 use crate::doc::camera::{Camera, Ease, Fill};
 use crate::doc::canvas::DirtyRect;
@@ -943,7 +944,7 @@ const ONION_DEFAULT_H: f32 = 210.0;
 
 /// The Tools panel's height as it first opens, on the pencil: where the
 /// Brush panel under it starts.
-const TOOLS_START_H: f32 = 240.0;
+const TOOLS_START_H: f32 = 248.0;
 
 /// The widest the Tools panel goes, inside its frame.
 const TOOLS_MAX_W: f32 = 560.0;
@@ -1245,15 +1246,14 @@ fn restick_axis(lo: f32, hi: f32, len: f32, o_lo: f32, o_hi: f32, n_lo: f32, n_h
 
 fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
     {
-            // Tool palette — two rows of three so each icon stays large/tappable.
+            // The pen slots on the first row, the eraser at its end; every
+            // other tool on the second, the colour picker last.
             ui.horizontal(|ui| {
-                let p = tip(state, Action::ToolPencil, "Pencil");
-                let i = tip(state, Action::ToolInk, "Ink");
+                pen_row(state, ui);
                 let e = tip(state, Action::ToolEraser, "Eraser");
-                tool_toggle(ui, state, ActiveTool::Pencil, ic::PENCIL, &p);
-                tool_toggle(ui, state, ActiveTool::Ink, ic::PEN_NIB, &i);
                 tool_toggle(ui, state, ActiveTool::Eraser, ic::ERASER, &e);
-                ui.add_space(6.0);
+            });
+            ui.horizontal(|ui| {
                 let f = tip(state, Action::ToolFill, "Fill — press again for bucket / lasso");
                 let g = tip(state, Action::ToolShape, "Shape");
                 let l = tip(state, Action::ToolLasso, "Lasso select");
@@ -1284,7 +1284,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 }
             });
             ui.add_space(6.0);
-            theme::section_header(ui, ic::SLIDERS, tool_name(state.tool));
+            theme::section_header(ui, ic::SLIDERS, &tool_name(state, state.tool));
 
             // Tool-specific options only — keeps this panel about tools alone.
             if state.tool == ActiveTool::Fill {
@@ -1358,18 +1358,13 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
                 };
                 let hint = with_mid_drag_hint(state, &hint);
                 ui.label(egui::RichText::new(hint).color(theme::text_muted()).size(11.0));
-                brush_size_lock(state, ui);
-                let label = if state.lock_brush_to_view {
-                    "Thickness (screen px)"
-                } else {
-                    "Thickness"
-                };
+                let label = "Thickness";
                 // Same range as the pens' Size: the slider clamps whatever it
                 // shows, so a narrower one would cut a big pen down.
                 let hover = format!(
                     "Shared with the {}, the pen you used last: change one and the \
                      other follows.",
-                    tool_name(state.last_pen)
+                    tool_name(state, state.last_pen)
                 );
                 size_slider(state, ui, label, Some(&hover));
                 size_strip(state, ui);
@@ -1430,13 +1425,7 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
             } else if state.tool == ActiveTool::Liquify {
                 liquify_options(state, ui);
             } else {
-                brush_size_lock(state, ui);
-                let label = if state.lock_brush_to_view {
-                    "Size (screen px)"
-                } else {
-                    "Size"
-                };
-                size_slider(state, ui, label, None);
+                size_slider(state, ui, "Size", None);
                 size_strip(state, ui);
                 // Two decimals at most: a value a drag left long (0.9225)
                 // would be wider than the row leaves it.
@@ -1449,17 +1438,22 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
 /// The pens' and Shape's size range.
 const BRUSH_SIZES: std::ops::RangeInclusive<f32> = 0.5..=128.0;
 
-/// A brush's size slider, as long as its row allows, its value to a tenth
-/// as the strip under it shows sizes. A line marks each pinned size, and a
-/// fainter one each size drawn at lately, over the slider.
+/// A brush's size slider, as long as its row allows next to the lock
+/// toggle at its end, its value to a tenth as the strip under it shows
+/// sizes. A line marks each pinned size, and a fainter one each size drawn
+/// at lately, over the slider.
 fn size_slider(state: &mut AppState, ui: &mut egui::Ui, label: &str, hover: Option<&str>) {
     let m = state.size_memory();
-    let slider = egui::Slider::new(&mut state.brush.radius, BRUSH_SIZES).max_decimals(1).text(label);
-    let resp = fill_slider(ui, label, slider);
-    ui.painter().extend(size_marks(ui, resp.rect, &m));
-    if let Some(h) = hover {
-        resp.on_hover_text(h);
-    }
+    ui.horizontal(|ui| {
+        let lock = LOCK_W + ui.spacing().item_spacing.x;
+        let slider = egui::Slider::new(&mut state.brush.radius, BRUSH_SIZES).max_decimals(1).text(label);
+        let resp = fill_slider_leaving(ui, label, slider, lock);
+        ui.painter().extend(size_marks(ui, resp.rect, &m));
+        if let Some(h) = hover {
+            resp.on_hover_text(h);
+        }
+        brush_size_lock(state, ui);
+    });
 }
 
 /// The lines [`size_slider`] marks remembered sizes with, for a slider row
@@ -1495,8 +1489,8 @@ fn size_marks(ui: &egui::Ui, row: Rect, m: &crate::app::brush_sizes::SizeMemory)
 }
 
 /// The sizes this brush was drawn at lately and the ones pinned, under its
-/// size slider: click one to draw at it, right-click to pin or unpin it,
-/// the pin to keep the size it is at. One row: pinned sizes first, then as
+/// size slider: click one to draw at it, right-click to take it off the
+/// strip, the pin to keep the size the brush is at. One row: pinned sizes first, then as
 /// many recent ones as fit. Wrapping would grow the panel for good.
 fn size_strip(state: &mut AppState, ui: &mut egui::Ui) {
     let m = state.size_memory();
@@ -1518,7 +1512,7 @@ fn size_strip(state: &mut AppState, ui: &mut egui::Ui) {
             format!("\n{swap_key}: swap to the size drawn at last, and back")
         },
     );
-    let (mut pick, mut toggle) = (None, None);
+    let (mut pick, mut pin_size, mut forget) = (None, None, None);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
         let pin = egui::Button::new(egui::RichText::new(ic::PUSH_PIN_SIMPLE).size(13.0)).frame(false);
@@ -1528,7 +1522,7 @@ fn size_strip(state: &mut AppState, ui: &mut egui::Ui) {
             .on_disabled_hover_text(&pin_tip)
             .clicked()
         {
-            toggle = Some(r);
+            pin_size = Some(r);
         }
         for (s, pinned) in sizes {
             let mut text = egui::RichText::new(size_label(s)).size(11.5);
@@ -1546,28 +1540,29 @@ fn size_strip(state: &mut AppState, ui: &mut egui::Ui) {
             let resp = ui
                 .add(egui::SelectableLabel::new(same_size(s, r), text))
                 .on_hover_text(if pinned {
-                    "Pinned: click to draw at this size, right-click to unpin"
+                    "Pinned: click to draw at this size, right-click to unpin and remove it"
                 } else {
-                    "Drawn at lately: click to draw at this size, right-click to pin"
+                    "Drawn at lately: click to draw at this size, right-click to remove it"
                 });
             if resp.clicked() {
                 pick = Some(s);
             }
             if resp.secondary_clicked() {
-                toggle = Some(s);
+                forget = Some(s);
             }
         }
     });
     if let Some(s) = pick {
         state.brush.radius = s;
     }
-    if let Some(s) = toggle {
+    if let Some(s) = pin_size {
         state.toggle_pinned_size(s);
+    }
+    if let Some(s) = forget {
+        state.forget_size(s);
     }
 }
 
-/// "Lock brush to screen size" toggle, shared by the freehand and Shape size
-/// sliders (both of which relabel themselves when it is on).
 /// The Fill tool's two modes, side by side.
 fn fill_mode_toggles(state: &mut AppState, ui: &mut egui::Ui) {
     let key = combo_text(state, Action::ToolFill);
@@ -1648,14 +1643,40 @@ fn lasso_fill_options(state: &mut AppState, ui: &mut egui::Ui) {
     );
 }
 
+/// How wide the lock toggle at the end of a size row is, exactly: the
+/// slider before it fills the rest of the row.
+const LOCK_W: f32 = 22.0;
+
+/// "Lock brush to screen size", at the end of every size row (the pens',
+/// Shape's Thickness, Liquify's): an icon, lit while on, saying what it does
+/// only in its tooltip.
+///
+/// Painted into a rect of exactly [`LOCK_W`] rather than added as a widget:
+/// a widget sizes itself to its text and padding, and a few points wider
+/// than the slider left for it, the row overflowed, the panel grew, the
+/// slider filled the new width, and the panel grew again every frame.
 fn brush_size_lock(state: &mut AppState, ui: &mut egui::Ui) {
-    ui.checkbox(&mut state.lock_brush_to_view, "Lock brush to screen size")
-        .on_hover_text(
-            "Keep the brush the same size on screen at every zoom, so the same \
-             hand movement always draws the same stroke.\n\nOff (default): size \
-             is in document pixels, so a line keeps its weight in the exported \
-             frame no matter what zoom you drew it at.",
-        );
+    let on = state.lock_brush_to_view;
+    let h = ui.spacing().interact_size.y;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(LOCK_W, h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let v = ui.style().interact_selectable(&resp, on);
+        if on || resp.hovered() {
+            ui.painter().rect_filled(rect.expand(v.expansion), v.rounding, v.weak_bg_fill);
+        }
+        let color = if on { theme::accent() } else { theme::text_muted() };
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, ic::MONITOR, egui::FontId::proportional(14.0), color);
+    }
+    let tip = format!(
+        "Lock brush to screen size: {}\n\nOn, the brush is the same size on screen at \
+         every zoom, so the same hand movement always draws the same stroke.\n\nOff \
+         (default), size is in document pixels, so a line keeps its weight in the \
+         exported frame no matter what zoom you drew it at.",
+        if on { "on" } else { "off" }
+    );
+    if resp.on_hover_text(tip).clicked() {
+        state.lock_brush_to_view = !on;
+    }
 }
 
 /// Pinned colour swatches: click to use, `+` to pin the current colour,
@@ -1842,11 +1863,16 @@ fn fit_sliders(ui: &mut egui::Ui, label: &str, extra: f32) {
 /// remembered, and the slider gives that much back from then on: the panel
 /// grows once, by that much, at most.
 fn fill_slider(ui: &mut egui::Ui, label: &str, slider: egui::Slider<'_>) -> egui::Response {
+    fill_slider_leaving(ui, label, slider, 0.0)
+}
+
+/// [`fill_slider`], leaving `after` points of its row for what follows it.
+fn fill_slider_leaving(ui: &mut egui::Ui, label: &str, slider: egui::Slider<'_>, after: f32) -> egui::Response {
     let id = ui.id().with(("fill_slider", label));
     let over = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
-    let room = ui.available_width();
+    let room = ui.available_width() - after;
     ui.spacing_mut().slider_width = room;
-    fit_sliders(ui, label, over);
+    fit_sliders(ui, label, over + after);
     let resp = ui.add(slider);
     let past = resp.rect.width() - room;
     if past > 0.0 {
@@ -2582,7 +2608,7 @@ fn smoothing_controls(o: &mut SmoothingOptions, ui: &mut egui::Ui, hint: &str) {
 /// What the smoothing picker belongs to, and the keys that change it
 /// without opening this window.
 fn smoothing_hint(state: &AppState) -> String {
-    let mut hint = "This pen's own: Pencil, Ink and Eraser each keep their own smoothing.".to_owned();
+    let mut hint = "This pen's own: every pen slot and the Eraser keep their own smoothing.".to_owned();
     for (action, what) in [(Action::StabilizerToggle, "Stabilizer on / off"), (Action::SmoothingCycle, "next kind")] {
         let key = combo_text(state, action);
         if !key.is_empty() {
@@ -2724,11 +2750,11 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
                 ui.separator();
                 // Active tool icon + brush colour swatch.
                 ui.label(
-                    egui::RichText::new(tool_icon(state.tool))
+                    egui::RichText::new(tool_icon(state, state.tool))
                         .size(15.0)
                         .color(theme::text()),
                 )
-                .on_hover_text(tool_name(state.tool));
+                .on_hover_text(tool_name(state, state.tool));
                 let c = state.brush.color;
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(13.0, 13.0), Sense::hover());
                 ui.painter().rect_filled(
@@ -2767,11 +2793,11 @@ fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context) {
         });
 }
 
-/// Phosphor icon for a tool — shared by the mini bar.
-fn tool_icon(tool: ActiveTool) -> &'static str {
+/// Phosphor icon for a tool — shared by the mini bar. A pen slot's is the
+/// one it was given.
+fn tool_icon(state: &AppState, tool: ActiveTool) -> &'static str {
     match tool {
-        ActiveTool::Pencil => ic::PENCIL,
-        ActiveTool::Ink => ic::PEN_NIB,
+        ActiveTool::Pen(i) => state.pens.get(i as usize).map_or(ic::PENCIL, |p| p.glyph()),
         ActiveTool::Eraser => ic::ERASER,
         ActiveTool::Fill => ic::PAINT_BUCKET,
         ActiveTool::Shape => ic::SHAPES,
@@ -2782,10 +2808,11 @@ fn tool_icon(tool: ActiveTool) -> &'static str {
     }
 }
 
-fn tool_name(tool: ActiveTool) -> &'static str {
-    match tool {
-        ActiveTool::Pencil => "Pencil",
-        ActiveTool::Ink => "Ink",
+/// A tool's name as the Tools panel heads its options. A pen slot's is the
+/// one it was given.
+fn tool_name(state: &AppState, tool: ActiveTool) -> String {
+    let name = match tool {
+        ActiveTool::Pen(i) => return state.pen_name(i as usize),
         ActiveTool::Eraser => "Eraser",
         ActiveTool::Fill => "Fill",
         ActiveTool::Shape => "Shape",
@@ -2793,7 +2820,8 @@ fn tool_name(tool: ActiveTool) -> &'static str {
         ActiveTool::Lasso => "Lasso select",
         ActiveTool::Perspective => "Perspective grid",
         ActiveTool::Liquify => "Liquify",
-    }
+    };
+    name.to_owned()
 }
 
 /// Minimal frame indicator for the mini bar: one fixed-size dot per frame,
@@ -4958,7 +4986,7 @@ fn brush_settings_window(state: &mut AppState, ctx: &egui::Context) {
                     match state.smoothing_mut() {
                         Some(o) => smoothing_controls(o, ui, &hint),
                         None => {
-                            ui.weak("Pencil, Ink and Eraser each keep their own.");
+                            ui.weak("Every pen slot and the Eraser keep their own.");
                         }
                     }
 
@@ -5995,12 +6023,14 @@ fn liquify_options(state: &mut AppState, ui: &mut egui::Ui) {
             }
         }
     });
-    brush_size_lock(state, ui);
-    ui.add(
-        egui::Slider::new(&mut state.brush.radius, MIN_RADIUS..=1000.0)
-            .logarithmic(true)
-            .text("Size"),
-    );
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Slider::new(&mut state.brush.radius, MIN_RADIUS..=1000.0)
+                .logarithmic(true)
+                .text("Size"),
+        );
+        brush_size_lock(state, ui);
+    });
     let mut pct = state.brush.liquify_strength * 100.0;
     if ui
         .add(egui::Slider::new(&mut pct, 1.0..=100.0).suffix("%").text("Strength"))
@@ -6273,7 +6303,7 @@ fn tool_toggle(
     target: ActiveTool,
     icon: &str,
     label: &str,
-) {
+) -> egui::Response {
     let selected = state.tool == target;
     let stabilized = state.smoothing_for(target).is_some_and(|o| o.kind == Smoothing::Stabilizer);
     let label = if stabilized { format!("{label}\nStabilizer on") } else { label.to_owned() };
@@ -6288,6 +6318,128 @@ fn tool_toggle(
     if resp.clicked() && !selected {
         state.set_tool(target);
     }
+    resp
+}
+
+/// What a pen slot's menu asks of the row, done once the row is drawn.
+enum PenOp {
+    Duplicate(usize),
+    Remove(usize),
+}
+
+/// The popup id of pen slot `i`'s menu. Not tied to a `Ui`, so the "+" can
+/// open the menu of the slot it adds before that slot's button is drawn.
+fn pen_menu_id(i: usize) -> egui::Id {
+    egui::Id::new(("pen-slot-menu", i))
+}
+
+/// Open slot `i`'s menu, under its button, and close any other.
+fn open_pen_menu(state: &mut AppState, ctx: &egui::Context, i: usize) {
+    state.pen_remove_armed = None;
+    ctx.memory_mut(|m| m.open_popup(pen_menu_id(i)));
+}
+
+/// The pen slots' buttons, in order, then while there is room for another,
+/// a "+" that adds one at the end and opens its menu. Right-click a slot for
+/// the same menu: its name, icon and brush, a copy of it, or removing it.
+fn pen_row(state: &mut AppState, ui: &mut egui::Ui) {
+    let mut op = None;
+    for i in 0..state.pens.len() {
+        let name = state.pen_name(i);
+        let named = pen_action(i).map_or_else(|| name.clone(), |a| tip(state, a, &name));
+        let label = format!("{named}\nRight-click: name, icon, brush, copy or remove");
+        let glyph = state.pens[i].glyph();
+        let resp = tool_toggle(ui, state, ActiveTool::Pen(i as u8), glyph, &label);
+        if resp.secondary_clicked() {
+            open_pen_menu(state, ui.ctx(), i);
+        }
+        let close = egui::PopupCloseBehavior::CloseOnClickOutside;
+        egui::popup_below_widget(ui, pen_menu_id(i), &resp, close, |ui| pen_slot_menu(state, ui, i, &mut op));
+    }
+    if state.pens.len() < MAX_PENS {
+        let add = format!("Add a pen slot ({} at most)", MAX_PENS);
+        if theme::icon_toggle(ui, ic::PLUS, &add, false).clicked() {
+            if let Some(at) = state.add_pen() {
+                open_pen_menu(state, ui.ctx(), at);
+            }
+        }
+    }
+    match op {
+        Some(PenOp::Duplicate(i)) => {
+            if let Some(at) = state.duplicate_pen(i) {
+                open_pen_menu(state, ui.ctx(), at);
+            }
+        }
+        Some(PenOp::Remove(i)) => {
+            ui.memory_mut(|m| m.close_popup());
+            state.pen_remove_armed = None;
+            state.remove_pen(i);
+        }
+        None => {}
+    }
+}
+
+/// Wide enough for the icons two rows of eight, and three brushes a row.
+const PEN_MENU_W: f32 = 290.0;
+
+/// A pen slot's menu, from a right-click on it or the "+" that added it:
+/// its name, its icon, the brush it holds, a copy of it, and removing it —
+/// which asks for a second click, there being no undo for it.
+fn pen_slot_menu(state: &mut AppState, ui: &mut egui::Ui, i: usize, op: &mut Option<PenOp>) {
+    if i >= state.pens.len() {
+        ui.memory_mut(|m| m.close_popup());
+        return;
+    }
+    ui.set_min_width(PEN_MENU_W);
+    ui.set_max_width(PEN_MENU_W);
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        let hint = format!("Pen {}", i + 1);
+        ui.add(egui::TextEdit::singleline(&mut state.pens[i].name).hint_text(hint).desired_width(f32::INFINITY));
+    });
+    ui.label(egui::RichText::new("Icon").color(theme::text_muted()).size(11.0));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+        for (key, glyph, what) in PEN_ICONS {
+            let on = state.pens[i].icon == key;
+            if theme::icon_toggle(ui, glyph, what, on).clicked() {
+                state.pens[i].icon = key.to_owned();
+            }
+        }
+    });
+    ui.label(egui::RichText::new("Brush").color(theme::text_muted()).size(11.0));
+    crate::ui::brush_picker::pen_brush_grid(state, ui, i);
+    ui.separator();
+    ui.horizontal(|ui| {
+        let full = state.pens.len() >= MAX_PENS;
+        if ui
+            .add_enabled(!full, egui::Button::new(theme::icon_text(ic::COPY, "Duplicate")))
+            .on_hover_text("A new slot right after this one, with its brush, sizes and smoothing")
+            .on_disabled_hover_text(format!("{MAX_PENS} pen slots at most"))
+            .clicked()
+        {
+            *op = Some(PenOp::Duplicate(i));
+        }
+        let armed = state.pen_remove_armed == Some(i);
+        let text = if armed {
+            egui::RichText::new(theme::icon_text(ic::TRASH, "Click again to remove")).color(theme::warn())
+        } else {
+            egui::RichText::new(theme::icon_text(ic::TRASH, "Remove slot"))
+        };
+        let last = state.pens.len() <= 1;
+        if ui
+            .add_enabled(!last, egui::Button::new(text))
+            .on_hover_text("Its brush and sizes go with it, with no undo")
+            .on_disabled_hover_text("The last pen slot stays")
+            .clicked()
+        {
+            if armed {
+                *op = Some(PenOp::Remove(i));
+            } else {
+                state.pen_remove_armed = Some(i);
+            }
+        }
+    });
 }
 
 /// The radius of the dot on a stabilized pen's tool button.
@@ -7985,12 +8137,12 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
     }
 
     match state.tool {
-        ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser
+        ActiveTool::Pen(_) | ActiveTool::Eraser
             if state.brush.mode == BrushMode::Krita =>
         {
             draw_krita_outline(state, &painter, canvas_rect, pos);
         }
-        ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser => {
+        ActiveTool::Pen(_) | ActiveTool::Eraser => {
             // Effective radius scales with pressure (mouse = 1.0 always).
             let pressure = state.pen.current_pressure().unwrap_or(1.0);
             let r_cell = (state.effective_radius() * state.brush.size.apply(pressure)).max(0.5);
@@ -11067,7 +11219,7 @@ mod size_strip_tests {
     /// Sizes drawn at show under the slider: a click draws at one, a
     /// right-click pins it, and a pinned size shows once, with its pin.
     #[test]
-    fn the_strip_offers_sizes_drawn_at_and_pins_them() {
+    fn the_strip_offers_sizes_drawn_at_pins_and_removes_them() {
         let mut state = AppState::for_test();
         state.dispatch(Action::ToolInk);
         for s in [7.5, 12.0] {
@@ -11086,14 +11238,46 @@ mod size_strip_tests {
         let shapes = click(&ctx, &mut state, at, egui::PointerButton::Primary);
         assert_eq!(state.brush.radius, 7.5);
 
+        // The pin keeps the size the brush is at.
         let at = text_pos(&shapes, "12").expect("12 offered");
-        let shapes = click(&ctx, &mut state, at, egui::PointerButton::Secondary);
+        let shapes = click(&ctx, &mut state, at, egui::PointerButton::Primary);
+        let pin = text_pos(&shapes, ic::PUSH_PIN_SIMPLE).expect("the pin");
+        let shapes = click(&ctx, &mut state, pin, egui::PointerButton::Primary);
         assert_eq!(state.size_memory().pinned, vec![12.0]);
-        assert_eq!(state.brush.radius, 7.5, "pinning leaves the size alone");
         // Pinned, it leads the row, and shows once.
         let twelve = text_pos(&shapes, "12").expect("still offered");
         let seven = text_pos(&shapes, "7.5").expect("still offered");
         assert!(twelve.x < seven.x, "pinned first");
+
+        // Right-click takes a size off the strip, pinned or not.
+        let shapes = click(&ctx, &mut state, twelve, egui::PointerButton::Secondary);
+        assert!(state.size_memory().pinned.is_empty());
+        assert!(!state.size_memory().recent.contains(&12.0));
+        assert!(text_pos(&shapes, "12").is_none(), "gone from the strip");
+        let at = text_pos(&shapes, "7.5").expect("7.5 still offered");
+        let shapes = click(&ctx, &mut state, at, egui::PointerButton::Secondary);
+        assert!(state.size_memory().recent.is_empty(), "{:?}", state.size_memory());
+        assert!(text_pos(&shapes, "7.5").is_none());
+        assert_eq!(state.brush.radius, 12.0, "removing leaves the size alone");
+    }
+
+    /// The lock to screen size is an icon at the end of the Size row, not a
+    /// line of its own, and clicking it turns the lock on and off.
+    #[test]
+    fn the_screen_size_lock_sits_at_the_end_of_the_size_row() {
+        let mut state = AppState::for_test();
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        frame(&ctx, &mut state, vec![]);
+        let shapes = frame(&ctx, &mut state, vec![]);
+        assert!(text_pos(&shapes, "Lock brush to screen size").is_none(), "no text");
+        let lock = text_pos(&shapes, ic::MONITOR).expect("the lock icon");
+        let size = text_pos(&shapes, "Size").expect("the Size label");
+        assert!((lock.y - size.y).abs() < 4.0 && lock.x > size.x, "{lock:?} after {size:?}");
+        click(&ctx, &mut state, lock, egui::PointerButton::Primary);
+        assert!(state.lock_brush_to_view);
+        click(&ctx, &mut state, lock, egui::PointerButton::Primary);
+        assert!(!state.lock_brush_to_view);
     }
 
     /// Every shape painted, flattened.
@@ -11145,9 +11329,7 @@ mod size_strip_tests {
     fn the_size_slider_marks_pinned_and_recent_sizes_where_the_handle_sits() {
         let mut state = AppState::for_test();
         state.dispatch(Action::ToolInk);
-        let slot = state.size_slot();
-        state.brush_sizes = vec![Default::default(); slot + 1];
-        state.brush_sizes[slot] = crate::app::brush_sizes::SizeMemory {
+        *state.size_memory_mut() = crate::app::brush_sizes::SizeMemory {
             recent: vec![16.9, 77.4],
             pinned: vec![16.9],
         };
@@ -11244,9 +11426,7 @@ mod size_strip_tests {
     fn the_strip_keeps_to_one_row() {
         let mut state = AppState::for_test();
         state.dispatch(Action::ToolInk);
-        let slot = state.size_slot();
-        state.brush_sizes = vec![Default::default(); slot + 1];
-        state.brush_sizes[slot] = crate::app::brush_sizes::SizeMemory {
+        *state.size_memory_mut() = crate::app::brush_sizes::SizeMemory {
             recent: vec![0.5, 3.3, 12.5, 64.0, 127.9],
             pinned: vec![1.1, 2.5, 7.7, 100.1, 128.0],
         };
@@ -11449,7 +11629,7 @@ mod stroke_latency_tests {
             st.show_panels = false;
             st.show_mini_timeline = false;
             st.auto_key_draw = false;
-            st.load_brush(ActiveTool::Pencil);
+            st.load_brush(ActiveTool::PENCIL);
             st.brush.mode = mode;
             st.brush.radius = 6.0;
             let ctx = egui::Context::default();
@@ -11479,7 +11659,7 @@ mod stroke_latency_tests {
         let mut st = AppState::for_test();
         st.show_panels = false;
         st.show_mini_timeline = false;
-        st.load_brush(ActiveTool::Pencil);
+        st.load_brush(ActiveTool::PENCIL);
         st.brush.mode = BrushMode::Ribbon;
         st.brush.radius = 8.0;
         let ctx = egui::Context::default();
@@ -13027,7 +13207,7 @@ mod button_drag_tests {
         frame(&ctx, &mut state, vec![]);
         frame(&ctx, &mut state, vec![]);
         assert_eq!(state.brush.radius, 100.0);
-        state.set_tool(ActiveTool::Pencil);
+        state.set_tool(ActiveTool::PENCIL);
         assert_eq!(state.brush.radius, 100.0);
     }
 
@@ -13157,7 +13337,7 @@ mod shortcut_clash_tests {
         let t = texts(&s);
         assert!(!t.iter().any(|x| x.contains("clash")), "{t:?}");
         assert!(!edit_dot(&s));
-        assert!(t.iter().any(|x| x == "Tool: Eraser"));
+        assert!(t.iter().any(|x| x == "Tool: pen slot 3"), "{t:?}");
     }
 
     #[test]
@@ -13173,15 +13353,15 @@ mod shortcut_clash_tests {
 
         state.shortcut_clashes_only = true;
         let t = texts(&settle(&ctx, &mut state));
-        assert!(t.iter().any(|x| x == "Tool: Pencil") && t.iter().any(|x| x == "Tool: Ink"));
-        assert!(!t.iter().any(|x| x == "Tool: Eraser"), "clean rows are filtered out");
+        assert!(t.iter().any(|x| x == "Tool: pen slot 1") && t.iter().any(|x| x == "Tool: pen slot 2"));
+        assert!(!t.iter().any(|x| x == "Tool: pen slot 3"), "clean rows are filtered out");
 
         // Fixing the clash clears the summary and lifts the filter with it.
         state.shortcuts.set(Action::ToolInk, KeyCombo::plain(egui::Key::W));
         let s = settle(&ctx, &mut state);
         let t = texts(&s);
         assert!(!t.contains(&summary));
-        assert!(t.iter().any(|x| x == "Tool: Eraser"));
+        assert!(t.iter().any(|x| x == "Tool: pen slot 3"));
         assert!(!edit_dot(&s));
     }
 }
@@ -15192,5 +15372,226 @@ mod axis_lock_tests {
         assert!(alpha_at_doc(&state, (a.0, (a.1 + b.1) * 0.5)) > 200, "left side, slid along");
         let (a0, b0) = (xf.screen_to_doc(from), xf.screen_to_doc(to));
         assert_eq!(alpha_at_doc(&state, (a0.0, (a0.1 + b0.1) * 0.5)), 0, "not where it was pressed");
+    }
+}
+
+/// The pen slots' row in the Tools panel and each slot's right-click menu.
+#[cfg(test)]
+mod pen_slot_tests {
+    use super::*;
+    use crate::tools::BrushSettings;
+    use egui::{pos2, Pos2};
+
+    fn frame(ctx: &egui::Context, state: &mut AppState, events: Vec<egui::Event>) -> Vec<egui::epaint::ClippedShape> {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| {
+            panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, None, None);
+        })
+        .shapes
+    }
+
+    fn settle(ctx: &egui::Context, state: &mut AppState) -> Vec<egui::epaint::ClippedShape> {
+        for _ in 0..3 {
+            frame(ctx, state, vec![]);
+        }
+        frame(ctx, state, vec![])
+    }
+
+    /// Every place `text` was painted, exactly that.
+    fn text_rects(shapes: &[egui::epaint::ClippedShape], text: &str) -> Vec<Rect> {
+        fn find(shape: &egui::Shape, text: &str, out: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| find(s, text, out)),
+                egui::Shape::Text(t) if t.galley.text() == text => out.push(t.visual_bounding_rect()),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            find(&s.shape, text, &mut out);
+        }
+        out
+    }
+
+    fn at(shapes: &[egui::epaint::ClippedShape], text: &str) -> Pos2 {
+        let r = text_rects(shapes, text);
+        r.first().unwrap_or_else(|| panic!("{text:?} not painted")).center()
+    }
+
+    fn click(ctx: &egui::Context, state: &mut AppState, at: Pos2, button: egui::PointerButton) -> Vec<egui::epaint::ClippedShape> {
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, state, vec![egui::Event::PointerMoved(at), press(true)]);
+        frame(ctx, state, vec![press(false)]);
+        settle(ctx, state)
+    }
+
+    fn setup() -> (egui::Context, AppState) {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        ctx.style_mut(|s| s.animation_time = 0.0);
+        (ctx, AppState::for_test())
+    }
+
+    /// The pens and the eraser after them on the first row; every other tool
+    /// on the second, the colour picker last.
+    #[test]
+    fn the_pens_and_the_eraser_lead_and_the_other_tools_follow() {
+        let (ctx, mut state) = setup();
+        let s = settle(&ctx, &mut state);
+        let first: Vec<Pos2> = [ic::PENCIL, ic::PEN_NIB, ic::ERASER].iter().map(|g| at(&s, g)).collect();
+        let second: Vec<Pos2> = [ic::PAINT_BUCKET, ic::SHAPES, ic::LASSO, ic::CROSSHAIR, ic::PERSPECTIVE, ic::DROP, ic::EYEDROPPER]
+            .iter()
+            .map(|g| at(&s, g))
+            .collect();
+        for row in [&first, &second] {
+            assert!(row.iter().all(|p| (p.y - row[0].y).abs() < 2.0), "one row: {row:?}");
+            assert!(row.windows(2).all(|w| w[0].x < w[1].x), "in order: {row:?}");
+        }
+        assert!(second[0].y > first[0].y + 20.0, "the tools under the pens");
+    }
+
+    /// The right-click menu gives the slot another icon and another brush,
+    /// leaving the pen in hand alone.
+    #[test]
+    fn the_menu_sets_a_slots_icon_and_brush() {
+        let (ctx, mut state) = setup();
+        let s = settle(&ctx, &mut state);
+        let s = click(&ctx, &mut state, at(&s, ic::PEN_NIB), egui::PointerButton::Secondary);
+        assert!(!text_rects(&s, &theme::icon_text(ic::TRASH, "Remove slot")).is_empty(), "the menu opened");
+        let s = click(&ctx, &mut state, at(&s, ic::FEATHER), egui::PointerButton::Primary);
+        assert_eq!(state.pens[1].icon, "feather");
+        assert!(!text_rects(&s, ic::FEATHER).is_empty(), "the button wears it");
+        click(&ctx, &mut state, at(&s, "4B"), egui::PointerButton::Primary);
+        assert_eq!(state.pens[1].brush.radius, BrushSettings::pencil_4b().radius);
+        assert_eq!(state.pens[1].brush.color, BrushSettings::default_ink().color, "its own colour kept");
+        assert_eq!(state.tool, ActiveTool::PENCIL, "still on the pencil");
+    }
+
+    /// The "+" adds a slot at the end, picks it and opens its menu; Remove
+    /// there asks for a second click, then takes the slot out.
+    #[test]
+    fn the_plus_adds_a_slot_and_opens_its_menu() {
+        let (ctx, mut state) = setup();
+        let s = settle(&ctx, &mut state);
+        let (ink, plus, eraser) = (at(&s, ic::PEN_NIB), at(&s, ic::PLUS), at(&s, ic::ERASER));
+        assert!(ink.x < plus.x && plus.x < eraser.x, "the + before the eraser");
+        assert!(eraser.x - plus.x < 45.0, "no gap: {plus:?} {eraser:?}");
+        let s = click(&ctx, &mut state, plus, egui::PointerButton::Primary);
+        assert_eq!(state.pens.len(), 3);
+        assert_eq!(state.tool, ActiveTool::Pen(2));
+        let remove = theme::icon_text(ic::TRASH, "Remove slot");
+        assert!(!text_rects(&s, &remove).is_empty(), "its menu opened");
+        let (brush, plus) = (at(&s, ic::PAINT_BRUSH), at(&s, ic::PLUS));
+        assert!(ink.x < brush.x && brush.x < plus.x && (brush.y - ink.y).abs() < 2.0, "{brush:?} {plus:?}");
+
+        let s = click(&ctx, &mut state, at(&s, &remove), egui::PointerButton::Primary);
+        assert_eq!(state.pens.len(), 3, "not yet");
+        let again = theme::icon_text(ic::TRASH, "Click again to remove");
+        let s = click(&ctx, &mut state, at(&s, &again), egui::PointerButton::Primary);
+        assert_eq!(state.pens.len(), 2);
+        assert_eq!(state.tool, ActiveTool::INK, "to the slot before it");
+        assert!(text_rects(&s, ic::PAINT_BRUSH).is_empty());
+        assert!(text_rects(&s, &again).is_empty(), "the menu closed");
+    }
+
+    /// Duplicate in a slot's menu puts a copy right after it, picked, with
+    /// the copy's own menu open.
+    #[test]
+    fn duplicate_puts_a_copy_after_its_slot() {
+        let (ctx, mut state) = setup();
+        let s = settle(&ctx, &mut state);
+        let s = click(&ctx, &mut state, at(&s, ic::PENCIL), egui::PointerButton::Secondary);
+        let s = click(&ctx, &mut state, at(&s, &theme::icon_text(ic::COPY, "Duplicate")), egui::PointerButton::Primary);
+        assert_eq!((state.pen_name(1), state.pen_name(2)), ("Pencil 2".into(), "Ink".into()));
+        assert_eq!(state.tool, ActiveTool::Pen(1));
+        assert!(!text_rects(&s, &theme::icon_text(ic::TRASH, "Remove slot")).is_empty(), "the copy's menu");
+        assert_eq!(text_rects(&s, ic::PENCIL).len(), 3, "two pencil buttons, and the icon in the menu");
+    }
+
+    /// Six slots and the eraser are a row of seven, like the tools under
+    /// them, with no "+" left.
+    #[test]
+    fn six_slots_and_the_eraser_make_a_row_of_seven() {
+        let (ctx, mut state) = setup();
+        while state.add_pen().is_some() {}
+        assert_eq!(state.pens.len(), MAX_PENS);
+        for (i, p) in state.pens.iter_mut().enumerate() {
+            p.icon = PEN_ICONS[i].0.to_owned();
+        }
+        let s = settle(&ctx, &mut state);
+        let row: Vec<Pos2> = PEN_ICONS[..MAX_PENS].iter().map(|i| at(&s, i.1)).chain([at(&s, ic::ERASER)]).collect();
+        assert!(row.iter().all(|p| (p.y - row[0].y).abs() < 2.0), "one row: {row:?}");
+        assert!(text_rects(&s, ic::PLUS).is_empty(), "no + with the row full");
+        let tools: Vec<Pos2> = [ic::PAINT_BUCKET, ic::EYEDROPPER].iter().map(|g| at(&s, g)).collect();
+        assert!((row[6].x - tools[1].x).abs() < 30.0, "as wide as the row under it: {row:?} {tools:?}");
+    }
+
+    /// How tall the Tools panel opens on the pencil: what the Brush panel
+    /// under it is placed by before the panel has been laid out.
+    #[test]
+    fn the_tools_panel_opens_as_tall_as_its_start_height() {
+        let (ctx, mut state) = setup();
+        settle(&ctx, &mut state);
+        let h = egui::AreaState::load(&ctx, panel_area(&state, PanelId::Tools)).expect("laid out").rect().height();
+        assert!((h - TOOLS_START_H).abs() <= 12.0, "{h} vs {TOOLS_START_H}");
+    }
+}
+
+/// The size rows hold the Tools panel's width at every size.
+#[cfg(test)]
+mod size_row_tests {
+    use super::*;
+    use egui::{pos2, Pos2};
+
+    fn width(ctx: &egui::Context, state: &mut AppState) -> f32 {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(1600.0, 900.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            panel_window(state, ctx, PanelId::Tools, [12.0, 48.0], 232.0, true, None, None);
+        });
+        egui::AreaState::load(ctx, panel_area(state, PanelId::Tools)).expect("laid out").rect().width()
+    }
+
+    /// Dragging the size up to the largest, a frame per step, on a pen and on
+    /// Shape, lock on and off, leaves the panel the width it opened at. The
+    /// lock icon after the slider was drawn wider than the room the slider
+    /// left it, and from three-digit sizes on, the panel grew every frame.
+    #[test]
+    fn a_growing_size_never_widens_the_panel() {
+        for (tool, lock) in [(ActiveTool::PENCIL, false), (ActiveTool::PENCIL, true), (ActiveTool::Shape, false)] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            ctx.style_mut(|s| s.animation_time = 0.0);
+            let mut state = AppState::for_test();
+            state.set_tool(tool);
+            state.lock_brush_to_view = lock;
+            state.brush.radius = 6.0;
+            for _ in 0..5 {
+                width(&ctx, &mut state);
+            }
+            let start = width(&ctx, &mut state);
+            let mut r = 6.0f32;
+            while r < *BRUSH_SIZES.end() {
+                r = (r * 1.07).min(*BRUSH_SIZES.end());
+                state.brush.radius = (r * 10.0).round() / 10.0 - 0.1;
+                let w = width(&ctx, &mut state);
+                assert!(w <= start + 0.5, "{tool:?}, lock {lock}: {start} -> {w} at size {}", state.brush.radius);
+            }
+            for _ in 0..20 {
+                let w = width(&ctx, &mut state);
+                assert!(w <= start + 0.5, "{tool:?}, lock {lock}: {start} -> {w} at rest");
+            }
+        }
     }
 }

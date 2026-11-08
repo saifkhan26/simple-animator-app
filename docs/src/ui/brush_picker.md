@@ -1,6 +1,6 @@
 # `src/ui/brush_picker.rs` — the brush picker grid
 
-> **Source:** [src/ui/brush_picker.rs](../../../src/ui/brush_picker.rs) · **Module:** `crate::ui::brush_picker` · **Size:** 207 lines · Line links as of commit `1fa5845`
+> **Source:** [src/ui/brush_picker.rs](../../../src/ui/brush_picker.rs) · **Module:** `crate::ui::brush_picker` · **Size:** 263 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 
@@ -81,8 +81,17 @@ fn sync_thumbs(state: &mut AppState, ctx: &egui::Context)
 
 Upload the thumbnails the library has decoded and the picker has not.
 
-### `pick`
+### `brush_for`
 [src/ui/brush_picker.rs:79](../../../src/ui/brush_picker.rs#L79)
+
+```rust
+fn brush_for(state: &AppState, id: &str, color: [u8; 4]) -> Option<BrushSettings>
+```
+
+The brush `id` makes, in `color`: an app preset as it is, a Krita preset on the Krita engine at the preset's own size.
+
+### `pick`
+[src/ui/brush_picker.rs:99](../../../src/ui/brush_picker.rs#L99)
 
 ```rust
 pub fn pick(state: &mut AppState, id: &str)
@@ -90,8 +99,35 @@ pub fn pick(state: &mut AppState, id: &str)
 
 Pick `id`: an app preset replaces the brush, a Krita preset sets the Krita engine on it at the preset's own size. The colour stays.
 
+### `pick_for_pen`
+[src/ui/brush_picker.rs:106](../../../src/ui/brush_picker.rs#L106)
+
+```rust
+pub fn pick_for_pen(state: &mut AppState, slot: usize, id: &str)
+```
+
+Pick `id` into pen slot `slot`, as `pick` does into the brush in hand.
+
+### `slot_brush`
+[src/ui/brush_picker.rs:114](../../../src/ui/brush_picker.rs#L114)
+
+```rust
+fn slot_brush(state: &AppState, slot: usize) -> &BrushSettings
+```
+
+Pen slot `slot`'s brush as it is now: the live one while it's in hand.
+
+### `krita_id`
+[src/ui/brush_picker.rs:124](../../../src/ui/brush_picker.rs#L124)
+
+```rust
+fn krita_id(b: &BrushSettings) -> Option<String>
+```
+
+The Krita preset `b` paints with, for the grid to mark it.
+
 ### `brush_grid`
-[src/ui/brush_picker.rs:97](../../../src/ui/brush_picker.rs#L97)
+[src/ui/brush_picker.rs:128](../../../src/ui/brush_picker.rs#L128)
 
 ```rust
 pub fn brush_grid(state: &mut AppState, ui: &mut egui::Ui)
@@ -99,17 +135,38 @@ pub fn brush_grid(state: &mut AppState, ui: &mut egui::Ui)
 
 Draws the search box and the grid of brush groups, then applies a click (`pick`) after drawing.
 
-### `groups`
-[src/ui/brush_picker.rs:116](../../../src/ui/brush_picker.rs#L116)
+### `pen_brush_grid`
+[src/ui/brush_picker.rs:147](../../../src/ui/brush_picker.rs#L147)
 
 ```rust
-fn groups(state: &AppState, ui: &mut egui::Ui, needle: &str, picked: &mut Option<String>)
+pub fn pen_brush_grid(state: &mut AppState, ui: &mut egui::Ui, slot: usize)
 ```
 
-Draws each library group whose brushes match the search text, as rows of tiles; records a clicked id in `picked`.
+The grid in a pen slot's right-click menu: the same brushes, picked into that slot whether it is in hand or not, with a search box of its own.
+
+### `search_box`
+[src/ui/brush_picker.rs:163](../../../src/ui/brush_picker.rs#L163)
+
+```rust
+fn search_box(ui: &mut egui::Ui, text: &mut String)
+```
+
+A magnifying glass and a one-line text field bound to `text`, filling the row. Shared by the Brush
+panel's grid (`state.brush_search`) and a pen slot's menu (`state.pen_menu_search`), so each keeps
+its own search.
+
+### `groups`
+[src/ui/brush_picker.rs:172](../../../src/ui/brush_picker.rs#L172)
+
+```rust
+fn groups(state: &AppState, ui: &mut egui::Ui, needle: &str, current: Option<&str>, picked: &mut Option<String>)
+```
+
+Draws each library group whose brushes match the search text, as rows of tiles; records a clicked id in
+`picked`. `current` is the Krita preset of the brush being picked for, which its tile is marked as.
 
 ### `sensor_name`
-[src/ui/brush_picker.rs:154](../../../src/ui/brush_picker.rs#L154)
+[src/ui/brush_picker.rs:210](../../../src/ui/brush_picker.rs#L210)
 
 ```rust
 fn sensor_name(k: SensorKind) -> &'static str
@@ -118,7 +175,7 @@ fn sensor_name(k: SensorKind) -> &'static str
 A sensor's human name for the summary ("pressure", "tilt direction", …).
 
 ### `describe`
-[src/ui/brush_picker.rs:171](../../../src/ui/brush_picker.rs#L171)
+[src/ui/brush_picker.rs:227](../../../src/ui/brush_picker.rs#L227)
 
 ```rust
 pub fn describe(b: &PixelBrush) -> Vec<String>

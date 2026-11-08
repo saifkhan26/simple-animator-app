@@ -1158,7 +1158,7 @@ mod tests {
     fn builder(view_scale: f32, opts: SmoothingOptions) -> StrokeBuilder {
         StrokeBuilder::new(
             BrushSettings::default_ink(),
-            ActiveTool::Ink,
+            ActiveTool::INK,
             view_scale,
             opts,
         )
@@ -1191,7 +1191,7 @@ mod tests {
         let mut ws = StrokeWorkspace::new();
         ws.begin(512, 512, &brush);
 
-        let mut b = StrokeBuilder::new(brush, ActiveTool::Ink, view_scale, opts);
+        let mut b = StrokeBuilder::new(brush, ActiveTool::INK, view_scale, opts);
         for &(x, y) in screen_path {
             b.push(sample(x / view_scale, y / view_scale));
             b.flush(&mut canvas, &mut ws, &pre);
@@ -1533,7 +1533,7 @@ mod tests {
         brush.radius = 60.0;
         let mut b = StrokeBuilder::new(
             brush,
-            ActiveTool::Ink,
+            ActiveTool::INK,
             1.0,
             SmoothingOptions::default(),
         );
@@ -1571,7 +1571,7 @@ mod tests {
         let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(w, h, &brush);
-        let mut b = StrokeBuilder::new(brush, ActiveTool::Ink, 1.0, SmoothingOptions::default());
+        let mut b = StrokeBuilder::new(brush, ActiveTool::INK, 1.0, SmoothingOptions::default());
         for &(x, y) in path {
             b.push(sample(x, y));
             b.flush(&mut canvas, &mut ws, &pre);
@@ -1734,7 +1734,7 @@ mod tests {
             krita_stroke(
                 &mut c,
                 brush.clone(),
-                ActiveTool::Pencil,
+                ActiveTool::PENCIL,
                 (30.0, 60.0),
                 (170.0, 60.0),
                 0.8,
@@ -1764,7 +1764,7 @@ mod tests {
             krita_stroke(
                 &mut c,
                 BrushSettings::pencil5_krita(),
-                ActiveTool::Pencil,
+                ActiveTool::PENCIL,
                 (60.0, 60.0),
                 (60.0, 60.0),
                 1.0,
@@ -1789,7 +1789,7 @@ mod tests {
             krita_stroke(
                 &mut c,
                 BrushSettings::pencil5_krita(),
-                ActiveTool::Pencil,
+                ActiveTool::PENCIL,
                 (60.0, 60.0),
                 (60.0, 60.0),
                 1.0,
@@ -1822,7 +1822,7 @@ mod tests {
         let pre = c.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(c.width, c.height, &brush);
-        let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+        let mut b = StrokeBuilder::new(brush, ActiveTool::PENCIL, 1.0, SmoothingOptions::default());
         let at = |x: f32| PointerSample {
             x,
             y: 60.0,
@@ -1852,7 +1852,7 @@ mod tests {
         krita_stroke(
             &mut c,
             BrushSettings::pencil5_krita(),
-            ActiveTool::Pencil,
+            ActiveTool::PENCIL,
             (20.0, 40.0),
             (140.0, 40.0),
             1.0,
@@ -1872,7 +1872,7 @@ mod tests {
         krita_stroke(
             &mut c,
             BrushSettings::pencil5_krita(),
-            ActiveTool::Pencil,
+            ActiveTool::PENCIL,
             (20.0, 40.0),
             (140.0, 40.0),
             1.0,
@@ -1915,7 +1915,7 @@ mod tests {
         let pre = c.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(c.width, c.height, &brush);
-        let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+        let mut b = StrokeBuilder::new(brush, ActiveTool::PENCIL, 1.0, SmoothingOptions::default());
         let t0 = std::time::Instant::now();
         let mut worst = std::time::Duration::ZERO;
         let n = 400;
@@ -2031,7 +2031,7 @@ mod tests {
             let pre = canvas.pixels().into_owned();
             let mut ws = StrokeWorkspace::new();
             ws.begin(w, h, &settings);
-            let mut b = StrokeBuilder::new_with_krita(settings, ActiveTool::Pencil, 1.0, SmoothingOptions::default(), brush);
+            let mut b = StrokeBuilder::new_with_krita(settings, ActiveTool::PENCIL, 1.0, SmoothingOptions::default(), brush);
             b.seed_random(1);
             for k in 0..=120 {
                 let t = k as f32 / 120.0;
@@ -2067,7 +2067,7 @@ mod tests {
             let mut ws = StrokeWorkspace::new();
             ws.begin(canvas.width, canvas.height, &brush);
             let mut b =
-                StrokeBuilder::new(brush.clone(), ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+                StrokeBuilder::new(brush.clone(), ActiveTool::PENCIL, 1.0, SmoothingOptions::default());
             for i in 0..=60 {
                 b.push(PointerSample {
                     x: 40.0 + i as f32 * 3.5,
@@ -2104,7 +2104,7 @@ mod tests {
         let pre = canvas.pixels().into_owned();
         let mut ws = StrokeWorkspace::new();
         ws.begin(canvas.width, canvas.height, &brush);
-        let mut b = StrokeBuilder::new(brush, ActiveTool::Pencil, 1.0, SmoothingOptions::default());
+        let mut b = StrokeBuilder::new(brush, ActiveTool::PENCIL, 1.0, SmoothingOptions::default());
 
         let n = 90;
         for i in 0..=n {

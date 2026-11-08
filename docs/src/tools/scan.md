@@ -1,6 +1,6 @@
 # `src/tools/scan.rs` — fast byte scans, eight bytes at a time
 
-> **Source:** [src/tools/scan.rs](../../../src/tools/scan.rs) · **Module:** `crate::tools::scan` · **Size:** 150 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/scan.rs](../../../src/tools/scan.rs) · **Module:** `crate::tools::scan` · **Size:** 150 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/tools/noise.rs` — midtone noise for app brushes
 
-> **Source:** [src/tools/noise.rs](../../../src/tools/noise.rs) · **Module:** `crate::tools::noise` · **Size:** 395 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/noise.rs](../../../src/tools/noise.rs) · **Module:** `crate::tools::noise` · **Size:** 395 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/tools/krita/distance.rs` — what a Krita stroke remembers between dabs
 
-> **Source:** [src/tools/krita/distance.rs](../../../../src/tools/krita/distance.rs) · **Module:** `crate::tools::krita::distance` · **Size:** 112 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/krita/distance.rs](../../../../src/tools/krita/distance.rs) · **Module:** `crate::tools::krita::distance` · **Size:** 112 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

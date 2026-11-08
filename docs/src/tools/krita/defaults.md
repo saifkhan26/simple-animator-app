@@ -1,6 +1,6 @@
 # `src/tools/krita/defaults.rs` — the 24 Krita brush presets built into the app
 
-> **Source:** [src/tools/krita/defaults.rs](../../../../src/tools/krita/defaults.rs) · **Module:** `crate::tools::krita::defaults` · **Size:** 160 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/krita/defaults.rs](../../../../src/tools/krita/defaults.rs) · **Module:** `crate::tools::krita::defaults` · **Size:** 160 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/input/button_drag.rs` — what middle / right button (and pen barrel button) drags do
 
-> **Source:** [src/input/button_drag.rs](../../../src/input/button_drag.rs) · **Module:** `crate::input::button_drag` · **Size:** 218 lines · Line links as of commit `1fa5845`
+> **Source:** [src/input/button_drag.rs](../../../src/input/button_drag.rs) · **Module:** `crate::input::button_drag` · **Size:** 218 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

@@ -635,7 +635,7 @@ mod tests {
         let (mut st, _) = liquify();
         let steps = st.history.undo_len();
         push(&mut st, (104.0, 104.0), 8.0);
-        st.set_tool(ActiveTool::Pencil);
+        st.set_tool(ActiveTool::PENCIL);
         st.sync_liquify();
         assert!(st.liquify.is_none());
         assert_eq!(st.history.undo_len(), steps + 1);

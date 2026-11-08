@@ -1,6 +1,6 @@
 # `src/app/button_drag.rs` — what middle/right-button drags do on the canvas
 
-> **Source:** [src/app/button_drag.rs](../../../src/app/button_drag.rs) · **Module:** `crate::app::button_drag` · **Size:** 519 lines · Line links as of commit `1fa5845`
+> **Source:** [src/app/button_drag.rs](../../../src/app/button_drag.rs) · **Module:** `crate::app::button_drag` · **Size:** 519 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 
@@ -341,7 +341,7 @@ press* (stored in `d`), not from the previous frame, so moving back undoes the c
 - **Fill:** the gap steps along the gap ladder by `drag_steps(dx)` (`step_gap`), and expand
   goes up one per step of `up`, clamped to `0..=MAX_EXPAND` — the same as the bucket's own
   press-drag.
-- **Pencil, Ink, Eraser, Shape:** the size scales by powers of two with sideways drag
+- **Pen slots, Eraser, Shape:** the size scales by powers of two with sideways drag
   (`SIZE_PX_PER_DOUBLING` points per doubling), holding briefly on each remembered size
   (`size_detents` + `size_with_detents`), clamped to `MIN_RADIUS..MAX_RADIUS`. Opacity rises
   by `up / OPACITY_PX`, clamped to `MIN_OPACITY..1`.

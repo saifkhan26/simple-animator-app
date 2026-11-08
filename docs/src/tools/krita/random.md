@@ -1,6 +1,6 @@
 # `src/tools/krita/random.rs` — Krita's random number source
 
-> **Source:** [src/tools/krita/random.rs](../../../../src/tools/krita/random.rs) · **Module:** `crate::tools::krita::random` · **Size:** 157 lines · Line links as of commit `1fa5845`
+> **Source:** [src/tools/krita/random.rs](../../../../src/tools/krita/random.rs) · **Module:** `crate::tools::krita::random` · **Size:** 157 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

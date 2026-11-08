@@ -1,6 +1,6 @@
 # `src/input/shortcuts.rs` — key bindings, the mouse-wheel map and `shortcuts.toml`
 
-> **Source:** [src/input/shortcuts.rs](../../../src/input/shortcuts.rs) · **Module:** `crate::input::shortcuts` · **Size:** 2429 lines · Line links as of commit `1fa5845`
+> **Source:** [src/input/shortcuts.rs](../../../src/input/shortcuts.rs) · **Module:** `crate::input::shortcuts` · **Size:** 2475 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 
@@ -244,6 +244,13 @@ and `CanvasRotate` (`Alt`) — see `shared_on_purpose`.
 |---|---|
 | `ToolPencil` | `Q` |
 | `ToolInk` | `W` |
+| `ToolPen3` | Pick pen slot 3. Unbound by default, like slots 4 to 6. |
+| `ToolPen4` | Pick pen slot 4. Unbound by default. |
+| `ToolPen5` | Pick pen slot 5. Unbound by default. |
+| `ToolPen6` | Pick pen slot 6. Unbound by default. |
+| `PenNext` | `Shift+W` — the next pen slot along the row, round at the end; from another tool, back to the pen used last. |
+| `PenPrev` | `Shift+Q` — the pen slot before, round at the start; from another tool, back to the pen used last. |
+| `PenSwap` | Back to the pen slot used before this one. Unbound by default. |
 | `ToolEraser` | `E` |
 | `ToolFill` | `R` |
 | `ToolColorPicker` | — |
@@ -363,23 +370,38 @@ and `CanvasRotate` (`Alt`) — see `shared_on_purpose`.
 | `CameraKeyNext` | — |
 
 ### `const Action::ALL`
-[src/input/shortcuts.rs:182](../../../src/input/shortcuts.rs#L182)
+[src/input/shortcuts.rs:196](../../../src/input/shortcuts.rs#L196)
 
 ```rust
 pub const ALL: &'static [Action] = &[
     Action::ToolPencil,
     Action::ToolInk,
-    Action::ToolEraser,
-    Action::ToolFill,
-    Action::PickScreenColor,
+    Action::ToolPen3,
+    Action::ToolPen4,
+    Action::ToolPen5,
 // …
 ```
 
 `&'static [Action]` — every action Settings offers, in the order it lists them. It is every
 variant **except** the two retired ones (`ToolColorPicker`, `ToggleCheckerBg`).
 
+### `const Action::PENS`
+[src/input/shortcuts.rs:455](../../../src/input/shortcuts.rs#L455)
+
+```rust
+pub const PENS: [Action; 6] = [
+    Action::ToolPencil,
+    Action::ToolInk,
+    Action::ToolPen3,
+    Action::ToolPen4,
+    Action::ToolPen5,
+// …
+```
+
+The actions that pick each pen slot, slot 1 first.
+
 ### `const HOLD_DRAGS`
-[src/input/shortcuts.rs:486](../../../src/input/shortcuts.rs#L486)
+[src/input/shortcuts.rs:529](../../../src/input/shortcuts.rs#L529)
 
 ```rust
 pub const HOLD_DRAGS: [Action; 7] = [
@@ -396,7 +418,7 @@ with equally specific combos: `CanvasZoom`, `CanvasRotate`, `CanvasPan`, `HoldTo
 `HoldScrub`, `HoldFlip`, `HoldSwatchPie`. Read by `ShortcutMap::held_drag`.
 
 ### `struct KeyCombo`
-[src/input/shortcuts.rs:497](../../../src/input/shortcuts.rs#L497)
+[src/input/shortcuts.rs:540](../../../src/input/shortcuts.rs#L540)
 
 One key combination. `Copy`, so it is passed around by value like a number. Written to the file as
 a single string such as `"Ctrl+Shift+Z"` (see its `Serialize` impl).
@@ -409,7 +431,7 @@ a single string such as `"Ctrl+Shift+Z"` (see its `Serialize` impl).
 | `alt` | `bool` | Alt must be down. |
 
 ### `struct HoldCapture`
-[src/input/shortcuts.rs:642](../../../src/input/shortcuts.rs#L642)
+[src/input/shortcuts.rs:685](../../../src/input/shortcuts.rs#L685)
 
 The little state machine Settings uses while waiting for a new **hold** binding. Unlike a press
 binding, a hold may be bare modifiers — but egui reports no key event for Shift, Ctrl or Alt
@@ -422,7 +444,7 @@ back up.
 | `peak` | `(bool, bool, bool)` | Ctrl, Shift, Alt — each `true` if it has been down at any point since arming. |
 
 ### `enum Clash`
-[src/input/shortcuts.rs:741](../../../src/input/shortcuts.rs#L741)
+[src/input/shortcuts.rs:784](../../../src/input/shortcuts.rs#L784)
 
 Something else sitting on a binding's combo, as the Settings list flags it.
 
@@ -433,7 +455,7 @@ Something else sitting on a binding's combo, as the Settings list flags it.
 | `Shared(Action, &'static str)` | Another action on the same combo **by design**, kept apart by the rule in the text. Shown as a note, not a conflict. |
 
 ### `const FOCUS_PASS_KEYS`
-[src/input/shortcuts.rs:815](../../../src/input/shortcuts.rs#L815)
+[src/input/shortcuts.rs:858](../../../src/input/shortcuts.rs#L858)
 
 ```rust
 pub const FOCUS_PASS_KEYS: [egui::Key; 2] = [egui::Key::Tab, egui::Key::Backtick];
@@ -446,7 +468,7 @@ character no name or number field needs. Whatever the map binds to them fires (m
 like any other press).
 
 ### `const CAPTURE_KEYS`
-[src/input/shortcuts.rs:818](../../../src/input/shortcuts.rs#L818)
+[src/input/shortcuts.rs:861](../../../src/input/shortcuts.rs#L861)
 
 ```rust
 pub const CAPTURE_KEYS: [egui::Key; 65] = {
@@ -463,7 +485,7 @@ Space, Tab, Backspace, backtick, `F1`–`F12` and the four arrows. Built inside 
 `use egui::Key::*;` so the names can be written bare.
 
 ### `enum WheelSlot`
-[src/input/shortcuts.rs:833](../../../src/input/shortcuts.rs#L833)
+[src/input/shortcuts.rs:876](../../../src/input/shortcuts.rs#L876)
 
 Which modifier the mouse wheel is turned with. Each slot holds one `WheelAction`, so the wheel
 can't clash with itself; turning it with two or more modifiers does nothing.
@@ -478,7 +500,7 @@ can't clash with itself; turning it with two or more modifiers does nothing.
 | `Alt` | Alt+Wheel |
 
 ### `const WheelSlot::ALL`
-[src/input/shortcuts.rs:841](../../../src/input/shortcuts.rs#L841)
+[src/input/shortcuts.rs:884](../../../src/input/shortcuts.rs#L884)
 
 ```rust
 pub const ALL: [WheelSlot; 4] = [WheelSlot::Plain, WheelSlot::Shift, WheelSlot::Ctrl, WheelSlot::Alt];
@@ -488,7 +510,7 @@ pub const ALL: [WheelSlot; 4] = [WheelSlot::Plain, WheelSlot::Shift, WheelSlot::
 variant **except** the two retired ones (`ToolColorPicker`, `ToggleCheckerBg`).
 
 ### `enum WheelAction`
-[src/input/shortcuts.rs:883](../../../src/input/shortcuts.rs#L883)
+[src/input/shortcuts.rs:926](../../../src/input/shortcuts.rs#L926)
 
 What one notch of the wheel does, in whichever slot it sits. It applies over the canvas, the
 Timeline and the mini timeline alike — except `PanTimeline`, which only the Timeline's tracks
@@ -508,7 +530,7 @@ order.
 | `Nothing` | — |
 
 ### `const WheelAction::ALL`
-[src/input/shortcuts.rs:899](../../../src/input/shortcuts.rs#L899)
+[src/input/shortcuts.rs:942](../../../src/input/shortcuts.rs#L942)
 
 ```rust
 pub const ALL: [WheelAction; 7] = [
@@ -524,7 +546,7 @@ pub const ALL: [WheelAction; 7] = [
 variant **except** the two retired ones (`ToolColorPicker`, `ToggleCheckerBg`).
 
 ### `struct ShortcutMap`
-[src/input/shortcuts.rs:988](../../../src/input/shortcuts.rs#L988)
+[src/input/shortcuts.rs:1031](../../../src/input/shortcuts.rs#L1031)
 
 The user's whole keymap. Saved as `action = "Combo"` lines plus the four wheel lines. An action
 the user unbound is saved as `action = ""` and kept in `unbound`, so loading doesn't hand it its
@@ -539,7 +561,7 @@ takes its default on the next load.
 | `wheel` | `BTreeMap<WheelSlot, WheelAction>` | What the wheel does in each slot. Always holds all four slots. |
 
 ### `enum Raw`
-[src/input/shortcuts.rs:1029](../../../src/input/shortcuts.rs#L1029)
+[src/input/shortcuts.rs:1072](../../../src/input/shortcuts.rs#L1072)
 
 A helper enum declared inside `ShortcutMap::deserialize`. With `#[serde(untagged)]`, serde tries each
 variant in turn: a value that is text becomes `Raw::Text`, anything else TOML allows (a number, a
@@ -554,7 +576,7 @@ line instead of failing the whole file.
 ## `impl Action`
 
 ### `Action::label`
-[src/input/shortcuts.rs:302](../../../src/input/shortcuts.rs#L302)
+[src/input/shortcuts.rs:323](../../../src/input/shortcuts.rs#L323)
 
 ```rust
 pub fn label(self) -> &'static str
@@ -563,8 +585,17 @@ pub fn label(self) -> &'static str
 The human-readable name of an action, shown in the Settings shortcut list and in tooltips — e.g.
 `Action::ToolPencil` → `"Tool: Pencil"`. One `match` arm per action returning a string literal.
 
+### `Action::pen_slot`
+[src/input/shortcuts.rs:465](../../../src/input/shortcuts.rs#L465)
+
+```rust
+pub fn pen_slot(self) -> Option<usize>
+```
+
+The pen slot this action picks, from 0, if it picks one.
+
 ### `Action::layer_pick`
-[src/input/shortcuts.rs:428](../../../src/input/shortcuts.rs#L428)
+[src/input/shortcuts.rs:471](../../../src/input/shortcuts.rs#L471)
 
 ```rust
 pub fn layer_pick(self) -> Option<usize>
@@ -574,7 +605,7 @@ For the "select layer n" actions (`LayerPick1`…`LayerPick9`) returns `Some(n)`
 the top of the Layers panel starting at 1; `None` for every other action.
 
 ### `Action::is_hold`
-[src/input/shortcuts.rs:446](../../../src/input/shortcuts.rs#L446)
+[src/input/shortcuts.rs:489](../../../src/input/shortcuts.rs#L489)
 
 ```rust
 pub fn is_hold(self) -> bool
@@ -585,7 +616,7 @@ pan/zoom/rotate, tool-adjust, scrub, flip, swatch pie, the selection modes and t
 Their combos may be a key, bare modifiers, or both, and they never fire as a press.
 
 ### `Action::is_mid_drag`
-[src/input/shortcuts.rs:463](../../../src/input/shortcuts.rs#L463)
+[src/input/shortcuts.rs:506](../../../src/input/shortcuts.rs#L506)
 
 ```rust
 pub fn is_mid_drag(self) -> bool
@@ -595,7 +626,7 @@ True for the holds read only once a drag is already under way (ShapeMove, ShapeC
 returns a bool for "does this value match this pattern".
 
 ### `Action::hold_drag`
-[src/input/shortcuts.rs:470](../../../src/input/shortcuts.rs#L470)
+[src/input/shortcuts.rs:513](../../../src/input/shortcuts.rs#L513)
 
 ```rust
 pub fn hold_drag(self) -> Option<ButtonDrag>
@@ -608,7 +639,7 @@ pie) returns which `ButtonDrag` gesture it is; `None` for everything else, inclu
 ## `impl KeyCombo`
 
 ### `KeyCombo::plain`
-[src/input/shortcuts.rs:506](../../../src/input/shortcuts.rs#L506)
+[src/input/shortcuts.rs:549](../../../src/input/shortcuts.rs#L549)
 
 ```rust
 pub fn plain(key: egui::Key) -> Self
@@ -619,7 +650,7 @@ Builds a combo of `key` with no modifiers. The next few functions (`ctrl`, `shif
 exist so the default map reads cleanly: `KeyCombo::ctrl(K::Z)` for Ctrl+Z.
 
 ### `KeyCombo::ctrl`
-[src/input/shortcuts.rs:514](../../../src/input/shortcuts.rs#L514)
+[src/input/shortcuts.rs:557](../../../src/input/shortcuts.rs#L557)
 
 ```rust
 pub fn ctrl(key: egui::Key) -> Self
@@ -628,7 +659,7 @@ pub fn ctrl(key: egui::Key) -> Self
 A combo of Ctrl + `key`.
 
 ### `KeyCombo::shift`
-[src/input/shortcuts.rs:522](../../../src/input/shortcuts.rs#L522)
+[src/input/shortcuts.rs:565](../../../src/input/shortcuts.rs#L565)
 
 ```rust
 pub fn shift(key: egui::Key) -> Self
@@ -637,7 +668,7 @@ pub fn shift(key: egui::Key) -> Self
 A combo of Shift + `key`.
 
 ### `KeyCombo::alt`
-[src/input/shortcuts.rs:530](../../../src/input/shortcuts.rs#L530)
+[src/input/shortcuts.rs:573](../../../src/input/shortcuts.rs#L573)
 
 ```rust
 pub fn alt(key: egui::Key) -> Self
@@ -646,7 +677,7 @@ pub fn alt(key: egui::Key) -> Self
 A combo of Alt + `key`.
 
 ### `KeyCombo::ctrl_shift`
-[src/input/shortcuts.rs:539](../../../src/input/shortcuts.rs#L539)
+[src/input/shortcuts.rs:582](../../../src/input/shortcuts.rs#L582)
 
 ```rust
 pub fn ctrl_shift(key: egui::Key) -> Self
@@ -655,7 +686,7 @@ pub fn ctrl_shift(key: egui::Key) -> Self
 A combo of Ctrl + Shift + `key`.
 
 ### `KeyCombo::ctrl_alt`
-[src/input/shortcuts.rs:548](../../../src/input/shortcuts.rs#L548)
+[src/input/shortcuts.rs:591](../../../src/input/shortcuts.rs#L591)
 
 ```rust
 pub fn ctrl_alt(key: egui::Key) -> Self
@@ -664,7 +695,7 @@ pub fn ctrl_alt(key: egui::Key) -> Self
 A combo of Ctrl + Alt + `key`.
 
 ### `KeyCombo::shift_alt`
-[src/input/shortcuts.rs:557](../../../src/input/shortcuts.rs#L557)
+[src/input/shortcuts.rs:600](../../../src/input/shortcuts.rs#L600)
 
 ```rust
 pub fn shift_alt(key: egui::Key) -> Self
@@ -673,7 +704,7 @@ pub fn shift_alt(key: egui::Key) -> Self
 A combo of Shift + Alt + `key`.
 
 ### `KeyCombo::modifier_only`
-[src/input/shortcuts.rs:567](../../../src/input/shortcuts.rs#L567)
+[src/input/shortcuts.rs:610](../../../src/input/shortcuts.rs#L610)
 
 ```rust
 pub fn modifier_only(ctrl: bool, shift: bool, alt: bool) -> Self
@@ -683,7 +714,7 @@ A combo with no key, only modifiers (e.g. "Ctrl" alone) — used for drag gestur
 zoom.
 
 ### `KeyCombo::display`
-[src/input/shortcuts.rs:576](../../../src/input/shortcuts.rs#L576)
+[src/input/shortcuts.rs:619](../../../src/input/shortcuts.rs#L619)
 
 ```rust
 pub fn display(self) -> String
@@ -693,7 +724,7 @@ Turns a combo into its text form, like `"Ctrl+Shift+Z"` or `"Alt"` for a modifie
 also exactly how combos are written in `shortcuts.toml`.
 
 ### `KeyCombo::matches`
-[src/input/shortcuts.rs:602](../../../src/input/shortcuts.rs#L602)
+[src/input/shortcuts.rs:645](../../../src/input/shortcuts.rs#L645)
 
 ```rust
 pub fn matches(self, i: &egui::InputState) -> bool
@@ -704,7 +735,7 @@ Windows/Super key ignored). Modifier-only combos never match here — they are d
 with `held`.
 
 ### `KeyCombo::held`
-[src/input/shortcuts.rs:616](../../../src/input/shortcuts.rs#L616)
+[src/input/shortcuts.rs:659](../../../src/input/shortcuts.rs#L659)
 
 ```rust
 pub fn held(self, i: &egui::InputState) -> bool
@@ -714,7 +745,7 @@ True while the combo is being held down: its key (if any) is down with exactly i
 key-less combo needs at least one modifier. Used to choose a drag gesture when a drag starts.
 
 ### `KeyCombo::still_held`
-[src/input/shortcuts.rs:628](../../../src/input/shortcuts.rs#L628)
+[src/input/shortcuts.rs:671](../../../src/input/shortcuts.rs#L671)
 
 ```rust
 pub fn still_held(self, i: &egui::InputState) -> bool
@@ -727,7 +758,7 @@ a gesture started with Space survives Shift being pressed on top mid-drag. `self
 ## `impl HoldCapture`
 
 ### `HoldCapture::step`
-[src/input/shortcuts.rs:652](../../../src/input/shortcuts.rs#L652)
+[src/input/shortcuts.rs:695](../../../src/input/shortcuts.rs#L695)
 
 ```rust
 pub fn step(&mut self, mods: egui::Modifiers, pressed: Option<egui::Key>) -> Option<KeyCombo>
@@ -740,7 +771,7 @@ and returns the captured combo once it is complete.
 ## `impl Serialize for KeyCombo`
 
 ### `KeyCombo::serialize`
-[src/input/shortcuts.rs:680](../../../src/input/shortcuts.rs#L680)
+[src/input/shortcuts.rs:723](../../../src/input/shortcuts.rs#L723)
 
 ```rust
 fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error>
@@ -752,7 +783,7 @@ Tells serde how to write a combo: as its display string (`"Ctrl+Z"`). Implementi
 ## `impl<'de> Deserialize<'de> for KeyCombo`
 
 ### `KeyCombo::deserialize`
-[src/input/shortcuts.rs:686](../../../src/input/shortcuts.rs#L686)
+[src/input/shortcuts.rs:729](../../../src/input/shortcuts.rs#L729)
 
 ```rust
 fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error>
@@ -764,7 +795,7 @@ becomes a serde error mentioning the bad text.
 ## Free functions
 
 ### `parse_combo`
-[src/input/shortcuts.rs:692](../../../src/input/shortcuts.rs#L692)
+[src/input/shortcuts.rs:735](../../../src/input/shortcuts.rs#L735)
 
 ```rust
 fn parse_combo(s: &str) -> Option<KeyCombo>
@@ -785,7 +816,7 @@ parse_combo("banana")       // None
 ## `impl Clash`
 
 ### `Clash::is_conflict`
-[src/input/shortcuts.rs:754](../../../src/input/shortcuts.rs#L754)
+[src/input/shortcuts.rs:797](../../../src/input/shortcuts.rs#L797)
 
 ```rust
 pub fn is_conflict(self) -> bool
@@ -797,7 +828,7 @@ shown only as a note).
 ## Free functions
 
 ### `shared_on_purpose`
-[src/input/shortcuts.rs:761](../../../src/input/shortcuts.rs#L761)
+[src/input/shortcuts.rs:804](../../../src/input/shortcuts.rs#L804)
 
 ```rust
 fn shared_on_purpose(a: Action, b: Action) -> Option<&'static str>
@@ -808,7 +839,7 @@ through depending on context; for such a pair this returns the reason (shown in 
 `None`.
 
 ### `builtin_clash`
-[src/input/shortcuts.rs:786](../../../src/input/shortcuts.rs#L786)
+[src/input/shortcuts.rs:829](../../../src/input/shortcuts.rs#L829)
 
 ```rust
 fn builtin_clash(action: Action, c: KeyCombo) -> Option<&'static str>
@@ -818,7 +849,7 @@ Whether a combo collides with keys the app reads directly instead of through the
 Enter, the Ctrl+Shift+Z redo alias), returning what it collides with.
 
 ### `fresh_press`
-[src/input/shortcuts.rs:804](../../../src/input/shortcuts.rs#L804)
+[src/input/shortcuts.rs:847](../../../src/input/shortcuts.rs#L847)
 
 ```rust
 fn fresh_press(i: &egui::InputState, combo: &KeyCombo) -> bool
@@ -831,7 +862,7 @@ It scans egui's event list with `iter().any(...)` and a `matches!` pattern with 
 ## `impl WheelSlot`
 
 ### `WheelSlot::key`
-[src/input/shortcuts.rs:844](../../../src/input/shortcuts.rs#L844)
+[src/input/shortcuts.rs:887](../../../src/input/shortcuts.rs#L887)
 
 ```rust
 pub fn key(self) -> &'static str
@@ -840,7 +871,7 @@ pub fn key(self) -> &'static str
 The name a wheel slot has in `shortcuts.toml` (`wheel`, `shift_wheel`, `ctrl_wheel`, `alt_wheel`).
 
 ### `WheelSlot::label`
-[src/input/shortcuts.rs:853](../../../src/input/shortcuts.rs#L853)
+[src/input/shortcuts.rs:896](../../../src/input/shortcuts.rs#L896)
 
 ```rust
 pub fn label(self) -> &'static str
@@ -849,7 +880,7 @@ pub fn label(self) -> &'static str
 The slot's display name in Settings ("Wheel", "Shift+Wheel", …).
 
 ### `WheelSlot::named`
-[src/input/shortcuts.rs:863](../../../src/input/shortcuts.rs#L863)
+[src/input/shortcuts.rs:906](../../../src/input/shortcuts.rs#L906)
 
 ```rust
 fn named(name: &str) -> Option<Self>
@@ -858,7 +889,7 @@ fn named(name: &str) -> Option<Self>
 Finds the slot whose file name is `name`, if any.
 
 ### `WheelSlot::of`
-[src/input/shortcuts.rs:868](../../../src/input/shortcuts.rs#L868)
+[src/input/shortcuts.rs:911](../../../src/input/shortcuts.rs#L911)
 
 ```rust
 pub fn of(mods: egui::Modifiers) -> Option<Self>
@@ -870,7 +901,7 @@ Which slot the mouse wheel is in given the held modifiers; `None` when two or mo
 ## `impl WheelAction`
 
 ### `WheelAction::label`
-[src/input/shortcuts.rs:909](../../../src/input/shortcuts.rs#L909)
+[src/input/shortcuts.rs:952](../../../src/input/shortcuts.rs#L952)
 
 ```rust
 pub fn label(self) -> &'static str
@@ -879,7 +910,7 @@ pub fn label(self) -> &'static str
 The display name of a wheel action ("Step frames", "Zoom", …).
 
 ### `WheelAction::hint`
-[src/input/shortcuts.rs:921](../../../src/input/shortcuts.rs#L921)
+[src/input/shortcuts.rs:964](../../../src/input/shortcuts.rs#L964)
 
 ```rust
 pub fn hint(self) -> &'static str
@@ -888,7 +919,7 @@ pub fn hint(self) -> &'static str
 The longer explanation of a wheel action shown as a tooltip in Settings.
 
 ### `WheelAction::name`
-[src/input/shortcuts.rs:945](../../../src/input/shortcuts.rs#L945)
+[src/input/shortcuts.rs:988](../../../src/input/shortcuts.rs#L988)
 
 ```rust
 pub fn name(self) -> &'static str
@@ -897,7 +928,7 @@ pub fn name(self) -> &'static str
 The value a wheel action is written as in `shortcuts.toml`.
 
 ### `WheelAction::named`
-[src/input/shortcuts.rs:959](../../../src/input/shortcuts.rs#L959)
+[src/input/shortcuts.rs:1002](../../../src/input/shortcuts.rs#L1002)
 
 ```rust
 fn named(s: &str) -> Option<Self>
@@ -908,7 +939,7 @@ Reads a wheel action from its file value, ignoring case; an empty value or `none
 ## Free functions
 
 ### `default_wheel`
-[src/input/shortcuts.rs:971](../../../src/input/shortcuts.rs#L971)
+[src/input/shortcuts.rs:1014](../../../src/input/shortcuts.rs#L1014)
 
 ```rust
 fn default_wheel() -> BTreeMap<WheelSlot, WheelAction>
@@ -920,7 +951,7 @@ pans the timeline. `BTreeMap::from([...])` builds a sorted map from an array of 
 ## `impl Serialize for ShortcutMap`
 
 ### `ShortcutMap::serialize`
-[src/input/shortcuts.rs:1003](../../../src/input/shortcuts.rs#L1003)
+[src/input/shortcuts.rs:1046](../../../src/input/shortcuts.rs#L1046)
 
 ```rust
 fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error>
@@ -933,7 +964,7 @@ sorted so the file is stable between saves.
 ## `impl<'de> Deserialize<'de> for ShortcutMap`
 
 ### `ShortcutMap::deserialize`
-[src/input/shortcuts.rs:1024](../../../src/input/shortcuts.rs#L1024)
+[src/input/shortcuts.rs:1067](../../../src/input/shortcuts.rs#L1067)
 
 ```rust
 fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error>
@@ -946,7 +977,7 @@ in `unread` so saving later doesn't destroy the user's line. Missing actions get
 ## `impl Default for ShortcutMap`
 
 ### `ShortcutMap::default`
-[src/input/shortcuts.rs:1078](../../../src/input/shortcuts.rs#L1078)
+[src/input/shortcuts.rs:1121](../../../src/input/shortcuts.rs#L1121)
 
 ```rust
 fn default() -> Self
@@ -959,7 +990,7 @@ map. `use egui::Key as K;` is a local alias so the long list stays readable.
 ## Free functions
 
 ### `action_named`
-[src/input/shortcuts.rs:1270](../../../src/input/shortcuts.rs#L1270)
+[src/input/shortcuts.rs:1316](../../../src/input/shortcuts.rs#L1316)
 
 ```rust
 fn action_named(name: &str) -> Option<Action>
@@ -969,7 +1000,7 @@ Finds the action a line in the file names (e.g. `tool_pencil`), using serde to c
 into the enum the same way loading does.
 
 ### `key_of`
-[src/input/shortcuts.rs:1277](../../../src/input/shortcuts.rs#L1277)
+[src/input/shortcuts.rs:1323](../../../src/input/shortcuts.rs#L1323)
 
 ```rust
 fn key_of(action: Action) -> String
@@ -980,7 +1011,7 @@ The name an action is written under in the file — the reverse of `action_named
 ## `impl ShortcutMap`
 
 ### `ShortcutMap::get`
-[src/input/shortcuts.rs:1285](../../../src/input/shortcuts.rs#L1285)
+[src/input/shortcuts.rs:1331](../../../src/input/shortcuts.rs#L1331)
 
 ```rust
 pub fn get(&self, action: Action) -> Option<KeyCombo>
@@ -989,7 +1020,7 @@ pub fn get(&self, action: Action) -> Option<KeyCombo>
 The combo bound to `action`, if any.
 
 ### `ShortcutMap::set`
-[src/input/shortcuts.rs:1288](../../../src/input/shortcuts.rs#L1288)
+[src/input/shortcuts.rs:1334](../../../src/input/shortcuts.rs#L1334)
 
 ```rust
 pub fn set(&mut self, action: Action, combo: KeyCombo)
@@ -999,7 +1030,7 @@ Binds `action` to `combo`, removing it from the unbound set and forgetting any u
 for it.
 
 ### `ShortcutMap::forget_unread`
-[src/input/shortcuts.rs:1295](../../../src/input/shortcuts.rs#L1295)
+[src/input/shortcuts.rs:1341](../../../src/input/shortcuts.rs#L1341)
 
 ```rust
 fn forget_unread(&mut self, action: Action)
@@ -1008,7 +1039,7 @@ fn forget_unread(&mut self, action: Action)
 Drops the stored unreadable line for `action` from the file text, since it now has a real binding.
 
 ### `ShortcutMap::wheel_action`
-[src/input/shortcuts.rs:1301](../../../src/input/shortcuts.rs#L1301)
+[src/input/shortcuts.rs:1347](../../../src/input/shortcuts.rs#L1347)
 
 ```rust
 pub fn wheel_action(&self, mods: egui::Modifiers) -> WheelAction
@@ -1017,7 +1048,7 @@ pub fn wheel_action(&self, mods: egui::Modifiers) -> WheelAction
 What the wheel does with these modifiers held (Nothing for two or more modifiers).
 
 ### `ShortcutMap::wheel_slot_of`
-[src/input/shortcuts.rs:1308](../../../src/input/shortcuts.rs#L1308)
+[src/input/shortcuts.rs:1354](../../../src/input/shortcuts.rs#L1354)
 
 ```rust
 pub fn wheel_slot_of(&self, action: WheelAction) -> Option<WheelSlot>
@@ -1026,7 +1057,7 @@ pub fn wheel_slot_of(&self, action: WheelAction) -> Option<WheelSlot>
 The first wheel slot that holds `action`, if any.
 
 ### `ShortcutMap::set_wheel`
-[src/input/shortcuts.rs:1314](../../../src/input/shortcuts.rs#L1314)
+[src/input/shortcuts.rs:1360](../../../src/input/shortcuts.rs#L1360)
 
 ```rust
 pub fn set_wheel(&mut self, slot: WheelSlot, action: WheelAction)
@@ -1035,7 +1066,7 @@ pub fn set_wheel(&mut self, slot: WheelSlot, action: WheelAction)
 Puts `action` into wheel `slot`.
 
 ### `ShortcutMap::clear`
-[src/input/shortcuts.rs:1321](../../../src/input/shortcuts.rs#L1321)
+[src/input/shortcuts.rs:1367](../../../src/input/shortcuts.rs#L1367)
 
 ```rust
 pub fn clear(&mut self, action: Action)
@@ -1045,7 +1076,7 @@ Unbinds `action` permanently — it stays unbound across save/load rather than g
 back.
 
 ### `ShortcutMap::held_drag`
-[src/input/shortcuts.rs:1330](../../../src/input/shortcuts.rs#L1330)
+[src/input/shortcuts.rs:1376](../../../src/input/shortcuts.rs#L1376)
 
 ```rust
 pub fn held_drag(&self, i: &egui::InputState) -> Option<(Action, KeyCombo)>
@@ -1055,7 +1086,7 @@ The drag gesture being held right now and the combo holding it. A combo with a k
 modifier one (Ctrl+Space beats Ctrl); otherwise the order in `HOLD_DRAGS` decides.
 
 ### `ShortcutMap::mid_drag_keys`
-[src/input/shortcuts.rs:1346](../../../src/input/shortcuts.rs#L1346)
+[src/input/shortcuts.rs:1392](../../../src/input/shortcuts.rs#L1392)
 
 ```rust
 pub fn mid_drag_keys(&self) -> Vec<egui::Key>
@@ -1065,7 +1096,7 @@ The keys bound to the mid-drag holds (move/centre a shape). While a shape is bei
 keys belong to the hold, not to any press shortcut.
 
 ### `ShortcutMap::still_held`
-[src/input/shortcuts.rs:1356](../../../src/input/shortcuts.rs#L1356)
+[src/input/shortcuts.rs:1402](../../../src/input/shortcuts.rs#L1402)
 
 ```rust
 pub fn still_held(&self, action: Action, i: &egui::InputState) -> bool
@@ -1074,7 +1105,7 @@ pub fn still_held(&self, action: Action, i: &egui::InputState) -> bool
 Whether `action`'s hold is still down, extra modifiers allowed.
 
 ### `ShortcutMap::hold_keys`
-[src/input/shortcuts.rs:1362](../../../src/input/shortcuts.rs#L1362)
+[src/input/shortcuts.rs:1408](../../../src/input/shortcuts.rs#L1408)
 
 ```rust
 pub(crate) fn hold_keys(&self) -> Vec<egui::Key>
@@ -1084,7 +1115,7 @@ The keys used by hold bindings; a press shortcut on one of them fires only on it
 never on auto-repeat.
 
 ### `ShortcutMap::clashes`
-[src/input/shortcuts.rs:1372](../../../src/input/shortcuts.rs#L1372)
+[src/input/shortcuts.rs:1418](../../../src/input/shortcuts.rs#L1418)
 
 ```rust
 pub fn clashes(&self) -> BTreeMap<Action, Vec<Clash>>
@@ -1094,7 +1125,7 @@ Every binding that shares its combo with another (or with a built-in key), as a 
 the list of clashes, for the Settings window. Bindings with no clash are absent.
 
 ### `ShortcutMap::conflict_count`
-[src/input/shortcuts.rs:1392](../../../src/input/shortcuts.rs#L1392)
+[src/input/shortcuts.rs:1438](../../../src/input/shortcuts.rs#L1438)
 
 ```rust
 pub fn conflict_count(&self) -> usize
@@ -1103,7 +1134,7 @@ pub fn conflict_count(&self) -> usize
 How many bindings have a real conflict (notes don't count) — shown as a badge in Settings.
 
 ### `ShortcutMap::poll_actions`
-[src/input/shortcuts.rs:1402](../../../src/input/shortcuts.rs#L1402)
+[src/input/shortcuts.rs:1448](../../../src/input/shortcuts.rs#L1448)
 
 ```rust
 pub fn poll_actions(&self, ctx: &egui::Context) -> Vec<Action>
@@ -1119,7 +1150,7 @@ key press ─► egui InputState ─► ShortcutMap::poll_actions ─► [Action
 ```
 
 ### `ShortcutMap::poll_focused`
-[src/input/shortcuts.rs:1436](../../../src/input/shortcuts.rs#L1436)
+[src/input/shortcuts.rs:1482](../../../src/input/shortcuts.rs#L1482)
 
 ```rust
 pub fn poll_focused(&self, ctx: &egui::Context) -> Vec<Action>
@@ -1131,7 +1162,7 @@ actions bound to the keys allowed through focus (`FOCUS_PASS_KEYS`, e.g. Tab) fi
 ## Free functions
 
 ### `config_dir`
-[src/input/shortcuts.rs:1450](../../../src/input/shortcuts.rs#L1450)
+[src/input/shortcuts.rs:1496](../../../src/input/shortcuts.rs#L1496)
 
 ```rust
 pub fn config_dir() -> Option<PathBuf>
@@ -1141,7 +1172,7 @@ The app's settings folder: the OS config directory plus `animator-app` (on Windo
 `%APPDATA%\animator-app`). Holds `shortcuts.toml`, `ui.ron` and imported brushes.
 
 ### `config_path`
-[src/input/shortcuts.rs:1461](../../../src/input/shortcuts.rs#L1461)
+[src/input/shortcuts.rs:1507](../../../src/input/shortcuts.rs#L1507)
 
 ```rust
 fn config_path() -> Option<PathBuf>
@@ -1151,7 +1182,7 @@ The path of `shortcuts.toml` — but `None` when compiled for tests (`cfg!(test)
 can never overwrite the real user's key bindings (this happened once).
 
 ### `load`
-[src/input/shortcuts.rs:1470](../../../src/input/shortcuts.rs#L1470)
+[src/input/shortcuts.rs:1516](../../../src/input/shortcuts.rs#L1516)
 
 ```rust
 pub fn load() -> (ShortcutMap, Option<String>)
@@ -1161,7 +1192,7 @@ Loads the user's shortcuts at startup: the parsed file, or defaults plus the err
 file is broken (and the broken file is not overwritten), or defaults if there is no file.
 
 ### `load_from_str`
-[src/input/shortcuts.rs:1484](../../../src/input/shortcuts.rs#L1484)
+[src/input/shortcuts.rs:1530](../../../src/input/shortcuts.rs#L1530)
 
 ```rust
 pub fn load_from_str(text: &str) -> ShortcutMap
@@ -1170,7 +1201,7 @@ pub fn load_from_str(text: &str) -> ShortcutMap
 Parses shortcuts from text, falling back to all defaults on error (used by tests).
 
 ### `parse`
-[src/input/shortcuts.rs:1492](../../../src/input/shortcuts.rs#L1492)
+[src/input/shortcuts.rs:1538](../../../src/input/shortcuts.rs#L1538)
 
 ```rust
 pub fn parse(text: &str) -> Result<ShortcutMap, String>
@@ -1180,7 +1211,7 @@ Parses `shortcuts.toml` text with the `toml` crate into a `ShortcutMap` (migrati
 and filling defaults for anything missing), or returns the error as a string.
 
 ### `read_file`
-[src/input/shortcuts.rs:1548](../../../src/input/shortcuts.rs#L1548)
+[src/input/shortcuts.rs:1594](../../../src/input/shortcuts.rs#L1594)
 
 ```rust
 pub fn read_file() -> Option<Result<ShortcutMap, String>>
@@ -1190,7 +1221,7 @@ Reads the shortcuts file as it is on disk now (for Settings → Reload); `None` 
 The `?` operators bail out with `None` if there is no config path or the read fails.
 
 ### `ensure_file`
-[src/input/shortcuts.rs:1556](../../../src/input/shortcuts.rs#L1556)
+[src/input/shortcuts.rs:1602](../../../src/input/shortcuts.rs#L1602)
 
 ```rust
 pub fn ensure_file(map: &ShortcutMap) -> std::io::Result<PathBuf>
@@ -1200,7 +1231,7 @@ Returns the shortcuts file path, writing the file out first if it doesn't exist 
 has none), so "Open shortcuts file" opens an editor showing every binding.
 
 ### `ensure_at`
-[src/input/shortcuts.rs:1564](../../../src/input/shortcuts.rs#L1564)
+[src/input/shortcuts.rs:1610](../../../src/input/shortcuts.rs#L1610)
 
 ```rust
 fn ensure_at(path: &std::path::Path, map: &ShortcutMap) -> std::io::Result<()>
@@ -1209,7 +1240,7 @@ fn ensure_at(path: &std::path::Path, map: &ShortcutMap) -> std::io::Result<()>
 `ensure_file` for a given path (tests pass their own temporary path).
 
 ### `open_file`
-[src/input/shortcuts.rs:1577](../../../src/input/shortcuts.rs#L1577)
+[src/input/shortcuts.rs:1623](../../../src/input/shortcuts.rs#L1623)
 
 ```rust
 pub fn open_file(path: &std::path::Path) -> std::io::Result<()>
@@ -1219,7 +1250,7 @@ Opens a file with the system's default program (`explorer` on Windows, `open` on
 on Linux). The three `#[cfg(...)]` lines pick one at compile time. It doesn't wait for the program.
 
 ### `save`
-[src/input/shortcuts.rs:1588](../../../src/input/shortcuts.rs#L1588)
+[src/input/shortcuts.rs:1634](../../../src/input/shortcuts.rs#L1634)
 
 ```rust
 pub fn save(map: &ShortcutMap)
@@ -1228,7 +1259,7 @@ pub fn save(map: &ShortcutMap)
 Saves the map to the user's `shortcuts.toml` (if there is a config folder), logging the result.
 
 ### `save_at`
-[src/input/shortcuts.rs:1602](../../../src/input/shortcuts.rs#L1602)
+[src/input/shortcuts.rs:1648](../../../src/input/shortcuts.rs#L1648)
 
 ```rust
 fn save_at(path: &std::path::Path, map: &ShortcutMap) -> std::io::Result<()>
@@ -1238,7 +1269,7 @@ Writes the map to `path`, editing an existing file in place (`save_text`) so com
 that isn't valid TOML is left alone — it is probably a half-finished hand edit.
 
 ### `save_text`
-[src/input/shortcuts.rs:1623](../../../src/input/shortcuts.rs#L1623)
+[src/input/shortcuts.rs:1669](../../../src/input/shortcuts.rs#L1669)
 
 ```rust
 fn save_text(old: &str, map: &ShortcutMap) -> Option<String>
@@ -1256,45 +1287,45 @@ Run with `cargo test input::shortcuts::tests` · 33 tests
 
 | Test | What it checks |
 |---|---|
-| [`tests_never_reach_the_users_shortcuts_file`](../../../src/input/shortcuts.rs#L1670) | The test suite has no shortcuts file: nothing of the user's to read, and nowhere for a rebind in a test to be saved over it. |
-| [`the_shortcuts_file_is_written_only_when_missing`](../../../src/input/shortcuts.rs#L1682) | Opening the file on a fresh install writes it out first, with every binding in it; an existing file — the user's edits — is left as it is. |
-| [`a_broken_shortcuts_file_is_an_error_not_the_defaults`](../../../src/input/shortcuts.rs#L1702) | A file that doesn't read says why, rather than quietly turning into the defaults — which a reload would then save over the user's file. |
-| [`a_save_edits_the_file_in_place`](../../../src/input/shortcuts.rs#L1721) | A hand-edited file keeps everything the user wrote through a save made here: comments, their spelling of a combo, a line naming an action this build doesn't have, and a line that doesn't parse. Only the binding changed here is rewritten. |
-| [`key_names_read_in_any_case`](../../../src/input/shortcuts.rs#L1755) | Key names read in any case. |
-| [`paste_on_ctrl_v_is_kept_in_a_current_file`](../../../src/input/shortcuts.rs#L1766) | Ctrl+V for paste_image in a file saved since selections came in is the user's choice: the old migration only moves it in older files. |
-| [`selection_defaults_clash_with_nothing`](../../../src/input/shortcuts.rs#L1777) | The selection's bindings must not collide with anything else's — a shared press fires both actions, and a shared held combo makes a selection drag also pan or zoom. |
-| [`next_grid_is_alt_g_and_clashes_with_nothing`](../../../src/input/shortcuts.rs#L1798) | Next grid is alt g and clashes with nothing. |
-| [`layer_nav_defaults_clash_with_nothing`](../../../src/input/shortcuts.rs#L1810) | Layer nav defaults clash with nothing. |
-| [`alt_digit_picks_a_layer_and_nothing_else`](../../../src/input/shortcuts.rs#L1845) | The plain digits are x-sheet keys; Alt+digit must pick a layer without also inserting a key. |
-| [`defaults_have_no_conflicts`](../../../src/input/shortcuts.rs#L1873) | No two defaults may share a combo, so a fresh install opens Settings with nothing flagged. Delete is shared on purpose and only noted. |
-| [`the_mid_drag_keys_share_the_press_holds_on_purpose`](../../../src/input/shortcuts.rs#L1893) | The mid drag keys share the press holds on purpose. |
-| [`clashes_name_the_other_action_and_note_the_delete_pair`](../../../src/input/shortcuts.rs#L1913) | Clashes name the other action and note the delete pair. |
-| [`keys_read_outside_the_map_are_flagged`](../../../src/input/shortcuts.rs#L1945) | Keys read outside the map are flagged. |
-| [`a_saved_checker_toggle_is_dropped_quietly`](../../../src/input/shortcuts.rs#L1973) | The reported map: the panels on M, the mini timeline on Shift+M and the last layer on Tab. Settings flagged Tab, because it was read as the panel toggle whenever a field had focus, whatever the map said. The checker backdrop is gone: a file that binds its toggle still reads, the binding dropped, with no line left over to warn about. |
-| [`tab_and_backtick_are_free_to_bind`](../../../src/input/shortcuts.rs#L1982) | Tab and backtick are free to bind. |
-| [`poll_focused_sees_only_the_pass_keys_exactly`](../../../src/input/shortcuts.rs#L2032) | Poll focused sees only the pass keys exactly. |
-| [`an_unbound_binding_survives_a_save_over_its_default`](../../../src/input/shortcuts.rs#L2111) | An unbound binding survives a save over its default. |
-| [`old_shortcut_files_still_load`](../../../src/input/shortcuts.rs#L2129) | Files written before holds could be keys: the gestures keep their bare modifiers, and the new holds come up unbound. |
-| [`ctrl_g_groups_unless_an_old_file_has_the_grid_there`](../../../src/input/shortcuts.rs#L2153) | A fresh install groups on Ctrl+G and finds the perspective grid on Shift+Alt+G; a file from before keeps its grid on Ctrl+G and gets grouping unbound, rather than a clash. |
-| [`a_bad_entry_drops_only_itself`](../../../src/input/shortcuts.rs#L2171) | A bad entry drops only itself. |
-| [`a_key_hold_matches_only_while_down_with_exact_modifiers`](../../../src/input/shortcuts.rs#L2184) | A key hold matches only while down with exact modifiers. |
-| [`hold_actions_never_fire_as_presses`](../../../src/input/shortcuts.rs#L2207) | Hold actions never fire as presses. |
-| [`holding_a_hold_key_does_not_repeat_presses_on_it`](../../../src/input/shortcuts.rs#L2219) | Space held to pan, then Ctrl pressed: Space's auto-repeat now arrives as Ctrl+Space, which must not play and pause on every repeat. |
-| [`the_more_specific_hold_wins`](../../../src/input/shortcuts.rs#L2256) | The more specific hold wins. |
-| [`hold_and_press_on_one_combo_clash`](../../../src/input/shortcuts.rs#L2271) | Hold and press on one combo clash. |
-| [`capturing_shift_alone_binds_it_on_release`](../../../src/input/shortcuts.rs#L2287) | Capturing shift alone binds it on release. |
-| [`selection_modes_are_holds_and_never_fire_as_presses`](../../../src/input/shortcuts.rs#L2318) | Selection modes are holds and never fire as presses. |
-| [`fill_selection_does_not_also_clear`](../../../src/input/shortcuts.rs#L2330) | Shift+Backspace fills; it must not also clear the drawing it just filled, which a loose modifier match would do. |
-| [`the_wheel_defaults_and_its_modifiers`](../../../src/input/shortcuts.rs#L2368) | Out of the box: frames, Shift for drawings, Ctrl zooms, Alt pans the tracks. Two modifiers do nothing. |
-| [`wheel_lines_read_from_the_file`](../../../src/input/shortcuts.rs#L2382) | The wheel lines read in any case, `none` empties a slot, and a slot the file doesn't name keeps its default. |
-| [`a_bad_wheel_line_is_kept_as_written`](../../../src/input/shortcuts.rs#L2395) | A wheel line that doesn't read costs that slot only: its default stands in, and the line stays as written through a save until the slot is set here. |
-| [`a_save_writes_the_wheel_in_place`](../../../src/input/shortcuts.rs#L2411) | A save writes the wheel lines into the file in place: comments and the user's own spelling stay, and a changed slot is rewritten. |
+| [`tests_never_reach_the_users_shortcuts_file`](../../../src/input/shortcuts.rs#L1716) | The test suite has no shortcuts file: nothing of the user's to read, and nowhere for a rebind in a test to be saved over it. |
+| [`the_shortcuts_file_is_written_only_when_missing`](../../../src/input/shortcuts.rs#L1728) | Opening the file on a fresh install writes it out first, with every binding in it; an existing file — the user's edits — is left as it is. |
+| [`a_broken_shortcuts_file_is_an_error_not_the_defaults`](../../../src/input/shortcuts.rs#L1748) | A file that doesn't read says why, rather than quietly turning into the defaults — which a reload would then save over the user's file. |
+| [`a_save_edits_the_file_in_place`](../../../src/input/shortcuts.rs#L1767) | A hand-edited file keeps everything the user wrote through a save made here: comments, their spelling of a combo, a line naming an action this build doesn't have, and a line that doesn't parse. Only the binding changed here is rewritten. |
+| [`key_names_read_in_any_case`](../../../src/input/shortcuts.rs#L1801) | Key names read in any case. |
+| [`paste_on_ctrl_v_is_kept_in_a_current_file`](../../../src/input/shortcuts.rs#L1812) | Ctrl+V for paste_image in a file saved since selections came in is the user's choice: the old migration only moves it in older files. |
+| [`selection_defaults_clash_with_nothing`](../../../src/input/shortcuts.rs#L1823) | The selection's bindings must not collide with anything else's — a shared press fires both actions, and a shared held combo makes a selection drag also pan or zoom. |
+| [`next_grid_is_alt_g_and_clashes_with_nothing`](../../../src/input/shortcuts.rs#L1844) | Next grid is alt g and clashes with nothing. |
+| [`layer_nav_defaults_clash_with_nothing`](../../../src/input/shortcuts.rs#L1856) | Layer nav defaults clash with nothing. |
+| [`alt_digit_picks_a_layer_and_nothing_else`](../../../src/input/shortcuts.rs#L1891) | The plain digits are x-sheet keys; Alt+digit must pick a layer without also inserting a key. |
+| [`defaults_have_no_conflicts`](../../../src/input/shortcuts.rs#L1919) | No two defaults may share a combo, so a fresh install opens Settings with nothing flagged. Delete is shared on purpose and only noted. |
+| [`the_mid_drag_keys_share_the_press_holds_on_purpose`](../../../src/input/shortcuts.rs#L1939) | The mid drag keys share the press holds on purpose. |
+| [`clashes_name_the_other_action_and_note_the_delete_pair`](../../../src/input/shortcuts.rs#L1959) | Clashes name the other action and note the delete pair. |
+| [`keys_read_outside_the_map_are_flagged`](../../../src/input/shortcuts.rs#L1991) | Keys read outside the map are flagged. |
+| [`a_saved_checker_toggle_is_dropped_quietly`](../../../src/input/shortcuts.rs#L2019) | The reported map: the panels on M, the mini timeline on Shift+M and the last layer on Tab. Settings flagged Tab, because it was read as the panel toggle whenever a field had focus, whatever the map said. The checker backdrop is gone: a file that binds its toggle still reads, the binding dropped, with no line left over to warn about. |
+| [`tab_and_backtick_are_free_to_bind`](../../../src/input/shortcuts.rs#L2028) | Tab and backtick are free to bind. |
+| [`poll_focused_sees_only_the_pass_keys_exactly`](../../../src/input/shortcuts.rs#L2078) | Poll focused sees only the pass keys exactly. |
+| [`an_unbound_binding_survives_a_save_over_its_default`](../../../src/input/shortcuts.rs#L2157) | An unbound binding survives a save over its default. |
+| [`old_shortcut_files_still_load`](../../../src/input/shortcuts.rs#L2175) | Files written before holds could be keys: the gestures keep their bare modifiers, and the new holds come up unbound. |
+| [`ctrl_g_groups_unless_an_old_file_has_the_grid_there`](../../../src/input/shortcuts.rs#L2199) | A fresh install groups on Ctrl+G and finds the perspective grid on Shift+Alt+G; a file from before keeps its grid on Ctrl+G and gets grouping unbound, rather than a clash. |
+| [`a_bad_entry_drops_only_itself`](../../../src/input/shortcuts.rs#L2217) | A bad entry drops only itself. |
+| [`a_key_hold_matches_only_while_down_with_exact_modifiers`](../../../src/input/shortcuts.rs#L2230) | A key hold matches only while down with exact modifiers. |
+| [`hold_actions_never_fire_as_presses`](../../../src/input/shortcuts.rs#L2253) | Hold actions never fire as presses. |
+| [`holding_a_hold_key_does_not_repeat_presses_on_it`](../../../src/input/shortcuts.rs#L2265) | Space held to pan, then Ctrl pressed: Space's auto-repeat now arrives as Ctrl+Space, which must not play and pause on every repeat. |
+| [`the_more_specific_hold_wins`](../../../src/input/shortcuts.rs#L2302) | The more specific hold wins. |
+| [`hold_and_press_on_one_combo_clash`](../../../src/input/shortcuts.rs#L2317) | Hold and press on one combo clash. |
+| [`capturing_shift_alone_binds_it_on_release`](../../../src/input/shortcuts.rs#L2333) | Capturing shift alone binds it on release. |
+| [`selection_modes_are_holds_and_never_fire_as_presses`](../../../src/input/shortcuts.rs#L2364) | Selection modes are holds and never fire as presses. |
+| [`fill_selection_does_not_also_clear`](../../../src/input/shortcuts.rs#L2376) | Shift+Backspace fills; it must not also clear the drawing it just filled, which a loose modifier match would do. |
+| [`the_wheel_defaults_and_its_modifiers`](../../../src/input/shortcuts.rs#L2414) | Out of the box: frames, Shift for drawings, Ctrl zooms, Alt pans the tracks. Two modifiers do nothing. |
+| [`wheel_lines_read_from_the_file`](../../../src/input/shortcuts.rs#L2428) | The wheel lines read in any case, `none` empties a slot, and a slot the file doesn't name keeps its default. |
+| [`a_bad_wheel_line_is_kept_as_written`](../../../src/input/shortcuts.rs#L2441) | A wheel line that doesn't read costs that slot only: its default stands in, and the line stays as written through a save until the slot is set here. |
+| [`a_save_writes_the_wheel_in_place`](../../../src/input/shortcuts.rs#L2457) | A save writes the wheel lines into the file in place: comments and the user's own spelling stay, and a changed slot is rewritten. |
 
 **Test helpers** (used only by the tests above):
 
-- [`press`](../../../src/input/shortcuts.rs#L2002) — What `poll` returns for one frame with `key` pressed under `mods`.
-- [`with_input`](../../../src/input/shortcuts.rs#L2061) — Run one frame of `events` with `mods` held on `ctx`, and read the input.
-- [`key`](../../../src/input/shortcuts.rs#L2084) — Key.
-- [`mods`](../../../src/input/shortcuts.rs#L2355) — Mods.
+- [`press`](../../../src/input/shortcuts.rs#L2048) — What `poll` returns for one frame with `key` pressed under `mods`.
+- [`with_input`](../../../src/input/shortcuts.rs#L2107) — Run one frame of `events` with `mods` held on `ctx`, and read the input.
+- [`key`](../../../src/input/shortcuts.rs#L2130) — Key.
+- [`mods`](../../../src/input/shortcuts.rs#L2401) — Mods.
 
-**Test-only types and constants:** [`NONE`](../../../src/input/shortcuts.rs#L2094), [`CTRL`](../../../src/input/shortcuts.rs#L2095), [`SHIFT`](../../../src/input/shortcuts.rs#L2102)
+**Test-only types and constants:** [`NONE`](../../../src/input/shortcuts.rs#L2140), [`CTRL`](../../../src/input/shortcuts.rs#L2141), [`SHIFT`](../../../src/input/shortcuts.rs#L2148)

@@ -1,6 +1,6 @@
 # `src/ui/sweep_tests.rs` — headless layout sweep over every window (test-only)
 
-> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 886 lines · Line links as of commit `1fa5845`
+> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 924 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 
@@ -359,13 +359,22 @@ fn report(findings: Vec<String>)
 Fails the test with every finding listed, if there are any.
 
 ### `snapshot`
-[src/ui/sweep_tests.rs:726](../../../src/ui/sweep_tests.rs#L726)
+[src/ui/sweep_tests.rs:730](../../../src/ui/sweep_tests.rs#L730)
 
 ```rust
 fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage
 ```
 
 What `rig` draws, painted on the CPU into an image cropped to its window: egui's meshes over the theme background, at `ppp` pixels a point. For looking at a layout without starting the app, which would share the real config folder.
+
+### `snapshot_of`
+[src/ui/sweep_tests.rs:737](../../../src/ui/sweep_tests.rs#L737)
+
+```rust
+fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage
+```
+
+`snapshot`, cropped to `crop` rather than to the window: for a window with a menu open beside it.
 
 ## Tests
 
@@ -380,7 +389,7 @@ Run with `cargo test ui::sweep_tests` · 9 tests
 | [`every_window_stays_clean_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L487) | Pulled as narrow as it goes: what is left still doesn't overlap or spill. |
 | [`every_window_is_clean_with_its_sections_open`](../../../src/ui/sweep_tests.rs#L502) | Every folded section opened: nothing overlaps or spills, the window holds steady, and it gets no wider than it opened at — a section is laid out to the window, not the other way round. |
 | [`a_busy_project_leaves_every_window_its_size`](../../../src/ui/sweep_tests.rs#L528) | A busier project — more layers, long names, cleanup chains, a group, faded layers, a long scene, camera keys, a brush with many sizes remembered, brush values a drag left unrounded — leaves every window the size it was, and still clean. |
-| [`every_combo_box_opens_on_screen`](../../../src/ui/sweep_tests.rs#L601) | Every combo box opened, one at a time, with every section open: its list lands on the screen, and the window under it keeps its width. |
-| [`the_whole_ui_fits_common_screens`](../../../src/ui/sweep_tests.rs#L655) | The whole UI at common screen sizes: every window on screen, and no ID clashes between windows. |
-| [`the_brush_panel_keeps_its_rows_apart_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L700) | However narrow the Brush panel goes, the H/S/L fields stay clear of the Paste button after them, and the backdrop row keeps its colour and opacity. (Their frames, not their text, would collide, which the overlap sweep doesn't see.) |
-| [`snapshots`](../../../src/ui/sweep_tests.rs#L802) | Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots` |
+| [`every_combo_box_opens_on_screen`](../../../src/ui/sweep_tests.rs#L605) | Every combo box opened, one at a time, with every section open: its list lands on the screen, and the window under it keeps its width. |
+| [`the_whole_ui_fits_common_screens`](../../../src/ui/sweep_tests.rs#L659) | The whole UI at common screen sizes: every window on screen, and no ID clashes between windows. |
+| [`the_brush_panel_keeps_its_rows_apart_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L704) | However narrow the Brush panel goes, the H/S/L fields stay clear of the Paste button after them, and the backdrop row keeps its colour and opacity. (Their frames, not their text, would collide, which the overlap sweep doesn't see.) |
+| [`snapshots`](../../../src/ui/sweep_tests.rs#L813) | Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots` |

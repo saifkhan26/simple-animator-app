@@ -1,6 +1,6 @@
 # `src/undo.rs` — undo and redo history
 
-> **Source:** [src/undo.rs](../../src/undo.rs) · **Module:** `crate::undo` · **Size:** 462 lines · Line links as of commit `1fa5845`
+> **Source:** [src/undo.rs](../../src/undo.rs) · **Module:** `crate::undo` · **Size:** 462 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

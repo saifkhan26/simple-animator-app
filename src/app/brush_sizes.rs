@@ -66,27 +66,34 @@ pub fn size_with_detents(from: f32, d: f32, per_doubling: f32, stops: &[f32], de
 }
 
 impl AppState {
-    /// Which brush's sizes the active tool shows. Shape draws at the size
-    /// of the pen it follows, so it shares that pen's.
-    pub fn size_slot(&self) -> usize {
+    /// Whose sizes the active tool shows. Shape draws at the size of the pen
+    /// it follows, so it shares that pen's.
+    pub fn size_owner(&self) -> ActiveTool {
         if self.tool == ActiveTool::Shape {
-            self.last_pen.idx()
+            self.last_pen
         } else {
-            self.tool.idx()
+            self.tool
         }
     }
 
     /// The active brush's remembered sizes.
     pub fn size_memory(&self) -> SizeMemory {
-        self.brush_sizes.get(self.size_slot()).cloned().unwrap_or_default()
+        match self.size_owner() {
+            ActiveTool::Pen(i) => self.pens.get(i as usize).map(|p| p.sizes.clone()).unwrap_or_default(),
+            t => t.idx().and_then(|k| self.brush_sizes.get(k)).cloned().unwrap_or_default(),
+        }
     }
 
-    fn size_memory_mut(&mut self) -> &mut SizeMemory {
-        let i = self.size_slot();
-        if self.brush_sizes.len() <= i {
-            self.brush_sizes.resize(i + 1, SizeMemory::default());
+    pub(crate) fn size_memory_mut(&mut self) -> &mut SizeMemory {
+        let owner = self.size_owner();
+        if let ActiveTool::Pen(i) = owner {
+            return &mut self.pens[i as usize].sizes;
         }
-        &mut self.brush_sizes[i]
+        let k = owner.idx().unwrap_or(0);
+        if self.brush_sizes.len() <= k {
+            self.brush_sizes.resize(k + 1, SizeMemory::default());
+        }
+        &mut self.brush_sizes[k]
     }
 
     /// A stroke landed at the brush's size: to the front of the recent ones.
@@ -110,10 +117,18 @@ impl AppState {
         }
     }
 
+    /// Take `size` off the strip: unpinned, and out of the sizes drawn at
+    /// lately. Drawing at it again brings it back as a recent one.
+    pub fn forget_size(&mut self, size: f32) {
+        let m = self.size_memory_mut();
+        m.pinned.retain(|&s| !same_size(s, size));
+        m.recent.retain(|&s| !same_size(s, size));
+    }
+
     /// Swap to the size drawn at last, or back to the one swapped from. At
     /// the size drawn at last already, the one drawn at before it.
     pub fn swap_size(&mut self) {
-        let (slot, r) = (self.size_slot(), self.brush.radius);
+        let (slot, r) = (self.size_owner(), self.brush.radius);
         let to = match self.size_swap {
             Some((s, to, from)) if s == slot && same_size(to, r) => Some(from),
             _ => self.size_memory().recent.into_iter().find(|&s| !same_size(s, r)),

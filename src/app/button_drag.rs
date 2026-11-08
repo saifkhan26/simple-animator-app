@@ -241,7 +241,7 @@ impl AppState {
 fn adjusts_brush(t: ActiveTool) -> bool {
     matches!(
         t,
-        ActiveTool::Pencil | ActiveTool::Ink | ActiveTool::Eraser | ActiveTool::Shape
+        ActiveTool::Pen(_) | ActiveTool::Eraser | ActiveTool::Shape
     )
 }
 

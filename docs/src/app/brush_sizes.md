@@ -1,10 +1,10 @@
 # `src/app/brush_sizes.rs` — remembered brush sizes (recent, pinned, swap, detents)
 
-> **Source:** [src/app/brush_sizes.rs](../../../src/app/brush_sizes.rs) · **Module:** `crate::app::brush_sizes` · **Size:** 266 lines · Line links as of commit `1fa5845`
+> **Source:** [src/app/brush_sizes.rs](../../../src/app/brush_sizes.rs) · **Module:** `crate::app::brush_sizes` · **Size:** 281 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 
-Every brush tool (Pencil, Ink, Eraser, …) remembers the sizes it was used at. This file
+Every brush tool (each pen slot, the Eraser, …) remembers the sizes it was used at. This file
 keeps that memory and the small features built on it:
 
 - **Recent sizes** — the last 5 sizes a stroke was actually drawn at, newest first.
@@ -58,12 +58,12 @@ the prototype from another module.
 ```rust
 use super::{ActiveTool, AppState}; // `super` = the parent module, crate::app
 impl AppState {
-    pub fn size_slot(&self) -> usize { /* … */ }
+    pub fn size_owner(&self) -> ActiveTool { /* … */ }
 }
 ```
 ```js
 import { AppState } from "../app.js";
-AppState.prototype.sizeSlot = function () { /* … */ };
+AppState.prototype.sizeOwner = function () { /* … */ };
 ```
 Because this file is a *child* module of `app`, it may read and write `AppState`'s private
 fields (`self.brush_sizes`, `self.size_swap`) — in Rust, privacy is per module, and child
@@ -267,19 +267,19 @@ function sizeWithDetents(from, d, perDoubling, stops, detent) {
 
 ## `impl AppState`
 
-### `AppState::size_slot`
+### `AppState::size_owner`
 [src/app/brush_sizes.rs:71](../../../src/app/brush_sizes.rs#L71)
 
 ```rust
-pub fn size_slot(&self) -> usize
+pub fn size_owner(&self) -> ActiveTool
 ```
 
-**What it does.** Returns which tool's size memory the active tool uses — the index into
-`brush_sizes`. Normally that is the active tool's own index (`self.tool.idx()`). The Shape
-tool is the exception: it draws at the size of the pen it follows (`self.last_pen`, the
-last pen tool used), so it shares that pen's sizes.
+**What it does.** Returns which tool's size memory the active tool uses. Normally that is the
+active tool itself. The Shape tool is the exception: it draws at the size of the pen it follows
+(`self.last_pen`, the last pen slot used), so it shares that pen's sizes. A pen slot keeps its
+sizes in its own `PenSlot::sizes`; every other tool in `brush_sizes`, by `ActiveTool::idx`.
 
-**Used by:** the other methods in this file; tests in [ui/shell.rs](../ui/shell.md).
+**Used by:** the other methods in this file.
 
 ### `AppState::size_memory`
 [src/app/brush_sizes.rs:80](../../../src/app/brush_sizes.rs#L80)
@@ -296,20 +296,21 @@ a copy (`.cloned()`) means callers can read it freely while still changing `self
 [ui/shell.rs](../ui/shell.md) (`size_slider`, `size_strip`).
 
 ### `AppState::size_memory_mut`
-[src/app/brush_sizes.rs:84](../../../src/app/brush_sizes.rs#L84)
+[src/app/brush_sizes.rs:87](../../../src/app/brush_sizes.rs#L87)
 
 ```rust
-fn size_memory_mut(&mut self) -> &mut SizeMemory
+pub(crate) fn size_memory_mut(&mut self) -> &mut SizeMemory
 ```
 
 **What it does.** Returns a mutable reference to the active brush's `SizeMemory` so it can
-be edited in place. If the `brush_sizes` list is too short to have an entry for this tool,
-it first grows the list with empty entries (`resize`). Private to this file.
+be edited in place: the pen slot's own, or the tool's entry in `brush_sizes`. If that list is too
+short to have an entry for the tool, it first grows the list with empty entries (`resize`).
+`pub(crate)` so the UI tests can set a memory up directly.
 
 **Used by:** `remember_size`, `toggle_pinned_size`.
 
 ### `AppState::remember_size`
-[src/app/brush_sizes.rs:93](../../../src/app/brush_sizes.rs#L93)
+[src/app/brush_sizes.rs:100](../../../src/app/brush_sizes.rs#L100)
 
 ```rust
 pub(super) fn remember_size(&mut self)
@@ -325,7 +326,7 @@ not count.
 something.
 
 ### `AppState::toggle_pinned_size`
-[src/app/brush_sizes.rs:103](../../../src/app/brush_sizes.rs#L103)
+[src/app/brush_sizes.rs:110](../../../src/app/brush_sizes.rs#L110)
 
 ```rust
 pub fn toggle_pinned_size(&mut self, size: f32)
@@ -342,8 +343,17 @@ comparison function in Rust, like `arr.sort((a, b) => a - b)` in JS).
 **Used by:** [ui/shell.rs](../ui/shell.md) (`size_strip`: right-click a size, or the pin
 button).
 
+### `AppState::forget_size`
+[src/app/brush_sizes.rs:122](../../../src/app/brush_sizes.rs#L122)
+
+```rust
+pub fn forget_size(&mut self, size: f32)
+```
+
+Take `size` off the strip: unpinned, and out of the sizes drawn at lately. Drawing at it again brings it back as a recent one.
+
 ### `AppState::swap_size`
-[src/app/brush_sizes.rs:115](../../../src/app/brush_sizes.rs#L115)
+[src/app/brush_sizes.rs:130](../../../src/app/brush_sizes.rs#L130)
 
 ```rust
 pub fn swap_size(&mut self)
@@ -365,7 +375,7 @@ at last, it goes to the most recent size that is *different* from the current on
 **Used by:** `AppState::dispatch` in [src/app.rs](../app.md) (`Action::SizeSwap`).
 
 ### `AppState::size_detents`
-[src/app/brush_sizes.rs:129](../../../src/app/brush_sizes.rs#L129)
+[src/app/brush_sizes.rs:144](../../../src/app/brush_sizes.rs#L144)
 
 ```rust
 pub(super) fn size_detents(&self, from: f32) -> Vec<f32>
@@ -383,7 +393,7 @@ tenth) removed (`dedup_by`).
 **Used by:** `AppState::adjust_tool` in [app/button_drag.rs](button_drag.md).
 
 ### `AppState::size_note`
-[src/app/brush_sizes.rs:139](../../../src/app/brush_sizes.rs#L139)
+[src/app/brush_sizes.rs:154](../../../src/app/brush_sizes.rs#L154)
 
 ```rust
 pub(super) fn size_note(&self) -> String
@@ -421,15 +431,15 @@ Run with `cargo test app::brush_sizes::tests` · 6 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_stop_holds_the_drag_then_lets_it_go_on_from_there`](../../../src/app/brush_sizes.rs#L166) | A stop holds the drag for the detent, then the drag carries on from it: a size just past the stop is reachable, every size is, and the size never goes back as the drag goes on. |
-| [`stops_below_hold_a_drag_down`](../../../src/app/brush_sizes.rs#L187) | Smaller stops hold a drag the other way, and stops behind the drag are passed by. |
-| [`each_brush_remembers_the_sizes_it_drew_at`](../../../src/app/brush_sizes.rs#L207) | Each brush keeps the sizes it was drawn at, newest first, five of them, no size twice; Shape keeps the pen's. |
-| [`swapping_goes_to_the_size_drawn_at_last_and_back`](../../../src/app/brush_sizes.rs#L227) | The swap goes to the size drawn at last, and back again. |
-| [`pins_toggle_and_stay_sorted`](../../../src/app/brush_sizes.rs#L246) | Pins toggle and stay sorted. |
-| [`labels_drop_a_trailing_zero`](../../../src/app/brush_sizes.rs#L260) | Labels drop a trailing zero. |
+| [`a_stop_holds_the_drag_then_lets_it_go_on_from_there`](../../../src/app/brush_sizes.rs#L181) | A stop holds the drag for the detent, then the drag carries on from it: a size just past the stop is reachable, every size is, and the size never goes back as the drag goes on. |
+| [`stops_below_hold_a_drag_down`](../../../src/app/brush_sizes.rs#L202) | Smaller stops hold a drag the other way, and stops behind the drag are passed by. |
+| [`each_brush_remembers_the_sizes_it_drew_at`](../../../src/app/brush_sizes.rs#L222) | Each brush keeps the sizes it was drawn at, newest first, five of them, no size twice; Shape keeps the pen's. |
+| [`swapping_goes_to_the_size_drawn_at_last_and_back`](../../../src/app/brush_sizes.rs#L242) | The swap goes to the size drawn at last, and back again. |
+| [`pins_toggle_and_stay_sorted`](../../../src/app/brush_sizes.rs#L261) | Pins toggle and stay sorted. |
+| [`labels_drop_a_trailing_zero`](../../../src/app/brush_sizes.rs#L275) | Labels drop a trailing zero. |
 
 **Test helpers** (used only by the tests above):
 
-- [`drawn`](../../../src/app/brush_sizes.rs#L197) — Drawn.
+- [`drawn`](../../../src/app/brush_sizes.rs#L212) — Drawn.
 
-**Test-only types and constants:** [`PER`](../../../src/app/brush_sizes.rs#L160)
+**Test-only types and constants:** [`PER`](../../../src/app/brush_sizes.rs#L175)

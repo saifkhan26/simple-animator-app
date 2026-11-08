@@ -922,7 +922,7 @@ impl AppState {
         if self.tool == ActiveTool::Fill {
             &mut self.brush.opacity
         } else {
-            &mut self.tool_brushes[ActiveTool::Fill.idx()].opacity
+            &mut self.brush_of_mut(ActiveTool::Fill).opacity
         }
     }
 
@@ -933,7 +933,7 @@ impl AppState {
         let b = if self.tool == ActiveTool::Fill {
             &self.brush
         } else {
-            &self.tool_brushes[ActiveTool::Fill.idx()]
+            self.brush_of(ActiveTool::Fill)
         };
         let (s, c) = (fill::GRAIN_SIZES, fill::GRAIN_CONTRASTS);
         let grain = Grain {
@@ -1801,7 +1801,7 @@ mod tests {
 
     /// An Ink stroke along `y`, from `x0` to `x1`, in cell space.
     fn ink_line(st: &mut AppState, y: f32, x0: f32, x1: f32) {
-        st.set_tool(ActiveTool::Ink);
+        st.set_tool(ActiveTool::INK);
         st.brush.radius = 3.0;
         st.pointer_down(st.make_sample(x0, y, 0.0));
         for i in 1..=40 {
@@ -1977,12 +1977,12 @@ mod tests {
         let orig = st.project.cell(id).unwrap().pixels().into_owned();
         let steps = st.history.undo_len();
 
-        stroke_with(&mut st, ActiveTool::Ink, 50.0);
+        stroke_with(&mut st, ActiveTool::INK, 50.0);
         let rev = st.project.cell(id).unwrap().rev();
         assert_eq!(st.pre_mirror, Some((id, rev)), "a landed stroke leaves it mirrored");
         assert_pre_mirrors(&st, "a stroke");
         // The next one starts from the mirror, copying nothing.
-        stroke_with(&mut st, ActiveTool::Ink, 70.0);
+        stroke_with(&mut st, ActiveTool::INK, 70.0);
         assert_pre_mirrors(&st, "a stroke from the mirror");
         stroke_with(&mut st, ActiveTool::Eraser, 50.0);
         assert_pre_mirrors(&st, "an eraser stroke");
@@ -1993,7 +1993,7 @@ mod tests {
         // An undo writes the cell, so the mirror no longer counts.
         st.undo();
         assert_ne!(st.pre_mirror.map(|m| m.1), Some(st.project.cell(id).unwrap().rev()));
-        stroke_with(&mut st, ActiveTool::Ink, 90.0);
+        stroke_with(&mut st, ActiveTool::INK, 90.0);
         assert_pre_mirrors(&st, "a stroke after an undo");
 
         st.set_tool(ActiveTool::Lasso);
@@ -2009,10 +2009,10 @@ mod tests {
         let other = st.project.cells.len();
         st.project.cells.push(crate::doc::canvas::Canvas::new(st.project.width, st.project.height).into());
         st.project.layers[0].set_key(0, other);
-        stroke_with(&mut st, ActiveTool::Ink, 300.0);
+        stroke_with(&mut st, ActiveTool::INK, 300.0);
         assert_pre_mirrors(&st, "a stroke on another drawing");
         st.project.layers[0].set_key(0, id);
-        stroke_with(&mut st, ActiveTool::Ink, 310.0);
+        stroke_with(&mut st, ActiveTool::INK, 310.0);
         assert_pre_mirrors(&st, "a stroke back on the first");
 
         while st.history.undo_len() > steps {
@@ -2465,7 +2465,7 @@ mod tests {
     fn fill_selection_takes_the_fill_tools_grain() {
         let mut st = lasso();
         drag(&mut st, (100.0, 100.0), (200.0, 200.0), None);
-        st.tool_brushes[ActiveTool::Fill.idx()].fill_grain = 1.0;
+        st.brush_of_mut(ActiveTool::Fill).fill_grain = 1.0;
         st.brush.color = [255, 0, 0, 255];
         st.fill_selection();
         let row: Vec<[u8; 4]> = (110..190).map(|x| px(&st, x, 150)).collect();
@@ -2475,7 +2475,7 @@ mod tests {
 
         // Boil: a patch of paper per drawing, the same one every time.
         assert_eq!(st.fill_grain(0).offset, (0, 0));
-        st.tool_brushes[ActiveTool::Fill.idx()].fill_grain_boil = true;
+        st.brush_of_mut(ActiveTool::Fill).fill_grain_boil = true;
         assert_ne!(st.fill_grain(0).offset, st.fill_grain(1).offset);
         assert_eq!(st.fill_grain(1), st.fill_grain(1));
         // The bucket shows the same settings.

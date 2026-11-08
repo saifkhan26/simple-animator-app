@@ -1,6 +1,6 @@
 # `src/io/png_save.rs` — saving one frame as PNG, or copying it
 
-> **Source:** [src/io/png_save.rs](../../../src/io/png_save.rs) · **Module:** `crate::io::png_save` · **Size:** 70 lines · Line links as of commit `1fa5845`
+> **Source:** [src/io/png_save.rs](../../../src/io/png_save.rs) · **Module:** `crate::io::png_save` · **Size:** 70 lines · Line links as of commit `67a7cb9`
 
 ## What this file is for
 

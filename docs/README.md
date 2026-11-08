@@ -38,6 +38,7 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/app/lasso_fill.rs`](src/app/lasso_fill.md) | the Fill tool's lasso mode |
 | [`src/app/liquify.rs`](src/app/liquify.md) | a Liquify session on AppState |
 | [`src/app/orient.rs`](src/app/orient.md) | flipping and turning the artwork |
+| [`src/app/pen_slots.rs`](src/app/pen_slots.md) | the pen slots (the row of pens in the Tools panel) |
 | [`src/app/select.rs`](src/app/select.md) | the selection: mask, gestures and floating pixels |
 | [`src/main.rs`](src/main.md) | where the program starts |
 
@@ -196,4 +197,4 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/platform.rs`](src/platform.md) | rounded corners and a border for the frameless window (Windows) |
 | [`src/undo.rs`](src/undo.md) | undo and redo history |
 
-_115 pages._
+_116 pages._

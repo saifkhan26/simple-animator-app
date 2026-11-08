@@ -16,8 +16,22 @@ use crate::input::button_drag::ButtonDrag;
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
+    /// Pick pen slot 1. The name is from when it was the pencil, kept so a
+    /// `shortcuts.toml` that binds it still binds the same slot.
     ToolPencil,
+    /// Pick pen slot 2, which was the ink.
     ToolInk,
+    /// Pick pen slots 3 to 6. Unbound by default.
+    ToolPen3,
+    ToolPen4,
+    ToolPen5,
+    ToolPen6,
+    /// The next pen slot along the row, or the one before, round at the
+    /// ends; from another tool, back to the pen used last.
+    PenNext,
+    PenPrev,
+    /// Back to the pen slot used before this one. Unbound by default.
+    PenSwap,
     ToolEraser,
     ToolFill,
     /// Retired — the in-canvas eyedropper was folded into `PickScreenColor`.
@@ -182,6 +196,13 @@ impl Action {
     pub const ALL: &'static [Action] = &[
         Action::ToolPencil,
         Action::ToolInk,
+        Action::ToolPen3,
+        Action::ToolPen4,
+        Action::ToolPen5,
+        Action::ToolPen6,
+        Action::PenNext,
+        Action::PenPrev,
+        Action::PenSwap,
         Action::ToolEraser,
         Action::ToolFill,
         Action::PickScreenColor,
@@ -301,8 +322,15 @@ impl Action {
 
     pub fn label(self) -> &'static str {
         match self {
-            Action::ToolPencil => "Tool: Pencil",
-            Action::ToolInk => "Tool: Ink",
+            Action::ToolPencil => "Tool: pen slot 1",
+            Action::ToolInk => "Tool: pen slot 2",
+            Action::ToolPen3 => "Tool: pen slot 3",
+            Action::ToolPen4 => "Tool: pen slot 4",
+            Action::ToolPen5 => "Tool: pen slot 5",
+            Action::ToolPen6 => "Tool: pen slot 6",
+            Action::PenNext => "Next pen slot",
+            Action::PenPrev => "Previous pen slot",
+            Action::PenSwap => "Swap to the pen slot used before",
             Action::ToolEraser => "Tool: Eraser",
             Action::ToolFill => "Tool: Fill",
             Action::ToolColorPicker => "Tool: Color picker (retired)",
@@ -421,6 +449,21 @@ impl Action {
             Action::CameraKeyPrev => "Previous camera key",
             Action::CameraKeyNext => "Next camera key",
         }
+    }
+
+    /// The actions that pick each pen slot, slot 1 first.
+    pub const PENS: [Action; 6] = [
+        Action::ToolPencil,
+        Action::ToolInk,
+        Action::ToolPen3,
+        Action::ToolPen4,
+        Action::ToolPen5,
+        Action::ToolPen6,
+    ];
+
+    /// The pen slot this action picks, from 0, if it picks one.
+    pub fn pen_slot(self) -> Option<usize> {
+        Self::PENS.iter().position(|&a| a == self)
     }
 
     /// `Some(n)` for the "select layer n" actions: n counts rows down from
@@ -1083,6 +1126,9 @@ impl Default for ShortcutMap {
         b.insert(Action::ToolInk, KeyCombo::plain(K::W));
         b.insert(Action::ToolEraser, KeyCombo::plain(K::E));
         b.insert(Action::ToolFill, KeyCombo::plain(K::R));
+        // Round the pen slots: the shifted siblings of the first two.
+        b.insert(Action::PenPrev, KeyCombo::shift(K::Q));
+        b.insert(Action::PenNext, KeyCombo::shift(K::W));
         // One picker now: it samples the canvas and anything behind the window.
         b.insert(Action::PickScreenColor, KeyCombo::plain(K::C));
         b.insert(Action::ToolShape, KeyCombo::plain(K::G));
