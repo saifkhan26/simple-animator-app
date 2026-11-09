@@ -1435,6 +1435,19 @@ fn tools_content(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// The active tool's Aliased switch. A Krita preset keeps its own edge, so
+/// its settings never show it.
+fn aliased_toggle(state: &mut AppState, ui: &mut egui::Ui) {
+    let hover = if state.tool == ActiveTool::Fill {
+        "The lasso fill's edge all in or all out, with no soft rim. Also cuts \
+         a soft selection edge it is held to."
+    } else {
+        "Every pixel fully inked or left bare, with no soft rim, so a fill \
+         meets the line exactly. Jagged up close; Opacity still applies."
+    };
+    ui.checkbox(&mut state.brush.aliased, "Aliased").on_hover_text(hover);
+}
+
 /// The pens' and Shape's size range.
 const BRUSH_SIZES: std::ops::RangeInclusive<f32> = 0.5..=128.0;
 
@@ -2171,6 +2184,7 @@ fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui) {
 
     ui.add(egui::Slider::new(&mut state.brush.hardness, 0.0..=1.0).text("Hardness"))
         .on_hover_text("Fraction of the radius that stays fully solid.");
+    aliased_toggle(state, ui);
     ui.add(egui::Slider::new(&mut state.brush.softness, 0.2..=4.0).text("Softness"))
         .on_hover_text("Bends the edge falloff inwards. 1.0 is a plain taper.");
     ui.add(egui::Slider::new(&mut state.brush.grain, 0.0..=1.0).text("Grain"))

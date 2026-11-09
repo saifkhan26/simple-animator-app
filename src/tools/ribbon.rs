@@ -120,6 +120,9 @@ pub struct StrokeWorkspace {
     noise: Option<Noise>,
     /// How a new stamp combines with the coverage already there.
     build_up: bool,
+    /// Coverage goes down all or nothing, split at half: no anti-aliased
+    /// rim. See `BrushSettings::aliased`.
+    aliased: bool,
     /// The selection, in this canvas's pixel space, that the stroke is held
     /// to — `None` paints freely. Set after `begin()`, which clears it, and
     /// constant for the whole stroke: that is what keeps incremental
@@ -150,6 +153,7 @@ impl StrokeWorkspace {
             grain_scale: 1.5,
             noise: None,
             build_up: false,
+            aliased: false,
             clip: None,
             alpha_lock: false,
             wash: Vec::new(),
@@ -177,6 +181,7 @@ impl StrokeWorkspace {
         self.grain_scale = brush.grain_scale.max(0.05);
         self.noise = Noise::for_brush(brush);
         self.build_up = brush.mode == BrushMode::Dab;
+        self.aliased = brush.aliased;
         self.clip = None;
         self.alpha_lock = false;
     }
@@ -286,6 +291,18 @@ impl StrokeWorkspace {
             base
         } else {
             base.powf(self.softness)
+        }
+    }
+
+    /// `c`, a pixel's coverage, as an aliased stroke lays it down: whole
+    /// from half covered up, nothing below. Coverage only grows over a
+    /// stroke, so this does too, and incremental compositing stays exact.
+    #[inline]
+    fn hard(c: f32) -> f32 {
+        if c >= 0.5 {
+            1.0
+        } else {
+            0.0
         }
     }
 
@@ -554,7 +571,10 @@ impl StrokeWorkspace {
                     shaper.skip();
                     continue;
                 }
-                let a_src = shaper.shape(cov as f32 / 65535.0) * opacity * k;
+                let c = shaper.shape(cov as f32 / 65535.0);
+                // Aliased, the selection's soft edge is cut along with the
+                // brush's own, and opacity goes on after.
+                let a_src = if self.aliased { Self::hard(c * k) * opacity } else { c * opacity * k };
                 let a_pre = pre[idx + 3] as f32 / 255.0;
                 if self.alpha_lock {
                     // Recolour in place: the colour mixes in by the stroke's
@@ -638,7 +658,9 @@ impl StrokeWorkspace {
                     continue;
                 }
                 let a_pre = pre[idx + 3] as f32 / 255.0;
-                let a_out = a_pre * (1.0 - shaper.shape(cov as f32 / 65535.0) * strength * k);
+                let c = shaper.shape(cov as f32 / 65535.0);
+                let e = if self.aliased { Self::hard(c * k) * strength } else { c * strength * k };
+                let a_out = a_pre * (1.0 - e);
                 let a8 = (a_out * 255.0).round() as u8;
                 let dst = &mut canvas.pixels_mut()[idx..idx + 4];
                 if a8 == 0 {
@@ -1301,5 +1323,77 @@ mod tests {
         }
         ws2.composite_paint(&mut once, &pre, all.expect("rect"), [0, 90, 200, 255], 0.9);
         assert_eq!(inc.pixels(), once.pixels());
+    }
+
+    fn aliased(mut b: BrushSettings) -> BrushSettings {
+        b.aliased = true;
+        b
+    }
+
+    /// The alpha a tapering capsule leaves on bare canvas, at `opacity`.
+    fn capsule_alphas(brush: &BrushSettings, opacity: f32) -> Vec<u8> {
+        let mut canvas = Canvas::new(64, 64);
+        let pre = canvas.pixels().into_owned();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, brush);
+        let r = ws
+            .raster_capsule(node(10.3, 12.7, 6.4, 0.8), node(51.6, 47.2, 3.1, 1.0))
+            .expect("on canvas");
+        ws.composite_paint(&mut canvas, &pre, r, [0, 0, 0, 255], opacity);
+        canvas.pixels().chunks_exact(4).map(|p| p[3]).collect()
+    }
+
+    #[test]
+    fn an_aliased_stroke_is_exactly_what_a_plain_one_half_covers() {
+        let soft = ribbon(0.3, 0.0);
+        let plain = capsule_alphas(&soft, 1.0);
+        assert!(plain.iter().any(|&a| a > 0 && a < 255), "the plain stroke has a soft rim");
+        let hard = capsule_alphas(&aliased(soft), 1.0);
+        let want: Vec<u8> = plain.iter().map(|&a| if a >= 128 { 255 } else { 0 }).collect();
+        assert_eq!(hard, want);
+        assert!(hard.iter().any(|&a| a == 255));
+    }
+
+    #[test]
+    fn an_aliased_stroke_keeps_its_opacity_flat() {
+        let alphas = capsule_alphas(&aliased(ribbon(0.3, 0.0)), 0.5);
+        assert!(alphas.iter().all(|&a| a == 0 || a == 128), "one level inside, bare outside");
+        assert!(alphas.iter().any(|&a| a == 128));
+    }
+
+    #[test]
+    fn aliased_dabs_with_grain_are_whole_or_bare() {
+        let brush = aliased(BrushSettings { grain: 0.5, ..dabs(0.3) });
+        let mut canvas = Canvas::new(64, 64);
+        let pre = canvas.pixels().into_owned();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &brush);
+        let mut all = None;
+        for i in 0..40 {
+            let x = 10.0 + i as f32 * 1.1;
+            if let Some(r) = ws.raster_dab(dab(x, 30.0 + (i % 3) as f32 * 0.4, 5.0, 1.0, 0.0, 0.3)) {
+                all = Some(union_rect(all, r));
+            }
+        }
+        ws.composite_paint(&mut canvas, &pre, all.expect("rect"), [0, 0, 0, 255], 1.0);
+        let alphas: Vec<u8> = canvas.pixels().chunks_exact(4).map(|p| p[3]).collect();
+        assert!(alphas.iter().all(|&a| a == 0 || a == 255));
+        assert!(alphas.iter().any(|&a| a == 255), "the dabs built up to something");
+    }
+
+    #[test]
+    fn an_aliased_eraser_takes_whole_pixels() {
+        let mut canvas = Canvas::new(64, 64);
+        canvas.pixels_mut().fill(255);
+        let pre = canvas.pixels().into_owned();
+        let mut ws = StrokeWorkspace::new();
+        ws.begin(64, 64, &aliased(ribbon(0.3, 0.0)));
+        let r = ws
+            .raster_capsule(node(10.3, 12.7, 6.4, 0.8), node(51.6, 47.2, 3.1, 1.0))
+            .expect("on canvas");
+        ws.composite_erase(&mut canvas, &pre, r, 1.0);
+        let alphas: Vec<u8> = canvas.pixels().chunks_exact(4).map(|p| p[3]).collect();
+        assert!(alphas.iter().all(|&a| a == 0 || a == 255));
+        assert!(alphas.iter().any(|&a| a == 0));
     }
 }

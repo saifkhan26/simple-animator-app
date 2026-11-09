@@ -295,6 +295,11 @@ pub struct BrushSettings {
     /// Shape of the stroke's two ends. `Ribbon` mode only: a dab brush's
     /// coverage builds up, so its ends cannot be re-cut after the fact.
     pub cap: StrokeCap,
+    /// Every pixel the tool reaches is either fully covered or left alone:
+    /// no anti-aliased rim, so a fill meets the line exactly. Opacity still
+    /// applies over that. Used by `Ribbon` and `Dab` brushes (pens, Eraser,
+    /// Shape) and the Fill tool's lasso; a `Krita` preset keeps its own edge.
+    pub aliased: bool,
     /// Flood-fill tolerance per channel (0..=255). Only used by Fill tool.
     pub fill_tolerance: u8,
     /// Grow the filled region by this many pixels after the flood, so colour
@@ -362,6 +367,7 @@ impl Default for BrushSettings {
             krita_id: None,
             krita_overrides: Vec::new(),
             cap: StrokeCap::Round,
+            aliased: false,
             fill_tolerance: 16,
             fill_expand: 0,
             fill_gap: 0,

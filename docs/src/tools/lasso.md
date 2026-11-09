@@ -1,6 +1,6 @@
 # `src/tools/lasso.rs` — turning a lasso outline into a coverage mask
 
-> **Source:** [src/tools/lasso.rs](../../../src/tools/lasso.rs) · **Module:** `crate::tools::lasso` · **Size:** 372 lines · Line links as of commit `36405ad`
+> **Source:** [src/tools/lasso.rs](../../../src/tools/lasso.rs) · **Module:** `crate::tools::lasso` · **Size:** 380 lines · Line links as of commit `0599d0a`
 
 ## What this file is for
 
@@ -85,8 +85,17 @@ pub fn intersect(&self, other: &Mask) -> Option<Mask>
 The overlap of two masks, each pixel the product of the two coverages (a lasso held inside a selection);
 `None` if they don't meet.
 
-### `Mask::contains`
+### `Mask::harden`
 [src/tools/lasso.rs:70](../../../src/tools/lasso.rs#L70)
+
+```rust
+pub fn harden(&mut self)
+```
+
+Every pixel all in or all out, split at half: the edge without its anti-aliasing, for an aliased fill.
+
+### `Mask::contains`
+[src/tools/lasso.rs:78](../../../src/tools/lasso.rs#L78)
 
 ```rust
 pub fn contains(&self, x: i32, y: i32) -> bool
@@ -97,7 +106,7 @@ Whether the mask covers pixel `(x, y)` at all — the "did you press inside the 
 ## Free functions
 
 ### `coverage`
-[src/tools/lasso.rs:85](../../../src/tools/lasso.rs#L85)
+[src/tools/lasso.rs:93](../../../src/tools/lasso.rs#L93)
 
 ```rust
 pub fn coverage(pts: &[(f32, f32)], cw: u32, ch: u32) -> Option<Mask>
@@ -107,7 +116,7 @@ Rasterises a closed polygon in a cell's pixel space into a `Mask`, clipped to th
 points or a path entirely off the cell.
 
 ### `coverage_rect`
-[src/tools/lasso.rs:100](../../../src/tools/lasso.rs#L100)
+[src/tools/lasso.rs:108](../../../src/tools/lasso.rs#L108)
 
 ```rust
 pub fn coverage_rect(
@@ -122,7 +131,7 @@ each polygon edge crosses, tracks the winding direction, and adds the inside spa
 weight `1/SUB`. Returns the covered box and its bytes.
 
 ### `erase_masked`
-[src/tools/lasso.rs:185](../../../src/tools/lasso.rs#L185)
+[src/tools/lasso.rs:193](../../../src/tools/lasso.rs#L193)
 
 ```rust
 pub fn erase_masked(canvas: &mut Canvas, mask: &Mask) -> bool
@@ -132,7 +141,7 @@ Erases through a mask: each pixel's alpha is scaled by `1 − coverage` (RGB kep
 zeroed entirely. Returns whether anything changed.
 
 ### `add_span`
-[src/tools/lasso.rs:230](../../../src/tools/lasso.rs#L230)
+[src/tools/lasso.rs:238](../../../src/tools/lasso.rs#L238)
 
 ```rust
 fn add_span(cov: &mut [f32], x0: i32, xa: f32, xb: f32, weight: f32)
@@ -149,19 +158,19 @@ Run with `cargo test tools::lasso::tests` · 9 tests
 
 | Test | What it checks |
 |---|---|
-| [`erases_inside_and_spares_outside`](../../../src/tools/lasso.rs#L279) | Erases inside and spares outside. |
-| [`erase_zeroes_rgb_so_no_stale_colour_remains`](../../../src/tools/lasso.rs#L296) | Erase zeroes rgb so no stale colour remains. |
-| [`partial_edge_coverage_is_antialiased`](../../../src/tools/lasso.rs#L304) | Partial edge coverage is antialiased. |
-| [`overlapping_loop_stays_solid`](../../../src/tools/lasso.rs#L314) | Overlapping loop stays solid. |
-| [`degenerate_paths_are_a_noop`](../../../src/tools/lasso.rs#L327) | Degenerate paths are a noop. |
-| [`offscreen_path_is_a_noop`](../../../src/tools/lasso.rs#L334) | Offscreen path is a noop. |
-| [`path_clipped_at_the_canvas_edge_does_not_wrap`](../../../src/tools/lasso.rs#L342) | Path clipped at the canvas edge does not wrap. |
-| [`coverage_bounds_the_path_and_anti_aliases_its_edge`](../../../src/tools/lasso.rs#L351) | Coverage bounds the path and anti aliases its edge. |
-| [`coverage_rejects_degenerate_and_offscreen_paths`](../../../src/tools/lasso.rs#L367) | Coverage rejects degenerate and offscreen paths. |
+| [`erases_inside_and_spares_outside`](../../../src/tools/lasso.rs#L287) | Erases inside and spares outside. |
+| [`erase_zeroes_rgb_so_no_stale_colour_remains`](../../../src/tools/lasso.rs#L304) | Erase zeroes rgb so no stale colour remains. |
+| [`partial_edge_coverage_is_antialiased`](../../../src/tools/lasso.rs#L312) | Partial edge coverage is antialiased. |
+| [`overlapping_loop_stays_solid`](../../../src/tools/lasso.rs#L322) | Overlapping loop stays solid. |
+| [`degenerate_paths_are_a_noop`](../../../src/tools/lasso.rs#L335) | Degenerate paths are a noop. |
+| [`offscreen_path_is_a_noop`](../../../src/tools/lasso.rs#L342) | Offscreen path is a noop. |
+| [`path_clipped_at_the_canvas_edge_does_not_wrap`](../../../src/tools/lasso.rs#L350) | Path clipped at the canvas edge does not wrap. |
+| [`coverage_bounds_the_path_and_anti_aliases_its_edge`](../../../src/tools/lasso.rs#L359) | Coverage bounds the path and anti aliases its edge. |
+| [`coverage_rejects_degenerate_and_offscreen_paths`](../../../src/tools/lasso.rs#L375) | Coverage rejects degenerate and offscreen paths. |
 
 **Test helpers** (used only by the tests above):
 
-- [`erase`](../../../src/tools/lasso.rs#L252) — The pre-selection entry point: rasterise a path and erase through it. The tool now splits these two steps so the mask can outlive the erase, but the composed behaviour is still what these tests pin down.
-- [`solid`](../../../src/tools/lasso.rs#L260) — 16x16 fully opaque white.
-- [`alpha`](../../../src/tools/lasso.rs#L269) — Alpha.
-- [`rect`](../../../src/tools/lasso.rs#L274) — Axis-aligned rectangle path, corners on pixel boundaries.
+- [`erase`](../../../src/tools/lasso.rs#L260) — The pre-selection entry point: rasterise a path and erase through it. The tool now splits these two steps so the mask can outlive the erase, but the composed behaviour is still what these tests pin down.
+- [`solid`](../../../src/tools/lasso.rs#L268) — 16x16 fully opaque white.
+- [`alpha`](../../../src/tools/lasso.rs#L277) — Alpha.
+- [`rect`](../../../src/tools/lasso.rs#L282) — Axis-aligned rectangle path, corners on pixel boundaries.
