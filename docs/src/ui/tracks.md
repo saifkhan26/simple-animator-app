@@ -1,6 +1,6 @@
 # `src/ui/tracks.rs` — the timeline's layer tracks
 
-> **Source:** [src/ui/tracks.rs](../../../src/ui/tracks.rs) · **Module:** `crate::ui::tracks` · **Size:** 1886 lines · Line links as of commit `36405ad`
+> **Source:** [src/ui/tracks.rs](../../../src/ui/tracks.rs) · **Module:** `crate::ui::tracks` · **Size:** 1904 lines · Line links as of commit `c224d51`
 
 ## What this file is for
 
@@ -560,21 +560,21 @@ Run with `cargo test ui::tracks::tests` · 6 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_plain_drag_moves_the_drawing`](../../../src/ui/tracks.rs#L1558) | A plain drag moves the drawing. |
-| [`a_group_row_takes_no_drawings_and_folding_hides_its_layers`](../../../src/ui/tracks.rs#L1568) | A group's row takes no drawings, and a folded group's layers have no rows at all. |
-| [`shift_partway_keeps_a_drag_on_its_layer`](../../../src/ui/tracks.rs#L1589) | Shift pressed partway through a drag that has gone further along than across keeps the drawing on its own layer. |
-| [`a_ctrl_drag_copies_the_drawing`](../../../src/ui/tracks.rs#L1627) | A ctrl drag copies the drawing. |
-| [`no_plain_drag_ever_duplicates`](../../../src/ui/tracks.rs#L1643) | Every plain drag of every drawing, grabbed at every one of its frames, to every frame of both layers: a move never leaves the drawing showing on more frames than it had. |
-| [`a_drag_after_resting_on_a_bar_still_moves_it`](../../../src/ui/tracks.rs#L1698) | Resting on a bar until its details show, then dragging it, still drags. egui's at-pointer tooltip used to appear over the pointer and take the press. |
+| [`a_plain_drag_moves_the_drawing`](../../../src/ui/tracks.rs#L1576) | A plain drag moves the drawing. |
+| [`a_group_row_takes_no_drawings_and_folding_hides_its_layers`](../../../src/ui/tracks.rs#L1586) | A group's row takes no drawings, and a folded group's layers have no rows at all. |
+| [`shift_partway_keeps_a_drag_on_its_layer`](../../../src/ui/tracks.rs#L1607) | Shift pressed partway through a drag that has gone further along than across keeps the drawing on its own layer. |
+| [`a_ctrl_drag_copies_the_drawing`](../../../src/ui/tracks.rs#L1645) | A ctrl drag copies the drawing. |
+| [`no_plain_drag_ever_duplicates`](../../../src/ui/tracks.rs#L1661) | Every plain drag of every drawing, grabbed at every one of its frames, to every frame of both layers: a move never leaves the drawing showing on more frames than it had. |
+| [`a_drag_after_resting_on_a_bar_still_moves_it`](../../../src/ui/tracks.rs#L1716) | Resting on a bar until its details show, then dragging it, still drags. egui's at-pointer tooltip used to appear over the pointer and take the press. |
 
 **Test helpers** (used only by the tests above):
 
-- [`sheet`](../../../src/ui/tracks.rs#L1494) — One layer, a distinct drawing keyed on each of `keys`, marked with its key frame + 1 in its first byte (alpha set, so it is not blank).
-- [`row`](../../../src/ui/tracks.rs#L1508) — The mark of the drawing showing on every frame of `layer`.
-- [`frame`](../../../src/ui/tracks.rs#L1515) — Run one frame of the tracks, laid out from the top-left corner.
-- [`at`](../../../src/ui/tracks.rs#L1530) — Centre of `frame` on the top row, at the default zoom with no scroll.
-- [`drag`](../../../src/ui/tracks.rs#L1539) — Press at `from`, drag through to `to`, release — each step its own frame, as a real drag arrives.
-- [`frames_showing`](../../../src/ui/tracks.rs#L1635) — How many frames of `layer` show the drawing marked `mark`.
+- [`sheet`](../../../src/ui/tracks.rs#L1512) — One layer, a distinct drawing keyed on each of `keys`, marked with its key frame + 1 in its first byte (alpha set, so it is not blank).
+- [`row`](../../../src/ui/tracks.rs#L1526) — The mark of the drawing showing on every frame of `layer`.
+- [`frame`](../../../src/ui/tracks.rs#L1533) — Run one frame of the tracks, laid out from the top-left corner.
+- [`at`](../../../src/ui/tracks.rs#L1548) — Centre of `frame` on the top row, at the default zoom with no scroll.
+- [`drag`](../../../src/ui/tracks.rs#L1557) — Press at `from`, drag through to `to`, release — each step its own frame, as a real drag arrives.
+- [`frames_showing`](../../../src/ui/tracks.rs#L1653) — How many frames of `layer` show the drawing marked `mark`.
 
 ### `mod camera_key_drag_tests`
 
@@ -582,19 +582,19 @@ Run with `cargo test ui::tracks::camera_key_drag_tests` · 6 tests
 
 | Test | What it checks |
 |---|---|
-| [`dragging_a_key_s_dot_retimes_the_key_and_leaves_the_playhead`](../../../src/ui/tracks.rs#L1811) | Dragging a key s dot retimes the key and leaves the playhead. |
-| [`alt_dragging_leaves_a_copy_behind`](../../../src/ui/tracks.rs#L1824) | Alt dragging leaves a copy behind. |
-| [`a_key_dropped_on_another_takes_its_place`](../../../src/ui/tracks.rs#L1831) | A key dropped on another takes its place. |
-| [`a_drag_from_anywhere_else_on_the_ruler_still_scrubs`](../../../src/ui/tracks.rs#L1840) | The pins for the ruler as it was: everything that isn't a drag from a dot still scrubs, and moves no key. |
-| [`a_click_on_a_dot_still_goes_to_its_frame`](../../../src/ui/tracks.rs#L1856) | A click on a dot still goes to its frame. |
-| [`a_key_dragged_back_to_where_it_was_changes_nothing`](../../../src/ui/tracks.rs#L1870) | A key dragged back to where it was changes nothing. |
+| [`dragging_a_key_s_dot_retimes_the_key_and_leaves_the_playhead`](../../../src/ui/tracks.rs#L1829) | Dragging a key s dot retimes the key and leaves the playhead. |
+| [`alt_dragging_leaves_a_copy_behind`](../../../src/ui/tracks.rs#L1842) | Alt dragging leaves a copy behind. |
+| [`a_key_dropped_on_another_takes_its_place`](../../../src/ui/tracks.rs#L1849) | A key dropped on another takes its place. |
+| [`a_drag_from_anywhere_else_on_the_ruler_still_scrubs`](../../../src/ui/tracks.rs#L1858) | The pins for the ruler as it was: everything that isn't a drag from a dot still scrubs, and moves no key. |
+| [`a_click_on_a_dot_still_goes_to_its_frame`](../../../src/ui/tracks.rs#L1874) | A click on a dot still goes to its frame. |
+| [`a_key_dragged_back_to_where_it_was_changes_nothing`](../../../src/ui/tracks.rs#L1888) | A key dragged back to where it was changes nothing. |
 
 **Test helpers** (used only by the tests above):
 
-- [`keyed`](../../../src/ui/tracks.rs#L1744) — Twelve frames, camera keys on 2 (ease in) and 8.
-- [`keys`](../../../src/ui/tracks.rs#L1761) — Keys.
-- [`frame`](../../../src/ui/tracks.rs#L1765) — Frame.
-- [`dot`](../../../src/ui/tracks.rs#L1780) — The dot of a key on `frame`, at the default zoom with no scroll.
-- [`number`](../../../src/ui/tracks.rs#L1785) — The same frame's number, up in the ruler clear of the dots.
-- [`button`](../../../src/ui/tracks.rs#L1789) — Button.
-- [`drag`](../../../src/ui/tracks.rs#L1798) — Drag.
+- [`keyed`](../../../src/ui/tracks.rs#L1762) — Twelve frames, camera keys on 2 (ease in) and 8.
+- [`keys`](../../../src/ui/tracks.rs#L1779) — Keys.
+- [`frame`](../../../src/ui/tracks.rs#L1783) — Frame.
+- [`dot`](../../../src/ui/tracks.rs#L1798) — The dot of a key on `frame`, at the default zoom with no scroll.
+- [`number`](../../../src/ui/tracks.rs#L1803) — The same frame's number, up in the ruler clear of the dots.
+- [`button`](../../../src/ui/tracks.rs#L1807) — Button.
+- [`drag`](../../../src/ui/tracks.rs#L1816) — Drag.

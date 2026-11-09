@@ -1,6 +1,6 @@
 # `src/io/mod.rs` — the list of file-format modules
 
-> **Source:** [src/io/mod.rs](../../../src/io/mod.rs) · **Module:** `crate::io` · **Size:** 21 lines · Line links as of commit `36405ad`
+> **Source:** [src/io/mod.rs](../../../src/io/mod.rs) · **Module:** `crate::io` · **Size:** 22 lines · Line links as of commit `c224d51`
 
 ## What this file is for
 
@@ -52,22 +52,22 @@ Each line in the file and the page that documents it. All are `pub`.
 
 | Line | Module | Page | One-line job |
 |---|---|---|---|
-| [5](../../../src/io/mod.rs#L5) | `composite` | [composite.md](composite.md) | CPU composite: flattens a frame's layers into flat pixels for exports (onion skins and reference layers left out). |
-| [6](../../../src/io/mod.rs#L6) | `frame_order` | [frame_order.md](frame_order.md) | Output frame order for exports: which timeline frame each written frame shows. |
-| [7](../../../src/io/mod.rs#L7) | `gif_export` | [gif_export.md](gif_export.md) | Export the project as an animated GIF. |
-| [8](../../../src/io/mod.rs#L8) | `gif_import` | [gif_import.md](gif_import.md) | Decode an animated GIF into one full-size canvas per frame. |
-| [9](../../../src/io/mod.rs#L9) | `mp4_export` | [mp4_export.md](mp4_export.md) | Export the project as an H.264 MP4 by running `ffmpeg`. |
-| [10](../../../src/io/mod.rs#L10) | `image_import` | [image_import.md](image_import.md) | Import a single still image as one project-sized canvas. |
-| [11](../../../src/io/mod.rs#L11) | `kra` | [kra/mod.md](kra/mod.md) | Krita `.kra` read / write (a folder module with `tiles` and `xml` inside). |
-| [12](../../../src/io/mod.rs#L12) | `legacy` | [legacy.md](legacy.md) | Frozen copies of old `.anim` layouts, so old project files still open. |
-| [13](../../../src/io/mod.rs#L13) | `png_import` | [png_import.md](png_import.md) | Import a folder of PNGs (a sequence) as a new layer. |
-| [14](../../../src/io/mod.rs#L14) | `png_save` | [png_save.md](png_save.md) | Save the current canvas as a PNG, or copy it to the clipboard. |
-| [15](../../../src/io/mod.rs#L15) | `png_seq` | [png_seq.md](png_seq.md) | Export every frame as `frame_NNNN.png` into a folder. |
-| [16](../../../src/io/mod.rs#L16) | `project_file` | [project_file.md](project_file.md) | Save / open Animator's own `.anim` project files. |
-| [17](../../../src/io/mod.rs#L17) | `sprite_sheet` | [sprite_sheet.md](sprite_sheet.md) | Sprite-sheet export: a frame range laid out as a grid in one PNG. |
-| [18](../../../src/io/mod.rs#L18) | `video_import` | [video_import.md](video_import.md) | Import frames from a video by running `ffmpeg` / `ffprobe`. |
-| [19](../../../src/io/mod.rs#L19) | `webp_export` | [webp_export.md](webp_export.md) | Export the project as a lossless animated WebP. |
-| [20](../../../src/io/mod.rs#L20) | `webp_import` | [webp_import.md](webp_import.md) | Decode an animated WebP into one full-size canvas per frame. |
+| [6](../../../src/io/mod.rs#L6) | `composite` | [composite.md](composite.md) | CPU composite: flattens a frame's layers into flat pixels for exports (onion skins and reference layers left out). |
+| [7](../../../src/io/mod.rs#L7) | `frame_order` | [frame_order.md](frame_order.md) | Output frame order for exports: which timeline frame each written frame shows. |
+| [8](../../../src/io/mod.rs#L8) | `gif_export` | [gif_export.md](gif_export.md) | Export the project as an animated GIF. |
+| [9](../../../src/io/mod.rs#L9) | `gif_import` | [gif_import.md](gif_import.md) | Decode an animated GIF into one full-size canvas per frame. |
+| [10](../../../src/io/mod.rs#L10) | `mp4_export` | [mp4_export.md](mp4_export.md) | Export the project as an H.264 MP4 by running `ffmpeg`. |
+| [11](../../../src/io/mod.rs#L11) | `image_import` | [image_import.md](image_import.md) | Import a single still image as one project-sized canvas. |
+| [12](../../../src/io/mod.rs#L12) | `kra` | [kra/mod.md](kra/mod.md) | Krita `.kra` read / write (a folder module with `tiles` and `xml` inside). |
+| [13](../../../src/io/mod.rs#L13) | `legacy` | [legacy.md](legacy.md) | Frozen copies of old `.anim` layouts, so old project files still open. |
+| [14](../../../src/io/mod.rs#L14) | `png_import` | [png_import.md](png_import.md) | Import a folder of PNGs (a sequence) as a new layer. |
+| [15](../../../src/io/mod.rs#L15) | `png_save` | [png_save.md](png_save.md) | Save the current canvas as a PNG, or copy it to the clipboard. |
+| [16](../../../src/io/mod.rs#L16) | `png_seq` | [png_seq.md](png_seq.md) | Export every frame as `frame_NNNN.png` into a folder. |
+| [17](../../../src/io/mod.rs#L17) | `project_file` | [project_file.md](project_file.md) | Save / open Animator's own `.anim` project files. |
+| [18](../../../src/io/mod.rs#L18) | `sprite_sheet` | [sprite_sheet.md](sprite_sheet.md) | Sprite-sheet export: a frame range laid out as a grid in one PNG. |
+| [19](../../../src/io/mod.rs#L19) | `video_import` | [video_import.md](video_import.md) | Import frames from a video by running `ffmpeg` / `ffprobe`. |
+| [20](../../../src/io/mod.rs#L20) | `webp_export` | [webp_export.md](webp_export.md) | Export the project as a lossless animated WebP. |
+| [21](../../../src/io/mod.rs#L21) | `webp_import` | [webp_import.md](webp_import.md) | Decode an animated WebP into one full-size canvas per frame. |
 
 The one-line jobs are paraphrased from the `//!` comment at the top of each file; see
 each page for the details.

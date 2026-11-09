@@ -9,7 +9,10 @@
 
 use super::*;
 use crate::app::{ExportKind, ImportRangeState, ImportSource};
+use crate::io::autosave::Orphan;
 use egui::{pos2, Pos2};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 type Shapes = Vec<egui::epaint::ClippedShape>;
 
@@ -40,6 +43,8 @@ enum Win {
     Export(ExportKind),
     ImportRange,
     SaveError,
+    Unsaved,
+    Recovery,
 }
 
 impl std::fmt::Debug for Win {
@@ -57,6 +62,8 @@ impl std::fmt::Debug for Win {
             Win::NewProject => write!(f, "NewProject"),
             Win::ImportRange => write!(f, "ImportRange"),
             Win::SaveError => write!(f, "SaveError"),
+            Win::Unsaved => write!(f, "Unsaved"),
+            Win::Recovery => write!(f, "Recovery"),
         }
     }
 }
@@ -80,6 +87,8 @@ fn all() -> Vec<Win> {
         Win::Export(ExportKind::SpriteSheet),
         Win::ImportRange,
         Win::SaveError,
+        Win::Unsaved,
+        Win::Recovery,
     ]);
     v
 }
@@ -157,6 +166,27 @@ impl Win {
                 state.save_error =
                     Some("Could not write D:\\Animation\\shot_04\\shot_04_cleanup.anim: access is denied".into())
             }
+            Win::Unsaved => {
+                // The longest name and the longest question.
+                state.project_path = Some(PathBuf::from("D:\\Animation\\shot_04\\shot_04_cleanup_final_v12.anim"));
+                state.unsaved_prompt = Some(Pending::Recover(PathBuf::from("x")));
+            }
+            Win::Recovery => {
+                let ago = |mins: u64| SystemTime::now() - Duration::from_secs(mins * 60);
+                let long = Orphan {
+                    dir: PathBuf::from("a"),
+                    source: Some(PathBuf::from("D:\\Animation\\shot_04\\shot_04_cleanup_final_v12.anim")),
+                    saved: ago(3),
+                    bytes: 734_003_200,
+                };
+                let untitled = Orphan { dir: PathBuf::from("b"), source: None, saved: ago(3000), bytes: 2_400_000 };
+                state.autosave.orphans = vec![long, untitled];
+                state.autosave.show_recovery = true;
+                // The wider of Discard's two labels.
+                state.autosave.discard_armed = Some(PathBuf::from("a"));
+                state.autosave.error =
+                    Some("Couldn't read the autosave of shot_04_cleanup_final_v12.anim: unexpected end of file".into());
+            }
         }
     }
 
@@ -177,6 +207,8 @@ impl Win {
             Win::Export(_) => export_dialog(state, ctx),
             Win::ImportRange => import_range_dialog(state, ctx),
             Win::SaveError => save_error_dialog(state, ctx),
+            Win::Unsaved => unsaved_dialog(state, ctx),
+            Win::Recovery => recovery_dialog(state, ctx),
         }
     }
 
@@ -828,6 +860,11 @@ fn snapshots() {
     snapshot(&mut rig, 2.0).save(dir.join("brush_narrowest.png")).unwrap();
     let mut rig = Rig::new(Win::Settings);
     snapshot(&mut rig, 1.5).save(dir.join("settings.png")).unwrap();
+    // The unsaved-work prompts.
+    let mut rig = Rig::new(Win::Unsaved);
+    snapshot(&mut rig, 2.0).save(dir.join("unsaved.png")).unwrap();
+    let mut rig = Rig::new(Win::Recovery);
+    snapshot(&mut rig, 2.0).save(dir.join("recovery.png")).unwrap();
     // A grid's settings, with Fill canvas's rows showing.
     let mut rig = Rig::new(Win::GridSettings);
     snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();

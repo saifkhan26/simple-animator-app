@@ -1,6 +1,6 @@
 # `src/ui/canvas_gpu.rs` — drawing the canvas on the GPU
 
-> **Source:** [src/ui/canvas_gpu.rs](../../../src/ui/canvas_gpu.rs) · **Module:** `crate::ui::canvas_gpu` · **Size:** 792 lines · Line links as of commit `36405ad`
+> **Source:** [src/ui/canvas_gpu.rs](../../../src/ui/canvas_gpu.rs) · **Module:** `crate::ui::canvas_gpu` · **Size:** 792 lines · Line links as of commit `c224d51`
 
 ## What this file is for
 

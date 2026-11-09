@@ -1,6 +1,6 @@
 # `src/io/gif_import.rs` — decode an animated GIF into one canvas per frame
 
-> **Source:** [src/io/gif_import.rs](../../../src/io/gif_import.rs) · **Module:** `crate::io::gif_import` · **Size:** 97 lines · Line links as of commit `36405ad`
+> **Source:** [src/io/gif_import.rs](../../../src/io/gif_import.rs) · **Module:** `crate::io::gif_import` · **Size:** 97 lines · Line links as of commit `c224d51`
 
 ## What this file is for
 

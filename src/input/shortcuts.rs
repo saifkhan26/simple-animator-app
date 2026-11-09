@@ -99,6 +99,9 @@ pub enum Action {
     LayerKeyLinkBelow,
     KeyBlank,
     KeyCopy,
+    /// A blank drawing in the middle of the gap to the next drawing, on
+    /// every selected layer (`AppState::insert_inbetween_here`).
+    KeyInbetween,
     Hold,
     SizeDown,
     SizeUp,
@@ -253,6 +256,7 @@ impl Action {
         Action::LayerKeyLinkBelow,
         Action::KeyBlank,
         Action::KeyCopy,
+        Action::KeyInbetween,
         Action::Hold,
         Action::SizeDown,
         Action::SizeUp,
@@ -382,6 +386,7 @@ impl Action {
             Action::LayerKeyLinkBelow => "Toggle key link to layer below",
             Action::KeyBlank => "Insert blank key",
             Action::KeyCopy => "Insert duplicate key",
+            Action::KeyInbetween => "Insert in-between",
             Action::Hold => "Hold (delete key)",
             Action::SizeDown => "Brush size down",
             Action::SizeUp => "Brush size up",
@@ -1210,10 +1215,11 @@ impl Default for ShortcutMap {
             },
         );
         b.insert(Action::LayerAlphaLockToggle, KeyCombo::plain(K::Slash));
-        // X-sheet keys: 1 / 2 / 3 (numeric row, left side).
+        // X-sheet keys: 1 / 2 / 3 / 4 (numeric row, left side).
         b.insert(Action::KeyBlank, KeyCombo::plain(K::Num1));
         b.insert(Action::KeyCopy, KeyCombo::plain(K::Num2));
         b.insert(Action::Hold, KeyCombo::plain(K::Num3));
+        b.insert(Action::KeyInbetween, KeyCombo::plain(K::Num4));
         // Brush size — bracket keys (Photoshop / Krita convention).
         b.insert(Action::SizeDown, KeyCombo::plain(K::OpenBracket));
         b.insert(Action::SizeUp, KeyCombo::plain(K::CloseBracket));

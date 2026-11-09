@@ -1,6 +1,6 @@
 # `src/doc/project.rs` — the animation document (Project)
 
-> **Source:** [src/doc/project.rs](../../../src/doc/project.rs) · **Module:** `crate::doc::project` · **Size:** 2387 lines · Line links as of commit `36405ad`
+> **Source:** [src/doc/project.rs](../../../src/doc/project.rs) · **Module:** `crate::doc::project` · **Size:** 2728 lines · Line links as of commit `c224d51`
 
 ## What this file is for
 
@@ -95,8 +95,18 @@ The whole animation document. See the picture above.
 | `camera_keys` | `Vec<CameraKey>` | Sorted camera keyframes. Empty = static `camera`. |
 | `camera_opts` | `CameraOpts` | Session-only, like `Layer::lines_from`: skipped, so the `.anim` layout is what it was and a load brings back the defaults. |
 
+### `enum NewFrames`
+[src/doc/project.rs:56](../../../src/doc/project.rs#L56)
+
+What frames inserted on some layers show (`Project::insert_layer_frames_at`).
+
+| Variant | Meaning |
+|---|---|
+| `Hold` | Holds of the drawing before them; nothing before the first drawing. |
+| `Repeat` | The drawing showing just before them, keyed again on each: Duplicate. |
+
 ### `enum CellReq`
-[src/doc/project.rs:1101](../../../src/doc/project.rs#L1101)
+[src/doc/project.rs:1235](../../../src/doc/project.rs#L1235)
 
 What `ripple_move` needs a cell for.
 
@@ -106,7 +116,7 @@ What `ripple_move` needs a cell for.
 | `Moved { id: CellId, src: usize, dst: usize, must_clone: bool, }` | Drawing `id`, from layer `src`, landing on layer `dst`. `must_clone` when it has to be a buffer of its own: a copy, or a move to another layer while the source still shows it somewhere else. |
 
 ### `struct Pick`
-[src/doc/project.rs:1156](../../../src/doc/project.rs#L1156)
+[src/doc/project.rs:1290](../../../src/doc/project.rs#L1290)
 
 A helper struct inside `ripple_move`: the drawings picked up from one layer.
 
@@ -118,7 +128,7 @@ A helper struct inside `ripple_move`: the drawings picked up from one layer.
 | `ids` | `Vec<CellId>` | The drawings' cell ids. |
 
 ### `struct Block`
-[src/doc/project.rs:1254](../../../src/doc/project.rs#L1254)
+[src/doc/project.rs:1400](../../../src/doc/project.rs#L1400)
 
 A drawing and the frames it holds for, on one layer: the key at `start` through to the next key.
 
@@ -131,7 +141,7 @@ A drawing and the frames it holds for, on one layer: the key at `start` through 
 ## `impl Project`
 
 ### `Project::new`
-[src/doc/project.rs:54](../../../src/doc/project.rs#L54)
+[src/doc/project.rs:64](../../../src/doc/project.rs#L64)
 
 ```rust
 pub fn new(width: u32, height: u32, fps: f32) -> Self
@@ -141,7 +151,7 @@ A new project of the given size and frame rate, seeded with one blank cell, one 
 to it on frame 0, a one-frame timeline, a default camera.
 
 ### `Project::output_size`
-[src/doc/project.rs:78](../../../src/doc/project.rs#L78)
+[src/doc/project.rs:88](../../../src/doc/project.rs#L88)
 
 ```rust
 pub fn output_size(&self) -> (u32, u32)
@@ -151,7 +161,7 @@ The camera frame's size — the size every exported frame has: the camera's own 
 canvas size.
 
 ### `Project::resolve_camera`
-[src/doc/project.rs:83](../../../src/doc/project.rs#L83)
+[src/doc/project.rs:93](../../../src/doc/project.rs#L93)
 
 ```rust
 pub fn resolve_camera(&self, frame: usize) -> Camera
@@ -160,7 +170,7 @@ pub fn resolve_camera(&self, frame: usize) -> Camera
 The camera on `frame`: the static camera when there are no keys, else interpolated between camera keys.
 
 ### `Project::resolve_camera_at`
-[src/doc/project.rs:95](../../../src/doc/project.rs#L95)
+[src/doc/project.rs:105](../../../src/doc/project.rs#L105)
 
 ```rust
 pub fn resolve_camera_at(&self, t: f32) -> Camera
@@ -170,7 +180,7 @@ The camera at a *fractional* time `t` in frames (needed when the camera's move i
 loops and falls between frames).
 
 ### `Project::camera_loops`
-[src/doc/project.rs:106](../../../src/doc/project.rs#L106)
+[src/doc/project.rs:116](../../../src/doc/project.rs#L116)
 
 ```rust
 pub fn camera_loops(&self) -> u32
@@ -180,7 +190,7 @@ How many passes of the animation the camera's move lasts — more than 1 only wh
 there is a move (two keys) to stretch.
 
 ### `Project::held_inside`
-[src/doc/project.rs:116](../../../src/doc/project.rs#L116)
+[src/doc/project.rs:126](../../../src/doc/project.rs#L126)
 
 ```rust
 pub fn held_inside(&self, cam: Camera) -> Camera
@@ -189,7 +199,7 @@ pub fn held_inside(&self, cam: Camera) -> Camera
 `cam`, pushed back inside the canvas when "keep camera inside canvas" is on.
 
 ### `Project::camera_leaves_canvas`
-[src/doc/project.rs:126](../../../src/doc/project.rs#L126)
+[src/doc/project.rs:136](../../../src/doc/project.rs#L136)
 
 ```rust
 pub fn camera_leaves_canvas(&self) -> bool
@@ -198,7 +208,7 @@ pub fn camera_leaves_canvas(&self) -> bool
 Whether the keyed camera shows past the canvas edge on any frame (or at rest).
 
 ### `Project::keep_inside_by_default`
-[src/doc/project.rs:143](../../../src/doc/project.rs#L143)
+[src/doc/project.rs:153](../../../src/doc/project.rs#L153)
 
 ```rust
 pub fn keep_inside_by_default(&mut self) -> bool
@@ -208,7 +218,7 @@ Turns "keep inside canvas" on for a new/opened project — unless its camera alr
 purpose, in which case it stays off and this returns `false` (the app then shows a toast).
 
 ### `Project::has_camera_key`
-[src/doc/project.rs:149](../../../src/doc/project.rs#L149)
+[src/doc/project.rs:159](../../../src/doc/project.rs#L159)
 
 ```rust
 pub fn has_camera_key(&self, frame: usize) -> bool
@@ -217,7 +227,7 @@ pub fn has_camera_key(&self, frame: usize) -> bool
 Whether there is a camera key exactly on `frame`.
 
 ### `Project::set_camera_key`
-[src/doc/project.rs:155](../../../src/doc/project.rs#L155)
+[src/doc/project.rs:165](../../../src/doc/project.rs#L165)
 
 ```rust
 pub fn set_camera_key(&mut self, frame: usize, camera: Camera)
@@ -226,7 +236,7 @@ pub fn set_camera_key(&mut self, frame: usize, camera: Camera)
 Adds or replaces the camera key on `frame` (keeping its easing), keeping keys sorted.
 
 ### `Project::delete_camera_key`
-[src/doc/project.rs:169](../../../src/doc/project.rs#L169)
+[src/doc/project.rs:179](../../../src/doc/project.rs#L179)
 
 ```rust
 pub fn delete_camera_key(&mut self, frame: usize)
@@ -235,7 +245,7 @@ pub fn delete_camera_key(&mut self, frame: usize)
 Removes the camera key on `frame`.
 
 ### `Project::prev_camera_key`
-[src/doc/project.rs:176](../../../src/doc/project.rs#L176)
+[src/doc/project.rs:186](../../../src/doc/project.rs#L186)
 
 ```rust
 pub fn prev_camera_key(&self) -> Option<usize>
@@ -244,7 +254,7 @@ pub fn prev_camera_key(&self) -> Option<usize>
 The frame of the nearest camera key before the current frame (keys past the end of the timeline ignored).
 
 ### `Project::next_camera_key`
-[src/doc/project.rs:183](../../../src/doc/project.rs#L183)
+[src/doc/project.rs:193](../../../src/doc/project.rs#L193)
 
 ```rust
 pub fn next_camera_key(&self) -> Option<usize>
@@ -253,7 +263,7 @@ pub fn next_camera_key(&self) -> Option<usize>
 The frame of the nearest camera key after the current frame.
 
 ### `Project::move_camera_key`
-[src/doc/project.rs:195](../../../src/doc/project.rs#L195)
+[src/doc/project.rs:205](../../../src/doc/project.rs#L205)
 
 ```rust
 pub fn move_camera_key(&mut self, from: usize, to: usize, copy: bool) -> bool
@@ -263,7 +273,7 @@ Moves (or with `copy`, copies) the camera key on `from` to `to`, replacing any k
 `false` and changes nothing if there's no key on `from` or `from == to`.
 
 ### `Project::cell`
-[src/doc/project.rs:208](../../../src/doc/project.rs#L208)
+[src/doc/project.rs:218](../../../src/doc/project.rs#L218)
 
 ```rust
 pub fn cell(&self, id: CellId) -> Option<&Canvas>
@@ -273,7 +283,7 @@ Read access to drawing `id`, or `None` if the id is out of range. `.map(|c| &**c
 `&Arc<Canvas>` into a plain `&Canvas`.
 
 ### `Project::cell_mut`
-[src/doc/project.rs:213](../../../src/doc/project.rs#L213)
+[src/doc/project.rs:223](../../../src/doc/project.rs#L223)
 
 ```rust
 pub fn cell_mut(&mut self, id: CellId) -> Option<&mut Canvas>
@@ -283,7 +293,7 @@ Write access to drawing `id` — copying it first if a clone of the project (a b
 shares it.
 
 ### `Project::compact_cells`
-[src/doc/project.rs:222](../../../src/doc/project.rs#L222)
+[src/doc/project.rs:232](../../../src/doc/project.rs#L232)
 
 ```rust
 pub fn compact_cells(&mut self)
@@ -293,7 +303,7 @@ Drops every cell no layer shows (deleted drawings, leftovers in older files) and
 Only safe right after opening a file, when nothing else (no undo history, no texture cache) holds cell ids.
 
 ### `Project::alloc_cell`
-[src/doc/project.rs:249](../../../src/doc/project.rs#L249)
+[src/doc/project.rs:259](../../../src/doc/project.rs#L259)
 
 ```rust
 pub fn alloc_cell(&mut self) -> CellId
@@ -302,7 +312,7 @@ pub fn alloc_cell(&mut self) -> CellId
 Adds a new blank cell sized for the active layer and returns its id.
 
 ### `Project::alloc_cell_for`
-[src/doc/project.rs:255](../../../src/doc/project.rs#L255)
+[src/doc/project.rs:265](../../../src/doc/project.rs#L265)
 
 ```rust
 pub fn alloc_cell_for(&mut self, layer: usize) -> CellId
@@ -311,7 +321,7 @@ pub fn alloc_cell_for(&mut self, layer: usize) -> CellId
 Adds a new blank cell sized for `layer` (layers with an enlarged canvas get bigger cells).
 
 ### `Project::draw_cell_size`
-[src/doc/project.rs:271](../../../src/doc/project.rs#L271)
+[src/doc/project.rs:281](../../../src/doc/project.rs#L281)
 
 ```rust
 pub fn draw_cell_size(&self, layer: usize, frame: usize) -> (u32, u32)
@@ -321,7 +331,7 @@ The pixel size of the buffer a stroke on `(layer, frame)` will paint into — th
 size `alloc_cell_for` would create. Pen input mapping uses this, so it must agree with allocation.
 
 ### `Project::resolved_current`
-[src/doc/project.rs:282](../../../src/doc/project.rs#L282)
+[src/doc/project.rs:292](../../../src/doc/project.rs#L292)
 
 ```rust
 pub fn resolved_current(&self) -> Option<CellId>
@@ -330,7 +340,7 @@ pub fn resolved_current(&self) -> Option<CellId>
 The drawing showing at the active layer and frame, if any.
 
 ### `Project::ensure_active_cell`
-[src/doc/project.rs:298](../../../src/doc/project.rs#L298)
+[src/doc/project.rs:308](../../../src/doc/project.rs#L308)
 
 ```rust
 pub fn ensure_active_cell(&mut self) -> CellId
@@ -341,7 +351,7 @@ held cell (painting into the hold edits the shared drawing), or a newly allocate
 shows nothing yet.
 
 ### `Project::ensure_cell`
-[src/doc/project.rs:303](../../../src/doc/project.rs#L303)
+[src/doc/project.rs:313](../../../src/doc/project.rs#L313)
 
 ```rust
 pub fn ensure_cell(&mut self, layer: usize, frame: usize) -> CellId
@@ -350,7 +360,7 @@ pub fn ensure_cell(&mut self, layer: usize, frame: usize) -> CellId
 `ensure_active_cell` for any `(layer, frame)`.
 
 ### `Project::copy_active_cell`
-[src/doc/project.rs:319](../../../src/doc/project.rs#L319)
+[src/doc/project.rs:329](../../../src/doc/project.rs#L329)
 
 ```rust
 pub fn copy_active_cell(&self) -> Option<Canvas>
@@ -360,7 +370,7 @@ A deep copy of the drawing at the active slot (for Copy drawing). A copy rather 
 slots must never share a buffer.
 
 ### `Project::cut_active_cell`
-[src/doc/project.rs:330](../../../src/doc/project.rs#L330)
+[src/doc/project.rs:340](../../../src/doc/project.rs#L340)
 
 ```rust
 pub fn cut_active_cell(&mut self) -> Option<Canvas>
@@ -371,7 +381,7 @@ rather than turned into a hold (which would make the previous drawing appear the
 the wrong frame).
 
 ### `Project::paste_cell_here`
-[src/doc/project.rs:341](../../../src/doc/project.rs#L341)
+[src/doc/project.rs:351](../../../src/doc/project.rs#L351)
 
 ```rust
 pub fn paste_cell_here(&mut self, src: &Canvas) -> CellId
@@ -381,7 +391,7 @@ Keys a copy of `src` at the active slot, replacing what was there. If the layer'
 size, the drawing is re-centred (cropped or padded) rather than stretched.
 
 ### `Project::insert_blank_key_here`
-[src/doc/project.rs:357](../../../src/doc/project.rs#L357)
+[src/doc/project.rs:367](../../../src/doc/project.rs#L367)
 
 ```rust
 pub fn insert_blank_key_here(&mut self) -> CellId
@@ -390,7 +400,7 @@ pub fn insert_blank_key_here(&mut self) -> CellId
 Puts a new empty key on the active slot, breaking any hold.
 
 ### `Project::insert_duplicate_key_here`
-[src/doc/project.rs:368](../../../src/doc/project.rs#L368)
+[src/doc/project.rs:378](../../../src/doc/project.rs#L378)
 
 ```rust
 pub fn insert_duplicate_key_here(&mut self) -> CellId
@@ -400,7 +410,7 @@ Puts a new key on the active slot that is a copy of the drawing that was showing
 keep the drawing as a starting point.
 
 ### `Project::layer_cell_ids`
-[src/doc/project.rs:389](../../../src/doc/project.rs#L389)
+[src/doc/project.rs:399](../../../src/doc/project.rs#L399)
 
 ```rust
 pub fn layer_cell_ids(&self, layer: usize) -> Vec<CellId>
@@ -409,7 +419,7 @@ pub fn layer_cell_ids(&self, layer: usize) -> Vec<CellId>
 Every distinct cell id a layer shows.
 
 ### `Project::expand_layer_canvas`
-[src/doc/project.rs:405](../../../src/doc/project.rs#L405)
+[src/doc/project.rs:415](../../../src/doc/project.rs#L415)
 
 ```rust
 pub fn expand_layer_canvas(&mut self, layer: usize, new_w: u32, new_h: u32)
@@ -420,7 +430,7 @@ pixels centred. Centring keeps the artwork exactly where it was, since layers ar
 centre.
 
 ### `Project::hold_here`
-[src/doc/project.rs:421](../../../src/doc/project.rs#L421)
+[src/doc/project.rs:431](../../../src/doc/project.rs#L431)
 
 ```rust
 pub fn hold_here(&mut self)
@@ -429,7 +439,7 @@ pub fn hold_here(&mut self)
 Deletes the key on the active slot so the previous drawing holds through it.
 
 ### `Project::add_frame`
-[src/doc/project.rs:429](../../../src/doc/project.rs#L429)
+[src/doc/project.rs:439](../../../src/doc/project.rs#L439)
 
 ```rust
 pub fn add_frame(&mut self)
@@ -439,7 +449,7 @@ Inserts one empty frame (a hold) after the current frame on every layer, shiftin
 points after it, and moves the playhead onto the new frame. The loop end follows the timeline end.
 
 ### `Project::duplicate_frame`
-[src/doc/project.rs:446](../../../src/doc/project.rs#L446)
+[src/doc/project.rs:456](../../../src/doc/project.rs#L456)
 
 ```rust
 pub fn duplicate_frame(&mut self)
@@ -449,7 +459,7 @@ Inserts a frame after the current one on every layer that shows the same drawing
 cell is keyed again), and moves the playhead onto it.
 
 ### `Project::delete_frame`
-[src/doc/project.rs:461](../../../src/doc/project.rs#L461)
+[src/doc/project.rs:471](../../../src/doc/project.rs#L471)
 
 ```rust
 pub fn delete_frame(&mut self)
@@ -460,7 +470,7 @@ instead: every slot becomes empty and every cell is replaced by a fresh blank ca
 than clearing in place, so an undo snapshot sharing the old ones stays valid).
 
 ### `Project::insert_frames_before`
-[src/doc/project.rs:496](../../../src/doc/project.rs#L496)
+[src/doc/project.rs:506](../../../src/doc/project.rs#L506)
 
 ```rust
 pub fn insert_frames_before(&mut self, n: usize)
@@ -471,7 +481,7 @@ Everything from the playhead on — drawings, camera and transform keys, pins, t
 moves `n` later, and the playhead moves with its drawing.
 
 ### `Project::keys_insert_frames`
-[src/doc/project.rs:530](../../../src/doc/project.rs#L530)
+[src/doc/project.rs:540](../../../src/doc/project.rs#L540)
 
 ```rust
 fn keys_insert_frames(&mut self, at: usize, n: usize)
@@ -480,7 +490,7 @@ fn keys_insert_frames(&mut self, at: usize, n: usize)
 Shifts camera keys and every layer's transform keys after an insert of `n` frames at `at`.
 
 ### `Project::keys_remove_frames`
-[src/doc/project.rs:543](../../../src/doc/project.rs#L543)
+[src/doc/project.rs:553](../../../src/doc/project.rs#L553)
 
 ```rust
 fn keys_remove_frames(&mut self, at: usize, n: usize)
@@ -489,7 +499,7 @@ fn keys_remove_frames(&mut self, at: usize, n: usize)
 Same after removing frames `at..at+n` (keys on removed frames are dropped).
 
 ### `Project::goto`
-[src/doc/project.rs:555](../../../src/doc/project.rs#L555)
+[src/doc/project.rs:565](../../../src/doc/project.rs#L565)
 
 ```rust
 pub fn goto(&mut self, frame: usize)
@@ -498,7 +508,7 @@ pub fn goto(&mut self, frame: usize)
 Moves the playhead to `frame`, clamped to the timeline.
 
 ### `Project::step`
-[src/doc/project.rs:565](../../../src/doc/project.rs#L565)
+[src/doc/project.rs:575](../../../src/doc/project.rs#L575)
 
 ```rust
 pub fn step(&mut self, delta: isize, wrap: bool)
@@ -507,7 +517,7 @@ pub fn step(&mut self, delta: isize, wrap: bool)
 Moves the playhead by `delta` frames — wrapping around with `wrap`, otherwise stopping at the ends.
 
 ### `Project::clip_base`
-[src/doc/project.rs:587](../../../src/doc/project.rs#L587)
+[src/doc/project.rs:597](../../../src/doc/project.rs#L597)
 
 ```rust
 pub fn clip_base(&self, li: usize) -> Option<usize>
@@ -517,7 +527,7 @@ The base layer that layer `li` is clipped to: the nearest layer below that isn't
 within its group). `None` if `li` isn't clipped or has no possible base.
 
 ### `Project::key_link`
-[src/doc/project.rs:605](../../../src/doc/project.rs#L605)
+[src/doc/project.rs:615](../../../src/doc/project.rs#L615)
 
 ```rust
 pub fn key_link(&self, li: usize) -> Option<usize>
@@ -527,7 +537,7 @@ The layer `li`'s key jumps also stop at (its `keys_from` link), if it still reso
 layer.
 
 ### `Project::jumps_at`
-[src/doc/project.rs:615](../../../src/doc/project.rs#L615)
+[src/doc/project.rs:625](../../../src/doc/project.rs#L625)
 
 ```rust
 pub fn jumps_at(&self, li: usize, f: usize) -> bool
@@ -537,7 +547,7 @@ Whether a "next/previous drawing" jump on layer `li` stops at frame `f`: one of 
 there, or one of its linked layer's does (so a cleanup layer can follow the rough's timing).
 
 ### `Project::toggle_key_link_below`
-[src/doc/project.rs:623](../../../src/doc/project.rs#L623)
+[src/doc/project.rs:633](../../../src/doc/project.rs#L633)
 
 ```rust
 pub fn toggle_key_link_below(&mut self, li: usize) -> bool
@@ -547,7 +557,7 @@ Links layer `li`'s key jumps to the nearest drawing layer below it, or unlinks i
 `false` if there's nothing to link.
 
 ### `Project::add_cleanup_layer`
-[src/doc/project.rs:638](../../../src/doc/project.rs#L638)
+[src/doc/project.rs:648](../../../src/doc/project.rs#L648)
 
 ```rust
 pub fn add_cleanup_layer(&mut self, of: usize) -> Option<usize>
@@ -557,7 +567,7 @@ Adds a layer directly above `of` for redrawing it cleanly: named after it, key j
 made active. `None` for a group header.
 
 ### `Project::prev_key_frame`
-[src/doc/project.rs:656](../../../src/doc/project.rs#L656)
+[src/doc/project.rs:666](../../../src/doc/project.rs#L666)
 
 ```rust
 pub fn prev_key_frame(&self) -> Option<usize>
@@ -567,7 +577,7 @@ The nearest drawing key on the active layer before the current frame (holds skip
 count). Used by the "previous drawing" shortcut.
 
 ### `Project::next_key_frame`
-[src/doc/project.rs:667](../../../src/doc/project.rs#L667)
+[src/doc/project.rs:677](../../../src/doc/project.rs#L677)
 
 ```rust
 pub fn next_key_frame(&self) -> Option<usize>
@@ -576,7 +586,7 @@ pub fn next_key_frame(&self) -> Option<usize>
 The nearest drawing key on the active layer after the current frame.
 
 ### `Project::relink_after_insert`
-[src/doc/project.rs:677](../../../src/doc/project.rs#L677)
+[src/doc/project.rs:687](../../../src/doc/project.rs#L687)
 
 ```rust
 pub(crate) fn relink_after_insert(&mut self, at: usize)
@@ -586,7 +596,7 @@ After inserting a layer at `at`, shifts every `lines_from` link pointing at `at`
 links keep pointing at the same layers.
 
 ### `Project::relink_after_remove`
-[src/doc/project.rs:689](../../../src/doc/project.rs#L689)
+[src/doc/project.rs:699](../../../src/doc/project.rs#L699)
 
 ```rust
 pub fn relink_after_remove(&mut self, at: usize)
@@ -595,7 +605,7 @@ pub fn relink_after_remove(&mut self, at: usize)
 After removing the layer at `at`, drops links to it and shifts links above it down by one.
 
 ### `Project::relink`
-[src/doc/project.rs:701](../../../src/doc/project.rs#L701)
+[src/doc/project.rs:711](../../../src/doc/project.rs#L711)
 
 ```rust
 pub(crate) fn relink(&mut self, to_new: impl Fn(usize) -> usize)
@@ -604,7 +614,7 @@ pub(crate) fn relink(&mut self, to_new: impl Fn(usize) -> usize)
 After any reorder, remaps every `lines_from` link through `to_new(old_index)`.
 
 ### `Project::add_layer`
-[src/doc/project.rs:709](../../../src/doc/project.rs#L709)
+[src/doc/project.rs:719](../../../src/doc/project.rs#L719)
 
 ```rust
 pub fn add_layer(&mut self)
@@ -613,7 +623,7 @@ pub fn add_layer(&mut self)
 Adds a new full-length layer named "Layer N" at the top of the stack and selects it.
 
 ### `Project::add_layer_above_active`
-[src/doc/project.rs:719](../../../src/doc/project.rs#L719)
+[src/doc/project.rs:729](../../../src/doc/project.rs#L729)
 
 ```rust
 pub fn add_layer_above_active(&mut self) -> usize
@@ -622,7 +632,7 @@ pub fn add_layer_above_active(&mut self) -> usize
 Adds a new full-length layer directly above the active one, selects it, and returns its index.
 
 ### `Project::move_layer`
-[src/doc/project.rs:735](../../../src/doc/project.rs#L735)
+[src/doc/project.rs:745](../../../src/doc/project.rs#L745)
 
 ```rust
 pub fn move_layer(&mut self, from: usize, to: usize)
@@ -631,7 +641,7 @@ pub fn move_layer(&mut self, from: usize, to: usize)
 Moves layer `from` to index `to` (the others close up), keeping links valid, and selects it.
 
 ### `Project::ensure_frame_count`
-[src/doc/project.rs:760](../../../src/doc/project.rs#L760)
+[src/doc/project.rs:770](../../../src/doc/project.rs#L770)
 
 ```rust
 pub fn ensure_frame_count(&mut self, n: usize)
@@ -640,7 +650,7 @@ pub fn ensure_frame_count(&mut self, n: usize)
 Grows the timeline to at least `n` frames, padding every layer with holds.
 
 ### `Project::add_layer_below_active`
-[src/doc/project.rs:777](../../../src/doc/project.rs#L777)
+[src/doc/project.rs:787](../../../src/doc/project.rs#L787)
 
 ```rust
 pub fn add_layer_below_active(&mut self, name: impl Into<String>) -> usize
@@ -649,7 +659,7 @@ pub fn add_layer_below_active(&mut self, name: impl Into<String>) -> usize
 Adds a new layer directly below the active one; the active layer stays selected (its index shifts up).
 
 ### `Project::add_background_layer`
-[src/doc/project.rs:795](../../../src/doc/project.rs#L795)
+[src/doc/project.rs:805](../../../src/doc/project.rs#L805)
 
 ```rust
 pub fn add_background_layer(&mut self, name: impl Into<String>) -> usize
@@ -658,7 +668,7 @@ pub fn add_background_layer(&mut self, name: impl Into<String>) -> usize
 Adds a new layer at the very bottom (index 0) — a background; the active layer stays selected.
 
 ### `Project::delete_layer`
-[src/doc/project.rs:804](../../../src/doc/project.rs#L804)
+[src/doc/project.rs:814](../../../src/doc/project.rs#L814)
 
 ```rust
 pub fn delete_layer(&mut self)
@@ -667,7 +677,7 @@ pub fn delete_layer(&mut self)
 Deletes the active layer (never the last one), fixes links, and keeps the selection in range.
 
 ### `Project::block_at`
-[src/doc/project.rs:830](../../../src/doc/project.rs#L830)
+[src/doc/project.rs:842](../../../src/doc/project.rs#L842)
 
 ```rust
 pub fn block_at(&self, layer: usize, frame: usize) -> Option<Block>
@@ -677,7 +687,7 @@ The drawing showing on `frame` on `layer`, with the frames it holds for, as a `B
 layer's first key.
 
 ### `Project::blocks`
-[src/doc/project.rs:843](../../../src/doc/project.rs#L843)
+[src/doc/project.rs:855](../../../src/doc/project.rs#L855)
 
 ```rust
 pub fn blocks(&self, layer: usize) -> Vec<Block>
@@ -686,7 +696,7 @@ pub fn blocks(&self, layer: usize) -> Vec<Block>
 Every drawing (block) on `layer`, in timeline order.
 
 ### `Project::settle_length`
-[src/doc/project.rs:861](../../../src/doc/project.rs#L861)
+[src/doc/project.rs:873](../../../src/doc/project.rs#L873)
 
 ```rust
 fn settle_length(&mut self, need: usize)
@@ -694,17 +704,50 @@ fn settle_length(&mut self, need: usize)
 
 Grows the timeline to `need` frames, padding only layers shorter than that.
 
-### `Project::insert_layer_frames`
-[src/doc/project.rs:877](../../../src/doc/project.rs#L877)
+### `Project::insert_layer_frames_at`
+[src/doc/project.rs:897](../../../src/doc/project.rs#L897)
 
 ```rust
-pub fn insert_layer_frames(&mut self, layer: usize, after: usize, n: usize)
+pub fn insert_layer_frames_at(&mut self, layers: &[usize], at: usize, n: usize, fill: NewFrames)
 ```
 
-Inserts `n` held frames on one layer after `after`: that drawing holds longer and later ones slide right.
+Insert `n` frames at `at` on `layers` only — what showed from `at` on slides `n` frames later on each, its transform keys with it — and grow the timeline by `n`, so nothing is pushed off its end and no layer's last drawing is cut short. Other layers keep their frames and hold their last drawing through the new end. The camera and the grids are the whole scene's and stay put; `Project::insert_frames_before` and `Project::add_frame` move them, for an insert on every layer.
+
+`fill` says what the new frames show (see `NewFrames`). Group rows are skipped. The playhead is left where it is, for the caller to place.
+
+### `Project::grow_by`
+[src/doc/project.rs:926](../../../src/doc/project.rs#L926)
+
+```rust
+fn grow_by(&mut self, n: usize)
+```
+
+Lengthen the timeline by `n`, every layer shorter than that holding its last drawing to the new end. A loop over the whole timeline stays whole; a shorter one stays where it was.
+
+### `Project::remove_layer_frames_at`
+[src/doc/project.rs:943](../../../src/doc/project.rs#L943)
+
+```rust
+pub fn remove_layer_frames_at(&mut self, layers: &[usize], at: usize, n: usize)
+```
+
+Remove `n` frames starting at `at` from `layers` only — see `Project::remove_layer_frames`. The timeline keeps its length.
+
+### `Project::insert_inbetweens`
+[src/doc/project.rs:967](../../../src/doc/project.rs#L967)
+
+```rust
+pub fn insert_inbetweens(&mut self, layers: &[usize], frame: usize) -> Vec<(usize, usize)>
+```
+
+A new blank drawing on each of `layers`, in the middle of the gap between the drawing showing on `frame` there (A) and the next one (B), for drawing the in-between over onion skin. Returns `(layer, frame)` for each drawing made.
+
+The middle rounds down: A on 1 and B on 6 (5 frames apart) puts it on 3, A keeping 1–2 and the new drawing 3–5. Nothing moves when there is room. When A and B sit on neighbouring frames there is none, so A holds one frame longer first — B and everything after it on that layer slide a frame later — and the new drawing takes that frame. Frames added that way grow the timeline, by one however many layers slid, as every frame insert on some layers does (`Project::insert_layer_frames_at`).
+
+A layer is skipped, unchanged, when it is a group's row, or `frame` is before its first drawing or on its last: there is no B to go between.
 
 ### `Project::remove_layer_frames`
-[src/doc/project.rs:890](../../../src/doc/project.rs#L890)
+[src/doc/project.rs:1006](../../../src/doc/project.rs#L1006)
 
 ```rust
 pub fn remove_layer_frames(&mut self, layer: usize, at: usize, n: usize)
@@ -714,7 +757,7 @@ Removes `n` frames from one layer at `at`: later drawings slide left and the las
 fill the end.
 
 ### `Project::retime_block`
-[src/doc/project.rs:897](../../../src/doc/project.rs#L897)
+[src/doc/project.rs:1014](../../../src/doc/project.rs#L1014)
 
 ```rust
 pub fn retime_block(&mut self, b: Block, new_len: usize)
@@ -723,7 +766,7 @@ pub fn retime_block(&mut self, b: Block, new_len: usize)
 Changes how long drawing `b` holds to `new_len` frames (at least 1), sliding later drawings.
 
 ### `Project::set_timing`
-[src/doc/project.rs:918](../../../src/doc/project.rs#L918)
+[src/doc/project.rs:1040](../../../src/doc/project.rs#L1040)
 
 ```rust
 pub fn set_timing(&mut self, starts: &[(usize, usize)], n: usize) -> Vec<(usize, usize)>
@@ -733,7 +776,7 @@ Gives every drawing keyed at `starts` a hold of `n` frames ("on twos", "on three
 with a running shift, because retiming one drawing moves every later one. Returns the new starts.
 
 ### `Project::clear_blocks`
-[src/doc/project.rs:949](../../../src/doc/project.rs#L949)
+[src/doc/project.rs:1083](../../../src/doc/project.rs#L1083)
 
 ```rust
 pub fn clear_blocks(&mut self, starts: &[(usize, usize)]) -> Vec<(usize, usize)>
@@ -743,7 +786,7 @@ Deletes the drawings keyed at `starts`, leaving blank frames (each run of adjace
 blank key); nothing else moves. Returns the blank runs' starts.
 
 ### `Project::close_blocks`
-[src/doc/project.rs:984](../../../src/doc/project.rs#L984)
+[src/doc/project.rs:1118](../../../src/doc/project.rs#L1118)
 
 ```rust
 pub fn close_blocks(&mut self, starts: &[(usize, usize)])
@@ -752,7 +795,7 @@ pub fn close_blocks(&mut self, starts: &[(usize, usize)])
 Deletes the drawings keyed at `starts` and closes the gap: later drawings slide left.
 
 ### `Project::drop_allowed`
-[src/doc/project.rs:1010](../../../src/doc/project.rs#L1010)
+[src/doc/project.rs:1144](../../../src/doc/project.rs#L1144)
 
 ```rust
 pub fn drop_allowed(&self, src: usize, dst: usize, copy: bool) -> bool
@@ -762,7 +805,7 @@ Whether a timeline drag from layer `src` to `dst` may land: never onto (or out o
 reference layer.
 
 ### `Project::blocks_keyed_at`
-[src/doc/project.rs:1016](../../../src/doc/project.rs#L1016)
+[src/doc/project.rs:1150](../../../src/doc/project.rs#L1150)
 
 ```rust
 pub fn blocks_keyed_at(&self, starts: &[(usize, usize)]) -> Vec<Block>
@@ -771,7 +814,7 @@ pub fn blocks_keyed_at(&self, starts: &[(usize, usize)]) -> Vec<Block>
 The blocks whose keys are exactly at `starts`.
 
 ### `Project::can_move_blocks`
-[src/doc/project.rs:1027](../../../src/doc/project.rs#L1027)
+[src/doc/project.rs:1161](../../../src/doc/project.rs#L1161)
 
 ```rust
 pub fn can_move_blocks(&self, starts: &[(usize, usize)], dl: isize, df: isize, copy: bool) -> bool
@@ -781,7 +824,7 @@ Whether `move_blocks` would do anything: the drag goes somewhere, the layers inv
 edited, and everything lands within the timeline (or just past its end, which extends it).
 
 ### `Project::move_blocks`
-[src/doc/project.rs:1052](../../../src/doc/project.rs#L1052)
+[src/doc/project.rs:1186](../../../src/doc/project.rs#L1186)
 
 ```rust
 pub fn move_blocks(
@@ -799,7 +842,7 @@ Moves (or copies) every drawing keyed at `starts` by `dl` layers and `df` frames
 ## Free functions
 
 ### `block_keyed_on`
-[src/doc/project.rs:1117](../../../src/doc/project.rs#L1117)
+[src/doc/project.rs:1251](../../../src/doc/project.rs#L1251)
 
 ```rust
 fn block_keyed_on(l: &Layer, layer: usize, fc: usize, start: usize) -> Option<Block>
@@ -808,7 +851,7 @@ fn block_keyed_on(l: &Layer, layer: usize, fc: usize, start: usize) -> Option<Bl
 The block keyed exactly on frame `start` of a layer, if there is one.
 
 ### `ripple_move`
-[src/doc/project.rs:1147](../../../src/doc/project.rs#L1147)
+[src/doc/project.rs:1281](../../../src/doc/project.rs#L1281)
 
 ```rust
 pub fn ripple_move(
@@ -837,7 +880,7 @@ after:   A A A B B C C      B lands at frame 3; A holds one more frame; C slides
 ## `impl Block`
 
 ### `Block::span`
-[src/doc/project.rs:1264](../../../src/doc/project.rs#L1264)
+[src/doc/project.rs:1410](../../../src/doc/project.rs#L1410)
 
 ```rust
 pub fn span(&self, frame_count: usize) -> Range<usize>
@@ -848,7 +891,7 @@ The frame range a block covers (`start..start+len`, or to the end of the timelin
 ## Free functions
 
 ### `distinct_layers`
-[src/doc/project.rs:1270](../../../src/doc/project.rs#L1270)
+[src/doc/project.rs:1416](../../../src/doc/project.rs#L1416)
 
 ```rust
 fn distinct_layers(starts: &[(usize, usize)]) -> Vec<usize>
@@ -857,7 +900,7 @@ fn distinct_layers(starts: &[(usize, usize)]) -> Vec<usize>
 Each layer index mentioned in `starts`, once, in order.
 
 ### `layer_insert`
-[src/doc/project.rs:1280](../../../src/doc/project.rs#L1280)
+[src/doc/project.rs:1426](../../../src/doc/project.rs#L1426)
 
 ```rust
 pub fn layer_insert(l: &mut Layer, after: usize, n: usize)
@@ -866,7 +909,7 @@ pub fn layer_insert(l: &mut Layer, after: usize, n: usize)
 Inserts `n` holds after frame `after` on one layer (tracker points kept in step).
 
 ### `layer_insert_at`
-[src/doc/project.rs:1286](../../../src/doc/project.rs#L1286)
+[src/doc/project.rs:1432](../../../src/doc/project.rs#L1432)
 
 ```rust
 pub fn layer_insert_at(l: &mut Layer, at: usize, n: usize)
@@ -875,7 +918,7 @@ pub fn layer_insert_at(l: &mut Layer, at: usize, n: usize)
 Inserts `n` holds at frame `at` (before whatever is there) — the version that can reach frame 0.
 
 ### `layer_remove`
-[src/doc/project.rs:1298](../../../src/doc/project.rs#L1298)
+[src/doc/project.rs:1444](../../../src/doc/project.rs#L1444)
 
 ```rust
 pub fn layer_remove(l: &mut Layer, at: usize, n: usize)
@@ -886,7 +929,7 @@ drawing that continues past it, that drawing is re-keyed at `at` so the next fra
 before.
 
 ### `layer_fit`
-[src/doc/project.rs:1323](../../../src/doc/project.rs#L1323)
+[src/doc/project.rs:1469](../../../src/doc/project.rs#L1469)
 
 ```rust
 pub fn layer_fit(l: &mut Layer, min_len: usize) -> usize
@@ -896,7 +939,7 @@ Trims or pads a layer to the timeline length (or longer, if a key was pushed pas
 timeline length required.
 
 ### `layer_retime`
-[src/doc/project.rs:1341](../../../src/doc/project.rs#L1341)
+[src/doc/project.rs:1491](../../../src/doc/project.rs#L1491)
 
 ```rust
 pub fn layer_retime(
@@ -905,14 +948,14 @@ pub fn layer_retime(
     b: Block,
     new_len: usize,
     blank: impl FnOnce() -> CellId,
-) -> usize
+) -> isize
 ```
 
 `retime_block` for one layer, with `blank` supplying a fresh blank cell when a last drawing is cut short.
 Public so the timeline can preview a retime on a copy of the layer.
 
 ### `recenter`
-[src/doc/project.rs:1369](../../../src/doc/project.rs#L1369)
+[src/doc/project.rs:1521](../../../src/doc/project.rs#L1521)
 
 ```rust
 pub fn recenter(src: &Canvas, new_w: u32, new_h: u32) -> Canvas
@@ -925,80 +968,104 @@ cropped.
 
 ### `mod tests`
 
-Run with `cargo test doc::project::tests` · 56 tests
+Run with `cargo test doc::project::tests` · 58 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_clone_shares_cells_until_one_is_written`](../../../src/doc/project.rs#L1378) | A clone shares cells until one is written. |
-| [`a_duplicated_key_shares_its_drawing_until_drawn_on`](../../../src/doc/project.rs#L1388) | A duplicated key shares its drawing until drawn on. |
-| [`compacting_drops_unshown_cells_and_renumbers_the_rest`](../../../src/doc/project.rs#L1399) | Compacting drops unshown cells and renumbers the rest. |
-| [`step_wraps_at_both_ends_when_looping`](../../../src/doc/project.rs#L1422) | Step wraps at both ends when looping. |
-| [`step_clamps_at_both_ends_when_not_looping`](../../../src/doc/project.rs#L1435) | Step clamps at both ends when not looping. |
-| [`a_camera_key_moves_with_its_ease_and_takes_the_place_of_one_it_lands_on`](../../../src/doc/project.rs#L1449) | A camera key moves with its ease and takes the place of one it lands on. |
-| [`the_smooth_path_is_only_taken_when_asked_for`](../../../src/doc/project.rs#L1488) | The smooth path is an option of the session: off, every frame is what the keys have always given; on, the frames between three keys curve. |
-| [`a_held_camera_stays_on_the_canvas_on_every_frame`](../../../src/doc/project.rs#L1516) | With the camera held on the canvas, a key that left it — and every frame tweened towards one — comes back inside; with it off, they are exactly what the keys say. |
-| [`keep_inside_starts_on_unless_the_camera_already_leaves_the_canvas`](../../../src/doc/project.rs#L1541) | Keep inside canvas starts on for a camera that stays on the canvas, and off for one keyed past its edge — on a key, or only between two. |
-| [`recenter_grows_symmetrically`](../../../src/doc/project.rs#L1574) | A symmetric grow leaves the old pixels centered, which is what keeps a layer visually still (its transform is defined about the cell center). |
-| [`a_new_layer_goes_just_above_the_selected_one`](../../../src/doc/project.rs#L1607) | A new layer goes just above the selected one. |
-| [`moving_a_layer_closes_up_behind_it_and_keeps_links`](../../../src/doc/project.rs#L1624) | Moving a layer closes up behind it and keeps links. |
-| [`draw_cell_size_matches_what_alloc_will_create`](../../../src/doc/project.rs#L1647) | Input mapping sizes an unkeyed slot by the layer's own cell size, not the frame size — otherwise the first stroke on a fresh oversized layer is mapped for one buffer and painted into a bigger one. |
-| [`recenter_shrinks_by_cropping`](../../../src/doc/project.rs#L1667) | Shrinking crops around the center rather than panicking on the copy. |
-| [`expanded_layer_allocates_bigger_cells`](../../../src/doc/project.rs#L1682) | New cells on an expanded layer come out at the layer's size, not the project's — otherwise the next key would silently shrink back. |
-| [`cut_blanks_the_slot_without_disturbing_the_grid`](../../../src/doc/project.rs#L1694) | Cut must not shorten this layer or touch any other: every layer's `exposures` stays `frame_count` long, which the whole timeline assumes. |
-| [`pasted_drawings_are_independent_copies`](../../../src/doc/project.rs#L1716) | Pasted drawings are independent copies. |
-| [`pasting_into_a_differently_sized_layer_recentres`](../../../src/doc/project.rs#L1734) | Pasting into a differently sized layer recentres. |
-| [`key_jump_skips_holds`](../../../src/doc/project.rs#L1762) | The point of the feature: from a held frame the jump reaches the bracketing drawings, not the neighbouring repeats. |
-| [`key_jump_is_strict_about_the_current_frame`](../../../src/doc/project.rs#L1772) | Strictly before / after: sitting on a key must still move off it, otherwise the button would be a no-op wherever it matters most. |
-| [`key_jump_clamps_at_both_ends`](../../../src/doc/project.rs#L1781) | Clamping, not wrapping — `None` is what greys the button out. |
-| [`camera_key_jump_is_strict_and_clamps`](../../../src/doc/project.rs#L1804) | Camera key jump is strict and clamps. |
-| [`camera_key_jump_ignores_keys_past_the_end`](../../../src/doc/project.rs#L1817) | A key past the last frame isn't somewhere the jump can land, so the button greys out instead of doing nothing. |
-| [`key_jump_on_an_untouched_layer_finds_nothing`](../../../src/doc/project.rs#L1828) | The jump reads the *active* layer only. A fresh `Project` keys its first layer on frame 0, so this needs a second, untouched one. |
-| [`a_linked_layer_jumps_through_its_own_and_the_linked_drawings`](../../../src/doc/project.rs#L1844) | The cleanup case: a layer linked to the rough under it stops at the rough's drawings and at its own, and nowhere else. |
-| [`a_broken_key_link_is_ignored`](../../../src/doc/project.rs#L1870) | A link that can't resolve is no link: its target deleted, itself, or a group header. |
-| [`a_block_is_a_key_and_its_hold`](../../../src/doc/project.rs#L1935) | A block is a key and its hold. |
-| [`inserting_frames_slides_only_that_layer`](../../../src/doc/project.rs#L1948) | The end of the timeline stays put: the last drawing's hold absorbs it. |
-| [`a_key_pushed_off_the_end_grows_every_layer`](../../../src/doc/project.rs#L1960) | A key pushed off the end grows every layer. |
-| [`removing_frames_keeps_what_showed_after_the_cut`](../../../src/doc/project.rs#L1970) | Removing frames keeps what showed after the cut. |
-| [`retiming_a_drawing_slides_the_ones_after_it`](../../../src/doc/project.rs#L1987) | Retiming a drawing slides the ones after it. |
-| [`retiming_the_last_drawing_stops_it_or_grows_the_timeline`](../../../src/doc/project.rs#L1998) | Retiming the last drawing stops it or grows the timeline. |
-| [`set_timing_puts_a_run_on_twos`](../../../src/doc/project.rs#L2013) | Set timing puts a run on twos. |
-| [`clearing_leaves_blank_frames_and_moves_nothing`](../../../src/doc/project.rs#L2024) | Clearing leaves blank frames and moves nothing. |
-| [`closing_the_gap_slides_later_drawings_up`](../../../src/doc/project.rs#L2039) | Closing the gap slides later drawings up. |
-| [`moving_within_a_layer_closes_the_gap_and_leaves_no_blank`](../../../src/doc/project.rs#L2064) | Moving within a layer closes the gap and leaves no blank. |
-| [`dragging_onto_the_next_drawing_swaps_them`](../../../src/doc/project.rs#L2076) | Dragging onto the next drawing swaps them. |
-| [`landing_in_a_hold_splits_it`](../../../src/doc/project.rs#L2087) | Landing in a hold splits it. |
-| [`a_drawing_moved_into_an_earlier_hold_splits_it`](../../../src/doc/project.rs#L2102) | A drawing moved into an earlier hold splits it. |
-| [`moving_to_an_empty_layer_hands_the_buffer_over_and_stops_it`](../../../src/doc/project.rs#L2112) | Moving to an empty layer hands the buffer over and stops it. |
-| [`a_cross_layer_move_copies_when_it_has_to`](../../../src/doc/project.rs#L2125) | A cross layer move copies when it has to. |
-| [`a_last_drawing_moved_to_another_layer_keeps_its_length`](../../../src/doc/project.rs#L2146) | A last drawing moved to another layer keeps its length. |
-| [`a_last_drawing_moved_left_splits_the_hold_it_lands_in`](../../../src/doc/project.rs#L2157) | A last drawing moved left splits the hold it lands in. |
-| [`the_last_drawings_hold_does_not_pick_up_past_the_end`](../../../src/doc/project.rs#L2167) | Dropping into the last drawing's hold near the end: that hold is only filler to the end, so it doesn't pick up again past it. |
-| [`moving_a_run_lands_it_back_to_back_in_either_direction`](../../../src/doc/project.rs#L2176) | Moving a run lands it back to back in either direction. |
-| [`scattered_drawings_land_together_in_order`](../../../src/doc/project.rs#L2190) | Scattered drawings land together in order. |
-| [`a_drawing_on_the_last_step_is_pushed_along_never_erased`](../../../src/doc/project.rs#L2202) | The reported bug: with a drawing on the last step, copying and moving drawings in front of it erased it instead of pushing it along. |
-| [`dropping_just_past_the_end_appends`](../../../src/doc/project.rs#L2227) | Dropping just past the end appends. |
-| [`moving_a_rectangle_down_a_layer_moves_the_lower_row_first`](../../../src/doc/project.rs#L2236) | Moving a rectangle down a layer moves the lower row first. |
-| [`locked_layers_are_never_edited_by_a_drag`](../../../src/doc/project.rs#L2253) | Locked layers are never edited by a drag. |
-| [`pins_follow_their_drawings_through_frame_inserts`](../../../src/doc/project.rs#L2283) | Pins follow their drawings through frame inserts. |
-| [`a_pin_on_a_removed_frame_goes_with_it`](../../../src/doc/project.rs#L2299) | A pin on a removed frame goes with it. |
-| [`inserting_before_the_first_frame_slides_every_layer_and_key`](../../../src/doc/project.rs#L2324) | Frames inserted before the first one go in on every layer, blank: every drawing slides, every key with it, and the playhead stays on the drawing it was on. |
-| [`inserting_before_mid_timeline_holds_what_showed_before`](../../../src/doc/project.rs#L2348) | Mid-timeline, what showed before the playhead holds over the new frames, and a shorter loop stays on its drawings. |
-| [`frame_ops_move_camera_and_transform_keys_too`](../../../src/doc/project.rs#L2363) | Adding, duplicating and deleting frames on every layer move the camera's and the layers' transform keys with the drawings; a key on a deleted frame goes with it. |
-| [`padding_the_timeline_leaves_pins_alone`](../../../src/doc/project.rs#L2381) | Padding the timeline leaves pins alone. |
+| [`a_clone_shares_cells_until_one_is_written`](../../../src/doc/project.rs#L1530) | A clone shares cells until one is written. |
+| [`a_duplicated_key_shares_its_drawing_until_drawn_on`](../../../src/doc/project.rs#L1540) | A duplicated key shares its drawing until drawn on. |
+| [`compacting_drops_unshown_cells_and_renumbers_the_rest`](../../../src/doc/project.rs#L1551) | Compacting drops unshown cells and renumbers the rest. |
+| [`step_wraps_at_both_ends_when_looping`](../../../src/doc/project.rs#L1574) | Step wraps at both ends when looping. |
+| [`step_clamps_at_both_ends_when_not_looping`](../../../src/doc/project.rs#L1587) | Step clamps at both ends when not looping. |
+| [`a_camera_key_moves_with_its_ease_and_takes_the_place_of_one_it_lands_on`](../../../src/doc/project.rs#L1601) | A camera key moves with its ease and takes the place of one it lands on. |
+| [`the_smooth_path_is_only_taken_when_asked_for`](../../../src/doc/project.rs#L1640) | The smooth path is an option of the session: off, every frame is what the keys have always given; on, the frames between three keys curve. |
+| [`a_held_camera_stays_on_the_canvas_on_every_frame`](../../../src/doc/project.rs#L1668) | With the camera held on the canvas, a key that left it — and every frame tweened towards one — comes back inside; with it off, they are exactly what the keys say. |
+| [`keep_inside_starts_on_unless_the_camera_already_leaves_the_canvas`](../../../src/doc/project.rs#L1693) | Keep inside canvas starts on for a camera that stays on the canvas, and off for one keyed past its edge — on a key, or only between two. |
+| [`recenter_grows_symmetrically`](../../../src/doc/project.rs#L1726) | A symmetric grow leaves the old pixels centered, which is what keeps a layer visually still (its transform is defined about the cell center). |
+| [`a_new_layer_goes_just_above_the_selected_one`](../../../src/doc/project.rs#L1759) | A new layer goes just above the selected one. |
+| [`moving_a_layer_closes_up_behind_it_and_keeps_links`](../../../src/doc/project.rs#L1776) | Moving a layer closes up behind it and keeps links. |
+| [`draw_cell_size_matches_what_alloc_will_create`](../../../src/doc/project.rs#L1799) | Input mapping sizes an unkeyed slot by the layer's own cell size, not the frame size — otherwise the first stroke on a fresh oversized layer is mapped for one buffer and painted into a bigger one. |
+| [`recenter_shrinks_by_cropping`](../../../src/doc/project.rs#L1819) | Shrinking crops around the center rather than panicking on the copy. |
+| [`expanded_layer_allocates_bigger_cells`](../../../src/doc/project.rs#L1834) | New cells on an expanded layer come out at the layer's size, not the project's — otherwise the next key would silently shrink back. |
+| [`cut_blanks_the_slot_without_disturbing_the_grid`](../../../src/doc/project.rs#L1846) | Cut must not shorten this layer or touch any other: every layer's `exposures` stays `frame_count` long, which the whole timeline assumes. |
+| [`pasted_drawings_are_independent_copies`](../../../src/doc/project.rs#L1868) | Pasted drawings are independent copies. |
+| [`pasting_into_a_differently_sized_layer_recentres`](../../../src/doc/project.rs#L1886) | Pasting into a differently sized layer recentres. |
+| [`key_jump_skips_holds`](../../../src/doc/project.rs#L1914) | The point of the feature: from a held frame the jump reaches the bracketing drawings, not the neighbouring repeats. |
+| [`key_jump_is_strict_about_the_current_frame`](../../../src/doc/project.rs#L1924) | Strictly before / after: sitting on a key must still move off it, otherwise the button would be a no-op wherever it matters most. |
+| [`key_jump_clamps_at_both_ends`](../../../src/doc/project.rs#L1933) | Clamping, not wrapping — `None` is what greys the button out. |
+| [`camera_key_jump_is_strict_and_clamps`](../../../src/doc/project.rs#L1956) | Camera key jump is strict and clamps. |
+| [`camera_key_jump_ignores_keys_past_the_end`](../../../src/doc/project.rs#L1969) | A key past the last frame isn't somewhere the jump can land, so the button greys out instead of doing nothing. |
+| [`key_jump_on_an_untouched_layer_finds_nothing`](../../../src/doc/project.rs#L1980) | The jump reads the *active* layer only. A fresh `Project` keys its first layer on frame 0, so this needs a second, untouched one. |
+| [`a_linked_layer_jumps_through_its_own_and_the_linked_drawings`](../../../src/doc/project.rs#L1996) | The cleanup case: a layer linked to the rough under it stops at the rough's drawings and at its own, and nowhere else. |
+| [`a_broken_key_link_is_ignored`](../../../src/doc/project.rs#L2022) | A link that can't resolve is no link: its target deleted, itself, or a group header. |
+| [`a_block_is_a_key_and_its_hold`](../../../src/doc/project.rs#L2087) | A block is a key and its hold. |
+| [`inserting_frames_slides_only_that_layer`](../../../src/doc/project.rs#L2101) | Frames inserted on one layer slide only its drawings; the timeline grows by as many, and the other layers hold their last drawing to the new end. |
+| [`a_key_pushed_off_the_end_grows_every_layer`](../../../src/doc/project.rs#L2113) | A key pushed off the end grows every layer. |
+| [`removing_frames_keeps_what_showed_after_the_cut`](../../../src/doc/project.rs#L2123) | Removing frames keeps what showed after the cut. |
+| [`retiming_a_drawing_slides_the_ones_after_it`](../../../src/doc/project.rs#L2142) | Lengthening a drawing slides the later ones and grows the timeline by as much; shortening it slides them back and keeps the length. |
+| [`retiming_moves_the_layers_transform_keys_with_its_drawings`](../../../src/doc/project.rs#L2154) | A retime moves the layer's transform keys along with the drawings after it, both ways. |
+| [`set_timing_grows_by_the_largest_net_gain`](../../../src/doc/project.rs#L2167) | Timing follows each layer's net change: one drawing longer and one shorter by as much leaves the length; across layers the largest gain counts, once. |
+| [`retiming_the_last_drawing_stops_it_or_grows_the_timeline`](../../../src/doc/project.rs#L2192) | Retiming the last drawing stops it or grows the timeline. |
+| [`set_timing_puts_a_run_on_twos`](../../../src/doc/project.rs#L2207) | Set timing puts a run on twos. |
+| [`clearing_leaves_blank_frames_and_moves_nothing`](../../../src/doc/project.rs#L2218) | Clearing leaves blank frames and moves nothing. |
+| [`closing_the_gap_slides_later_drawings_up`](../../../src/doc/project.rs#L2233) | Closing the gap slides later drawings up. |
+| [`moving_within_a_layer_closes_the_gap_and_leaves_no_blank`](../../../src/doc/project.rs#L2258) | Moving within a layer closes the gap and leaves no blank. |
+| [`dragging_onto_the_next_drawing_swaps_them`](../../../src/doc/project.rs#L2270) | Dragging onto the next drawing swaps them. |
+| [`landing_in_a_hold_splits_it`](../../../src/doc/project.rs#L2281) | A copy dropped into another layer's hold splits it: the held drawing picks up again after it, and the timeline grows so that drawing keeps all its frames. |
+| [`a_drawing_moved_into_an_earlier_hold_splits_it`](../../../src/doc/project.rs#L2298) | A drawing moved into an earlier hold splits it. |
+| [`moving_to_an_empty_layer_hands_the_buffer_over_and_stops_it`](../../../src/doc/project.rs#L2308) | Moving to an empty layer hands the buffer over and stops it with a blank; the target gained frames, so the timeline grows, and the source closes up and keeps its length. |
+| [`a_cross_layer_move_copies_when_it_has_to`](../../../src/doc/project.rs#L2323) | A cross layer move copies when it has to. |
+| [`a_last_drawing_moved_to_another_layer_keeps_its_length`](../../../src/doc/project.rs#L2344) | A last drawing moved to the front of another layer keeps its length, and that layer's own drawing keeps all its frames behind it as the timeline grows. |
+| [`a_last_drawing_moved_left_splits_the_hold_it_lands_in`](../../../src/doc/project.rs#L2357) | A last drawing moved left splits the hold it lands in. |
+| [`the_last_drawings_hold_does_not_pick_up_past_the_end`](../../../src/doc/project.rs#L2367) | A move along one layer gains nothing, so a drop into the last drawing's hold near the end doesn't pick it up again past the end, and the timeline keeps its length. |
+| [`moving_a_run_lands_it_back_to_back_in_either_direction`](../../../src/doc/project.rs#L2376) | Moving a run lands it back to back in either direction. |
+| [`scattered_drawings_land_together_in_order`](../../../src/doc/project.rs#L2390) | Scattered drawings land together in order. |
+| [`a_drawing_on_the_last_step_is_pushed_along_never_erased`](../../../src/doc/project.rs#L2402) | The reported bug: with a drawing on the last step, copying and moving drawings in front of it erased it instead of pushing it along. |
+| [`dropping_just_past_the_end_appends`](../../../src/doc/project.rs#L2427) | Dropping just past the end appends. |
+| [`moving_a_rectangle_down_a_layer_moves_the_lower_row_first`](../../../src/doc/project.rs#L2436) | Moving a rectangle down a layer moves the lower row first. |
+| [`locked_layers_are_never_edited_by_a_drag`](../../../src/doc/project.rs#L2453) | Locked layers are never edited by a drag. |
+| [`pins_follow_their_drawings_through_frame_inserts`](../../../src/doc/project.rs#L2483) | Pins follow their drawings through frame inserts. |
+| [`a_pin_on_a_removed_frame_goes_with_it`](../../../src/doc/project.rs#L2499) | A pin on a removed frame goes with it. |
+| [`inserting_before_the_first_frame_slides_every_layer_and_key`](../../../src/doc/project.rs#L2524) | Frames inserted before the first one go in on every layer, blank: every drawing slides, every key with it, and the playhead stays on the drawing it was on. |
+| [`inserting_before_mid_timeline_holds_what_showed_before`](../../../src/doc/project.rs#L2548) | Mid-timeline, what showed before the playhead holds over the new frames, and a shorter loop stays on its drawings. |
+| [`frame_ops_move_camera_and_transform_keys_too`](../../../src/doc/project.rs#L2563) | Adding, duplicating and deleting frames on every layer move the camera's and the layers' transform keys with the drawings; a key on a deleted frame goes with it. |
+| [`padding_the_timeline_leaves_pins_alone`](../../../src/doc/project.rs#L2581) | Padding the timeline leaves pins alone. |
 
 **Test helpers** (used only by the tests above):
 
-- [`names`](../../../src/doc/project.rs#L1587) — Names.
-- [`abc`](../../../src/doc/project.rs#L1592) — Three layers named A (bottom), B, C (top); C's fills read B's lines.
-- [`keyed_on_fours`](../../../src/doc/project.rs#L1749) — Keys on 0 / 4 / 8 of an 11-frame layer — the shape the jump buttons navigate.
-- [`camera_keyed`](../../../src/doc/project.rs#L1794) — Camera keys on 2 and 7 of a 10-frame timeline, plus one left past the end the way a frame delete leaves it.
-- [`key`](../../../src/doc/project.rs#L1888) — Key a fresh drawing on (`layer`, `f`) whose first byte is `mark`, so a test can tell which drawing shows where after it has moved.
-- [`sheet`](../../../src/doc/project.rs#L1897) — One layer, `frames` long, with a drawing keyed on each of `keys`, marked with its key frame + 1.
-- [`key_frames`](../../../src/doc/project.rs#L1907) — Key frames.
-- [`row`](../../../src/doc/project.rs#L1912) — The mark of the drawing showing on every frame; 0 for nothing or blank.
-- [`assert_sound`](../../../src/doc/project.rs#L1920) — What the whole timeline assumes: every layer exactly as long as the timeline, and no cell shown on two layers.
-- [`mv`](../../../src/doc/project.rs#L2057) — Move (or copy) the drawing keyed on `from` so it starts on (`to_layer`, `to_frame`).
-- [`pin_frames`](../../../src/doc/project.rs#L2264) — Pin frames.
-- [`pinned`](../../../src/doc/project.rs#L2268) — Pinned.
-- [`cam_key`](../../../src/doc/project.rs#L2308) — Cam key.
-- [`cam_frames`](../../../src/doc/project.rs#L2316) — Cam frames.
+- [`names`](../../../src/doc/project.rs#L1739) — Names.
+- [`abc`](../../../src/doc/project.rs#L1744) — Three layers named A (bottom), B, C (top); C's fills read B's lines.
+- [`keyed_on_fours`](../../../src/doc/project.rs#L1901) — Keys on 0 / 4 / 8 of an 11-frame layer — the shape the jump buttons navigate.
+- [`camera_keyed`](../../../src/doc/project.rs#L1946) — Camera keys on 2 and 7 of a 10-frame timeline, plus one left past the end the way a frame delete leaves it.
+- [`key`](../../../src/doc/project.rs#L2040) — Key a fresh drawing on (`layer`, `f`) whose first byte is `mark`, so a test can tell which drawing shows where after it has moved.
+- [`sheet`](../../../src/doc/project.rs#L2049) — One layer, `frames` long, with a drawing keyed on each of `keys`, marked with its key frame + 1.
+- [`key_frames`](../../../src/doc/project.rs#L2059) — Key frames.
+- [`row`](../../../src/doc/project.rs#L2064) — The mark of the drawing showing on every frame; 0 for nothing or blank.
+- [`assert_sound`](../../../src/doc/project.rs#L2072) — What the whole timeline assumes: every layer exactly as long as the timeline, and no cell shown on two layers.
+- [`mv`](../../../src/doc/project.rs#L2251) — Move (or copy) the drawing keyed on `from` so it starts on (`to_layer`, `to_frame`).
+- [`pin_frames`](../../../src/doc/project.rs#L2464) — Pin frames.
+- [`pinned`](../../../src/doc/project.rs#L2468) — Pinned.
+- [`cam_key`](../../../src/doc/project.rs#L2508) — Cam key.
+- [`cam_frames`](../../../src/doc/project.rs#L2516) — Cam frames.
+
+### `mod inbetween_tests`
+
+Run with `cargo test doc::project::inbetween_tests` · 10 tests
+
+| Test | What it checks |
+|---|---|
+| [`the_in_between_goes_in_the_middle_of_the_gap`](../../../src/doc/project.rs#L2615) | The in between goes in the middle of the gap. |
+| [`from_inside_a_hold_it_still_goes_between_its_drawing_and_the_next`](../../../src/doc/project.rs#L2628) | From inside a hold it still goes between its drawing and the next. |
+| [`on_twos_it_takes_the_frame_between`](../../../src/doc/project.rs#L2637) | On twos it takes the frame between. |
+| [`neighbouring_drawings_make_room_by_sliding`](../../../src/doc/project.rs#L2644) | Neighbouring drawings make room by sliding. |
+| [`nothing_to_go_between_changes_nothing`](../../../src/doc/project.rs#L2654) | Nothing to go between changes nothing. |
+| [`inserting_before_on_some_layers_leaves_the_rest`](../../../src/doc/project.rs#L2665) | Inserting before on some layers leaves the rest. |
+| [`inserting_before_frame_one_leaves_blank_frames`](../../../src/doc/project.rs#L2683) | Inserting before frame one leaves blank frames. |
+| [`a_duplicate_shows_the_drawing_before_it_again`](../../../src/doc/project.rs#L2691) | A duplicate shows the drawing before it again. |
+| [`removing_frames_on_some_layers_keeps_the_length_and_moves_their_keys`](../../../src/doc/project.rs#L2701) | Removing frames on some layers keeps the length and moves their keys. |
+| [`in_betweens_on_several_layers_grow_the_timeline_once`](../../../src/doc/project.rs#L2714) | In betweens on several layers grow the timeline once. |
+
+**Test helpers** (used only by the tests above):
+
+- [`keyed`](../../../src/doc/project.rs#L2594) — `layers` layers over `frames` frames, each keyed on `keys`.
+- [`keys`](../../../src/doc/project.rs#L2610) — Keys.

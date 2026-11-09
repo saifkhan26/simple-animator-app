@@ -1437,29 +1437,47 @@ fn context_menu(state: &mut AppState, ui: &mut egui::Ui) {
     };
     if ui
         .add(
-            egui::Button::new(format!("Insert {frames} before, every layer"))
+            egui::Button::new("Insert in-between")
+                .shortcut_text(combo_text(state, Action::KeyInbetween)),
+        )
+        .on_hover_text(
+            "A blank drawing in the middle of the gap to the next drawing, on the selected \
+             layers. Drawings on neighbouring frames make room: the later ones slide a frame.",
+        )
+        .clicked()
+    {
+        state.insert_inbetween_here();
+        ui.close_menu();
+    }
+    // The frame commands, by the step size, on the selected layers (the
+    // active one when none are picked; the whole scene when all are):
+    // adds grow the timeline, deletes keep it.
+    let scope = "On the selected layers, or the whole scene when every layer is selected.";
+    if ui
+        .add(
+            egui::Button::new(format!("Insert {frames} before"))
                 .shortcut_text(combo_text(state, Action::FrameInsertBefore)),
         )
-        .on_hover_text("Everything from the playhead on slides later, keys too; blank at the start")
+        .on_hover_text(format!("{scope} From the playhead on, drawings slide later; blank at the start."))
         .clicked()
     {
         state.insert_frames_before();
         ui.close_menu();
     }
     if ui
-        .button(format!("Insert {frames} on this layer"))
-        .on_hover_text("The drawing here holds longer; later ones on this layer slide")
+        .add(egui::Button::new(format!("Add {frames} after")).shortcut_text(combo_text(state, Action::FrameAdd)))
+        .on_hover_text(format!("{scope} The drawing here holds longer; later ones slide."))
         .clicked()
     {
-        state.insert_layer_frames_here(n);
+        state.add_frames();
         ui.close_menu();
     }
     if ui
-        .button(format!("Remove {frames} on this layer"))
-        .on_hover_text("Later drawings on this layer slide up")
+        .add(egui::Button::new(format!("Delete {frames}")).shortcut_text(combo_text(state, Action::FrameDelete)))
+        .on_hover_text(format!("{scope} From the playhead on; later drawings slide up."))
         .clicked()
     {
-        state.remove_layer_frames_here(n);
+        state.delete_frames();
         ui.close_menu();
     }
     ui.separator();

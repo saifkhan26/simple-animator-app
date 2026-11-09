@@ -7,6 +7,7 @@ use egui_phosphor::regular as ic;
 use crate::app::{
     AppState, CameraFraming, ExportKind, FillMode, LassoHeld, NavKind, PanelId, SelGesture, MP4_PRESETS,
 };
+use crate::app::autosave::{Pending, Unsaved};
 use crate::app::brush_sizes::{same_size, size_label};
 use crate::app::pen_slots::{pen_action, MAX_PENS, PEN_ICONS};
 use crate::color::{fmt_rgb, parse_color};
@@ -17,7 +18,7 @@ use crate::input::button_drag::{self, ButtonDrag};
 use crate::input::shortcuts::{Action, Clash};
 use crate::input::tablet::PenPacket;
 use crate::io::frame_order::shot_len;
-use crate::io::{composite, png_import, png_save, project_file};
+use crate::io::{composite, png_import, png_save};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep, ONION_RANGE, PIN_TINTS};
 use crate::tools::fill;
 use crate::tools::select_mask::{SelOp, SelShape};
@@ -161,6 +162,8 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     if let Some(label) = state.bg_label {
         busy_overlay(ctx, label);
     }
+    recovery_dialog(state, ctx);
+    unsaved_dialog(state, ctx);
     save_error_dialog(state, ctx);
     save_toast(state, ctx);
     krita_toast(state, ctx);
@@ -1975,57 +1978,43 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
 
         let n = state.frame_step_count();
         let before_base = if n == 1 {
-            "Insert a frame before this one, on every layer — blank at the start".to_string()
+            "Insert a frame before this one, on the selected layers — blank at the start".to_string()
         } else {
-            format!("Insert {n} frames before this one, on every layer — blank at the start")
+            format!("Insert {n} frames before this one, on the selected layers — blank at the start")
         };
         let before_tip = tip(state, Action::FrameInsertBefore, &before_base);
         if theme::icon_button(ui, ic::COLUMNS_PLUS_LEFT, &before_tip).clicked() {
             state.insert_frames_before();
         }
+        // Every frame button acts on the selected layers (the active one when
+        // none are picked) — the whole scene when every layer is selected —
+        // and by the step size: adds grow the timeline, deletes keep it.
         let add_base = if n == 1 {
-            "Add frame (hold)".to_string()
+            "Add a frame after this one, on the selected layers (hold)".to_string()
         } else {
-            format!("Add {n} frames (hold)")
+            format!("Add {n} frames after this one, on the selected layers (hold)")
         };
         let add_tip = tip(state, Action::FrameAdd, &add_base);
         if theme::icon_button(ui, ic::PLUS, &add_tip).clicked() {
             state.add_frames();
         }
         let dup_base = if n == 1 {
-            "Duplicate frame".to_string()
+            "Duplicate this frame, on the selected layers".to_string()
         } else {
-            format!("Duplicate frame ×{n}")
+            format!("Duplicate this frame ×{n}, on the selected layers")
         };
         let dup_tip = tip(state, Action::FrameDuplicate, &dup_base);
         if theme::icon_button(ui, ic::COPY, &dup_tip).clicked() {
             state.duplicate_frames();
         }
-        let del_tip = tip(state, Action::FrameDelete, "Delete frame");
-        if theme::icon_button(ui, ic::TRASH, &del_tip).clicked() {
-            state.delete_frame();
-        }
-        gap(ui);
-
-        // The same step size, on the active layer alone: its drawings slide,
-        // every other layer stays where it is.
-        let frames = if n == 1 {
-            "a frame".to_string()
+        let del_base = if n == 1 {
+            "Delete this frame, on the selected layers — later drawings slide up".to_string()
         } else {
-            format!("{n} frames")
+            format!("Delete {n} frames from this one, on the selected layers — later drawings slide up")
         };
-        let ins_tip = format!(
-            "Insert {frames} on this layer — the drawing at the playhead holds longer, \
-             later ones slide"
-        );
-        if theme::icon_button(ui, ic::ARROWS_OUT_LINE_HORIZONTAL, &ins_tip).clicked() {
-            state.insert_layer_frames_here(n);
-        }
-        let rem_tip = format!(
-            "Remove {frames} on this layer, from the playhead — later drawings slide up"
-        );
-        if theme::icon_button(ui, ic::ARROWS_IN_LINE_HORIZONTAL, &rem_tip).clicked() {
-            state.remove_layer_frames_here(n);
+        let del_tip = tip(state, Action::FrameDelete, &del_base);
+        if theme::icon_button(ui, ic::TRASH, &del_tip).clicked() {
+            state.delete_frames();
         }
 
         // Right to left: fps at the edge, the frame counter beside it.
@@ -4807,6 +4796,14 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                         p.insert_duplicate_key_here();
                     });
                 }
+                let between = tip(
+                    state,
+                    Action::KeyInbetween,
+                    "Insert in-between: a blank drawing in the middle of the gap to the next one",
+                );
+                if theme::icon_button(ui, ic::SQUARE_SPLIT_HORIZONTAL, &between).clicked() {
+                    state.insert_inbetween_here();
+                }
                 if theme::icon_button(ui, ic::PUSH_PIN, "Hold (delete key)").clicked() {
                     state.structural_edit(false, |p| p.hold_here());
                 }
@@ -5033,6 +5030,26 @@ fn settings_window(state: &mut AppState, ctx: &egui::Context) {
         .show(ctx, |ui| {
             drag_by_title_only(ui);
             appearance_section(state, ui);
+            ui.add_space(6.0);
+            theme::section_header(ui, ic::FLOPPY_DISK, "Files");
+            ui.horizontal(|ui| {
+                ui.label("Autosave every");
+                ui.add(
+                    egui::DragValue::new(&mut state.autosave.minutes)
+                        .range(0..=60)
+                        .speed(0.1)
+                        .custom_formatter(|m, _| if m < 0.5 { "off".to_string() } else { format!("{m:.0} min") })
+                        .custom_parser(|s| {
+                            let s = s.trim().trim_end_matches("min").trim();
+                            if s.eq_ignore_ascii_case("off") { Some(0.0) } else { s.parse().ok() }
+                        }),
+                )
+                .on_hover_text(
+                    "Unsaved work is copied to a separate autosave this often — never \
+                     over your file. If Animator closes without saving, it is offered \
+                     back the next time Animator starts. 0 = off.",
+                );
+            });
             ui.add_space(6.0);
             theme::section_header(ui, ic::MOUSE, "Input");
             ui.checkbox(&mut state.invert_timeline_scroll, "Invert timeline scroll")
@@ -8733,11 +8750,7 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
             .button(theme::icon_text(ic::FOLDER_OPEN, &open_label))
             .clicked()
         {
-            match project_file::load_dialog() {
-                Ok(Some((p, path))) => state.load_project(p, Some(path)),
-                Ok(None) => {}
-                Err(e) => log::error!("Open project failed: {e:#}"),
-            }
+            state.request(Pending::Open);
             ui.close_menu();
         }
         // Name the file Save is about to overwrite — it no longer prompts, so
@@ -9254,13 +9267,13 @@ fn new_project_dialog(state: &mut AppState, ctx: &egui::Context) {
         state.save_preset();
     }
     if create {
-        let (w, h, f) = (
+        let (width, height, fps) = (
             state.new_project_cfg.width.max(1),
             state.new_project_cfg.height.max(1),
             state.new_project_cfg.fps.max(1.0),
         );
-        state.reset_with(w, h, f);
         state.show_new_project = false;
+        state.request(Pending::New { width, height, fps });
     } else if cancel || !open {
         state.show_new_project = false;
     }
@@ -9770,6 +9783,159 @@ fn krita_toast(state: &mut AppState, ctx: &egui::Context) {
                     });
                 });
         });
+}
+
+/// "Save changes before …?" — held up by a close, an Open, a New or a
+/// recovery that would drop unsaved work (see `app::autosave`).
+fn unsaved_dialog(state: &mut AppState, ctx: &egui::Context) {
+    let Some(pending) = state.unsaved_prompt.clone() else {
+        return;
+    };
+    let name = match state.project_path.as_ref().and_then(|p| p.file_name()) {
+        Some(n) => format!("“{}”", n.to_string_lossy()),
+        None => "this untitled project".to_string(),
+    };
+    let mut answer = None;
+    egui::Window::new(theme::icon_text(ic::FLOPPY_DISK, "Unsaved changes"))
+        .id(egui::Id::new("window_unsaved"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .frame(floating_frame())
+        .show(ctx, |ui| {
+            ui.set_max_width(380.0);
+            ui.label(
+                egui::RichText::new(format!("Save changes to {name} before {}?", pending.verb()))
+                    .color(theme::text()),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    answer = Some(Unsaved::Save);
+                }
+                if ui.button("Don't save").clicked() {
+                    answer = Some(Unsaved::Discard);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(Unsaved::Cancel);
+                }
+            });
+        });
+    if answer.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        answer = Some(Unsaved::Cancel);
+    }
+    if let Some(a) = answer {
+        state.answer_unsaved(a);
+    }
+}
+
+/// How long ago `t` was, in words.
+fn ago(t: std::time::SystemTime) -> String {
+    let s = std::time::SystemTime::now().duration_since(t).map_or(0, |d| d.as_secs());
+    match s {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86_399 => format!("{} h ago", s / 3600),
+        _ => match s / 86_400 {
+            1 => "yesterday".to_string(),
+            d => format!("{d} days ago"),
+        },
+    }
+}
+
+/// Offered at launch: work an earlier run autosaved and never saved,
+/// because it crashed or was shut down without asking.
+fn recovery_dialog(state: &mut AppState, ctx: &egui::Context) {
+    // Out of the way while the unsaved-changes prompt it raised is up: both
+    // sit in the middle of the window.
+    if !state.autosave.show_recovery || state.autosave.orphans.is_empty() || state.unsaved_prompt.is_some() {
+        return;
+    }
+    let mut recover = None;
+    let mut discard = None;
+    let mut later = false;
+    egui::Window::new(theme::icon_text(ic::CLOCK_COUNTER_CLOCKWISE, "Recover unsaved work"))
+        .id(egui::Id::new("window_recovery"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .frame(floating_frame())
+        .show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            ui.label(
+                egui::RichText::new(
+                    "Animator closed before this work was saved. It was autosaved, \
+                     and can be opened again:",
+                )
+                .color(theme::text()),
+            );
+            ui.add_space(8.0);
+            for o in &state.autosave.orphans {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(o.name()).color(theme::text()).strong());
+                        let detail = format!(
+                            "autosaved {}  ·  {:.1} MB",
+                            ago(o.saved),
+                            o.bytes as f64 / (1024.0 * 1024.0)
+                        );
+                        let detail = ui.label(egui::RichText::new(detail).color(theme::text_muted()).size(11.0));
+                        if let Some(src) = &o.source {
+                            detail.on_hover_text(src.display().to_string());
+                        }
+                        if o.source_saved().is_some_and(|f| f > o.saved) {
+                            ui.label(
+                                egui::RichText::new("The file was saved after this autosave.")
+                                    .color(theme::warn())
+                                    .size(11.0),
+                            );
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let armed = state.autosave.discard_armed.as_deref() == Some(o.dir.as_path());
+                        let label = if armed {
+                            egui::RichText::new("Delete for good?").color(theme::warn())
+                        } else {
+                            egui::RichText::new("Discard")
+                        };
+                        let d = ui.button(label);
+                        let d = if armed {
+                            d.on_hover_text("Click again to delete this autosave. It can't be undone.")
+                        } else {
+                            d
+                        };
+                        if d.clicked() {
+                            discard = Some(o.dir.clone());
+                        }
+                        if ui.button("Recover").clicked() {
+                            recover = Some(o.dir.clone());
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+            }
+            if let Some(e) = &state.autosave.error {
+                ui.label(egui::RichText::new(e).color(theme::warn()).size(11.0));
+                ui.add_space(4.0);
+            }
+            ui.separator();
+            if ui
+                .button("Later")
+                .on_hover_text("Keep these for the next time Animator starts.")
+                .clicked()
+            {
+                later = true;
+            }
+        });
+    if let Some(dir) = recover {
+        state.autosave.discard_armed = None;
+        state.request(Pending::Recover(dir));
+    } else if let Some(dir) = discard {
+        state.discard_orphan(&dir);
+    } else if later {
+        state.autosave.discard_armed = None;
+        state.autosave.show_recovery = false;
+    }
 }
 
 /// Modal report for a failed write. Blocking on purpose: a save that silently
@@ -11905,7 +12071,8 @@ mod timeline_panel_tests {
     }
 
     /// The toolbar's insert-before button puts the step size's worth of
-    /// blank frames in front of the first drawing, on every layer.
+    /// blank frames in front of the first drawing, on the selected layers
+    /// only — here the active one — and the timeline grows by as many.
     #[test]
     fn the_insert_before_button_adds_frames_at_the_start() {
         let (mut state, ctx) = setup();
@@ -11941,8 +12108,13 @@ mod timeline_panel_tests {
         frame(&ctx, &mut state, vec![button(false)]);
         assert_eq!(state.project.frame_count, 3);
         assert_eq!(state.project.current_frame, 2);
-        for (l, was) in state.project.layers.iter().zip(was) {
-            assert_eq!(l.exposures[..], [None, None, was], "{}: blank in front, then what was first", l.name);
+        let active = state.project.current_layer;
+        for (i, (l, was)) in state.project.layers.iter().zip(was).enumerate() {
+            if i == active {
+                assert_eq!(l.exposures[..], [None, None, was], "{}: blank in front, then what was first", l.name);
+            } else {
+                assert_eq!(l.exposures[..], [was, None, None], "{}: unselected, held to the new end", l.name);
+            }
         }
     }
 }
@@ -14649,7 +14821,7 @@ mod window_layout_tests {
         let shapes = settle(&ctx, &mut show);
         let t = texts(&shapes);
         let at = |s: &str| t.iter().find(|(x, _)| x == s).unwrap_or_else(|| panic!("no {s:?} drawn")).1;
-        let last_button = at(ic::ARROWS_IN_LINE_HORIZONTAL);
+        let last_button = at(ic::TRASH);
         let clock = at(ic::CLOCK);
         assert!(clock.min.x > last_button.max.x, "counter {clock:?} over the buttons {last_button:?}");
         assert!(window(&ctx, id).width() > 300.0, "the panel stopped at the toolbar");
