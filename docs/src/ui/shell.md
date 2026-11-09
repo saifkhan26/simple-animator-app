@@ -1,6 +1,6 @@
 # `src/ui/shell.rs` — the whole app window: panels, menus, canvas input and overlays
 
-> **Source:** [src/ui/shell.rs](../../../src/ui/shell.rs) · **Module:** `crate::ui::shell` · **Size:** 15784 lines · Line links as of commit `3fdc282`
+> **Source:** [src/ui/shell.rs](../../../src/ui/shell.rs) · **Module:** `crate::ui::shell` · **Size:** 15784 lines · Line links as of commit `c224d51`
 
 ## What this file is for
 
@@ -33,7 +33,7 @@ diagnostics section, the mini timeline and the first half of the Camera panel.
 - **Used by:**
   - [app.rs](../app.md) — `AppState::update` (the per-frame callback eframe calls)
     ends with `ui::shell::draw(self, ctx)` at
-    [src/app.rs:7705](../../../src/app.rs#L7705). That is the **one entry point** into
+    [src/app.rs:7787](../../../src/app.rs#L7787). That is the **one entry point** into
     this file. Tests in [app.rs](../app.md) and [app/select.rs](../app/select.md) also call
     `draw` to run whole UI frames headlessly.
   - [ui/tracks.rs](tracks.md) — borrows `combo_text`, `grid_key_marks` and
@@ -478,7 +478,7 @@ because `grp_key` borrows a string owned by the caller.
 |---|---|---|
 | `header` | `bool` | The row is a group header, not a layer |
 | `grp_key` | `&'a str` | The shortcut text for "Group selected layers", shown in the label |
-| `krita_label` | `&'static str` | Label for the Krita item (from [`krita_menu_label`](../../../src/ui/shell.rs#L9748)) |
+| `krita_label` | `&'static str` | Label for the Krita item (from [`krita_menu_label`](../../../src/ui/shell.rs#L9742)) |
 | `krita_ok` | `bool` | False for reference layers and layers whose name ends in `-x`, which never go to Krita |
 
 ### `const OPACITY_BADGE_PAD`
@@ -517,7 +517,7 @@ line is its value, so the `use` stays local to this constant. `Orient` comes fro
 
 **Used by:** [`layer_selection_actions`](#layer_selection_actions),
 [`selection_options`](#selection_options) and
-[`title_menu`](../../../src/ui/shell.rs#L8668).
+[`title_menu`](../../../src/ui/shell.rs#L8662).
 
 ### `enum PenOp`
 [src/ui/shell.rs:6356](../../../src/ui/shell.rs#L6356)
@@ -636,7 +636,7 @@ const SIZE_PRESETS: [(&str, u32, u32); 6] = [
 One-click sizes as `(label, width, height)` tuples, written landscape. Used for a new canvas in
 New project and for a camera frame in the Camera panel.
 
-Used by [`camera_size_ui`](../../../src/ui/shell.rs#L3336) and
+Used by [`camera_size_ui`](../../../src/ui/shell.rs#L3322) and
 [`new_project_dialog`](#new_project_dialog).
 
 ### `const MAX_SIDE`
@@ -648,7 +648,7 @@ const MAX_SIDE: u32 = 16384;
 
 `u32 = 16384`. The longest side a camera frame (or a clipboard-sized canvas) may have: the canvas
 limit, which is the largest texture a GPU accepts. Used by
-[`camera_size_ui`](../../../src/ui/shell.rs#L3336),
+[`camera_size_ui`](../../../src/ui/shell.rs#L3322),
 [`new_project_dialog`](#new_project_dialog) and tests.
 
 ## Free functions
@@ -2032,7 +2032,7 @@ is still going.
    [`shot_len`](../io/frame_order.md) over the loop range, and shows that in frames and
    seconds (`frames / fps`).
 
-**Used by:** [`camera_content`](../../../src/ui/shell.rs#L3441) (inside its "Over loops"
+**Used by:** [`camera_content`](../../../src/ui/shell.rs#L3427) (inside its "Over loops"
 collapsing header).
 
 ### `camera_content`
@@ -2050,7 +2050,7 @@ moves between — see [glossary](../../glossary.md)), easing, and view-only over
 **How it works.** Top to bottom:
 1. A muted intro sentence.
 2. A collapsing header "Resolution · W×H" (open by default) holding
-   [`camera_size_ui`](../../../src/ui/shell.rs#L3336).
+   [`camera_size_ui`](../../../src/ui/shell.rs#L3322).
 3. "Camera edit mode" checkbox (`state.camera_edit`); turning it on turns
    `state.camera_box` off. A help label shows its shortcut via
    [`combo_text`](../../../src/ui/shell.rs#L49).
@@ -2231,7 +2231,7 @@ function in this stretch (about 640 lines).
    `let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);`.
 5. **Size the list.** The list fills the panel's height minus what the sections below it
    used *last frame* (kept in egui temp memory under `"layers_below_h"`) and minus
-   [`title_bar_shortfall`](../../../src/ui/shell.rs#L2114), floored and never below
+   [`title_bar_shortfall`](../../../src/ui/shell.rs#L2100), floored and never below
    [`LAYER_LIST_MIN_H`](#const-layer_list_min_h). The comment explains why: if the list
    were sized to its rows, every new layer would grow the window, and egui never shrinks a
    window below what its content once asked for. Only the list scrolls; the toolbars and
@@ -2248,7 +2248,7 @@ function in this stretch (about 640 lines).
      directly;
    - for non-groups: a light-bulb **reference** toggle (a light-table layer shown dim for
      tracing) and an **onion** toggle (keep onion skin on for this layer while another is
-     active; tooltip from [`layer_onion_tip`](../../../src/ui/shell.rs#L3055));
+     active; tooltip from [`layer_onion_tip`](../../../src/ui/shell.rs#L3041));
    - the **name**: when this row is being renamed, a single-line text box that grabs focus
      once; Escape cancels, losing focus (Enter or clicking away) commits. Otherwise a
      selectable label that senses both click and drag. It is the drag handle
@@ -2409,7 +2409,7 @@ clipboard actions.
    shows its name with a folder icon and no cells; its layers are marked "›"; folded
    groups' layers are left out.
 4. A `ScrollArea` in both directions that takes the panel's full height (minus
-   [`title_bar_shortfall`](../../../src/ui/shell.rs#L2114)) whatever the frame count, so
+   [`title_bar_shortfall`](../../../src/ui/shell.rs#L2100)) whatever the frame count, so
    adding frames never grows the window.
 5. Inside an `egui::Grid`: a header row of layer names, then for each frame:
    - even rows get a stripe painted by hand. It reserves a placeholder shape
@@ -2452,13 +2452,13 @@ leave.
    with [`floating_frame`](#floating_frame).
 3. [`drag_by_title_only`](../../../src/ui/shell.rs#L1175) so dragging inside doesn't move
    the window, then a vertical `ScrollArea` limited by
-   [`title_shortfall`](../../../src/ui/shell.rs#L2122).
+   [`title_shortfall`](../../../src/ui/shell.rs#L2108).
 4. Sections: "Preset" ([`brush_picker::brush_grid`](brush_picker.md) and an "Import from
    Krita…" button calling `state.open_krita_import()`), "Dynamics"
-   ([`brush_dynamics`](../../../src/ui/shell.rs#L2166)), "Smoothing"
-   ([`smoothing_controls`](../../../src/ui/shell.rs#L2556) for the tool's own options, or a
+   ([`brush_dynamics`](../../../src/ui/shell.rs#L2152)), "Smoothing"
+   ([`smoothing_controls`](../../../src/ui/shell.rs#L2542) for the tool's own options, or a
    note that every pen slot and the Eraser keep their own when the tool has none), and a
-   folded "Tablet" section ([`tablet_diagnostics`](../../../src/ui/shell.rs#L2354)).
+   folded "Tablet" section ([`tablet_diagnostics`](../../../src/ui/shell.rs#L2340)).
 
 **Used by:** [`draw`](../../../src/ui/shell.rs#L77) — deliberately outside the "panels
 shown" branch, since hiding the panels is what you do to draw, which is when brush feel
@@ -2644,8 +2644,8 @@ A colour button (from [`color_wheel::hsl_edit_button`](color_wheel.md)) followed
 label, on one row. `c` is an RGB colour as three bytes (`[u8; 3]`, a fixed-size array),
 edited in place.
 
-**Used by:** [`onion_settings`](../../../src/ui/shell.rs#L3001) and
-[`onion_pins_content`](../../../src/ui/shell.rs#L3243).
+**Used by:** [`onion_settings`](../../../src/ui/shell.rs#L2987) and
+[`onion_pins_content`](../../../src/ui/shell.rs#L3229).
 
 ### `floating_frame`
 [src/ui/shell.rs:5499](../../../src/ui/shell.rs#L5499)
@@ -2660,15 +2660,15 @@ shadow. `pub(crate)` means other files in this crate may call it, but not outsid
 More: [Modules and visibility](../../rust-primer.md#modules-and-visibility).
 
 **Used by:** [`panel_window`](../../../src/ui/shell.rs#L1065),
-[`mini_timeline_window`](../../../src/ui/shell.rs#L2692),
+[`mini_timeline_window`](../../../src/ui/shell.rs#L2678),
 [`brush_settings_window`](#brush_settings_window),
 [`settings_window`](#settings_window),
 [`grid_settings_window`](#grid_settings_window),
-[`menu_window`](../../../src/ui/shell.rs#L8627),
-[`new_project_dialog`](../../../src/ui/shell.rs#L9040),
-[`export_dialog`](../../../src/ui/shell.rs#L9321),
-[`import_range_dialog`](../../../src/ui/shell.rs#L9562),
-[`save_error_dialog`](../../../src/ui/shell.rs#L9949), and
+[`menu_window`](../../../src/ui/shell.rs#L8621),
+[`new_project_dialog`](../../../src/ui/shell.rs#L9034),
+[`export_dialog`](../../../src/ui/shell.rs#L9315),
+[`import_range_dialog`](../../../src/ui/shell.rs#L9556),
+[`save_error_dialog`](../../../src/ui/shell.rs#L9943), and
 [ui/krita_import.rs](krita_import.md).
 
 ### `perspective_options`
@@ -2885,7 +2885,7 @@ frames" is on; else "this drawing, about the canvas centre". `&'static str` mean
 literal baked into the program, valid forever.
 
 **Used by:** [`selection_options`](#selection_options) and
-[`title_menu`](../../../src/ui/shell.rs#L8668).
+[`title_menu`](../../../src/ui/shell.rs#L8662).
 
 ### `tool_toggle`
 [src/ui/shell.rs:6331](../../../src/ui/shell.rs#L6331)
@@ -3055,7 +3055,7 @@ guides rotate and scale along with the camera.
    3% of the shorter side, clamped to 3–14 screen points, so both arms are the same length on
    screen however wide the frame is.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) (when the camera overlay toggle,
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492) (when the camera overlay toggle,
 `state.camera_overlay`, is on) and a test.
 
 ### `draw_perspective_grids`
@@ -3105,7 +3105,7 @@ showing where its keyframes on either side put it.
    base corners, which belong to its floor), round vanishing-point handles, and a tick plus two
    knobs on the horizon for tilting it.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) and a test. Most of the geometry
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492) and a test. Most of the geometry
 comes from [tools/perspective.rs](../tools/perspective.md).
 
 ### `draw_cursor_guides`
@@ -3178,7 +3178,7 @@ for (let i = 0; i < 4; i++) {
 }
 ```
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492).
 
 ## `impl Xform`
 
@@ -3210,7 +3210,7 @@ fn new(state: &AppState, rect: Rect) -> Self
 
 **Used by:** [`draw`](../../../src/ui/shell.rs#L77) (to publish `view_scale`, and for pan/rotate
 gestures), [`zoom_view_at`](../../../src/ui/shell.rs#L897),
-[`paint_canvas`](../../../src/ui/shell.rs#L6498),
+[`paint_canvas`](../../../src/ui/shell.rs#L6492),
 [`draw_krita_outline`](#draw_krita_outline),
 [`draw_tool_cursor`](#draw_tool_cursor),
 [`canvas_to_doc_mapping`](#canvas_to_doc_mapping), and many tests.
@@ -3300,7 +3300,7 @@ fn corners(&self) -> [egui::Pos2; 4]
 **What it does.** The four corners of the whole document on screen, in TL, TR, BR, BL order
 (possibly rotated or mirrored).
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492).
 
 ## Free functions
 
@@ -3324,7 +3324,7 @@ GPU path declines, it falls back to [`image_quad`](#image_quad).
 - `corners` — where its four corners go on screen (TL, TR, BR, BL).
 - `tint` — a colour multiplied into every texel (used for opacity and onion tints).
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492).
 
 ### `image_quad`
 [src/ui/shell.rs:7813](../../../src/ui/shell.rs#L7813)
@@ -3338,7 +3338,7 @@ egui's own renderer. It makes a mesh of four vertices — each corner paired wit
 texture corner `(0,0)`, `(1,0)`, `(1,1)`, `(0,1)` — and two triangles `0,1,2` and `0,2,3`.
 
 **Used by:** [`canvas_quad`](#canvas_quad) (fallback) and
-[`paint_canvas`](../../../src/ui/shell.rs#L6498).
+[`paint_canvas`](../../../src/ui/shell.rs#L6492).
 
 ### `marching_ants`
 [src/ui/shell.rs:7836](../../../src/ui/shell.rs#L7836)
@@ -3356,7 +3356,7 @@ frame makes the dashes appear to crawl. Does nothing with fewer than 2 points.
 - `pts` — the loop's points on screen (the first point is repeated at the end to close it).
 - `phase` — how far along the dash pattern starts.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492).
 
 ### `gesture_path`
 [src/ui/shell.rs:7861](../../../src/ui/shell.rs#L7861)
@@ -3369,7 +3369,7 @@ fn gesture_path(painter: &egui::Painter, pts: &[egui::Pos2], closing: bool)
 wider dark line (readable over ink and empty canvas). If `closing` is true it also draws a faint
 line from the last point back to the first, showing that the loop will close itself.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) and
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492) and
 [`draw_tap_lasso`](#draw_tap_lasso).
 
 ### `held_lasso`
@@ -3386,7 +3386,7 @@ shortcuts settings. `pub(crate)` means other files in this crate may call it
 ([Modules and visibility](../../rust-primer.md#modules-and-visibility)).
 
 **Used by:** [`draw`](../../../src/ui/shell.rs#L77) (when a lasso fill drag starts) and
-[`paint_canvas`](../../../src/ui/shell.rs#L6498).
+[`paint_canvas`](../../../src/ui/shell.rs#L6492).
 
 ### `draw_tap_lasso`
 [src/ui/shell.rs:7892](../../../src/ui/shell.rs#L7892)
@@ -3414,7 +3414,7 @@ the first corner when the pointer is close enough that a tap there would close t
 - `hover` — the pointer position on screen, if over the canvas.
 - `next` — where the next polygon edge should go (the pointer, or a snapped corner).
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492).
 
 ### `held_sel_op`
 [src/ui/shell.rs:7921](../../../src/ui/shell.rs#L7921)
@@ -3468,7 +3468,7 @@ on a `pw`×`ph` canvas by the layer transform `t` (move/rotate/scale, see
 [doc/transform.rs](../doc/transform.md)), then through the view `xf`. A thin wrapper over
 [`cell_rect_screen_corners`](#cell_rect_screen_corners) with the full cell rectangle.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) (layers, the camera frame and its
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492) (layers, the camera frame and its
 ghost, the camera box).
 
 ### `cell_rect_screen_corners`
@@ -3491,7 +3491,7 @@ part of a cell: the rectangle `r = [x0, y0, x1, y1]` in cell pixels. This is whe
 cropped to just the drawn area of a cell goes. Each corner is mapped cell → document with
 `t.cell_to_doc(...)`, then document → screen with `xf.doc_to_screen(...)`.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) and
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6492) and
 [`layer_screen_corners`](#layer_screen_corners).
 
 ### `draw_readout`
@@ -3615,7 +3615,7 @@ like it is pulled on a string; with "delay" on, the line only starts moving once
 further than this radius. Krita draws the same circle.
 
 **Used by:** [`draw_tool_cursor`](#draw_tool_cursor) and
-[`paint_canvas`](../../../src/ui/shell.rs#L6498).
+[`paint_canvas`](../../../src/ui/shell.rs#L6492).
 
 ### `draw_tool_cursor`
 [src/ui/shell.rs:8151](../../../src/ui/shell.rs#L8151)
@@ -3927,8 +3927,8 @@ method or an I/O helper, then closes the menu.
 
 - **Edit:** Undo / Redo (greyed out when there is nothing to undo/redo, with the bound shortcut in
   the label); a **Flip / rotate** submenu listing the artwork orientation actions from
-  [`ORIENT_ART`](../../../src/ui/shell.rs#L6309) (the hover text says what they act on, from
-  [`orient_scope`](../../../src/ui/shell.rs#L6326)); and **Settings…**, shown in the warning colour
+  [`ORIENT_ART`](../../../src/ui/shell.rs#L6303) (the hover text says what they act on, from
+  [`orient_scope`](../../../src/ui/shell.rs#L6320)); and **Settings…**, shown in the warning colour
   when keyboard shortcuts clash. If shortcuts clash, a small warning dot is also painted on the
   Edit menu's corner, because a clash is easy to make and hard to notice.
 - **File:** New project…; Open project… (via `project_file::load_dialog`, errors are logged);
@@ -3968,7 +3968,7 @@ disagree with a size typed by hand.
 
 **Returns.** `true` if it swapped them this frame.
 
-**Used by:** [`camera_size_ui`](../../../src/ui/shell.rs#L3336) and
+**Used by:** [`camera_size_ui`](../../../src/ui/shell.rs#L3322) and
 [`new_project_dialog`](#new_project_dialog).
 
 ### `fit_side`
@@ -4185,7 +4185,7 @@ one layer); once linked, the same click sends again, so it says "Send to Krita a
 ([Lifetimes](../../rust-primer.md#lifetimes)).
 
 **Used by:** [`title_menu`](#title_menu) and
-[`layers_content`](../../../src/ui/shell.rs#L3938).
+[`layers_content`](../../../src/ui/shell.rs#L3924).
 
 ### `krita_toast`
 [src/ui/shell.rs:9753](../../../src/ui/shell.rs#L9753)

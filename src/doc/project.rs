@@ -828,12 +828,14 @@ impl Project {
     // `structural_edit` takes is a complete undo. Same contract as
     // `paste_cell_here`.
     //
-    // The timeline's length is fixed unless a key would be pushed off its end
-    // (or a moved drawing would be cut short there); only then does it grow,
-    // padding every other layer with holds. A layer's last drawing holds to
-    // the end, so a ripple in front of it shortens or lengthens that hold
-    // rather than moving the end. Moves are magnetic — see [`ripple_move`]:
-    // nothing is overwritten, and nothing is left behind.
+    // One rule for the timeline's length, the same as every frame command's
+    // (`Project::insert_layer_frames_at`): frames a layer gains grow the
+    // timeline by as many, so no layer's last drawing is cut short, and the
+    // other layers hold their last drawing through the new end; frames it
+    // loses keep the length, its last drawing holding longer. A layer's gain
+    // is its net change — a move along one layer gains nothing — and with
+    // several layers the timeline grows by the largest. Moves are magnetic —
+    // see [`ripple_move`]: nothing is overwritten, and nothing is left behind.
 
     /// The drawing showing on `frame` and the frames it holds for. `None` before
     /// the layer's first key, where nothing shows.
@@ -1016,10 +1018,11 @@ impl Project {
         let (w, h) = l.cell_size(self.width, self.height);
         let fc = self.frame_count;
         let cells = &mut self.cells;
-        let need = layer_retime(&mut self.layers[b.layer], fc, b, new_len, || {
+        layer_retime(&mut self.layers[b.layer], fc, b, new_len, || {
             cells.push(Canvas::new(w, h).into());
             cells.len() - 1
         });
+        let need = self.layers[b.layer].exposures.len();
         self.settle_length(need);
     }
 
@@ -1028,12 +1031,22 @@ impl Project {
     ///
     /// Left to right with a running shift: retiming a drawing moves every
     /// later one on its layer, so each start is re-found at its shifted spot.
-    /// Going right to left instead would let a later insert truncate the
-    /// already-retimed last drawing against the end of the timeline.
+    ///
+    /// The timeline follows each layer's *net* change: lengthening one
+    /// drawing and shortening another by as much leaves it as it was, and it
+    /// grows by the largest gain of any layer. Mid-way a layer is left as
+    /// long as its edits made it, so nothing is cut against the end before
+    /// the sum is known; then it is fitted once.
     pub fn set_timing(&mut self, starts: &[(usize, usize)], n: usize) -> Vec<(usize, usize)> {
         let n = n.max(1);
+        let fc = self.frame_count;
+        let mut need = fc;
         let mut out = Vec::new();
         for layer in distinct_layers(starts) {
+            let Some(l) = self.layers.get(layer) else {
+                continue;
+            };
+            let (w, h) = l.cell_size(self.width, self.height);
             let mut frames: Vec<usize> = starts
                 .iter()
                 .filter(|s| s.0 == layer)
@@ -1043,15 +1056,21 @@ impl Project {
             let mut shift: isize = 0;
             for f in frames {
                 let at = (f as isize + shift).max(0) as usize;
-                let Some(b) = self.block_at(layer, at).filter(|b| b.start == at) else {
+                let l = &mut self.layers[layer];
+                let len = l.exposures.len();
+                let Some(b) = block_keyed_on(l, layer, len, at) else {
                     continue;
                 };
-                let old = b.len.unwrap_or(self.frame_count - b.start);
-                self.retime_block(b, n);
-                shift += n as isize - old as isize;
+                let cells = &mut self.cells;
+                shift += layer_retime(l, len, b, n, || {
+                    cells.push(Canvas::new(w, h).into());
+                    cells.len() - 1
+                });
                 out.push((layer, at));
             }
+            need = need.max(layer_fit(&mut self.layers[layer], fc + shift.max(0) as usize));
         }
+        self.settle_length(need);
         out
     }
 
@@ -1297,16 +1316,20 @@ pub fn ripple_move(
         });
     }
 
+    // Each layer's net change in frames, and how far what landed on it
+    // reaches: what it has to be fitted to at the end.
+    let mut gain = vec![0isize; layers.len()];
+    let mut reach = vec![0usize; layers.len()];
     if !copy {
         for p in &picks {
             // Rightmost first, so the spans still to come stay where they were.
             for s in p.spans.iter().rev() {
                 layer_remove(&mut layers[p.src], s.start, s.len());
             }
+            gain[p.src] -= p.spans.iter().map(|s| s.len() as isize).sum::<isize>();
         }
     }
 
-    let mut need = fc;
     let mut landed = Vec::new();
     for p in &picks {
         let dst = p.src as isize + dl;
@@ -1333,10 +1356,14 @@ pub fn ripple_move(
         let key_at = l.is_key(at);
         let showing = (at < l.exposures.len()).then(|| l.resolve(at)).flatten();
         // No key after the drop point: what shows there is the layer's last
-        // drawing (or nothing), whose hold is only filler to the timeline's
-        // end. Past the end it is trimmed, so there is nothing to pick up.
+        // drawing (or nothing), whose hold is only filler to the end. It
+        // picks up again only inside the length the layer ends up with —
+        // the timeline plus what the layer gained — never past it: a move
+        // along one layer gains nothing, and must not grow the timeline.
         let open = !(at + 1..l.exposures.len()).any(|f| l.is_key(f));
         let total: usize = p.spans.iter().map(|s| s.len()).sum();
+        gain[dst] += total as isize;
+        let end = fc + gain[dst].max(0) as usize;
         layer_insert_at(l, at, total);
         let mut pos = at;
         for (s, &id) in p.spans.iter().zip(&ids) {
@@ -1344,7 +1371,7 @@ pub fn ripple_move(
             landed.push((dst, pos));
             pos += s.len();
         }
-        if pos < l.exposures.len() && l.exposures[pos].is_none() && (!open || pos < fc) {
+        if pos < l.exposures.len() && l.exposures[pos].is_none() && (!open || pos < end) {
             match showing {
                 // Landed inside a hold: that drawing picks up again.
                 Some(y) if !key_at => l.exposures[pos] = Some(y),
@@ -1353,12 +1380,16 @@ pub fn ripple_move(
                 None => l.exposures[pos] = Some(cell(CellReq::Blank { layer: dst })),
             }
         }
-        // Whatever moved keeps every frame it had, even landing last: the
-        // timeline grows to fit rather than cutting it.
-        need = need.max(layer_fit(l, fc.max(at + total)));
+        // Whatever moved keeps every frame it had, even landing last.
+        reach[dst] = reach[dst].max(at + total);
     }
-    for p in &picks {
-        need = need.max(layer_fit(&mut layers[p.src], fc));
+    // The timeline rule ([`Project::set_timing`] has it too): each layer
+    // grows the timeline by its net gain, never less than what landed needs.
+    let mut need = fc;
+    for (i, l) in layers.iter_mut().enumerate() {
+        if gain[i] != 0 || reach[i] > 0 || picks.iter().any(|p| p.src == i) {
+            need = need.max(layer_fit(l, (fc + gain[i].max(0) as usize).max(reach[i])));
+        }
     }
     (need, landed)
 }
@@ -1449,34 +1480,40 @@ pub fn layer_fit(l: &mut Layer, min_len: usize) -> usize {
     need
 }
 
-/// [`Project::retime_block`] on one layer, with `blank` supplying a fresh blank
-/// cell when a last drawing is cut short. Public so the timeline can preview a
-/// retime on a copy of the layer, handing it a placeholder id, and show
-/// exactly what the edit is about to do. Returns the timeline length needed.
+/// [`Project::retime_block`] on one layer `frame_count` long, with `blank`
+/// supplying a fresh blank cell when a last drawing is cut short. Public so
+/// the timeline can preview a retime on a copy of the layer, handing it a
+/// placeholder id, and show exactly what the edit is about to do.
+///
+/// Later drawings slide, and the layer's transform keys with them. Returns
+/// the frames the layer gained (negative: lost); it is left that much longer
+/// when it gained, and as long as it was when it lost — the timeline rule.
 pub fn layer_retime(
     l: &mut Layer,
     frame_count: usize,
     b: Block,
     new_len: usize,
     blank: impl FnOnce() -> CellId,
-) -> usize {
+) -> isize {
     let new_len = new_len.max(1);
-    let mut min_len = frame_count;
+    let old = b.len.unwrap_or(frame_count.saturating_sub(b.start));
     match b.len {
-        Some(old) if new_len > old => layer_insert(l, b.start + old - 1, new_len - old),
-        Some(old) if new_len < old => layer_remove(l, b.start + new_len, old - new_len),
-        Some(_) => {}
-        None => {
-            let old = frame_count.saturating_sub(b.start);
-            if new_len < old {
-                // A last drawing stops only if something follows it.
-                l.exposures[b.start + new_len] = Some(blank());
-            } else {
-                min_len = min_len.max(b.start + new_len);
-            }
+        Some(old) if new_len > old => {
+            layer_insert(l, b.start + old - 1, new_len - old);
+            l.transform_keys_insert_frames(b.start + old, new_len - old);
         }
+        Some(old) if new_len < old => {
+            layer_remove(l, b.start + new_len, old - new_len);
+            l.transform_keys_remove_frames(b.start + new_len, old - new_len);
+        }
+        Some(_) => {}
+        // A last drawing stops only if something follows it.
+        None if new_len < old => l.exposures[b.start + new_len] = Some(blank()),
+        None => {}
     }
-    layer_fit(l, min_len)
+    let gain = new_len as isize - old as isize;
+    layer_fit(l, frame_count + gain.max(0) as usize);
+    gain
 }
 
 /// Copy `src` into a fresh `new_w`×`new_h` buffer with the old content
@@ -2099,15 +2136,56 @@ mod tests {
         assert_sound(&p);
     }
 
+    /// Lengthening grows the timeline by as much, so the last drawing keeps
+    /// its frames; shortening keeps the length, the last drawing holding on.
     #[test]
     fn retiming_a_drawing_slides_the_ones_after_it() {
         let mut p = sheet(10, &[0, 2, 4]);
         p.retime_block(p.block_at(0, 2).unwrap(), 4);
         assert_eq!(key_frames(&p, 0), vec![0, 2, 6]);
+        assert_eq!(p.frame_count, 12);
         p.retime_block(p.block_at(0, 2).unwrap(), 1);
         assert_eq!(key_frames(&p, 0), vec![0, 2, 3]);
-        assert_eq!(p.frame_count, 10);
+        assert_eq!(p.frame_count, 12);
         assert_sound(&p);
+    }
+
+    #[test]
+    fn retiming_moves_the_layers_transform_keys_with_its_drawings() {
+        let mut p = sheet(10, &[0, 2, 4]);
+        p.layers[0].set_transform_key(4, Default::default());
+        p.retime_block(p.block_at(0, 2).unwrap(), 4);
+        assert_eq!(p.layers[0].transform_keys[0].frame, 6);
+        p.retime_block(p.block_at(0, 2).unwrap(), 1);
+        assert_eq!(p.layers[0].transform_keys[0].frame, 3);
+    }
+
+    /// Timing follows each layer's net change: one drawing longer and one
+    /// shorter by as much leaves the length; across layers the largest gain
+    /// counts, once.
+    #[test]
+    fn set_timing_grows_by_the_largest_net_gain() {
+        let mut p = sheet(10, &[0, 2, 4]);
+        p.add_layer();
+        for f in [0, 2, 4] {
+            key(&mut p, 1, f, 50 + f as u8);
+        }
+        p.set_timing(&[(0, 0), (0, 2), (1, 0)], 3);
+        // Layer 0 gained 2, layer 1 gained 1: the timeline grows by 2.
+        assert_eq!(p.frame_count, 12);
+        assert_eq!(key_frames(&p, 0), vec![0, 3, 6]);
+        assert_eq!(key_frames(&p, 1), vec![0, 3, 5]);
+        assert_sound(&p);
+
+        let mut p = sheet(10, &[0, 2, 4]);
+        p.set_timing(&[(0, 0)], 3);
+        p.set_timing(&[(0, 3)], 1);
+        assert_eq!(p.frame_count, 11, "each Timing is its own edit");
+        // 1 frame → 2, then 3 frames → 2.
+        let mut p = sheet(10, &[0, 1, 4]);
+        p.set_timing(&[(0, 0), (0, 1)], 2);
+        assert_eq!(p.frame_count, 10, "one longer, one shorter: no change");
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 4]);
     }
 
     #[test]
@@ -2205,12 +2283,14 @@ mod tests {
         p.add_layer();
         let bg = key(&mut p, 1, 0, 100);
         mv(&mut p, (0, 2), (1, 5), true).unwrap();
-        assert_eq!(row(&p, 1), vec![100, 100, 100, 100, 100, 3, 3, 100, 100, 100]);
+        // The layer gained two frames, so the timeline grows by two and the
+        // drawing it split keeps all ten of its frames.
+        assert_eq!(row(&p, 1), vec![100, 100, 100, 100, 100, 3, 3, 100, 100, 100, 100, 100]);
         assert_eq!(p.layers[1].exposures[7], Some(bg), "the same drawing picks up again");
         // A copy is its own buffer, and the source is untouched.
         let landed = p.layers[1].exposures[5].unwrap();
         p.cell_mut(landed).unwrap().pixels_mut()[0] = 9;
-        assert_eq!(row(&p, 0), vec![1, 1, 3, 3, 5, 5, 5, 5, 5, 5]);
+        assert_eq!(row(&p, 0), vec![1, 1, 3, 3, 5, 5, 5, 5, 5, 5, 5, 5]);
         assert_sound(&p);
     }
 
@@ -2230,10 +2310,12 @@ mod tests {
         p.add_layer();
         let moved = p.layers[0].exposures[2];
         mv(&mut p, (0, 2), (1, 5), false).unwrap();
-        assert_eq!(row(&p, 1), vec![0, 0, 0, 0, 0, 3, 3, 0, 0, 0]);
+        // Two frames gained on layer 1 grow the timeline by two; layer 0's
+        // loss keeps its length, its last drawing holding on.
+        assert_eq!(row(&p, 1), vec![0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0]);
         assert_eq!(p.layers[1].exposures[5], moved, "no copy when nothing else shows it");
         assert!(p.layers[1].is_key(7), "a blank stops it holding to the end");
-        assert_eq!(row(&p, 0), vec![1, 1, 5, 5, 5, 5, 5, 5, 5, 5], "the source closed up");
+        assert_eq!(row(&p, 0), vec![1, 1, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5], "the source closed up");
         assert_sound(&p);
     }
 
@@ -2264,8 +2346,10 @@ mod tests {
         p.add_layer();
         key(&mut p, 1, 0, 50);
         mv(&mut p, (0, 5), (1, 0), false).unwrap();
-        assert_eq!(row(&p, 1), vec![6, 6, 6, 50, 50, 50, 50, 50]);
-        assert_eq!(row(&p, 0), vec![1, 1, 3, 3, 3, 3, 3, 3], "3 holds on to the end");
+        // Three frames gained: the timeline grows by three, and 50 keeps all
+        // eight of its frames behind the drawing that landed in front of it.
+        assert_eq!(row(&p, 1), vec![6, 6, 6, 50, 50, 50, 50, 50, 50, 50, 50]);
+        assert_eq!(row(&p, 0), vec![1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3], "3 holds on to the end");
         assert_sound(&p);
     }
 

@@ -1,6 +1,6 @@
 # `src/input/shortcuts.rs` — key bindings, the mouse-wheel map and `shortcuts.toml`
 
-> **Source:** [src/input/shortcuts.rs](../../../src/input/shortcuts.rs) · **Module:** `crate::input::shortcuts` · **Size:** 2481 lines · Line links as of commit `3fdc282`
+> **Source:** [src/input/shortcuts.rs](../../../src/input/shortcuts.rs) · **Module:** `crate::input::shortcuts` · **Size:** 2481 lines · Line links as of commit `c224d51`
 
 ## What this file is for
 
@@ -491,7 +491,7 @@ Space, Tab, Backspace, backtick, `F1`–`F12` and the four arrows. Built inside 
 Which modifier the mouse wheel is turned with. Each slot holds one `WheelAction`, so the wheel
 can't clash with itself; turning it with two or more modifiers does nothing.
 
-`WheelSlot::ALL` ([line 884](../../../src/input/shortcuts.rs#L884)) lists the four in that order.
+`WheelSlot::ALL` ([line 889](../../../src/input/shortcuts.rs#L889)) lists the four in that order.
 
 | Variant | Meaning |
 |---|---|
@@ -517,7 +517,7 @@ What one notch of the wheel does, in whichever slot it sits. It applies over the
 Timeline and the mini timeline alike — except `PanTimeline`, which only the Timeline's tracks
 have.
 
-`WheelAction::ALL` ([line 942](../../../src/input/shortcuts.rs#L942)) lists all seven in that
+`WheelAction::ALL` ([line 947](../../../src/input/shortcuts.rs#L947)) lists all seven in that
 order.
 
 | Variant | Meaning |
