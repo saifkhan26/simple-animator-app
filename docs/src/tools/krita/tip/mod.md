@@ -1,6 +1,6 @@
 # `src/tools/krita/tip/mod.rs` — bitmap brush tips
 
-> **Source:** [src/tools/krita/tip/mod.rs](../../../../../src/tools/krita/tip/mod.rs) · **Module:** `crate::tools::krita::tip` · **Size:** 483 lines · Line links as of commit `8192137`
+> **Source:** [src/tools/krita/tip/mod.rs](../../../../../src/tools/krita/tip/mod.rs) · **Module:** `crate::tools::krita::tip` · **Size:** 483 lines · Line links as of commit `3fdc282`
 
 ## What this file is for
 

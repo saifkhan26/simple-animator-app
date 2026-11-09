@@ -1,6 +1,6 @@
 # `src/doc/layer.rs` — one layer of the animation
 
-> **Source:** [src/doc/layer.rs](../../../src/doc/layer.rs) · **Module:** `crate::doc::layer` · **Size:** 406 lines · Line links as of commit `8192137`
+> **Source:** [src/doc/layer.rs](../../../src/doc/layer.rs) · **Module:** `crate::doc::layer` · **Size:** 406 lines · Line links as of commit `3fdc282`
 
 ## What this file is for
 

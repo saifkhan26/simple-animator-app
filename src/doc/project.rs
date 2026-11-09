@@ -50,6 +50,16 @@ pub struct Project {
     pub camera_opts: CameraOpts,
 }
 
+/// What frames inserted on some layers show
+/// ([`Project::insert_layer_frames_at`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewFrames {
+    /// Holds of the drawing before them; nothing before the first drawing.
+    Hold,
+    /// The drawing showing just before them, keyed again on each: Duplicate.
+    Repeat,
+}
+
 impl Project {
     pub fn new(width: u32, height: u32, fps: f32) -> Self {
         // Seed with one cell and one layer keyed on frame 0.
@@ -872,24 +882,129 @@ impl Project {
         self.loop_end = need;
     }
 
-    /// Insert `n` held frames on one layer right after `after`: the drawing
-    /// showing there holds `n` frames longer, and later drawings slide.
-    pub fn insert_layer_frames(&mut self, layer: usize, after: usize, n: usize) {
-        let fc = self.frame_count;
-        let Some(l) = self.layers.get_mut(layer) else {
+    /// Insert `n` frames at `at` on `layers` only — what showed from `at` on
+    /// slides `n` frames later on each, its transform keys with it — and grow
+    /// the timeline by `n`, so nothing is pushed off its end and no layer's
+    /// last drawing is cut short. Other layers keep their frames and hold
+    /// their last drawing through the new end. The camera and the grids are
+    /// the whole scene's and stay put; [`Project::insert_frames_before`] and
+    /// [`Project::add_frame`] move them, for an insert on every layer.
+    ///
+    /// `fill` says what the new frames show (see [`NewFrames`]). Group rows
+    /// are skipped. The playhead is left where it is, for the caller to place.
+    pub fn insert_layer_frames_at(&mut self, layers: &[usize], at: usize, n: usize, fill: NewFrames) {
+        if n == 0 {
             return;
-        };
-        layer_insert(l, after, n);
-        let need = layer_fit(l, fc);
-        self.settle_length(need);
+        }
+        let at = at.min(self.frame_count);
+        let mut any = false;
+        for &i in layers {
+            let Some(l) = self.layers.get_mut(i).filter(|l| !l.is_group()) else {
+                continue;
+            };
+            let shown = match fill {
+                NewFrames::Hold => None,
+                NewFrames::Repeat => at.checked_sub(1).and_then(|f| l.resolve(f)),
+            };
+            layer_insert_at(l, at, n);
+            if shown.is_some() {
+                l.exposures[at..at + n].iter_mut().for_each(|e| *e = shown);
+            }
+            l.transform_keys_insert_frames(at, n);
+            any = true;
+        }
+        if any {
+            self.grow_by(n);
+        }
+    }
+
+    /// Lengthen the timeline by `n`, every layer shorter than that holding
+    /// its last drawing to the new end. A loop over the whole timeline stays
+    /// whole; a shorter one stays where it was.
+    fn grow_by(&mut self, n: usize) {
+        let need = self.frame_count + n;
+        let whole_loop = self.loop_start == 0 && self.loop_end >= self.frame_count;
+        for l in &mut self.layers {
+            while l.exposures.len() < need {
+                l.exposures.push(None);
+                l.track_insert_frame(l.exposures.len() - 1);
+            }
+        }
+        self.frame_count = need;
+        if whole_loop {
+            self.loop_end = need;
+        }
+    }
+
+    /// Remove `n` frames starting at `at` from `layers` only — see
+    /// [`Project::remove_layer_frames`]. The timeline keeps its length.
+    pub fn remove_layer_frames_at(&mut self, layers: &[usize], at: usize, n: usize) {
+        for &i in layers {
+            if self.layers.get(i).is_some_and(|l| !l.is_group()) {
+                self.remove_layer_frames(i, at, n);
+            }
+        }
+    }
+
+    /// A new blank drawing on each of `layers`, in the middle of the gap
+    /// between the drawing showing on `frame` there (A) and the next one (B),
+    /// for drawing the in-between over onion skin. Returns `(layer, frame)`
+    /// for each drawing made.
+    ///
+    /// The middle rounds down: A on 1 and B on 6 (5 frames apart) puts it on
+    /// 3, A keeping 1–2 and the new drawing 3–5. Nothing moves when there is
+    /// room. When A and B sit on neighbouring frames there is none, so A
+    /// holds one frame longer first — B and everything after it on that layer
+    /// slide a frame later — and the new drawing takes that frame. Frames
+    /// added that way grow the timeline, by one however many layers slid, as
+    /// every frame insert on some layers does
+    /// ([`Project::insert_layer_frames_at`]).
+    ///
+    /// A layer is skipped, unchanged, when it is a group's row, or `frame` is
+    /// before its first drawing or on its last: there is no B to go between.
+    pub fn insert_inbetweens(&mut self, layers: &[usize], frame: usize) -> Vec<(usize, usize)> {
+        let mut made = Vec::new();
+        let mut slid = false;
+        for &i in layers {
+            if self.layers.get(i).map_or(true, Layer::is_group) {
+                continue;
+            }
+            let Some(a) = self.block_at(i, frame) else {
+                continue;
+            };
+            let Some(gap) = a.len else {
+                continue;
+            };
+            let at = if gap >= 2 {
+                a.start + gap / 2
+            } else {
+                let l = &mut self.layers[i];
+                layer_insert_at(l, a.start + 1, 1);
+                l.transform_keys_insert_frames(a.start + 1, 1);
+                slid = true;
+                a.start + 1
+            };
+            made.push((i, at));
+        }
+        if slid {
+            self.grow_by(1);
+        }
+        for &(i, at) in &made {
+            let id = self.alloc_cell_for(i);
+            self.layers[i].set_key(at, id);
+        }
+        made
     }
 
     /// Remove `n` frames from one layer starting at `at`; later drawings slide
     /// up and the layer's last drawing holds longer to fill the end. Whatever
-    /// was showing right after the removed frames still shows there.
+    /// was showing right after the removed frames still shows there. The
+    /// layer's transform keys move with its drawings; one on a removed frame
+    /// goes with it.
     pub fn remove_layer_frames(&mut self, layer: usize, at: usize, n: usize) {
         if let Some(l) = self.layers.get_mut(layer) {
             layer_remove(l, at, n);
+            l.transform_keys_remove_frames(at, n);
         }
     }
 
@@ -1943,16 +2058,17 @@ mod tests {
         assert_eq!(p.blocks(0), vec![held, last]);
     }
 
-    /// The end of the timeline stays put: the last drawing's hold absorbs it.
+    /// Frames added on some layers grow the timeline by as many, so no
+    /// layer's last drawing is cut short; the others hold to the new end.
     #[test]
     fn inserting_frames_slides_only_that_layer() {
         let mut p = sheet(10, &[0, 2, 5]);
         p.add_layer();
         key(&mut p, 1, 3, 50);
-        p.insert_layer_frames(0, 3, 2);
+        p.insert_layer_frames_at(&[0], 4, 2, NewFrames::Hold);
         assert_eq!(key_frames(&p, 0), vec![0, 2, 7]);
         assert_eq!(key_frames(&p, 1), vec![3], "other layers never move");
-        assert_eq!(p.frame_count, 10);
+        assert_eq!(p.frame_count, 12);
         assert_sound(&p);
     }
 
@@ -1960,7 +2076,7 @@ mod tests {
     fn a_key_pushed_off_the_end_grows_every_layer() {
         let mut p = sheet(6, &[0, 5]);
         p.add_layer();
-        p.insert_layer_frames(0, 0, 3);
+        p.insert_layer_frames_at(&[0], 1, 3, NewFrames::Hold);
         assert_eq!(key_frames(&p, 0), vec![0, 8]);
         assert_eq!(p.frame_count, 9);
         assert_sound(&p);
@@ -2288,7 +2404,7 @@ mod tests {
         p.current_frame = 5;
         p.duplicate_frame(); // inserts at 6
         assert_eq!(pin_frames(&p, 0), vec![0, 5, 10]);
-        p.insert_layer_frames(0, 0, 2); // inserts at 1
+        p.insert_layer_frames_at(&[0], 1, 2, NewFrames::Hold);
         assert_eq!(pin_frames(&p, 0), vec![0, 7, 12]);
         // Every pin still shows the drawing it was put on.
         let marks: Vec<u8> = pin_frames(&p, 0).iter().map(|&f| row(&p, 0)[f]).collect();
@@ -2382,5 +2498,146 @@ mod tests {
         let mut p = pinned(4, &[0, 2], &[0, 2]);
         p.ensure_frame_count(9);
         assert_eq!(pin_frames(&p, 0), vec![0, 2]);
+    }
+}
+
+#[cfg(test)]
+mod inbetween_tests {
+    use super::*;
+    use crate::doc::transform::Transform;
+
+    /// `layers` layers over `frames` frames, each keyed on `keys`.
+    fn keyed(layers: usize, frames: usize, keys: &[usize]) -> Project {
+        let mut p = Project::new(16, 16, 24.0);
+        p.ensure_frame_count(frames);
+        p.layers[0].exposures.iter_mut().for_each(|e| *e = None);
+        for i in 0..layers {
+            if i > 0 {
+                p.layers.push(Layer::new(format!("L{i}"), frames));
+            }
+            for &f in keys {
+                let id = p.alloc_cell_for(i);
+                p.layers[i].set_key(f, id);
+            }
+        }
+        p
+    }
+
+    fn keys(p: &Project, layer: usize) -> Vec<usize> {
+        (0..p.frame_count).filter(|&f| p.layers[layer].is_key(f)).collect()
+    }
+
+    #[test]
+    fn the_in_between_goes_in_the_middle_of_the_gap() {
+        // Frames 1 and 6 in the UI: the new drawing on 3, nothing moves.
+        let mut p = keyed(1, 8, &[0, 5]);
+        let b = p.layers[0].exposures[5];
+        assert_eq!(p.insert_inbetweens(&[0], 0), [(0, 2)]);
+        assert_eq!(keys(&p, 0), [0, 2, 5]);
+        assert_eq!(p.layers[0].exposures[5], b, "B moved");
+        assert_eq!(p.frame_count, 8);
+        let new = p.layers[0].exposures[2].unwrap();
+        assert!(p.cell(new).unwrap().is_blank());
+    }
+
+    #[test]
+    fn from_inside_a_hold_it_still_goes_between_its_drawing_and_the_next() {
+        let mut p = keyed(1, 10, &[0, 8]);
+        assert_eq!(p.insert_inbetweens(&[0], 6), [(0, 4)]);
+        // Then the next halving, between the first and the new one.
+        assert_eq!(p.insert_inbetweens(&[0], 0), [(0, 2)]);
+        assert_eq!(keys(&p, 0), [0, 2, 4, 8]);
+    }
+
+    #[test]
+    fn on_twos_it_takes_the_frame_between() {
+        let mut p = keyed(1, 6, &[0, 2, 4]);
+        assert_eq!(p.insert_inbetweens(&[0], 0), [(0, 1)]);
+        assert_eq!(keys(&p, 0), [0, 1, 2, 4]);
+    }
+
+    #[test]
+    fn neighbouring_drawings_make_room_by_sliding() {
+        let mut p = keyed(1, 3, &[0, 1, 2]);
+        let (b, c) = (p.layers[0].exposures[1], p.layers[0].exposures[2]);
+        assert_eq!(p.insert_inbetweens(&[0], 0), [(0, 1)]);
+        assert_eq!(keys(&p, 0), [0, 1, 2, 3]);
+        assert_eq!((p.layers[0].exposures[2], p.layers[0].exposures[3]), (b, c));
+        assert_eq!(p.frame_count, 4, "a frame added grows the timeline");
+    }
+
+    #[test]
+    fn nothing_to_go_between_changes_nothing() {
+        let mut p = keyed(1, 6, &[2, 4]);
+        assert!(p.insert_inbetweens(&[0], 0).is_empty(), "before the first drawing");
+        assert!(p.insert_inbetweens(&[0], 5).is_empty(), "on the last drawing");
+        assert_eq!(keys(&p, 0), [2, 4]);
+        assert_eq!(p.frame_count, 6);
+        p.layers.push(Layer::group("G", 6));
+        assert!(p.insert_inbetweens(&[1], 2).is_empty(), "a group row");
+    }
+
+    #[test]
+    fn inserting_before_on_some_layers_leaves_the_rest() {
+        let mut p = keyed(2, 8, &[0, 4]);
+        p.layers[0].set_transform_key(4, Transform::default());
+        p.layers[1].set_transform_key(4, Transform::default());
+        p.set_camera_key(4, Default::default());
+        p.insert_layer_frames_at(&[0], 2, 2, NewFrames::Hold);
+        assert_eq!(keys(&p, 0), [0, 6]);
+        assert_eq!(keys(&p, 1), [0, 4], "an unpicked layer moved");
+        assert_eq!(p.layers[0].transform_keys[0].frame, 6, "the layer transform key stayed behind");
+        assert_eq!(p.layers[1].transform_keys[0].frame, 4);
+        assert_eq!(p.camera_keys[0].frame, 4, "the camera belongs to the scene, not the layer");
+        assert_eq!(p.frame_count, 10, "frames added grow the timeline");
+        assert!(p.layers.iter().all(|l| l.exposures.len() == 10), "a layer was left short");
+        // A holds through the new frames.
+        assert_eq!(p.block_at(0, 2).map(|b| b.start), Some(0));
+    }
+
+    #[test]
+    fn inserting_before_frame_one_leaves_blank_frames() {
+        let mut p = keyed(2, 6, &[0, 3]);
+        p.insert_layer_frames_at(&[1], 0, 2, NewFrames::Hold);
+        assert_eq!(keys(&p, 1), [2, 5]);
+        assert!(p.block_at(1, 0).is_none(), "nothing shows before the first drawing");
+    }
+
+    #[test]
+    fn a_duplicate_shows_the_drawing_before_it_again() {
+        let mut p = keyed(2, 8, &[0, 4]);
+        let a = p.layers[0].exposures[0];
+        p.insert_layer_frames_at(&[0], 1, 2, NewFrames::Repeat);
+        assert_eq!(&p.layers[0].exposures[1..3], &[a, a]);
+        assert_eq!(keys(&p, 0), [0, 1, 2, 6]);
+        assert_eq!(p.frame_count, 10);
+    }
+
+    #[test]
+    fn removing_frames_on_some_layers_keeps_the_length_and_moves_their_keys() {
+        let mut p = keyed(2, 8, &[0, 4, 6]);
+        p.layers[0].set_transform_key(6, Transform::default());
+        p.layers[0].set_transform_key(2, Transform::default());
+        p.remove_layer_frames_at(&[0], 2, 2);
+        assert_eq!(keys(&p, 0), [0, 2, 4]);
+        assert_eq!(keys(&p, 1), [0, 4, 6], "an unpicked layer moved");
+        let frames: Vec<usize> = p.layers[0].transform_keys.iter().map(|k| k.frame).collect();
+        assert_eq!(frames, [4], "the key on a removed frame went with it; the later one slid");
+        assert_eq!(p.frame_count, 8);
+    }
+
+    #[test]
+    fn in_betweens_on_several_layers_grow_the_timeline_once() {
+        // Layer 0 has a gap; layer 1 has neighbours that must slide.
+        let mut p = keyed(1, 6, &[0, 4]);
+        p.layers.push(Layer::new("L1", 6));
+        for f in [0, 1] {
+            let id = p.alloc_cell_for(1);
+            p.layers[1].set_key(f, id);
+        }
+        assert_eq!(p.insert_inbetweens(&[0, 1], 0), [(0, 2), (1, 1)]);
+        assert_eq!(keys(&p, 0), [0, 2, 4]);
+        assert_eq!(keys(&p, 1), [0, 1, 2]);
+        assert_eq!(p.frame_count, 7);
     }
 }

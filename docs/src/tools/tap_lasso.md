@@ -1,6 +1,6 @@
 # `src/tools/tap_lasso.rs` — the lasso outline (drag or tap corners)
 
-> **Source:** [src/tools/tap_lasso.rs](../../../src/tools/tap_lasso.rs) · **Module:** `crate::tools::tap_lasso` · **Size:** 183 lines · Line links as of commit `8192137`
+> **Source:** [src/tools/tap_lasso.rs](../../../src/tools/tap_lasso.rs) · **Module:** `crate::tools::tap_lasso` · **Size:** 183 lines · Line links as of commit `3fdc282`
 
 ## What this file is for
 

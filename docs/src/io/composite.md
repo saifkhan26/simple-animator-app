@@ -1,6 +1,6 @@
 # `src/io/composite.rs` — flatten all layers of a frame into one picture
 
-> **Source:** [src/io/composite.rs](../../../src/io/composite.rs) · **Module:** `crate::io::composite` · **Size:** 987 lines · Line links as of commit `8192137`
+> **Source:** [src/io/composite.rs](../../../src/io/composite.rs) · **Module:** `crate::io::composite` · **Size:** 987 lines · Line links as of commit `3fdc282`
 
 ## What this file is for
 

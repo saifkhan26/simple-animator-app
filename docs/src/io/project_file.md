@@ -1,6 +1,6 @@
 # `src/io/project_file.rs` — saving and opening `.anim` projects
 
-> **Source:** [src/io/project_file.rs](../../../src/io/project_file.rs) · **Module:** `crate::io::project_file` · **Size:** 1029 lines · Line links as of commit `8192137`
+> **Source:** [src/io/project_file.rs](../../../src/io/project_file.rs) · **Module:** `crate::io::project_file` · **Size:** 1029 lines · Line links as of commit `3fdc282`
 
 ## What this file is for
 
@@ -710,27 +710,27 @@ migration) and `pins` (byte-exact "nothing changed by accident" checks).
 
 | Test | What it checks |
 |---|---|
-| [`decodes_v2_project`](../../../src/io/project_file.rs#L222) | A hand-built v2 file (no `track_points`) decodes and migrates: frame count, layer name and exposures kept, `track_points` empty. |
-| [`decodes_v3_project`](../../../src/io/project_file.rs#L261) | A v3 file keeps its track points and gets an identity camera, no camera keys and a 0×0 (use project size) cell size. |
-| [`decodes_v4_project`](../../../src/io/project_file.rs#L303) | A v4 file keeps its camera and cell size, and its transform keys come back with `Ease::Linear` (same playback as before `ease` existed). |
-| [`saves_a_project_with_freed_cells`](../../../src/io/project_file.rs#L366) | A project with a freed (0×0 tombstone) cell saves and loads; this once panicked and crashed the app during a background save. |
-| [`round_trips_current_project`](../../../src/io/project_file.rs#L382) | `encode` stamps `VERSION`, and track points, cell size, camera, camera keys and key eases all survive a round trip. |
-| [`pixels_survive_the_round_trip_exactly`](../../../src/io/project_file.rs#L427) | A cell filled with a pattern that has no long runs comes back byte-identical (guards against a lossy or truncating codec). |
-| [`decodes_v5_project`](../../../src/io/project_file.rs#L450) | An uncompressed v5 file opens with name, cell size, camera keys and fps intact and nothing clipped. |
-| [`decodes_v6_project`](../../../src/io/project_file.rs#L512) | A compressed v6 file opens with both layers and no clip / alpha lock. |
-| [`clipping_and_alpha_lock_survive_a_save`](../../../src/io/project_file.rs#L532) | `clip` and `alpha_lock` flags come back on the right layers. |
-| [`groups_survive_a_save`](../../../src/io/project_file.rs#L546) | A collapsed, half-opaque group keeps its header, members, `collapsed` flag and opacity. |
-| [`a_v7_file_opens_without_groups`](../../../src/io/project_file.rs#L562) | A v7 file keeps its clipping and opens with every layer ungrouped. |
-| [`compression_actually_shrinks_sparse_cells`](../../../src/io/project_file.rs#L616) | Five blank 256×256 cells pack more than 100× smaller than the raw postcard body, and the reported raw size is the true body size. |
-| [`rejects_a_truncated_body`](../../../src/io/project_file.rs#L641) | A file cut short, or a header with no body, is an error, not a panic or a half-built project. |
-| [`measure_ratio_and_time`](../../../src/io/project_file.rs#L652) | `#[ignore]` measurement harness: 12 cells of 1080p fake line art; prints raw / packed size and encode / decode times. Run with `-- --ignored --nocapture`. |
-| [`saves_and_loads_a_real_file_losslessly`](../../../src/io/project_file.rs#L704) | `save_to` + `load_from` through a real temp file: pixels byte-identical and the file smaller than the raw body. |
-| [`rejects_unsupported_version`](../../../src/io/project_file.rs#L738) | A version newer than `VERSION` gives "unsupported project version"; a file starting `NOPE` is refused. |
-| [`a_saved_project_is_byte_for_byte_what_it_was`](../../../src/io/project_file.rs#L830) | (`pins`) The postcard body of the shared test scene (`composite::pins::scene`) still has the same length and FNV hash — any layout change fails here. |
-| [`the_format_version_has_not_moved`](../../../src/io/project_file.rs#L836) | (`pins`) `VERSION` is still 8. |
-| [`the_camera_s_session_options_stay_out_of_the_file`](../../../src/io/project_file.rs#L841) | (`pins`) Setting a session-only camera size does not change the saved bytes, and a load brings back default `camera_opts`. |
+| [`decodes_v2_project`](../../../src/io/project_file.rs#L224) | A hand-built v2 file (no `track_points`) decodes and migrates: frame count, layer name and exposures kept, `track_points` empty. |
+| [`decodes_v3_project`](../../../src/io/project_file.rs#L263) | A v3 file keeps its track points and gets an identity camera, no camera keys and a 0×0 (use project size) cell size. |
+| [`decodes_v4_project`](../../../src/io/project_file.rs#L305) | A v4 file keeps its camera and cell size, and its transform keys come back with `Ease::Linear` (same playback as before `ease` existed). |
+| [`saves_a_project_with_freed_cells`](../../../src/io/project_file.rs#L368) | A project with a freed (0×0 tombstone) cell saves and loads; this once panicked and crashed the app during a background save. |
+| [`round_trips_current_project`](../../../src/io/project_file.rs#L384) | `encode` stamps `VERSION`, and track points, cell size, camera, camera keys and key eases all survive a round trip. |
+| [`pixels_survive_the_round_trip_exactly`](../../../src/io/project_file.rs#L429) | A cell filled with a pattern that has no long runs comes back byte-identical (guards against a lossy or truncating codec). |
+| [`decodes_v5_project`](../../../src/io/project_file.rs#L452) | An uncompressed v5 file opens with name, cell size, camera keys and fps intact and nothing clipped. |
+| [`decodes_v6_project`](../../../src/io/project_file.rs#L514) | A compressed v6 file opens with both layers and no clip / alpha lock. |
+| [`clipping_and_alpha_lock_survive_a_save`](../../../src/io/project_file.rs#L534) | `clip` and `alpha_lock` flags come back on the right layers. |
+| [`groups_survive_a_save`](../../../src/io/project_file.rs#L548) | A collapsed, half-opaque group keeps its header, members, `collapsed` flag and opacity. |
+| [`a_v7_file_opens_without_groups`](../../../src/io/project_file.rs#L564) | A v7 file keeps its clipping and opens with every layer ungrouped. |
+| [`compression_actually_shrinks_sparse_cells`](../../../src/io/project_file.rs#L618) | Five blank 256×256 cells pack more than 100× smaller than the raw postcard body, and the reported raw size is the true body size. |
+| [`rejects_a_truncated_body`](../../../src/io/project_file.rs#L643) | A file cut short, or a header with no body, is an error, not a panic or a half-built project. |
+| [`measure_ratio_and_time`](../../../src/io/project_file.rs#L654) | `#[ignore]` measurement harness: 12 cells of 1080p fake line art; prints raw / packed size and encode / decode times. Run with `-- --ignored --nocapture`. |
+| [`saves_and_loads_a_real_file_losslessly`](../../../src/io/project_file.rs#L706) | `save_to` + `load_from` through a real temp file: pixels byte-identical and the file smaller than the raw body. |
+| [`rejects_unsupported_version`](../../../src/io/project_file.rs#L740) | A version newer than `VERSION` gives "unsupported project version"; a file starting `NOPE` is refused. |
+| [`a_saved_project_is_byte_for_byte_what_it_was`](../../../src/io/project_file.rs#L928) | (`pins`) The postcard body of the shared test scene (`composite::pins::scene`) still has the same length and FNV hash — any layout change fails here. |
+| [`the_format_version_has_not_moved`](../../../src/io/project_file.rs#L934) | (`pins`) `VERSION` is still 8. |
+| [`the_camera_s_session_options_stay_out_of_the_file`](../../../src/io/project_file.rs#L939) | (`pins`) Setting a session-only camera size does not change the saved bytes, and a load brings back default `camera_opts`. |
 
-**Test helpers:** `v6_mirror` ([line 476](../../../src/io/project_file.rs#L476)) —
+**Test helpers:** `v6_mirror` ([line 478](../../../src/io/project_file.rs#L478)) —
 copies a `Project` into the v5/v6 mirror `ProjectV6`, field by field, the way a file of
 that era was written; used by `decodes_v5_project` and `decodes_v6_project`.
 

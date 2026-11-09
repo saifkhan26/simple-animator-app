@@ -1,6 +1,6 @@
 # `src/input/tablet.rs` — pen tablet input through the Wintab driver
 
-> **Source:** [src/input/tablet.rs](../../../src/input/tablet.rs) · **Module:** `crate::input::tablet` · **Size:** 2100 lines · Line links as of commit `8192137`
+> **Source:** [src/input/tablet.rs](../../../src/input/tablet.rs) · **Module:** `crate::input::tablet` · **Size:** 2100 lines · Line links as of commit `3fdc282`
 
 ## What this file is for
 

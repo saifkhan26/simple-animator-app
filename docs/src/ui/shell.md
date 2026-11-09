@@ -1,6 +1,6 @@
 # `src/ui/shell.rs` — the whole app window: panels, menus, canvas input and overlays
 
-> **Source:** [src/ui/shell.rs](../../../src/ui/shell.rs) · **Module:** `crate::ui::shell` · **Size:** 15784 lines · Line links as of commit `8192137`
+> **Source:** [src/ui/shell.rs](../../../src/ui/shell.rs) · **Module:** `crate::ui::shell` · **Size:** 15784 lines · Line links as of commit `3fdc282`
 
 ## What this file is for
 
@@ -33,7 +33,7 @@ diagnostics section, the mini timeline and the first half of the Camera panel.
 - **Used by:**
   - [app.rs](../app.md) — `AppState::update` (the per-frame callback eframe calls)
     ends with `ui::shell::draw(self, ctx)` at
-    [src/app.rs:7637](../../../src/app.rs#L7637). That is the **one entry point** into
+    [src/app.rs:7705](../../../src/app.rs#L7705). That is the **one entry point** into
     this file. Tests in [app.rs](../app.md) and [app/select.rs](../app/select.md) also call
     `draw` to run whole UI frames headlessly.
   - [ui/tracks.rs](tracks.md) — borrows `combo_text`, `grid_key_marks` and
@@ -378,7 +378,7 @@ const TABLET_ICON_W: f32 = 18.0;
 `f32 = 18.0` — room left for the tablet status icon beside the Brush settings button.
 
 ### `const MINI_BAR_NAME_W`
-[src/ui/shell.rs:2690](../../../src/ui/shell.rs#L2690)
+[src/ui/shell.rs:2676](../../../src/ui/shell.rs#L2676)
 
 ```rust
 const MINI_BAR_NAME_W: f32 = 140.0;
@@ -388,7 +388,7 @@ const MINI_BAR_NAME_W: f32 = 140.0;
 the 18 characters a name is cut to.
 
 ### `const STRIP_NUM_H`
-[src/ui/shell.rs:3067](../../../src/ui/shell.rs#L3067)
+[src/ui/shell.rs:3053](../../../src/ui/shell.rs#L3053)
 
 ```rust
 const STRIP_NUM_H: f32 = 16.0;
@@ -399,7 +399,7 @@ numbers, the gap under it, and the bars at their shortest. A taller Onion panel 
 the bars taller than `STRIP_BAR_H`.
 
 ### `const STRIP_GAP`
-[src/ui/shell.rs:3068](../../../src/ui/shell.rs#L3068)
+[src/ui/shell.rs:3054](../../../src/ui/shell.rs#L3054)
 
 ```rust
 const STRIP_GAP: f32 = 3.0;
@@ -410,7 +410,7 @@ numbers, the gap under it, and the bars at their shortest. A taller Onion panel 
 the bars taller than `STRIP_BAR_H`.
 
 ### `const STRIP_BAR_H`
-[src/ui/shell.rs:3069](../../../src/ui/shell.rs#L3069)
+[src/ui/shell.rs:3055](../../../src/ui/shell.rs#L3055)
 
 ```rust
 const STRIP_BAR_H: f32 = 46.0;
@@ -421,7 +421,7 @@ numbers, the gap under it, and the bars at their shortest. A taller Onion panel 
 the bars taller than `STRIP_BAR_H`.
 
 ### `const LAYER_LIST_MIN_H`
-[src/ui/shell.rs:3714](../../../src/ui/shell.rs#L3714)
+[src/ui/shell.rs:3700](../../../src/ui/shell.rs#L3700)
 
 ```rust
 const LAYER_LIST_MIN_H: f32 = 96.0;
@@ -432,7 +432,7 @@ sections under it (Transform, Layer canvas) want room — about one layer row. B
 the panel grows instead. Used by [`layers_content`](#layers_content).
 
 ### `struct LayerDrag`
-[src/ui/shell.rs:3717](../../../src/ui/shell.rs#L3717)
+[src/ui/shell.rs:3703](../../../src/ui/shell.rs#L3703)
 
 A *tuple struct* (a struct whose single field has no name, read as `.0`) used as the
 drag-and-drop **payload** when a layer row is dragged. The `usize` is the index of the
@@ -444,7 +444,7 @@ keeps it from being confused with other drags. More: [Structs](../../rust-primer
 | `0` | `usize` |  |
 
 ### `const ROW_DOTS_W`
-[src/ui/shell.rs:3720](../../../src/ui/shell.rs#L3720)
+[src/ui/shell.rs:3706](../../../src/ui/shell.rs#L3706)
 
 ```rust
 const ROW_DOTS_W: f32 = 22.0;
@@ -454,7 +454,7 @@ const ROW_DOTS_W: f32 = 22.0;
 name field is shrunk by this much so the button always fits.
 
 ### `enum RowCmd`
-[src/ui/shell.rs:3724](../../../src/ui/shell.rs#L3724)
+[src/ui/shell.rs:3710](../../../src/ui/shell.rs#L3710)
 
 What was picked in a layer row's ⋮ menu. It derives `Clone, Copy, Debug, PartialEq, Eq`
 so it can be copied and compared freely.
@@ -469,7 +469,7 @@ so it can be copied and compared freely.
 | `DeleteGroup` | (group rows) delete the group and its layers |
 
 ### `struct RowMenu`
-[src/ui/shell.rs:3734](../../../src/ui/shell.rs#L3734)
+[src/ui/shell.rs:3720](../../../src/ui/shell.rs#L3720)
 
 What the row menu needs to know about the row it belongs to. The `'a` lifetime is there
 because `grp_key` borrows a string owned by the caller.
@@ -478,11 +478,11 @@ because `grp_key` borrows a string owned by the caller.
 |---|---|---|
 | `header` | `bool` | The row is a group header, not a layer |
 | `grp_key` | `&'a str` | The shortcut text for "Group selected layers", shown in the label |
-| `krita_label` | `&'static str` | Label for the Krita item (from [`krita_menu_label`](../../../src/ui/shell.rs#L9729)) |
+| `krita_label` | `&'static str` | Label for the Krita item (from [`krita_menu_label`](../../../src/ui/shell.rs#L9748)) |
 | `krita_ok` | `bool` | False for reference layers and layers whose name ends in `-x`, which never go to Krita |
 
 ### `const OPACITY_BADGE_PAD`
-[src/ui/shell.rs:3909](../../../src/ui/shell.rs#L3909)
+[src/ui/shell.rs:3895](../../../src/ui/shell.rs#L3895)
 
 ```rust
 const OPACITY_BADGE_PAD: f32 = 2.0;
@@ -492,7 +492,7 @@ const OPACITY_BADGE_PAD: f32 = 2.0;
 still look like a field.
 
 ### `const ORIENT_ART`
-[src/ui/shell.rs:6309](../../../src/ui/shell.rs#L6309)
+[src/ui/shell.rs:6303](../../../src/ui/shell.rs#L6303)
 
 ```rust
 const ORIENT_ART: [(crate::doc::orient::Orient, Action, &str, &str); 5] = {
@@ -517,10 +517,10 @@ line is its value, so the `use` stays local to this constant. `Orient` comes fro
 
 **Used by:** [`layer_selection_actions`](#layer_selection_actions),
 [`selection_options`](#selection_options) and
-[`title_menu`](../../../src/ui/shell.rs#L8645).
+[`title_menu`](../../../src/ui/shell.rs#L8668).
 
 ### `enum PenOp`
-[src/ui/shell.rs:6362](../../../src/ui/shell.rs#L6362)
+[src/ui/shell.rs:6356](../../../src/ui/shell.rs#L6356)
 
 What a pen slot's right-click menu asks of the row, done once the row is drawn.
 
@@ -530,7 +530,7 @@ What a pen slot's right-click menu asks of the row, done once the row is drawn.
 | `Remove(usize)` | Remove this slot (`AppState::remove_pen`). |
 
 ### `const PEN_MENU_W`
-[src/ui/shell.rs:6420](../../../src/ui/shell.rs#L6420)
+[src/ui/shell.rs:6414](../../../src/ui/shell.rs#L6414)
 
 ```rust
 const PEN_MENU_W: f32 = 290.0;
@@ -539,7 +539,7 @@ const PEN_MENU_W: f32 = 290.0;
 Wide enough for the icons two rows of eight, and four brushes a row.
 
 ### `const STABILIZED_DOT_R`
-[src/ui/shell.rs:6483](../../../src/ui/shell.rs#L6483)
+[src/ui/shell.rs:6477](../../../src/ui/shell.rs#L6477)
 
 ```rust
 const STABILIZED_DOT_R: f32 = 2.5;
@@ -549,7 +549,7 @@ const STABILIZED_DOT_R: f32 = 2.5;
 [`tool_toggle`](#tool_toggle) and a test.
 
 ### `struct Xform`
-[src/ui/shell.rs:7672](../../../src/ui/shell.rs#L7672)
+[src/ui/shell.rs:7666](../../../src/ui/shell.rs#L7666)
 
 The canvas **view transform**: how the document (the drawing, measured in its own pixels) is
 placed on screen. It combines the "fit to window" base scale with the user's zoom, pan, rotation
@@ -573,7 +573,7 @@ and `Copy`, so it is passed around by value like a number
 | `ch` | `f32` | Document (canvas) height in pixels. |
 
 ### `const PEN_MOUSE_AGREEMENT`
-[src/ui/shell.rs:8437](../../../src/ui/shell.rs#L8437)
+[src/ui/shell.rs:8431](../../../src/ui/shell.rs#L8431)
 
 ```rust
 const PEN_MOUSE_AGREEMENT: f32 = 20.0;
@@ -588,7 +588,7 @@ points. Checking against the newest packet made every fast stroke fail and fall 
 check still catches it.
 
 ### `const MAX_PACKET_JUMP`
-[src/ui/shell.rs:8444](../../../src/ui/shell.rs#L8444)
+[src/ui/shell.rs:8438](../../../src/ui/shell.rs#L8438)
 
 ```rust
 const MAX_PACKET_JUMP: f32 = 400.0;
@@ -599,7 +599,7 @@ batch. One frame at 60 Hz with 400 points of travel would be 24,000 points per s
 hand can do — so a packet that far away is not a real position and is dropped.
 
 ### `enum PenFrame`
-[src/ui/shell.rs:8448](../../../src/ui/shell.rs#L8448)
+[src/ui/shell.rs:8442](../../../src/ui/shell.rs#L8442)
 
 This frame's tablet input, as far as a stroke is concerned. `#[derive(Debug)]` lets it be printed
 for debugging.
@@ -611,7 +611,7 @@ for debugging.
 | `Untrusted` | No pen to draw from: none at all, or its mapping disagrees with the OS cursor. |
 
 ### `const PRESET_LIST_MAX_H`
-[src/ui/shell.rs:8986](../../../src/ui/shell.rs#L8986)
+[src/ui/shell.rs:8980](../../../src/ui/shell.rs#L8980)
 
 ```rust
 const PRESET_LIST_MAX_H: f32 = 170.0;
@@ -621,7 +621,7 @@ const PRESET_LIST_MAX_H: f32 = 170.0;
 scrolls — about six rows, so a long list never pushes the Create button off the screen.
 
 ### `const SIZE_PRESETS`
-[src/ui/shell.rs:8990](../../../src/ui/shell.rs#L8990)
+[src/ui/shell.rs:8984](../../../src/ui/shell.rs#L8984)
 
 ```rust
 const SIZE_PRESETS: [(&str, u32, u32); 6] = [
@@ -636,11 +636,11 @@ const SIZE_PRESETS: [(&str, u32, u32); 6] = [
 One-click sizes as `(label, width, height)` tuples, written landscape. Used for a new canvas in
 New project and for a camera frame in the Camera panel.
 
-Used by [`camera_size_ui`](../../../src/ui/shell.rs#L3333) and
+Used by [`camera_size_ui`](../../../src/ui/shell.rs#L3336) and
 [`new_project_dialog`](#new_project_dialog).
 
 ### `const MAX_SIDE`
-[src/ui/shell.rs:9001](../../../src/ui/shell.rs#L9001)
+[src/ui/shell.rs:8995](../../../src/ui/shell.rs#L8995)
 
 ```rust
 const MAX_SIDE: u32 = 16384;
@@ -648,7 +648,7 @@ const MAX_SIDE: u32 = 16384;
 
 `u32 = 16384`. The longest side a camera frame (or a clipboard-sized canvas) may have: the canvas
 limit, which is the largest texture a GPU accepts. Used by
-[`camera_size_ui`](../../../src/ui/shell.rs#L3333),
+[`camera_size_ui`](../../../src/ui/shell.rs#L3336),
 [`new_project_dialog`](#new_project_dialog) and tests.
 
 ## Free functions
@@ -1558,10 +1558,13 @@ slider — the ruler in the tracks scrubs.
    *before* the `add_enabled_ui` closures, because those closures borrow `state` while
    they run.
 3. **Step size** — a `DragValue` "×N" (1–999) shared by the arrows and the insert buttons.
-4. **Whole-timeline edits** (every layer) — insert N frames before this one, add N
-   frames, duplicate, delete.
-5. **Active-layer edits** — insert N frames on this layer (the drawing at the playhead
-   holds longer, later ones slide) and remove N frames from the playhead.
+4. **Frame edits** — insert N frames before this one, add N frames, duplicate, delete.
+   All four follow one rule (`AppState::frame_scope` in [app.rs](../app.md)): they act on
+   the selected layers (the active one when none are picked), or on the whole scene —
+   camera and grid keys included — when every layer is selected. Adding grows the
+   timeline by N; deleting keeps its length on the selected layers.
+5. *(Removed: the separate insert/remove-on-this-layer buttons, which the rule above
+   made the same as add and delete.)*
 6. **Right-aligned group** (laid out right to left) — fps (1–60), the frame count in a
    slot four digits wide (so the bar keeps its width as the scene grows), the current
    frame field and a clock icon. The frame field accepts arithmetic through
@@ -1580,7 +1583,7 @@ make it grow taller each frame.
 **Used by:** [`panel_content`](#panel_content).
 
 ### `title_bar_shortfall`
-[src/ui/shell.rs:2114](../../../src/ui/shell.rs#L2114)
+[src/ui/shell.rs:2100](../../../src/ui/shell.rs#L2100)
 
 ```rust
 fn title_bar_shortfall(ctx: &egui::Context, id: PanelId) -> f32
@@ -1600,7 +1603,7 @@ out exactly the size dragged. It looks up the panel's title with
 `layers_content`, `xsheet_content`.
 
 ### `title_shortfall`
-[src/ui/shell.rs:2122](../../../src/ui/shell.rs#L2122)
+[src/ui/shell.rs:2108](../../../src/ui/shell.rs#L2108)
 
 ```rust
 pub(crate) fn title_shortfall(ctx: &egui::Context, title: &str) -> f32
@@ -1615,7 +1618,7 @@ the Heading style) and returns `interact_size.y − that height`, or 0 if negati
 [ui/krita_import.rs](krita_import.md).
 
 ### `brush_noise`
-[src/ui/shell.rs:2133](../../../src/ui/shell.rs#L2133)
+[src/ui/shell.rs:2119](../../../src/ui/shell.rs#L2119)
 
 ```rust
 fn brush_noise(state: &mut AppState, ui: &mut egui::Ui)
@@ -1635,7 +1638,7 @@ shows as selected when `field == Value` and sets `field = Value` when clicked.
 **Used by:** [`brush_dynamics`](#brush_dynamics).
 
 ### `brush_dynamics`
-[src/ui/shell.rs:2166](../../../src/ui/shell.rs#L2166)
+[src/ui/shell.rs:2152](../../../src/ui/shell.rs#L2152)
 
 ```rust
 fn brush_dynamics(state: &mut AppState, ui: &mut egui::Ui)
@@ -1669,7 +1672,7 @@ false.
 **Used by:** `brush_settings_window`.
 
 ### `krita_notes`
-[src/ui/shell.rs:2247](../../../src/ui/shell.rs#L2247)
+[src/ui/shell.rs:2233](../../../src/ui/shell.rs#L2233)
 
 ```rust
 fn krita_notes(state: &AppState, ui: &mut egui::Ui)
@@ -1681,7 +1684,7 @@ Krita's own sliders, and (when no pen is active) tilt needs a tablet.
 **Used by:** [`brush_dynamics`](#brush_dynamics).
 
 ### `diag_row`
-[src/ui/shell.rs:2263](../../../src/ui/shell.rs#L2263)
+[src/ui/shell.rs:2249](../../../src/ui/shell.rs#L2249)
 
 ```rust
 fn diag_row(ui: &mut egui::Ui, key: &str, value: String)
@@ -1693,7 +1696,7 @@ text, the value in small monospace text.
 **Used by:** [`display_diagnostics`](#display_diagnostics), [`tablet_diagnostics`](#tablet_diagnostics).
 
 ### `display_diagnostics`
-[src/ui/shell.rs:2274](../../../src/ui/shell.rs#L2274)
+[src/ui/shell.rs:2260](../../../src/ui/shell.rs#L2260)
 
 ```rust
 fn display_diagnostics(ui: &mut egui::Ui, d: &crate::input::tablet::PenDiagnostics)
@@ -1717,7 +1720,7 @@ prints a number in hex with a `0x` prefix.
 **Used by:** [`tablet_diagnostics`](#tablet_diagnostics).
 
 ### `tablet_diagnostics`
-[src/ui/shell.rs:2354](../../../src/ui/shell.rs#L2354)
+[src/ui/shell.rs:2340](../../../src/ui/shell.rs#L2340)
 
 ```rust
 fn tablet_diagnostics(state: &mut AppState, ui: &mut egui::Ui)
@@ -1754,7 +1757,7 @@ position) is the number that settles it.
 **Used by:** `brush_settings_window` (in a collapsing section).
 
 ### `smoothing_controls`
-[src/ui/shell.rs:2556](../../../src/ui/shell.rs#L2556)
+[src/ui/shell.rs:2542](../../../src/ui/shell.rs#L2542)
 
 ```rust
 fn smoothing_controls(o: &mut SmoothingOptions, ui: &mut egui::Ui, hint: &str)
@@ -1781,7 +1784,7 @@ Eraser has its own); `hint` — the drop-down's tooltip, from [`smoothing_hint`]
 **Used by:** `brush_settings_window`.
 
 ### `smoothing_hint`
-[src/ui/shell.rs:2627](../../../src/ui/shell.rs#L2627)
+[src/ui/shell.rs:2613](../../../src/ui/shell.rs#L2613)
 
 ```rust
 fn smoothing_hint(state: &AppState) -> String
@@ -1794,7 +1797,7 @@ alone, then lists the keys bound to `StabilizerToggle` and `SmoothingCycle`, if 
 **Used by:** `brush_settings_window`.
 
 ### `stabilizer_controls`
-[src/ui/shell.rs:2639](../../../src/ui/shell.rs#L2639)
+[src/ui/shell.rs:2625](../../../src/ui/shell.rs#L2625)
 
 ```rust
 fn stabilizer_controls(o: &mut SmoothingOptions, ui: &mut egui::Ui)
@@ -1810,7 +1813,7 @@ sensors** (average pressure and tilt too) and **Scale distance with zoom**.
 **Used by:** [`smoothing_controls`](#smoothing_controls).
 
 ### `play_button`
-[src/ui/shell.rs:2666](../../../src/ui/shell.rs#L2666)
+[src/ui/shell.rs:2652](../../../src/ui/shell.rs#L2652)
 
 ```rust
 fn play_button(state: &AppState, ui: &mut egui::Ui, icon: &str) -> egui::Response
@@ -1826,7 +1829,7 @@ source starts with a paragraph about the Loop toggle, which belongs to
 **Used by:** [`timeline_content`](#timeline_content), [`mini_timeline_window`](#mini_timeline_window).
 
 ### `loop_toggle`
-[src/ui/shell.rs:2679](../../../src/ui/shell.rs#L2679)
+[src/ui/shell.rs:2665](../../../src/ui/shell.rs#L2665)
 
 ```rust
 fn loop_toggle(ui: &mut egui::Ui, state: &AppState) -> egui::Response
@@ -1841,7 +1844,7 @@ caller flips the flag when it is clicked.
 **Used by:** [`timeline_content`](#timeline_content), [`mini_timeline_window`](#mini_timeline_window).
 
 ### `mini_timeline_window`
-[src/ui/shell.rs:2692](../../../src/ui/shell.rs#L2692)
+[src/ui/shell.rs:2678](../../../src/ui/shell.rs#L2678)
 
 ```rust
 fn mini_timeline_window(state: &mut AppState, ctx: &egui::Context)
@@ -1855,7 +1858,7 @@ configured with a builder chain (`.title_bar(false).resizable(false)…`) and th
 runs the closure to fill it — the closure *is* the window's contents.
 
 ### `tool_icon`
-[src/ui/shell.rs:2815](../../../src/ui/shell.rs#L2815)
+[src/ui/shell.rs:2801](../../../src/ui/shell.rs#L2801)
 
 ```rust
 fn tool_icon(state: &AppState, tool: ActiveTool) -> &'static str
@@ -1865,7 +1868,7 @@ The Phosphor icon (a glyph from the icon font) for a tool, used by the mini bar.
 was given (`PenSlot::glyph`), which is why it needs `state`.
 
 ### `tool_name`
-[src/ui/shell.rs:2830](../../../src/ui/shell.rs#L2830)
+[src/ui/shell.rs:2816](../../../src/ui/shell.rs#L2816)
 
 ```rust
 fn tool_name(state: &AppState, tool: ActiveTool) -> String
@@ -1876,7 +1879,7 @@ The display name of a tool ("Lasso select", or a pen slot's own name such as "Pe
 tools' names are literals turned into a `String` with `.to_owned()`.
 
 ### `mini_frame_dots`
-[src/ui/shell.rs:2848](../../../src/ui/shell.rs#L2848)
+[src/ui/shell.rs:2834](../../../src/ui/shell.rs#L2834)
 
 ```rust
 fn mini_frame_dots(state: &mut AppState, ui: &mut egui::Ui)
@@ -1886,7 +1889,7 @@ The mini bar's frame indicator: one dot per frame, the current one filled, in a 
 scrollable strip that keeps the current frame in view. Click or drag on the dots to scrub.
 
 ### `grid_key_marks`
-[src/ui/shell.rs:2932](../../../src/ui/shell.rs#L2932)
+[src/ui/shell.rs:2918](../../../src/ui/shell.rs#L2918)
 
 ```rust
 pub(crate) fn grid_key_marks(state: &AppState) -> Option<(Vec<usize>, Color32)>
@@ -1896,7 +1899,7 @@ The frames where the active perspective grid has keys, plus the grid's colour, s
 mark them — only while grids are being shown and the grid has keys. The `?` returns `None` early.
 
 ### `key_flags`
-[src/ui/shell.rs:2945](../../../src/ui/shell.rs#L2945)
+[src/ui/shell.rs:2931](../../../src/ui/shell.rs#L2931)
 
 ```rust
 fn key_flags(state: &AppState, n: usize) -> (Vec<bool>, Vec<bool>)
@@ -1907,7 +1910,7 @@ and the same for the camera. Built once per timeline draw, because asking per fr
 draw loop would scan the key list every time (quadratic on long scenes).
 
 ### `onion_content`
-[src/ui/shell.rs:2963](../../../src/ui/shell.rs#L2963)
+[src/ui/shell.rs:2949](../../../src/ui/shell.rs#L2949)
 
 ```rust
 fn onion_content(state: &mut AppState, ui: &mut egui::Ui)
@@ -1921,7 +1924,7 @@ out in a child `Ui` that claims no space of its own, so adding a pin can't grow 
 a typical immediate-mode layout trick, since sizes are only known after drawing.
 
 ### `onion_settings`
-[src/ui/shell.rs:3001](../../../src/ui/shell.rs#L3001)
+[src/ui/shell.rs:2987](../../../src/ui/shell.rs#L2987)
 
 ```rust
 fn onion_settings(state: &mut AppState, ui: &mut egui::Ui)
@@ -1931,7 +1934,7 @@ The Onion panel's lower section: stepping options, a Reset button, the past/futu
 the pinned frames (`onion_pins_content`).
 
 ### `button_width`
-[src/ui/shell.rs:3034](../../../src/ui/shell.rs#L3034)
+[src/ui/shell.rs:3020](../../../src/ui/shell.rs#L3020)
 
 ```rust
 fn button_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>, min: f32) -> f32
@@ -1941,7 +1944,7 @@ How wide a button showing `text` would be (text width plus padding), but at leas
 line up rows of buttons.
 
 ### `pad_to_right`
-[src/ui/shell.rs:3047](../../../src/ui/shell.rs#L3047)
+[src/ui/shell.rs:3033](../../../src/ui/shell.rs#L3033)
 
 ```rust
 fn pad_to_right(ui: &mut egui::Ui, w: f32)
@@ -1952,7 +1955,7 @@ instead of a right-to-left layout, which overlaps on narrow panels, and floored 
 be a hair too wide and grow the panel a little every frame.
 
 ### `layer_onion_tip`
-[src/ui/shell.rs:3055](../../../src/ui/shell.rs#L3055)
+[src/ui/shell.rs:3041](../../../src/ui/shell.rs#L3041)
 
 ```rust
 pub(crate) fn layer_onion_tip(on: bool) -> &'static str
@@ -1962,7 +1965,7 @@ The tooltip text for a layer's onion toggle (Layers panel and timeline tracks), 
 it is on. The `\` at line ends continues a string literal onto the next line.
 
 ### `strip_offset`
-[src/ui/shell.rs:3073](../../../src/ui/shell.rs#L3073)
+[src/ui/shell.rs:3059](../../../src/ui/shell.rs#L3059)
 
 ```rust
 fn strip_offset(i: usize) -> Option<(u8, OnionDirection)>
@@ -1973,7 +1976,7 @@ frames (−8…−1), the middle is 0 (`None`, the on/off switch), the right are
 `i.cmp(&r)` compares two numbers and returns `Less`, `Equal` or `Greater`, matched on.
 
 ### `onion_strip`
-[src/ui/shell.rs:3086](../../../src/ui/shell.rs#L3086)
+[src/ui/shell.rs:3072](../../../src/ui/shell.rs#L3072)
 
 ```rust
 fn onion_strip(onion: &mut OnionConfig, key: Option<&str>, bar_h: f32, ui: &mut egui::Ui)
@@ -1984,7 +1987,7 @@ sets its opacity; Alt-click shows only that ghost (again to restore); 0 turns on
 off; one drag across several bars sets each one it crosses.
 
 ### `onion_pins_content`
-[src/ui/shell.rs:3243](../../../src/ui/shell.rs#L3243)
+[src/ui/shell.rs:3229](../../../src/ui/shell.rs#L3229)
 
 ```rust
 fn onion_pins_content(state: &mut AppState, ui: &mut egui::Ui)
@@ -1994,7 +1997,7 @@ The pinned-frames list for the active layer: add a pin by frame number or from t
 recolour, hide or remove each pin. Pinned frames always show as ghosts, whatever the range.
 
 ### `camera_size_ui`
-[src/ui/shell.rs:3336](../../../src/ui/shell.rs#L3336)
+[src/ui/shell.rs:3322](../../../src/ui/shell.rs#L3322)
 
 ```rust
 fn camera_size_ui(state: &mut AppState, ui: &mut egui::Ui)
@@ -2004,7 +2007,7 @@ The camera frame size controls (the size every export comes out at). Changing it
 keys alone, so the frame simply shows more or less of the canvas.
 
 ### `camera_loops_ui`
-[src/ui/shell.rs:3403](../../../src/ui/shell.rs#L3403)
+[src/ui/shell.rs:3389](../../../src/ui/shell.rs#L3389)
 
 ```rust
 fn camera_loops_ui(state: &mut AppState, ui: &mut egui::Ui)
@@ -2029,11 +2032,11 @@ is still going.
    [`shot_len`](../io/frame_order.md) over the loop range, and shows that in frames and
    seconds (`frames / fps`).
 
-**Used by:** [`camera_content`](../../../src/ui/shell.rs#L3438) (inside its "Over loops"
+**Used by:** [`camera_content`](../../../src/ui/shell.rs#L3441) (inside its "Over loops"
 collapsing header).
 
 ### `camera_content`
-[src/ui/shell.rs:3441](../../../src/ui/shell.rs#L3441)
+[src/ui/shell.rs:3427](../../../src/ui/shell.rs#L3427)
 
 ```rust
 fn camera_content(state: &mut AppState, ui: &mut egui::Ui)
@@ -2047,14 +2050,14 @@ moves between — see [glossary](../../glossary.md)), easing, and view-only over
 **How it works.** Top to bottom:
 1. A muted intro sentence.
 2. A collapsing header "Resolution · W×H" (open by default) holding
-   [`camera_size_ui`](../../../src/ui/shell.rs#L3333).
+   [`camera_size_ui`](../../../src/ui/shell.rs#L3336).
 3. "Camera edit mode" checkbox (`state.camera_edit`); turning it on turns
    `state.camera_box` off. A help label shows its shortcut via
-   [`combo_text`](../../../src/ui/shell.rs#L48).
+   [`combo_text`](../../../src/ui/shell.rs#L49).
 4. "Draw camera box" checkbox (calls `state.set_camera_box`) and an indented
    "Free shape" checkbox (`state.camera_box_free`). The help text changes with the free
    shape setting and appends the mid-drag key hint from
-   [`mid_drag_hint`](../../../src/ui/shell.rs#L58) when there is one.
+   [`mid_drag_hint`](../../../src/ui/shell.rs#L59) when there is one.
 5. Number boxes for X, Y, Zoom (0.05–64) and Roll. Roll is stored in radians but edited
    in degrees (`to_degrees()` / `to_radians()`).
 6. Four buttons — Fit, Fill, 1:1, Centre — each calling `state.frame_camera(...)` with a
@@ -2074,11 +2077,11 @@ moves between — see [glossary](../../glossary.md)), easing, and view-only over
 Note the comment at the key row: the previous/next key frames are looked up *before*
 `ui.add_enabled_ui(...)`, because that closure borrows `state` while it runs.
 
-**Used by:** [`panel_content`](../../../src/ui/shell.rs#L921) for `PanelId::Camera`; also
+**Used by:** [`panel_content`](../../../src/ui/shell.rs#L924) for `PanelId::Camera`; also
 drawn directly by tests in this file.
 
 ### `layer_row_menu`
-[src/ui/shell.rs:3744](../../../src/ui/shell.rs#L3744)
+[src/ui/shell.rs:3730](../../../src/ui/shell.rs#L3730)
 
 ```rust
 fn layer_row_menu(ui: &mut egui::Ui, m: &RowMenu, out: &mut Option<RowCmd>)
@@ -2104,7 +2107,7 @@ an explanation on hover) when `krita_ok` is false.
 name's context menu).
 
 ### `row_caption`
-[src/ui/shell.rs:3786](../../../src/ui/shell.rs#L3786)
+[src/ui/shell.rs:3772](../../../src/ui/shell.rs#L3772)
 
 ```rust
 fn row_caption(ui: &mut egui::Ui, text: &str)
@@ -2118,7 +2121,7 @@ larger width with `fold(0.0, f32::max)`.
 **Used by:** [`layers_content`](#layers_content).
 
 ### `icon_button_on`
-[src/ui/shell.rs:3805](../../../src/ui/shell.rs#L3805)
+[src/ui/shell.rs:3791](../../../src/ui/shell.rs#L3791)
 
 ```rust
 fn icon_button_on(ui: &mut egui::Ui, icon: &str, tooltip: &str, on: bool) -> egui::Response
@@ -2133,7 +2136,7 @@ clicked, hovered, dragged…).
 clip and alpha-lock toggles.
 
 ### `layer_selection_actions`
-[src/ui/shell.rs:3814](../../../src/ui/shell.rs#L3814)
+[src/ui/shell.rs:3800](../../../src/ui/shell.rs#L3800)
 
 ```rust
 fn layer_selection_actions(state: &mut AppState, ui: &mut egui::Ui)
@@ -2157,7 +2160,7 @@ actions that apply to the active layer *and* every other layer picked with it
      *Clipping* shows a layer only where the layer under it has paint; *alpha lock* lets
      painting change only already-painted pixels (see [glossary](../../glossary.md)).
 3. Opacity slider (label "opacity ×N" when several are picked), sized by
-   [`fit_sliders`](../../../src/ui/shell.rs#L1856). Double-click resets to 100%. A change
+   [`fit_sliders`](../../../src/ui/shell.rs#L1859). Double-click resets to 100%. A change
    calls `state.set_selected_opacity(v)`.
 4. When the slider is not being dragged or typed in, and no row's % badge is in hand
    (`state.opacity_row_uid` is `None`), it calls `state.commit_layer_opacity()` so a whole
@@ -2166,7 +2169,7 @@ actions that apply to the active layer *and* every other layer picked with it
 **Used by:** [`layers_content`](#layers_content).
 
 ### `opacity_badge`
-[src/ui/shell.rs:3913](../../../src/ui/shell.rs#L3913)
+[src/ui/shell.rs:3899](../../../src/ui/shell.rs#L3899)
 
 ```rust
 fn opacity_badge(ui: &mut egui::Ui, pct: &mut f32) -> egui::Response
@@ -2181,7 +2184,7 @@ place.
 **Used by:** [`layers_content`](#layers_content).
 
 ### `opacity_badge_w`
-[src/ui/shell.rs:3929](../../../src/ui/shell.rs#L3929)
+[src/ui/shell.rs:3915](../../../src/ui/shell.rs#L3915)
 
 ```rust
 fn opacity_badge_w(ui: &egui::Ui, opacity: f32) -> f32
@@ -2195,7 +2198,7 @@ padding on both sides, and rounds up.
 [`layers_content`](#layers_content) (to reserve room for it).
 
 ### `layers_content`
-[src/ui/shell.rs:3938](../../../src/ui/shell.rs#L3938)
+[src/ui/shell.rs:3924](../../../src/ui/shell.rs#L3924)
 
 ```rust
 fn layers_content(state: &mut AppState, ui: &mut egui::Ui)
@@ -2212,7 +2215,7 @@ function in this stretch (about 640 lines).
    p.add_layer_above_active())` — one undoable structural change), delete the selected
    layers, group the selected layers, move layer up / down, merge down (enabled only when
    `state.can_merge_down()`), and a "Fade other layers" toggle (`state.fade_others`).
-   Tooltips include the bound shortcut via [`tip`](../../../src/ui/shell.rs#L30).
+   Tooltips include the bound shortcut via [`tip`](../../../src/ui/shell.rs#L31).
 2. **Second toolbar** and opacity slider:
    [`layer_selection_actions`](#layer_selection_actions).
 3. **"Fade other layers"** collapsing header with two sliders (`state.fade.above`,
@@ -2228,7 +2231,7 @@ function in this stretch (about 640 lines).
    `let (layers, rename) = (&mut state.project.layers, &mut state.layer_rename);`.
 5. **Size the list.** The list fills the panel's height minus what the sections below it
    used *last frame* (kept in egui temp memory under `"layers_below_h"`) and minus
-   [`title_bar_shortfall`](../../../src/ui/shell.rs#L2111), floored and never below
+   [`title_bar_shortfall`](../../../src/ui/shell.rs#L2114), floored and never below
    [`LAYER_LIST_MIN_H`](#const-layer_list_min_h). The comment explains why: if the list
    were sized to its rows, every new layer would grow the window, and egui never shrinks a
    window below what its content once asked for. Only the list scrolls; the toolbars and
@@ -2245,7 +2248,7 @@ function in this stretch (about 640 lines).
      directly;
    - for non-groups: a light-bulb **reference** toggle (a light-table layer shown dim for
      tracing) and an **onion** toggle (keep onion skin on for this layer while another is
-     active; tooltip from [`layer_onion_tip`](../../../src/ui/shell.rs#L3052));
+     active; tooltip from [`layer_onion_tip`](../../../src/ui/shell.rs#L3055));
    - the **name**: when this row is being renamed, a single-line text box that grabs focus
      once; Escape cancels, losing focus (Enter or clicking away) commits. Otherwise a
      selectable label that senses both click and drag. It is the drag handle
@@ -2302,10 +2305,10 @@ drawLine(inside ? row.rect.left + 14 : row.rect.left, row.rect.right, y);
 if (released) drop = { from: dragged, to: i, above };
 ```
 
-**Used by:** [`panel_content`](../../../src/ui/shell.rs#L921) for `PanelId::Layers`.
+**Used by:** [`panel_content`](../../../src/ui/shell.rs#L924) for `PanelId::Layers`.
 
 ### `layer_transform_section`
-[src/ui/shell.rs:4585](../../../src/ui/shell.rs#L4585)
+[src/ui/shell.rs:4571](../../../src/ui/shell.rs#L4571)
 
 ```rust
 fn layer_transform_section(state: &mut AppState, ui: &mut egui::Ui)
@@ -2337,7 +2340,7 @@ animates between) and the ease out of the key on this frame.
 header); also drawn by a test in this file.
 
 ### `layer_canvas_section`
-[src/ui/shell.rs:4727](../../../src/ui/shell.rs#L4727)
+[src/ui/shell.rs:4713](../../../src/ui/shell.rs#L4713)
 
 ```rust
 fn layer_canvas_section(state: &mut AppState, ui: &mut egui::Ui)
@@ -2360,7 +2363,7 @@ egui::DragValue::new(value)
 be called later. More: [Closures](../../rust-primer.md#closures).
 
 #### `layer_canvas_section::size_field`
-[src/ui/shell.rs:4744](../../../src/ui/shell.rs#L4744)
+[src/ui/shell.rs:4730](../../../src/ui/shell.rs#L4730)
 
 ```rust
 fn size_field(value: &mut u32, max: u32) -> egui::DragValue<'_>
@@ -2383,7 +2386,7 @@ egui::DragValue::new(value)
 be called later. More: [Closures](../../rust-primer.md#closures).
 
 ### `xsheet_content`
-[src/ui/shell.rs:4800](../../../src/ui/shell.rs#L4800)
+[src/ui/shell.rs:4786](../../../src/ui/shell.rs#L4786)
 
 ```rust
 fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui)
@@ -2406,7 +2409,7 @@ clipboard actions.
    shows its name with a folder icon and no cells; its layers are marked "›"; folded
    groups' layers are left out.
 4. A `ScrollArea` in both directions that takes the panel's full height (minus
-   [`title_bar_shortfall`](../../../src/ui/shell.rs#L2111)) whatever the frame count, so
+   [`title_bar_shortfall`](../../../src/ui/shell.rs#L2114)) whatever the frame count, so
    adding frames never grows the window.
 5. Inside an `egui::Grid`: a header row of layer names, then for each frame:
    - even rows get a stripe painted by hand. It reserves a placeholder shape
@@ -2418,10 +2421,10 @@ clipboard actions.
    - per layer column: the cell id or "·" for empty, plus "◆" if that layer has a
      transform key on this frame. Clicking a cell makes that frame and layer current.
 
-**Used by:** [`panel_content`](../../../src/ui/shell.rs#L921) for `PanelId::Xsheet`.
+**Used by:** [`panel_content`](../../../src/ui/shell.rs#L924) for `PanelId::Xsheet`.
 
 ### `brush_settings_window`
-[src/ui/shell.rs:4962](../../../src/ui/shell.rs#L4962)
+[src/ui/shell.rs:4956](../../../src/ui/shell.rs#L4956)
 
 ```rust
 fn brush_settings_window(state: &mut AppState, ctx: &egui::Context)
@@ -2447,22 +2450,22 @@ leave.
    window's saved position from its title, so a later rename would strand it
    off-screen. Default position (260, 120), width 300, resizable, collapsible, framed
    with [`floating_frame`](#floating_frame).
-3. [`drag_by_title_only`](../../../src/ui/shell.rs#L1172) so dragging inside doesn't move
+3. [`drag_by_title_only`](../../../src/ui/shell.rs#L1175) so dragging inside doesn't move
    the window, then a vertical `ScrollArea` limited by
-   [`title_shortfall`](../../../src/ui/shell.rs#L2119).
+   [`title_shortfall`](../../../src/ui/shell.rs#L2122).
 4. Sections: "Preset" ([`brush_picker::brush_grid`](brush_picker.md) and an "Import from
    Krita…" button calling `state.open_krita_import()`), "Dynamics"
-   ([`brush_dynamics`](../../../src/ui/shell.rs#L2163)), "Smoothing"
-   ([`smoothing_controls`](../../../src/ui/shell.rs#L2553) for the tool's own options, or a
+   ([`brush_dynamics`](../../../src/ui/shell.rs#L2166)), "Smoothing"
+   ([`smoothing_controls`](../../../src/ui/shell.rs#L2556) for the tool's own options, or a
    note that every pen slot and the Eraser keep their own when the tool has none), and a
-   folded "Tablet" section ([`tablet_diagnostics`](../../../src/ui/shell.rs#L2351)).
+   folded "Tablet" section ([`tablet_diagnostics`](../../../src/ui/shell.rs#L2354)).
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) — deliberately outside the "panels
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) — deliberately outside the "panels
 shown" branch, since hiding the panels is what you do to draw, which is when brush feel
 needs adjusting. Also used by [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `settings_window`
-[src/ui/shell.rs:5019](../../../src/ui/shell.rs#L5019)
+[src/ui/shell.rs:5013](../../../src/ui/shell.rs#L5013)
 
 ```rust
 fn settings_window(state: &mut AppState, ctx: &egui::Context)
@@ -2507,11 +2510,11 @@ The `ensure_file(...).and_then(...).map(...).map_err(...)` chain is a `Result` p
 each step runs only if the previous succeeded, and `map_err` turns the error into a
 message. More: [Option and Result](../../rust-primer.md#option-and-result).
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (when the panels are shown and
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (when the panels are shown and
 settings are open); also by tests here and in [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `appearance_section`
-[src/ui/shell.rs:5262](../../../src/ui/shell.rs#L5262)
+[src/ui/shell.rs:5256](../../../src/ui/shell.rs#L5256)
 
 ```rust
 fn appearance_section(state: &mut AppState, ui: &mut egui::Ui)
@@ -2537,7 +2540,7 @@ apply immediately.
 **Used by:** [`settings_window`](#settings_window).
 
 ### `scheme_card`
-[src/ui/shell.rs:5344](../../../src/ui/shell.rs#L5344)
+[src/ui/shell.rs:5338](../../../src/ui/shell.rs#L5338)
 
 ```rust
 fn scheme_card(ui: &mut egui::Ui, s: Scheme, p: &crate::ui::theme::Palette, selected: bool) -> egui::Response
@@ -2560,7 +2563,7 @@ when selected, a hover colour when hovered, otherwise thin.
 **Used by:** [`appearance_section`](#appearance_section).
 
 ### `wheel_rows`
-[src/ui/shell.rs:5380](../../../src/ui/shell.rs#L5380)
+[src/ui/shell.rs:5374](../../../src/ui/shell.rs#L5374)
 
 ```rust
 fn wheel_rows(state: &mut AppState, ui: &mut egui::Ui)
@@ -2578,7 +2581,7 @@ a rebind.
 **Used by:** [`settings_window`](#settings_window).
 
 ### `shortcut_row`
-[src/ui/shell.rs:5422](../../../src/ui/shell.rs#L5422)
+[src/ui/shell.rs:5416](../../../src/ui/shell.rs#L5416)
 
 ```rust
 fn shortcut_row(
@@ -2609,7 +2612,7 @@ cell is [`clash_cell`](#clash_cell).
 **Used by:** [`settings_window`](#settings_window).
 
 ### `clash_cell`
-[src/ui/shell.rs:5473](../../../src/ui/shell.rs#L5473)
+[src/ui/shell.rs:5467](../../../src/ui/shell.rs#L5467)
 
 ```rust
 fn clash_cell(ui: &mut egui::Ui, action: Action, flags: Option<&Vec<Clash>>)
@@ -2631,7 +2634,7 @@ the condition is also true.
 **Used by:** [`shortcut_row`](#shortcut_row).
 
 ### `color_picker_u8`
-[src/ui/shell.rs:5498](../../../src/ui/shell.rs#L5498)
+[src/ui/shell.rs:5492](../../../src/ui/shell.rs#L5492)
 
 ```rust
 fn color_picker_u8(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3])
@@ -2641,11 +2644,11 @@ A colour button (from [`color_wheel::hsl_edit_button`](color_wheel.md)) followed
 label, on one row. `c` is an RGB colour as three bytes (`[u8; 3]`, a fixed-size array),
 edited in place.
 
-**Used by:** [`onion_settings`](../../../src/ui/shell.rs#L2998) and
-[`onion_pins_content`](../../../src/ui/shell.rs#L3240).
+**Used by:** [`onion_settings`](../../../src/ui/shell.rs#L3001) and
+[`onion_pins_content`](../../../src/ui/shell.rs#L3243).
 
 ### `floating_frame`
-[src/ui/shell.rs:5505](../../../src/ui/shell.rs#L5505)
+[src/ui/shell.rs:5499](../../../src/ui/shell.rs#L5499)
 
 ```rust
 pub(crate) fn floating_frame() -> Frame
@@ -2656,20 +2659,20 @@ thin 1-px outline, 10-pt inner margin, 10-pt rounded corners and the theme's win
 shadow. `pub(crate)` means other files in this crate may call it, but not outside code.
 More: [Modules and visibility](../../rust-primer.md#modules-and-visibility).
 
-**Used by:** [`panel_window`](../../../src/ui/shell.rs#L1062),
-[`mini_timeline_window`](../../../src/ui/shell.rs#L2689),
+**Used by:** [`panel_window`](../../../src/ui/shell.rs#L1065),
+[`mini_timeline_window`](../../../src/ui/shell.rs#L2692),
 [`brush_settings_window`](#brush_settings_window),
 [`settings_window`](#settings_window),
 [`grid_settings_window`](#grid_settings_window),
-[`menu_window`](../../../src/ui/shell.rs#L8604),
-[`new_project_dialog`](../../../src/ui/shell.rs#L9021),
-[`export_dialog`](../../../src/ui/shell.rs#L9302),
-[`import_range_dialog`](../../../src/ui/shell.rs#L9543),
-[`save_error_dialog`](../../../src/ui/shell.rs#L9777), and
+[`menu_window`](../../../src/ui/shell.rs#L8627),
+[`new_project_dialog`](../../../src/ui/shell.rs#L9040),
+[`export_dialog`](../../../src/ui/shell.rs#L9321),
+[`import_range_dialog`](../../../src/ui/shell.rs#L9562),
+[`save_error_dialog`](../../../src/ui/shell.rs#L9949), and
 [ui/krita_import.rs](krita_import.md).
 
 ### `perspective_options`
-[src/ui/shell.rs:5517](../../../src/ui/shell.rs#L5517)
+[src/ui/shell.rs:5511](../../../src/ui/shell.rs#L5511)
 
 ```rust
 fn perspective_options(state: &mut AppState, ui: &mut egui::Ui)
@@ -2699,11 +2702,11 @@ so this list stays short.
    copy doesn't sit invisibly on top, unlocks it and detaches it from any wall.
 6. If a settings button was used, sets `state.show_grid_settings = true`.
 
-**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1247) when the active tool is
+**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1250) when the active tool is
 `ActiveTool::Perspective`.
 
 ### `grid_settings_window`
-[src/ui/shell.rs:5676](../../../src/ui/shell.rs#L5676)
+[src/ui/shell.rs:5670](../../../src/ui/shell.rs#L5670)
 
 ```rust
 fn grid_settings_window(state: &mut AppState, ctx: &egui::Context)
@@ -2716,16 +2719,16 @@ row (or Alt+G) changes what it shows, and like Brush settings it stays up while 
 **How it works.** Returns early if closed. If there is no active grid any more (the last
 one was deleted) it clears the flag and returns. The title includes the grid number, so
 the window has a fixed id (`"window_grid_settings"`) — egui keys a window's remembered
-position on its title. Inside: [`drag_by_title_only`](../../../src/ui/shell.rs#L1172) and
+position on its title. Inside: [`drag_by_title_only`](../../../src/ui/shell.rs#L1175) and
 a scroll area holding [`grid_settings`](#grid_settings). At the end
 `state.show_grid_settings &= open;` (stays true only if it was true *and* the window was
 not closed).
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (outside the panels branch, since
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (outside the panels branch, since
 snapping is set while drawing) and [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `grid_settings`
-[src/ui/shell.rs:5710](../../../src/ui/shell.rs#L5710)
+[src/ui/shell.rs:5704](../../../src/ui/shell.rs#L5704)
 
 ```rust
 fn grid_settings(state: &mut AppState, ui: &mut egui::Ui)
@@ -2776,7 +2779,7 @@ over the shot (follow target and keys).
 directly by [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `liquify_options`
-[src/ui/shell.rs:6051](../../../src/ui/shell.rs#L6051)
+[src/ui/shell.rs:6045](../../../src/ui/shell.rs#L6045)
 
 ```rust
 fn liquify_options(state: &mut AppState, ui: &mut egui::Ui)
@@ -2801,11 +2804,11 @@ for the warp in progress.
 6. Apply (Enter) → `state.land_float()`, Cancel (Esc) → `state.cancel_liquify()`, both
    enabled only while a warp is live (`state.liquify.is_some()`), plus a help paragraph.
 
-**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1247) when the tool is
+**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1250) when the tool is
 `ActiveTool::Liquify`.
 
 ### `selection_options`
-[src/ui/shell.rs:6117](../../../src/ui/shell.rs#L6117)
+[src/ui/shell.rs:6111](../../../src/ui/shell.rs#L6111)
 
 ```rust
 fn selection_options(state: &mut AppState, ui: &mut egui::Ui)
@@ -2818,7 +2821,7 @@ on a selection.
 **How it works.**
 1. **Shape toggles:** Freehand, Rect, Ellipse, Wand (magic select). Rect and Ellipse
    tooltips add "once dragging: Shift squares it" plus the mid-drag hint from
-   [`with_mid_drag_hint`](../../../src/ui/shell.rs#L69). Switching shape first calls
+   [`with_mid_drag_hint`](../../../src/ui/shell.rs#L70). Switching shape first calls
    `state.cancel_gesture()` (a half-placed polygon means nothing to another shape).
 2. With the Wand shape picked: [`wand_options`](#wand_options).
 3. **Combine-mode toggles** ([`SelOp`](../tools/select_mask.md)): Replace, Add, Subtract,
@@ -2838,11 +2841,11 @@ on a selection.
 8. "Tint outside selection" checkbox, and a help paragraph listing the delete / cut /
    copy / paste shortcuts.
 
-**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1247) when the tool is
+**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1250) when the tool is
 `ActiveTool::Lasso`.
 
 ### `wand_options`
-[src/ui/shell.rs:6265](../../../src/ui/shell.rs#L6265)
+[src/ui/shell.rs:6259](../../../src/ui/shell.rs#L6259)
 
 ```rust
 fn wand_options(state: &mut AppState, ui: &mut egui::Ui)
@@ -2869,7 +2872,7 @@ See [tools/wand.rs](../tools/wand.md) for the algorithm.
 **Used by:** [`selection_options`](#selection_options).
 
 ### `orient_scope`
-[src/ui/shell.rs:6326](../../../src/ui/shell.rs#L6326)
+[src/ui/shell.rs:6320](../../../src/ui/shell.rs#L6320)
 
 ```rust
 fn orient_scope(state: &AppState) -> &'static str
@@ -2882,10 +2885,10 @@ frames" is on; else "this drawing, about the canvas centre". `&'static str` mean
 literal baked into the program, valid forever.
 
 **Used by:** [`selection_options`](#selection_options) and
-[`title_menu`](../../../src/ui/shell.rs#L8645).
+[`title_menu`](../../../src/ui/shell.rs#L8668).
 
 ### `tool_toggle`
-[src/ui/shell.rs:6337](../../../src/ui/shell.rs#L6337)
+[src/ui/shell.rs:6331](../../../src/ui/shell.rs#L6331)
 
 ```rust
 fn tool_toggle(
@@ -2908,10 +2911,10 @@ where the line trails behind the pen for steadier strokes), the tooltip gets a s
 key that turns it on is easy to hit by accident. Clicking the already-selected tool does
 nothing.
 
-**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1247).
+**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1250).
 
 ### `pen_menu_id`
-[src/ui/shell.rs:6369](../../../src/ui/shell.rs#L6369)
+[src/ui/shell.rs:6363](../../../src/ui/shell.rs#L6363)
 
 ```rust
 fn pen_menu_id(i: usize) -> egui::Id
@@ -2920,7 +2923,7 @@ fn pen_menu_id(i: usize) -> egui::Id
 The popup id of pen slot `i`'s menu. Not tied to a `Ui`, so the "+" can open the menu of the slot it adds before that slot's button is drawn.
 
 ### `open_pen_menu`
-[src/ui/shell.rs:6374](../../../src/ui/shell.rs#L6374)
+[src/ui/shell.rs:6368](../../../src/ui/shell.rs#L6368)
 
 ```rust
 fn open_pen_menu(state: &mut AppState, ctx: &egui::Context, i: usize)
@@ -2929,7 +2932,7 @@ fn open_pen_menu(state: &mut AppState, ctx: &egui::Context, i: usize)
 Open slot `i`'s menu, under its button, and close any other.
 
 ### `pen_row`
-[src/ui/shell.rs:6382](../../../src/ui/shell.rs#L6382)
+[src/ui/shell.rs:6376](../../../src/ui/shell.rs#L6376)
 
 ```rust
 fn pen_row(state: &mut AppState, ui: &mut egui::Ui)
@@ -2951,7 +2954,7 @@ the end (`AppState::add_pen`) and opens its menu.
 **Used by:** [`tools_content`](#tools_content).
 
 ### `pen_slot_menu`
-[src/ui/shell.rs:6425](../../../src/ui/shell.rs#L6425)
+[src/ui/shell.rs:6419](../../../src/ui/shell.rs#L6419)
 
 ```rust
 fn pen_slot_menu(state: &mut AppState, ui: &mut egui::Ui, i: usize, op: &mut Option<PenOp>)
@@ -2969,7 +2972,7 @@ remove" in the warning colour (`state.pen_remove_armed`) — and the second reco
 **Used by:** [`pen_row`](#pen_row).
 
 ### `shape_kind_toggle`
-[src/ui/shell.rs:6485](../../../src/ui/shell.rs#L6485)
+[src/ui/shell.rs:6479](../../../src/ui/shell.rs#L6479)
 
 ```rust
 fn shape_kind_toggle(
@@ -2984,10 +2987,10 @@ fn shape_kind_toggle(
 An icon toggle for one Shape-tool kind (e.g. line, rectangle, ellipse): lit when
 `state.brush.shape_kind == kind`, and a click sets it.
 
-**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1247).
+**Used by:** [`tools_content`](../../../src/ui/shell.rs#L1250).
 
 ### `paint_canvas`
-[src/ui/shell.rs:6499](../../../src/ui/shell.rs#L6499)
+[src/ui/shell.rs:6493](../../../src/ui/shell.rs#L6493)
 
 ```rust
 fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) -> egui::layers::ShapeIdx
@@ -3014,7 +3017,7 @@ It returns the index of the slot reserved for the live stroke tail, which `live_
 frame's pen samples are in.
 
 ### `live_tail`
-[src/ui/shell.rs:7159](../../../src/ui/shell.rs#L7159)
+[src/ui/shell.rs:7153](../../../src/ui/shell.rs#L7153)
 
 ```rust
 fn live_tail(state: &AppState, rect: Rect) -> Option<egui::Shape>
@@ -3026,7 +3029,7 @@ pen tip without lag. Not used for Krita brushes (their dabs don't look like a so
 shows no tail).
 
 ### `camera_overlay_lines`
-[src/ui/shell.rs:7200](../../../src/ui/shell.rs#L7200)
+[src/ui/shell.rs:7194](../../../src/ui/shell.rs#L7194)
 
 ```rust
 fn camera_overlay_lines(q: [egui::Pos2; 4]) -> Vec<[egui::Pos2; 2]>
@@ -3052,11 +3055,11 @@ guides rotate and scale along with the camera.
    3% of the shorter side, clamped to 3–14 screen points, so both arms are the same length on
    screen however wide the frame is.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475) (when the camera overlay toggle,
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) (when the camera overlay toggle,
 `state.camera_overlay`, is on) and a test.
 
 ### `draw_perspective_grids`
-[src/ui/shell.rs:7240](../../../src/ui/shell.rs#L7240)
+[src/ui/shell.rs:7234](../../../src/ui/shell.rs#L7234)
 
 ```rust
 fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform, clip: Rect)
@@ -3102,11 +3105,11 @@ showing where its keyframes on either side put it.
    base corners, which belong to its floor), round vanishing-point handles, and a tick plus two
    knobs on the horizon for tilting it.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475) and a test. Most of the geometry
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) and a test. Most of the geometry
 comes from [tools/perspective.rs](../tools/perspective.md).
 
 ### `draw_cursor_guides`
-[src/ui/shell.rs:7552](../../../src/ui/shell.rs#L7552)
+[src/ui/shell.rs:7546](../../../src/ui/shell.rs#L7546)
 
 ```rust
 fn draw_cursor_guides(
@@ -3138,7 +3141,7 @@ vanishing point, or straight across the canvas for a family of lines that stays 
 **Used by:** [`draw_tool_cursor`](#draw_tool_cursor).
 
 ### `fill_outside_quad`
-[src/ui/shell.rs:7605](../../../src/ui/shell.rs#L7605)
+[src/ui/shell.rs:7599](../../../src/ui/shell.rs#L7599)
 
 ```rust
 fn fill_outside_quad(painter: &egui::Painter, clip: Rect, inner: [egui::Pos2; 4], color: Color32)
@@ -3175,12 +3178,12 @@ for (let i = 0; i < 4; i++) {
 }
 ```
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
 
 ## `impl Xform`
 
 ### `Xform::new`
-[src/ui/shell.rs:7691](../../../src/ui/shell.rs#L7691)
+[src/ui/shell.rs:7685](../../../src/ui/shell.rs#L7685)
 
 ```rust
 fn new(state: &AppState, rect: Rect) -> Self
@@ -3205,15 +3208,15 @@ fn new(state: &AppState, rect: Rect) -> Self
 4. Flip flags become signs `-1.0` / `1.0`, and everything is handed to
    [`Xform::from_parts`](#xformfrom_parts).
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (to publish `view_scale`, and for pan/rotate
-gestures), [`zoom_view_at`](../../../src/ui/shell.rs#L894),
-[`paint_canvas`](../../../src/ui/shell.rs#L6475),
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (to publish `view_scale`, and for pan/rotate
+gestures), [`zoom_view_at`](../../../src/ui/shell.rs#L897),
+[`paint_canvas`](../../../src/ui/shell.rs#L6498),
 [`draw_krita_outline`](#draw_krita_outline),
 [`draw_tool_cursor`](#draw_tool_cursor),
 [`canvas_to_doc_mapping`](#canvas_to_doc_mapping), and many tests.
 
 ### `Xform::from_parts`
-[src/ui/shell.rs:7738](../../../src/ui/shell.rs#L7738)
+[src/ui/shell.rs:7732](../../../src/ui/shell.rs#L7732)
 
 ```rust
 fn from_parts(
@@ -3237,7 +3240,7 @@ list ([Attributes and cfg](../../rust-primer.md#attributes-and-cfg)).
 **Used by:** [`Xform::new`](#xformnew) and tests.
 
 ### `Xform::doc_to_screen`
-[src/ui/shell.rs:7764](../../../src/ui/shell.rs#L7764)
+[src/ui/shell.rs:7758](../../../src/ui/shell.rs#L7758)
 
 ```rust
 fn doc_to_screen(&self, x: f32, y: f32) -> egui::Pos2
@@ -3261,7 +3264,7 @@ function docToScreen(xf, x, y) {
 **Used by:** nearly every overlay in this file (grids, lasso, layer corners, cursor).
 
 ### `Xform::screen_delta_to_doc`
-[src/ui/shell.rs:7774](../../../src/ui/shell.rs#L7774)
+[src/ui/shell.rs:7768](../../../src/ui/shell.rs#L7768)
 
 ```rust
 fn screen_delta_to_doc(&self, d: Vec2) -> (f32, f32)
@@ -3271,10 +3274,10 @@ fn screen_delta_to_doc(&self, d: Vec2) -> (f32, f32)
 document pixels: undoes the rotation, mirror and scale, but not the position offset (a movement
 has no position).
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) when panning a layer or the camera, and a test.
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) when panning a layer or the camera, and a test.
 
 ### `Xform::screen_to_doc`
-[src/ui/shell.rs:7781](../../../src/ui/shell.rs#L7781)
+[src/ui/shell.rs:7775](../../../src/ui/shell.rs#L7775)
 
 ```rust
 fn screen_to_doc(&self, p: egui::Pos2) -> (f32, f32)
@@ -3283,12 +3286,12 @@ fn screen_to_doc(&self, p: egui::Pos2) -> (f32, f32)
 **What it does.** The exact inverse of [`doc_to_screen`](#xformdoc_to_screen): turns a screen
 point (for example the mouse position) into document pixel coordinates.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (keeping the view centre still while
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (keeping the view centre still while
 rotating), [`draw_cursor_guides`](#draw_cursor_guides),
 [`canvas_to_doc_mapping`](#canvas_to_doc_mapping), and others.
 
 ### `Xform::corners`
-[src/ui/shell.rs:7791](../../../src/ui/shell.rs#L7791)
+[src/ui/shell.rs:7785](../../../src/ui/shell.rs#L7785)
 
 ```rust
 fn corners(&self) -> [egui::Pos2; 4]
@@ -3297,12 +3300,12 @@ fn corners(&self) -> [egui::Pos2; 4]
 **What it does.** The four corners of the whole document on screen, in TL, TR, BR, BL order
 (possibly rotated or mirrored).
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
 
 ## Free functions
 
 ### `canvas_quad`
-[src/ui/shell.rs:7807](../../../src/ui/shell.rs#L7807)
+[src/ui/shell.rs:7801](../../../src/ui/shell.rs#L7801)
 
 ```rust
 fn canvas_quad(painter: &egui::Painter, state: &AppState, tex: egui::TextureId, corners: [egui::Pos2; 4], tint: Color32)
@@ -3321,10 +3324,10 @@ GPU path declines, it falls back to [`image_quad`](#image_quad).
 - `corners` — where its four corners go on screen (TL, TR, BR, BL).
 - `tint` — a colour multiplied into every texel (used for opacity and onion tints).
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
 
 ### `image_quad`
-[src/ui/shell.rs:7819](../../../src/ui/shell.rs#L7819)
+[src/ui/shell.rs:7813](../../../src/ui/shell.rs#L7813)
 
 ```rust
 fn image_quad(painter: &egui::Painter, tex: egui::TextureId, corners: [egui::Pos2; 4], tint: Color32)
@@ -3335,10 +3338,10 @@ egui's own renderer. It makes a mesh of four vertices — each corner paired wit
 texture corner `(0,0)`, `(1,0)`, `(1,1)`, `(0,1)` — and two triangles `0,1,2` and `0,2,3`.
 
 **Used by:** [`canvas_quad`](#canvas_quad) (fallback) and
-[`paint_canvas`](../../../src/ui/shell.rs#L6475).
+[`paint_canvas`](../../../src/ui/shell.rs#L6498).
 
 ### `marching_ants`
-[src/ui/shell.rs:7842](../../../src/ui/shell.rs#L7842)
+[src/ui/shell.rs:7836](../../../src/ui/shell.rs#L7836)
 
 ```rust
 fn marching_ants(painter: &egui::Painter, pts: &[egui::Pos2], phase: f32)
@@ -3353,10 +3356,10 @@ frame makes the dashes appear to crawl. Does nothing with fewer than 2 points.
 - `pts` — the loop's points on screen (the first point is repeated at the end to close it).
 - `phase` — how far along the dash pattern starts.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
 
 ### `gesture_path`
-[src/ui/shell.rs:7867](../../../src/ui/shell.rs#L7867)
+[src/ui/shell.rs:7861](../../../src/ui/shell.rs#L7861)
 
 ```rust
 fn gesture_path(painter: &egui::Painter, pts: &[egui::Pos2], closing: bool)
@@ -3366,11 +3369,11 @@ fn gesture_path(painter: &egui::Painter, pts: &[egui::Pos2], closing: bool)
 wider dark line (readable over ink and empty canvas). If `closing` is true it also draws a faint
 line from the last point back to the first, showing that the loop will close itself.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475) and
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) and
 [`draw_tap_lasso`](#draw_tap_lasso).
 
 ### `held_lasso`
-[src/ui/shell.rs:7884](../../../src/ui/shell.rs#L7884)
+[src/ui/shell.rs:7878](../../../src/ui/shell.rs#L7878)
 
 ```rust
 pub(crate) fn held_lasso(state: &AppState, i: &egui::InputState) -> LassoHeld
@@ -3382,11 +3385,11 @@ whatever the user bound to `FillLassoErase`, `FillLassoEnclose` and `FillPolygon
 shortcuts settings. `pub(crate)` means other files in this crate may call it
 ([Modules and visibility](../../rust-primer.md#modules-and-visibility)).
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (when a lasso fill drag starts) and
-[`paint_canvas`](../../../src/ui/shell.rs#L6475).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (when a lasso fill drag starts) and
+[`paint_canvas`](../../../src/ui/shell.rs#L6498).
 
 ### `draw_tap_lasso`
-[src/ui/shell.rs:7898](../../../src/ui/shell.rs#L7898)
+[src/ui/shell.rs:7892](../../../src/ui/shell.rs#L7892)
 
 ```rust
 fn draw_tap_lasso(
@@ -3411,10 +3414,10 @@ the first corner when the pointer is close enough that a tap there would close t
 - `hover` — the pointer position on screen, if over the canvas.
 - `next` — where the next polygon edge should go (the pointer, or a snapped corner).
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475).
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498).
 
 ### `held_sel_op`
-[src/ui/shell.rs:7927](../../../src/ui/shell.rs#L7927)
+[src/ui/shell.rs:7921](../../../src/ui/shell.rs#L7921)
 
 ```rust
 pub(crate) fn held_sel_op(state: &AppState, i: &egui::InputState) -> Option<SelOp>
@@ -3425,11 +3428,11 @@ pub(crate) fn held_sel_op(state: &AppState, i: &egui::InputState) -> Option<SelO
 `None` if none of those combos is held. It walks a small list of (action, mode) pairs and returns
 the first whose shortcut is held.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (when a Lasso drag starts) and
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (when a Lasso drag starts) and
 [`draw_tool_cursor`](#draw_tool_cursor).
 
 ### `finish_canvas_drag`
-[src/ui/shell.rs:7940](../../../src/ui/shell.rs#L7940)
+[src/ui/shell.rs:7934](../../../src/ui/shell.rs#L7934)
 
 ```rust
 fn finish_canvas_drag(state: &mut AppState)
@@ -3444,10 +3447,10 @@ when idle, so a tool change mid-drag cannot leave one stuck). Finally it clears 
 flags. `&mut AppState` means it is allowed to change the state
 ([Ownership and borrowing](../../rust-primer.md#ownership-and-borrowing)).
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (on drag stop, and when a held combo is let go).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (on drag stop, and when a held combo is let go).
 
 ### `layer_screen_corners`
-[src/ui/shell.rs:7965](../../../src/ui/shell.rs#L7965)
+[src/ui/shell.rs:7959](../../../src/ui/shell.rs#L7959)
 
 ```rust
 fn layer_screen_corners(
@@ -3465,11 +3468,11 @@ on a `pw`×`ph` canvas by the layer transform `t` (move/rotate/scale, see
 [doc/transform.rs](../doc/transform.md)), then through the view `xf`. A thin wrapper over
 [`cell_rect_screen_corners`](#cell_rect_screen_corners) with the full cell rectangle.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475) (layers, the camera frame and its
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) (layers, the camera frame and its
 ghost, the camera box).
 
 ### `cell_rect_screen_corners`
-[src/ui/shell.rs:7980](../../../src/ui/shell.rs#L7980)
+[src/ui/shell.rs:7974](../../../src/ui/shell.rs#L7974)
 
 ```rust
 fn cell_rect_screen_corners(
@@ -3488,11 +3491,11 @@ part of a cell: the rectangle `r = [x0, y0, x1, y1]` in cell pixels. This is whe
 cropped to just the drawn area of a cell goes. Each corner is mapped cell → document with
 `t.cell_to_doc(...)`, then document → screen with `xf.doc_to_screen(...)`.
 
-**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6475) and
+**Used by:** [`paint_canvas`](../../../src/ui/shell.rs#L6498) and
 [`layer_screen_corners`](#layer_screen_corners).
 
 ### `draw_readout`
-[src/ui/shell.rs:8001](../../../src/ui/shell.rs#L8001)
+[src/ui/shell.rs:7995](../../../src/ui/shell.rs#L7995)
 
 ```rust
 fn draw_readout(painter: &egui::Painter, pos: egui::Pos2, text: String)
@@ -3502,12 +3505,12 @@ fn draw_readout(painter: &egui::Painter, pos: egui::Pos2, text: String)
 white 12-point text on a rounded dark box, so it reads over any drawing. Used for live values
 such as a brush size while adjusting it.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (button-drag readouts),
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (button-drag readouts),
 [`draw_swatch_pie`](#draw_swatch_pie) and
 [`draw_tool_cursor`](#draw_tool_cursor).
 
 ### `draw_swatch_pie`
-[src/ui/shell.rs:8013](../../../src/ui/shell.rs#L8013)
+[src/ui/shell.rs:8007](../../../src/ui/shell.rs#L8007)
 
 ```rust
 fn draw_swatch_pie(
@@ -3542,10 +3545,10 @@ any panel the pen wanders over.
 4. The current colour fills the centre; its edge is white when no wedge is hovered.
 5. With no pinned swatches, a "No pinned swatches" readout appears.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77).
 
 ### `pie_wedge`
-[src/ui/shell.rs:8068](../../../src/ui/shell.rs#L8068)
+[src/ui/shell.rs:8062](../../../src/ui/shell.rs#L8062)
 
 ```rust
 fn pie_wedge(
@@ -3567,7 +3570,7 @@ previous. Then the outline is drawn round the outer arc and back along the inner
 **Used by:** [`draw_swatch_pie`](#draw_swatch_pie).
 
 ### `draw_krita_outline`
-[src/ui/shell.rs:8101](../../../src/ui/shell.rs#L8101)
+[src/ui/shell.rs:8095](../../../src/ui/shell.rs#L8095)
 
 ```rust
 fn draw_krita_outline(state: &AppState, painter: &egui::Painter, canvas_rect: Rect, pos: egui::Pos2)
@@ -3600,7 +3603,7 @@ stroke it uses the pen's real pressure.
 **Used by:** [`draw_tool_cursor`](#draw_tool_cursor).
 
 ### `delay_circle`
-[src/ui/shell.rs:8148](../../../src/ui/shell.rs#L8148)
+[src/ui/shell.rs:8142](../../../src/ui/shell.rs#L8142)
 
 ```rust
 fn delay_circle(painter: &egui::Painter, centre: egui::Pos2, radius: f32)
@@ -3612,10 +3615,10 @@ like it is pulled on a string; with "delay" on, the line only starts moving once
 further than this radius. Krita draws the same circle.
 
 **Used by:** [`draw_tool_cursor`](#draw_tool_cursor) and
-[`paint_canvas`](../../../src/ui/shell.rs#L6475).
+[`paint_canvas`](../../../src/ui/shell.rs#L6498).
 
 ### `draw_tool_cursor`
-[src/ui/shell.rs:8157](../../../src/ui/shell.rs#L8157)
+[src/ui/shell.rs:8151](../../../src/ui/shell.rs#L8151)
 
 ```rust
 fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egui::Pos2)
@@ -3649,10 +3652,10 @@ ring(pos, r + 0.6, black, 1.5);  // outer dark ring
 ring(pos, r, white, 1.0);        // inner light ring
 ```
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77).
 
 ### `clipboard_color`
-[src/ui/shell.rs:8395](../../../src/ui/shell.rs#L8395)
+[src/ui/shell.rs:8389](../../../src/ui/shell.rs#L8389)
 
 ```rust
 pub(crate) fn clipboard_color() -> Option<[u8; 3]>
@@ -3667,7 +3670,7 @@ is not a colour. The `?` after each step means "if this failed, return `None` no
 **Used by:** [ui/color_wheel.rs](color_wheel.md) (the "paste a colour" button).
 
 ### `canvas_to_doc_mapping`
-[src/ui/shell.rs:8400](../../../src/ui/shell.rs#L8400)
+[src/ui/shell.rs:8394](../../../src/ui/shell.rs#L8394)
 
 ```rust
 fn canvas_to_doc_mapping(state: &AppState, rect: Rect) -> impl Fn(egui::Pos2) -> (f32, f32) + Copy
@@ -3689,10 +3692,10 @@ const [x, y] = canvasToDoc(pos);
 ```
 More: [Closures](../../rust-primer.md#closures)
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77).
 
 ### `snapped`
-[src/ui/shell.rs:8407](../../../src/ui/shell.rs#L8407)
+[src/ui/shell.rs:8401](../../../src/ui/shell.rs#L8401)
 
 ```rust
 fn snapped(state: &mut AppState, doc: (f32, f32)) -> (f32, f32)
@@ -3702,10 +3705,10 @@ fn snapped(state: &mut AppState, doc: (f32, f32)) -> (f32, f32)
 which applies the Shift axis lock (straight lines) or perspective-grid snapping, and returns the
 adjusted point as a tuple.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (every point of a stroke after the first).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (every point of a stroke after the first).
 
 ### `doc_to_active_cell`
-[src/ui/shell.rs:8416](../../../src/ui/shell.rs#L8416)
+[src/ui/shell.rs:8410](../../../src/ui/shell.rs#L8410)
 
 ```rust
 fn doc_to_active_cell(state: &AppState, doc: (f32, f32)) -> (f32, f32)
@@ -3718,10 +3721,10 @@ It sizes the cell with `Project::draw_cell_size`, so on a frame with no drawing 
 the cell that is about to be created rather than assuming a canvas-sized one. (`AppState` has its
 own method of the same name in [app/select.rs](../app/select.md); this is the shell's copy.)
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (on press and on every drag point) and a test.
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (on press and on every drag point) and a test.
 
 ### `pen_to_points`
-[src/ui/shell.rs:8465](../../../src/ui/shell.rs#L8465)
+[src/ui/shell.rs:8459](../../../src/ui/shell.rs#L8459)
 
 ```rust
 fn pen_to_points(p: &PenPacket, (ox, oy): (f32, f32), ppp: f32) -> egui::Pos2
@@ -3738,7 +3741,7 @@ argument directly.
 [`pen_stroke_points`](#pen_stroke_points).
 
 ### `pen_agrees_with_cursor`
-[src/ui/shell.rs:8471](../../../src/ui/shell.rs#L8471)
+[src/ui/shell.rs:8465](../../../src/ui/shell.rs#L8465)
 
 ```rust
 fn pen_agrees_with_cursor(
@@ -3766,7 +3769,7 @@ stroke, using the `state.pen_outlier_logged` flag.
 [`pen_stroke_points`](#pen_stroke_points).
 
 ### `pen_stroke_start`
-[src/ui/shell.rs:8500](../../../src/ui/shell.rs#L8500)
+[src/ui/shell.rs:8494](../../../src/ui/shell.rs#L8494)
 
 ```rust
 fn pen_stroke_start(
@@ -3785,10 +3788,10 @@ this frame's older packets lie at or behind it.
 stroke — when no pen is active, there is no window origin or packet yet, or the pen disagrees with
 the cursor. `bool::then_some(x)` turns `true` into `Some(x)` and `false` into `None`.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (sets `state.stroke_from_pen` from the result).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (sets `state.stroke_from_pen` from the result).
 
 ### `path_passes_near`
-[src/ui/shell.rs:8515](../../../src/ui/shell.rs#L8515)
+[src/ui/shell.rs:8509](../../../src/ui/shell.rs#L8509)
 
 ```rust
 fn path_passes_near(path: &[egui::Pos2], at: egui::Pos2, reach: f32) -> bool
@@ -3819,7 +3822,7 @@ one element, or anything else ([Enums and match](../../rust-primer.md#enums-and-
 **Used by:** [`pen_agrees_with_cursor`](#pen_agrees_with_cursor) and tests.
 
 ### `pen_stroke_points`
-[src/ui/shell.rs:8529](../../../src/ui/shell.rs#L8529)
+[src/ui/shell.rs:8523](../../../src/ui/shell.rs#L8523)
 
 ```rust
 fn pen_stroke_points(state: &mut AppState, ppp: f32, pointer: Option<egui::Pos2>) -> PenFrame
@@ -3844,10 +3847,10 @@ path disagrees with the cursor; `Empty` if no new packets; otherwise `Points`.
    `state.pen_packets_dropped` and logged once per stroke.
 4. Return `Points` (never empty, since the newest packet is always within reach of itself).
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) while dragging a pen stroke.
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) while dragging a pen stroke.
 
 ### `stroke_frame_samples`
-[src/ui/shell.rs:8586](../../../src/ui/shell.rs#L8586)
+[src/ui/shell.rs:8580](../../../src/ui/shell.rs#L8580)
 
 ```rust
 fn stroke_frame_samples(
@@ -3873,10 +3876,10 @@ packet (or nothing when there is no cursor).
 
 **Returns.** A list of `(screen position, optional packet)` pairs.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) and tests.
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) and tests.
 
 ### `stroke_sample`
-[src/ui/shell.rs:8605](../../../src/ui/shell.rs#L8605)
+[src/ui/shell.rs:8599](../../../src/ui/shell.rs#L8599)
 
 ```rust
 fn stroke_sample(
@@ -3894,10 +3897,10 @@ pressure, tilt and so on) and counts it in `state.stroke_pen_samples`; without o
 `state.make_sample` and counts it in `state.stroke_mouse_samples`. The counts feed the tablet
 readout.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) (on press and on every drag point).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) (on press and on every drag point).
 
 ### `menu_window`
-[src/ui/shell.rs:8627](../../../src/ui/shell.rs#L8627)
+[src/ui/shell.rs:8621](../../../src/ui/shell.rs#L8621)
 
 ```rust
 fn menu_window(state: &mut AppState, ctx: &egui::Context)
@@ -3909,11 +3912,11 @@ panels (`state.show_panels`), and a drag handle (a six-dot grip icon). Because t
 title bar, pressing on the handle sends `ViewportCommand::StartDrag` so the OS moves the window, and
 double-clicking it toggles maximised. The strip itself is anchored, so dragging it never moves it.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76), a test, and
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77), a test, and
 [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `title_menu`
-[src/ui/shell.rs:8668](../../../src/ui/shell.rs#L8668)
+[src/ui/shell.rs:8662](../../../src/ui/shell.rs#L8662)
 
 ```rust
 fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui)
@@ -3924,8 +3927,8 @@ method or an I/O helper, then closes the menu.
 
 - **Edit:** Undo / Redo (greyed out when there is nothing to undo/redo, with the bound shortcut in
   the label); a **Flip / rotate** submenu listing the artwork orientation actions from
-  [`ORIENT_ART`](../../../src/ui/shell.rs#L6286) (the hover text says what they act on, from
-  [`orient_scope`](../../../src/ui/shell.rs#L6303)); and **Settings…**, shown in the warning colour
+  [`ORIENT_ART`](../../../src/ui/shell.rs#L6309) (the hover text says what they act on, from
+  [`orient_scope`](../../../src/ui/shell.rs#L6326)); and **Settings…**, shown in the warning colour
   when keyboard shortcuts clash. If shortcuts clash, a small warning dot is also painted on the
   Edit menu's corner, because a clash is easy to make and hard to notice.
 - **File:** New project…; Open project… (via `project_file::load_dialog`, errors are logged);
@@ -3939,7 +3942,7 @@ method or an I/O helper, then closes the menu.
   paste image as background, video, GIF, WebP, .kra); Clear current cell; and Quit (asks the OS
   window to close).
 - **Panels:** a checkbox per panel (from `PanelId::ALL` and
-  [`panel_meta`](../../../src/ui/shell.rs#L745)), a **Color scheme** submenu (radio buttons over
+  [`panel_meta`](../../../src/ui/shell.rs#L748)), a **Color scheme** submenu (radio buttons over
   `Scheme::ALL`, see [ui/theme.rs](theme.md)), and Reset panel layout.
 
 `ui.menu_button(label, |ui| { … })` draws a button that opens a menu; the closure draws the menu's
@@ -3948,7 +3951,7 @@ contents only while it is open.
 **Used by:** [`menu_window`](#menu_window).
 
 ### `orientation_toggle`
-[src/ui/shell.rs:9009](../../../src/ui/shell.rs#L9009)
+[src/ui/shell.rs:9003](../../../src/ui/shell.rs#L9003)
 
 ```rust
 fn orientation_toggle(ui: &mut egui::Ui, w: &mut u32, h: &mut u32) -> bool
@@ -3965,11 +3968,11 @@ disagree with a size typed by hand.
 
 **Returns.** `true` if it swapped them this frame.
 
-**Used by:** [`camera_size_ui`](../../../src/ui/shell.rs#L3333) and
+**Used by:** [`camera_size_ui`](../../../src/ui/shell.rs#L3336) and
 [`new_project_dialog`](#new_project_dialog).
 
 ### `fit_side`
-[src/ui/shell.rs:9031](../../../src/ui/shell.rs#L9031)
+[src/ui/shell.rs:9025](../../../src/ui/shell.rs#L9025)
 
 ```rust
 fn fit_side(w: u32, h: u32, max: u32) -> (u32, u32)
@@ -3985,7 +3988,7 @@ fn fit_side(w: u32, h: u32, max: u32) -> (u32, u32)
 and tests.
 
 ### `new_project_dialog`
-[src/ui/shell.rs:9040](../../../src/ui/shell.rs#L9040)
+[src/ui/shell.rs:9034](../../../src/ui/shell.rs#L9034)
 
 ```rust
 fn new_project_dialog(state: &mut AppState, ctx: &egui::Context)
@@ -4020,10 +4023,10 @@ Contents, top to bottom:
    one of delete / star / apply, then save, then on Create call `state.reset_with(width, height,
    fps)` and close; Cancel or the window's close button just closes.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76), tests, and [ui/sweep_tests.rs](sweep_tests.md).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77), tests, and [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `open_export`
-[src/ui/shell.rs:9290](../../../src/ui/shell.rs#L9290)
+[src/ui/shell.rs:9284](../../../src/ui/shell.rs#L9284)
 
 ```rust
 fn open_export(state: &mut AppState, kind: ExportKind)
@@ -4038,7 +4041,7 @@ MP4 or sprite sheet). It keeps the remembered frame range but pulls it back insi
 **Used by:** [`title_menu`](#title_menu) (the five Export items) and a test.
 
 ### `frame_range_ui`
-[src/ui/shell.rs:9304](../../../src/ui/shell.rs#L9304)
+[src/ui/shell.rs:9298](../../../src/ui/shell.rs#L9298)
 
 ```rust
 fn frame_range_ui(ui: &mut egui::Ui, start: &mut usize, end: &mut usize, last: usize)
@@ -4053,7 +4056,7 @@ export dialog and the import range dialog so the two can't drift apart.
 [`import_range_dialog`](#import_range_dialog).
 
 ### `export_dialog`
-[src/ui/shell.rs:9321](../../../src/ui/shell.rs#L9321)
+[src/ui/shell.rs:9315](../../../src/ui/shell.rs#L9315)
 
 ```rust
 fn export_dialog(state: &mut AppState, ctx: &egui::Context)
@@ -4083,10 +4086,10 @@ Contents:
 After the window, Export closes the dialog and calls `state.start_export()`; Cancel or closing the
 window just hides it.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76), a test, and [ui/sweep_tests.rs](sweep_tests.md).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77), a test, and [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `import_range_dialog`
-[src/ui/shell.rs:9562](../../../src/ui/shell.rs#L9562)
+[src/ui/shell.rs:9556](../../../src/ui/shell.rs#L9556)
 
 ```rust
 fn import_range_dialog(state: &mut AppState, ctx: &egui::Context)
@@ -4107,10 +4110,10 @@ laid onto a new layer starting at frame 0.
 4. Write the edited range back (clamped to the last frame), then call
    `state.confirm_import_range()` or `state.cancel_import_range()`.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) and [ui/sweep_tests.rs](sweep_tests.md).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) and [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `preview_box`
-[src/ui/shell.rs:9644](../../../src/ui/shell.rs#L9644)
+[src/ui/shell.rs:9638](../../../src/ui/shell.rs#L9638)
 
 ```rust
 fn preview_box(ui: &mut egui::Ui, label: &str, idx: usize, tex: &Option<egui::TextureHandle>)
@@ -4123,7 +4126,7 @@ texture it draws the image scaled down to at most 170 points wide (never scaled 
 **Used by:** [`import_range_dialog`](#import_range_dialog).
 
 ### `save_toast`
-[src/ui/shell.rs:9668](../../../src/ui/shell.rs#L9668)
+[src/ui/shell.rs:9662](../../../src/ui/shell.rs#L9662)
 
 ```rust
 fn save_toast(state: &mut AppState, ctx: &egui::Context)
@@ -4143,10 +4146,10 @@ doc comment above this function, "Modal busy overlay…", actually describes
 4. Fade the colours over the last half second (`gamma_multiply` by the fraction of time left).
 5. Draw a check icon and the message.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77).
 
 ### `ellipsize_middle`
-[src/ui/shell.rs:9727](../../../src/ui/shell.rs#L9727)
+[src/ui/shell.rs:9721](../../../src/ui/shell.rs#L9721)
 
 ```rust
 fn ellipsize_middle(name: &str, max: usize) -> String
@@ -4169,7 +4172,7 @@ ellipsize_middle("my_really_long_scene_name_v12.anim", 20)
 **Used by:** [`title_menu`](#title_menu) (the Save item) and tests.
 
 ### `krita_menu_label`
-[src/ui/shell.rs:9748](../../../src/ui/shell.rs#L9748)
+[src/ui/shell.rs:9742](../../../src/ui/shell.rs#L9742)
 
 ```rust
 fn krita_menu_label(state: &AppState, layer: bool) -> &'static str
@@ -4182,10 +4185,10 @@ one layer); once linked, the same click sends again, so it says "Send to Krita a
 ([Lifetimes](../../rust-primer.md#lifetimes)).
 
 **Used by:** [`title_menu`](#title_menu) and
-[`layers_content`](../../../src/ui/shell.rs#L3935).
+[`layers_content`](../../../src/ui/shell.rs#L3938).
 
 ### `krita_toast`
-[src/ui/shell.rs:9759](../../../src/ui/shell.rs#L9759)
+[src/ui/shell.rs:9753](../../../src/ui/shell.rs#L9753)
 
 ```rust
 fn krita_toast(state: &mut AppState, ctx: &egui::Context)
@@ -4199,10 +4202,10 @@ amber for warnings or a brush icon in the accent colour otherwise. It sits highe
 the bottom instead of 28) so it and the save toast can show together, and wraps long text at 520
 points.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77).
 
 ### `unsaved_dialog`
-[src/ui/shell.rs:9796](../../../src/ui/shell.rs#L9796)
+[src/ui/shell.rs:9790](../../../src/ui/shell.rs#L9790)
 
 ```rust
 fn unsaved_dialog(state: &mut AppState, ctx: &egui::Context)
@@ -4211,7 +4214,7 @@ fn unsaved_dialog(state: &mut AppState, ctx: &egui::Context)
 "Save changes before …?" — held up by a close, an Open, a New or a recovery that would drop unsaved work (see `app::autosave`).
 
 ### `ago`
-[src/ui/shell.rs:9839](../../../src/ui/shell.rs#L9839)
+[src/ui/shell.rs:9833](../../../src/ui/shell.rs#L9833)
 
 ```rust
 fn ago(t: std::time::SystemTime) -> String
@@ -4220,7 +4223,7 @@ fn ago(t: std::time::SystemTime) -> String
 How long ago `t` was, in words.
 
 ### `recovery_dialog`
-[src/ui/shell.rs:9854](../../../src/ui/shell.rs#L9854)
+[src/ui/shell.rs:9848](../../../src/ui/shell.rs#L9848)
 
 ```rust
 fn recovery_dialog(state: &mut AppState, ctx: &egui::Context)
@@ -4229,7 +4232,7 @@ fn recovery_dialog(state: &mut AppState, ctx: &egui::Context)
 Offered at launch: work an earlier run autosaved and never saved, because it crashed or was shut down without asking.
 
 ### `save_error_dialog`
-[src/ui/shell.rs:9949](../../../src/ui/shell.rs#L9949)
+[src/ui/shell.rs:9943](../../../src/ui/shell.rs#L9943)
 
 ```rust
 fn save_error_dialog(state: &mut AppState, ctx: &egui::Context)
@@ -4240,10 +4243,10 @@ up until dismissed, on purpose: a save that failed silently would leave you thin
 on disk when it isn't. **OK** clears the error; **Save As…** clears it and opens Save As so the
 work can be saved somewhere else.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76) and [ui/sweep_tests.rs](sweep_tests.md).
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77) and [ui/sweep_tests.rs](sweep_tests.md).
 
 ### `busy_overlay`
-[src/ui/shell.rs:9984](../../../src/ui/shell.rs#L9984)
+[src/ui/shell.rs:9978](../../../src/ui/shell.rs#L9978)
 
 ```rust
 fn busy_overlay(ctx: &egui::Context, label: &str)
@@ -4252,7 +4255,7 @@ fn busy_overlay(ctx: &egui::Context, label: &str)
 **What it does.** A small popup in the middle of the window with a spinner and `label`, shown while
 a background import job runs. It is an `egui::Area` on the foreground layer.
 
-**Used by:** [`draw`](../../../src/ui/shell.rs#L76), when `state.bg_label` is set.
+**Used by:** [`draw`](../../../src/ui/shell.rs#L77), when `state.bg_label` is set.
 
 ## Tests
 
@@ -4262,21 +4265,21 @@ Run with `cargo test ui::shell::tests` · 9 tests
 
 | Test | What it checks |
 |---|---|
-| [`xform_round_trips_under_every_flip`](../../../src/ui/shell.rs#L10010) | For all four mirror combinations of a rotated, zoomed, panned view, turning a document point into a screen point and back gives the same point, so the hand-written inverse `screen_to_doc` never disagrees with `doc_to_screen`. |
-| [`screen_delta_matches_position_mapping_under_flip`](../../../src/ui/shell.rs#L10035) | A mouse drag distance converted with `screen_delta_to_doc` equals the difference of two converted positions under every flip, so dragging a layer in a mirrored view doesn't move it backwards. |
-| [`right_hand_column_tracks_the_right_edge`](../../../src/ui/shell.rs#L10067) | A panel 24 px from the right edge of a 1280 window is still 24 px from the right edge when the window grows to 2560 (the gap is kept, not the x). |
-| [`left_hand_column_stays_put`](../../../src/ui/shell.rs#L10074) | A panel near the left edge keeps its exact x when the window grows. |
-| [`centred_panel_recentres_instead_of_drifting`](../../../src/ui/shell.rs#L10080) | A panel with equal gaps on both sides (the Timeline) is re-centred in the bigger window instead of being pinned to one side. |
-| [`bottom_anchored_panel_tracks_the_bottom`](../../../src/ui/shell.rs#L10087) | Vertically, a panel 20 px above the bottom stays 20 px above the bottom of a taller window. |
-| [`shrinking_keeps_the_panel_on_screen`](../../../src/ui/shell.rs#L10095) | When the window shrinks, a right-anchored panel moves in to keep its gap rather than hanging off the edge. |
-| [`panel_wider_than_the_window_clamps_to_the_left`](../../../src/ui/shell.rs#L10102) | If the window becomes narrower than the panel, the panel is placed at x = 0 instead of getting a negative position. |
-| [`no_resize_is_a_no_op`](../../../src/ui/shell.rs#L10108) | When the window size didn't change, no panel moves. |
+| [`xform_round_trips_under_every_flip`](../../../src/ui/shell.rs#L10004) | For all four mirror combinations of a rotated, zoomed, panned view, turning a document point into a screen point and back gives the same point, so the hand-written inverse `screen_to_doc` never disagrees with `doc_to_screen`. |
+| [`screen_delta_matches_position_mapping_under_flip`](../../../src/ui/shell.rs#L10029) | A mouse drag distance converted with `screen_delta_to_doc` equals the difference of two converted positions under every flip, so dragging a layer in a mirrored view doesn't move it backwards. |
+| [`right_hand_column_tracks_the_right_edge`](../../../src/ui/shell.rs#L10061) | A panel 24 px from the right edge of a 1280 window is still 24 px from the right edge when the window grows to 2560 (the gap is kept, not the x). |
+| [`left_hand_column_stays_put`](../../../src/ui/shell.rs#L10068) | A panel near the left edge keeps its exact x when the window grows. |
+| [`centred_panel_recentres_instead_of_drifting`](../../../src/ui/shell.rs#L10074) | A panel with equal gaps on both sides (the Timeline) is re-centred in the bigger window instead of being pinned to one side. |
+| [`bottom_anchored_panel_tracks_the_bottom`](../../../src/ui/shell.rs#L10081) | Vertically, a panel 20 px above the bottom stays 20 px above the bottom of a taller window. |
+| [`shrinking_keeps_the_panel_on_screen`](../../../src/ui/shell.rs#L10089) | When the window shrinks, a right-anchored panel moves in to keep its gap rather than hanging off the edge. |
+| [`panel_wider_than_the_window_clamps_to_the_left`](../../../src/ui/shell.rs#L10096) | If the window becomes narrower than the panel, the panel is placed at x = 0 instead of getting a negative position. |
+| [`no_resize_is_a_no_op`](../../../src/ui/shell.rs#L10102) | When the window size didn't change, no panel moves. |
 
 **Test helpers** (used only by the tests above):
 
-- [`restick`](../../../src/ui/shell.rs#L10062) — shorthand that calls `restick_axis` for a panel at `lo` with length `len`, going from the `old` window span to the `new` one.
+- [`restick`](../../../src/ui/shell.rs#L10056) — shorthand that calls `restick_axis` for a panel at `lo` with length `len`, going from the `old` window span to the `new` one.
 
-**Test-only types and constants:** [`SMALL`](../../../src/ui/shell.rs#L10059), [`WIDE`](../../../src/ui/shell.rs#L10060)
+**Test-only types and constants:** [`SMALL`](../../../src/ui/shell.rs#L10053), [`WIDE`](../../../src/ui/shell.rs#L10054)
 
 ### `mod perspective_tests`
 
@@ -4284,24 +4287,24 @@ Run with `cargo test ui::shell::perspective_tests` · 8 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_screen_lock_is_level_on_screen`](../../../src/ui/shell.rs#L10149) | With "lock to screen axes" on, the Shift-lock's horizontal direction is level on screen under every view rotation and mirror, and also when looking through a rolled camera; with it off the lock uses the canvas's own axes (angle 0). |
-| [`dragging_a_corner_on_the_canvas_reshapes_the_grid`](../../../src/ui/shell.rs#L10176) | Pressing on a grid corner and dragging it 40 px moves just that corner to where the pointer let go, leaves the other corners alone, and paints nothing (no new cell, no stroke). |
-| [`grids_paint_with_every_option_and_tool`](../../../src/ui/shell.rs#L10211) | A smoke test: two grids with extra vanishing points (one off the horizon, one in the middle of a grid) draw without panicking, whichever grid is active and whether the Grid tool or the Pencil is selected. |
-| [`a_grids_gear_opens_its_settings_which_follow_the_active_grid`](../../../src/ui/shell.rs#L10275) | The Tools panel lists the grids with one gear icon per row but not their settings; clicking the second gear opens the grid-settings window for that grid and makes it active; switching the active grid changes what the window shows; deleting all grids closes it. |
-| [`every_grid_kind_line_option_and_guide_paints`](../../../src/ui/shell.rs#L10349) | A smoke test over every grid kind (perspective, flat, isometric following the camera, a full-canvas room), walls, infinite/diagonal/centre lines, keyed grids with ghosts either side of the frame and snapping: all paint under both tools, and the two walls are still there. |
-| [`a_grid_that_fills_the_canvas_is_only_its_lines_out_of_the_grid_tool`](../../../src/ui/shell.rs#L10418) | A "fill canvas" one-point grid shows its grabbable four-corner outline only in the Grid tool; under the Pencil it paints just lines: level floor and ceiling lines, plus an even fan of rays every 7.5° that stop short of the vanishing point. |
-| [`an_extra_vanishing_point_drags_along_the_horizon_on_the_canvas`](../../../src/ui/shell.rs#L10469) | Dragging an extra vanishing point sideways (and a bit off) slides it along the horizon to the pointer's x while it stays exactly on the horizon, and the grid itself doesn't move. |
-| [`a_rect_dragged_on_the_canvas_lies_on_the_grid`](../../../src/ui/shell.rs#L10508) | With snapping on, a Rectangle shape dragged over a one-point floor grid previews on the grid's plane mid-drag and paints a trapezoid that follows the leaning column (ink near the far edge, bare at the flat rectangle's corner). |
+| [`a_screen_lock_is_level_on_screen`](../../../src/ui/shell.rs#L10143) | With "lock to screen axes" on, the Shift-lock's horizontal direction is level on screen under every view rotation and mirror, and also when looking through a rolled camera; with it off the lock uses the canvas's own axes (angle 0). |
+| [`dragging_a_corner_on_the_canvas_reshapes_the_grid`](../../../src/ui/shell.rs#L10170) | Pressing on a grid corner and dragging it 40 px moves just that corner to where the pointer let go, leaves the other corners alone, and paints nothing (no new cell, no stroke). |
+| [`grids_paint_with_every_option_and_tool`](../../../src/ui/shell.rs#L10205) | A smoke test: two grids with extra vanishing points (one off the horizon, one in the middle of a grid) draw without panicking, whichever grid is active and whether the Grid tool or the Pencil is selected. |
+| [`a_grids_gear_opens_its_settings_which_follow_the_active_grid`](../../../src/ui/shell.rs#L10269) | The Tools panel lists the grids with one gear icon per row but not their settings; clicking the second gear opens the grid-settings window for that grid and makes it active; switching the active grid changes what the window shows; deleting all grids closes it. |
+| [`every_grid_kind_line_option_and_guide_paints`](../../../src/ui/shell.rs#L10343) | A smoke test over every grid kind (perspective, flat, isometric following the camera, a full-canvas room), walls, infinite/diagonal/centre lines, keyed grids with ghosts either side of the frame and snapping: all paint under both tools, and the two walls are still there. |
+| [`a_grid_that_fills_the_canvas_is_only_its_lines_out_of_the_grid_tool`](../../../src/ui/shell.rs#L10412) | A "fill canvas" one-point grid shows its grabbable four-corner outline only in the Grid tool; under the Pencil it paints just lines: level floor and ceiling lines, plus an even fan of rays every 7.5° that stop short of the vanishing point. |
+| [`an_extra_vanishing_point_drags_along_the_horizon_on_the_canvas`](../../../src/ui/shell.rs#L10463) | Dragging an extra vanishing point sideways (and a bit off) slides it along the horizon to the pointer's x while it stays exactly on the horizon, and the grid itself doesn't move. |
+| [`a_rect_dragged_on_the_canvas_lies_on_the_grid`](../../../src/ui/shell.rs#L10502) | With snapping on, a Rectangle shape dragged over a one-point floor grid previews on the grid's plane mid-drag and paints a trapezoid that follows the leaning column (ink near the far edge, bare at the flat rectangle's corner). |
 
 **Test helpers** (used only by the tests above):
 
-- [`frame`](../../../src/ui/shell.rs#L10124) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
-- [`state`](../../../src/ui/shell.rs#L10133) — a test state with panels hidden, 12 frames, playhead on frame 0.
-- [`texts`](../../../src/ui/shell.rs#L10250) — every painted text with its rectangle.
-- [`find`](../../../src/ui/shell.rs#L10254) — Find.
-- [`grid_shapes`](../../../src/ui/shell.rs#L10404) — runs a frame that paints only the perspective grids (via `draw_perspective_grids` on a background painter) and returns the shapes.
+- [`frame`](../../../src/ui/shell.rs#L10118) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
+- [`state`](../../../src/ui/shell.rs#L10127) — a test state with panels hidden, 12 frames, playhead on frame 0.
+- [`texts`](../../../src/ui/shell.rs#L10244) — every painted text with its rectangle.
+- [`find`](../../../src/ui/shell.rs#L10248) — Find.
+- [`grid_shapes`](../../../src/ui/shell.rs#L10398) — runs a frame that paints only the perspective grids (via `draw_perspective_grids` on a background painter) and returns the shapes.
 
-**Test-only types and constants:** [`SCREEN`](../../../src/ui/shell.rs#L10122)
+**Test-only types and constants:** [`SCREEN`](../../../src/ui/shell.rs#L10116)
 
 ### `mod onion_tests`
 
@@ -4309,28 +4312,28 @@ Run with `cargo test ui::shell::onion_tests` · 7 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_pin_gets_a_ghost_in_its_own_colour_and_everything_paints`](../../../src/ui/shell.rs#L10557) | A visible onion pin gets a ghost in the pin's own colour (not the "previous frames" tint), an ordinary lit offset gets the normal tint, and an offset that is hidden with its pin switched off gets no ghost; the onion panel also draws. |
-| [`the_current_drawing_paints_over_every_ghost`](../../../src/ui/shell.rs#L10602) | Past, future and pinned ghosts are all painted before the current drawing, so no ghost covers the lines being drawn; a pin uses its own opacity (0.4 → alpha 102), not the bars'. |
-| [`the_strip_fits_the_default_panel`](../../../src/ui/shell.rs#L10749) | The onion strip fits in the default 232 px panel width and is exactly numbers + gap + bars tall. |
-| [`numbers_light_offsets_and_zero_switches_the_skin`](../../../src/ui/shell.rs#L10756) | Clicking the 0 number turns the onion skin on and off; clicking another number toggles only that offset (−5 lights, +1 goes dark) and leaves the others alone. |
-| [`alt_click_shows_one_offset_and_again_brings_the_rest_back`](../../../src/ui/shell.rs#L10772) | Alt-clicking a number shows that offset alone ("solo"), and Alt-clicking it again restores exactly the offsets that were shown before. |
-| [`a_press_sets_a_bar_and_a_sweep_sets_every_bar_it_crosses`](../../../src/ui/shell.rs#L10782) | Clicking a bar sets that offset's opacity to the click height; one fast drag from +1 (high) to +8 (low) sets every bar in between along a straight falling line with none skipped, and doesn't touch the past side. |
-| [`a_layer_with_its_onion_on_ghosts_under_its_own_drawing`](../../../src/ui/shell.rs#L10802) | A non-active layer whose own onion switch is on gets ghosts painted just under its own drawing (and below the active layer's ghosts), while a layer with its onion off gets none. |
+| [`a_pin_gets_a_ghost_in_its_own_colour_and_everything_paints`](../../../src/ui/shell.rs#L10551) | A visible onion pin gets a ghost in the pin's own colour (not the "previous frames" tint), an ordinary lit offset gets the normal tint, and an offset that is hidden with its pin switched off gets no ghost; the onion panel also draws. |
+| [`the_current_drawing_paints_over_every_ghost`](../../../src/ui/shell.rs#L10596) | Past, future and pinned ghosts are all painted before the current drawing, so no ghost covers the lines being drawn; a pin uses its own opacity (0.4 → alpha 102), not the bars'. |
+| [`the_strip_fits_the_default_panel`](../../../src/ui/shell.rs#L10743) | The onion strip fits in the default 232 px panel width and is exactly numbers + gap + bars tall. |
+| [`numbers_light_offsets_and_zero_switches_the_skin`](../../../src/ui/shell.rs#L10750) | Clicking the 0 number turns the onion skin on and off; clicking another number toggles only that offset (−5 lights, +1 goes dark) and leaves the others alone. |
+| [`alt_click_shows_one_offset_and_again_brings_the_rest_back`](../../../src/ui/shell.rs#L10766) | Alt-clicking a number shows that offset alone ("solo"), and Alt-clicking it again restores exactly the offsets that were shown before. |
+| [`a_press_sets_a_bar_and_a_sweep_sets_every_bar_it_crosses`](../../../src/ui/shell.rs#L10776) | Clicking a bar sets that offset's opacity to the click height; one fast drag from +1 (high) to +8 (low) sets every bar in between along a straight falling line with none skipped, and doesn't touch the past side. |
+| [`a_layer_with_its_onion_on_ghosts_under_its_own_drawing`](../../../src/ui/shell.rs#L10796) | A non-active layer whose own onion switch is on gets ghosts painted just under its own drawing (and below the active layer's ghosts), while a layer with its onion off gets none. |
 
 **Test helpers** (used only by the tests above):
 
-- [`strip_frame`](../../../src/ui/shell.rs#L10659) — runs one frame with only the onion strip inside a 232 px wide area, with Alt held or not, and returns the strip's rectangle.
-- [`new`](../../../src/ui/shell.rs#L10691) — makes the context and a default onion config and lays the strip out once.
-- [`col_x`](../../../src/ui/shell.rs#L10698) — the x at the centre of column `i` (17 columns: −8 … +8).
-- [`num`](../../../src/ui/shell.rs#L10704) — the screen point of the number in column `i`.
-- [`bar`](../../../src/ui/shell.rs#L10709) — the screen point at height `v` (0–1) of column `i`'s bar.
-- [`frame`](../../../src/ui/shell.rs#L10713) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
-- [`button`](../../../src/ui/shell.rs#L10717) — builds a primary-button press or release event with given modifiers.
-- [`stroke`](../../../src/ui/shell.rs#L10728) — presses at the first point, moves through the rest (one frame each), releases at the last, then runs a settle frame.
-- [`click`](../../../src/ui/shell.rs#L10738) — a press and its release, one frame each.
-- [`col`](../../../src/ui/shell.rs#L10744) — turns an offset (−8 … +8) into its column index (0 … 16).
+- [`strip_frame`](../../../src/ui/shell.rs#L10653) — runs one frame with only the onion strip inside a 232 px wide area, with Alt held or not, and returns the strip's rectangle.
+- [`new`](../../../src/ui/shell.rs#L10685) — makes the context and a default onion config and lays the strip out once.
+- [`col_x`](../../../src/ui/shell.rs#L10692) — the x at the centre of column `i` (17 columns: −8 … +8).
+- [`num`](../../../src/ui/shell.rs#L10698) — the screen point of the number in column `i`.
+- [`bar`](../../../src/ui/shell.rs#L10703) — the screen point at height `v` (0–1) of column `i`'s bar.
+- [`frame`](../../../src/ui/shell.rs#L10707) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
+- [`button`](../../../src/ui/shell.rs#L10711) — builds a primary-button press or release event with given modifiers.
+- [`stroke`](../../../src/ui/shell.rs#L10722) — presses at the first point, moves through the rest (one frame each), releases at the last, then runs a settle frame.
+- [`click`](../../../src/ui/shell.rs#L10732) — a press and its release, one frame each.
+- [`col`](../../../src/ui/shell.rs#L10738) — turns an offset (−8 … +8) into its column index (0 … 16).
 
-**Test-only types and constants:** [`Strip`](../../../src/ui/shell.rs#L10684)
+**Test-only types and constants:** [`Strip`](../../../src/ui/shell.rs#L10678)
 
 ### `mod fade_tests`
 
@@ -4338,7 +4341,7 @@ Run with `cargo test ui::shell::fade_tests` · 1 tests
 
 | Test | What it checks |
 |---|---|
-| [`other_layers_paint_at_their_fade_and_the_active_one_at_full`](../../../src/ui/shell.rs#L10879) | With fading on (above 0.25, below 0.5), the active layer paints at full alpha 255, the layer above at 25 % and the layer below at 50 %. |
+| [`other_layers_paint_at_their_fade_and_the_active_one_at_full`](../../../src/ui/shell.rs#L10873) | With fading on (above 0.25, below 0.5), the active layer paints at full alpha 255, the layer above at 25 % and the layer below at 50 %. |
 
 ### `mod panel_drag_tests`
 
@@ -4346,20 +4349,20 @@ Run with `cargo test ui::shell::panel_drag_tests` · 6 tests
 
 | Test | What it checks |
 |---|---|
-| [`the_onion_bars_grow_with_the_panel_and_pins_squeeze_them`](../../../src/ui/shell.rs#L10976) | Dragging the Onion panel's bottom edge down 80 px makes it 80 px taller and the bars take all of that height (the Reset button below them moves by the same amount); the panel doesn't creep at rest, and adding two pins keeps the panel's height while the bars shrink to make room. |
-| [`dragging_the_body_leaves_the_panel_where_it_is`](../../../src/ui/shell.rs#L11056) | A drag that starts on the panel's bottom margin or on empty space just above the onion numbers does not move the panel. |
-| [`dragging_the_title_bar_moves_the_panel`](../../../src/ui/shell.rs#L11071) | A 40 px diagonal drag on the title bar moves the panel by exactly (40, 40). |
-| [`controls_under_the_catcher_still_work`](../../../src/ui/shell.rs#L11077) | A click on the onion strip inside the panel body still changes the onion settings, so the drag catcher doesn't block the panel's own controls. |
-| [`the_edges_still_resize`](../../../src/ui/shell.rs#L11097) | Dragging the left edge outwards widens the panel to the left while its right edge stays put. |
-| [`dragging_the_menu_strip_leaves_it_where_it_is`](../../../src/ui/shell.rs#L11106) | The top menu strip starts one padding in from the top-left corner and stays there when dragged from its margin or from the gap between its menus. |
+| [`the_onion_bars_grow_with_the_panel_and_pins_squeeze_them`](../../../src/ui/shell.rs#L10970) | Dragging the Onion panel's bottom edge down 80 px makes it 80 px taller and the bars take all of that height (the Reset button below them moves by the same amount); the panel doesn't creep at rest, and adding two pins keeps the panel's height while the bars shrink to make room. |
+| [`dragging_the_body_leaves_the_panel_where_it_is`](../../../src/ui/shell.rs#L11050) | A drag that starts on the panel's bottom margin or on empty space just above the onion numbers does not move the panel. |
+| [`dragging_the_title_bar_moves_the_panel`](../../../src/ui/shell.rs#L11065) | A 40 px diagonal drag on the title bar moves the panel by exactly (40, 40). |
+| [`controls_under_the_catcher_still_work`](../../../src/ui/shell.rs#L11071) | A click on the onion strip inside the panel body still changes the onion settings, so the drag catcher doesn't block the panel's own controls. |
+| [`the_edges_still_resize`](../../../src/ui/shell.rs#L11091) | Dragging the left edge outwards widens the panel to the left while its right edge stays put. |
+| [`dragging_the_menu_strip_leaves_it_where_it_is`](../../../src/ui/shell.rs#L11100) | The top menu strip starts one padding in from the top-left corner and stays there when dragged from its margin or from the gap between its menus. |
 
 **Test helpers** (used only by the tests above):
 
-- [`frame`](../../../src/ui/shell.rs#L10941) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
-- [`frame_shapes`](../../../src/ui/shell.rs#L10945) — runs one frame on a 1600 × 900 screen that draws only the Onion panel (via `panel_window` at (300, 200), 252 px wide) and returns the painted shapes.
-- [`reset_y`](../../../src/ui/shell.rs#L10963) — the y of the Onion panel's "Reset" text, which sits right under the bars and so shows how tall the bars are.
-- [`panel_rect`](../../../src/ui/shell.rs#L11023) — reads the Onion panel's current rectangle from egui's memory.
-- [`drag`](../../../src/ui/shell.rs#L11030) — press at `from`, move by `by` over 10 frames, release, settle a frame.
+- [`frame`](../../../src/ui/shell.rs#L10935) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
+- [`frame_shapes`](../../../src/ui/shell.rs#L10939) — runs one frame on a 1600 × 900 screen that draws only the Onion panel (via `panel_window` at (300, 200), 252 px wide) and returns the painted shapes.
+- [`reset_y`](../../../src/ui/shell.rs#L10957) — the y of the Onion panel's "Reset" text, which sits right under the bars and so shows how tall the bars are.
+- [`panel_rect`](../../../src/ui/shell.rs#L11017) — reads the Onion panel's current rectangle from egui's memory.
+- [`drag`](../../../src/ui/shell.rs#L11024) — press at `from`, move by `by` over 10 frames, release, settle a frame.
 
 ### `mod panel_padding_tests`
 
@@ -4367,28 +4370,28 @@ Run with `cargo test ui::shell::panel_padding_tests` · 9 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_panel_near_another_settles_a_padding_from_it`](../../../src/ui/shell.rs#L11171) | A panel let go near another panel (below it or beside it, even overlapping a little) snaps to one padding away from it, but one dropped right on top of it or well clear is left alone; the window edge beats a neighbour, and a panel caught between two neighbours hangs from the one above. |
-| [`a_panel_near_an_edge_settles_at_the_padding`](../../../src/ui/shell.rs#L11197) | A panel within reach of the right, bottom or top edge snaps to exactly the padding from it (clear of the top bar), while one out in the open, already in place, or too far away gets no new position. |
-| [`under_the_top_bar_the_bar_is_the_edge`](../../../src/ui/shell.rs#L11207) | Near the top-left, the bottom of the top bar acts as the edge: a panel just under it, or overlapping it, snaps to one padding below the bar. |
-| [`a_new_padding_moves_the_panels_it_held`](../../../src/ui/shell.rs#L11215) | When the padding changes from 8 to 40, panels that were held at the old padding (left, right, and under the moved bar) move to the new one however far, and a free panel stays where it is. |
-| [`the_first_layout_keeps_the_padding`](../../../src/ui/shell.rs#L11254) | On first open, the top bar sits 8 px from the corner, the Tools panel 8 px under the bar, and the Layers column 8 px from the top-right corner. |
-| [`a_panel_let_go_near_an_edge_settles_at_the_padding_and_no_nearer`](../../../src/ui/shell.rs#L11288) | While held near the right edge the Layers panel follows the pointer, but once let go it snaps to 8 px from the edge; dragged past the edge it still ends 8 px in; dropped in the open it stays exactly where it was let go. |
-| [`changing_the_padding_moves_the_bar_and_the_panels_it_held`](../../../src/ui/shell.rs#L11306) | Setting the padding to 30 moves the top bar, the Tools panel, the right column and the Brush panel stacked under Tools to their 30 px positions within a few frames. |
-| [`the_first_layout_stacks_the_panels_a_padding_apart`](../../../src/ui/shell.rs#L11327) | On first open, panels stacked in a column (Tools/Brush, Layers/Onion/Camera/X-sheet) are exactly one padding apart and no two panels overlap. |
-| [`a_panel_let_go_under_another_settles_a_padding_below_it`](../../../src/ui/shell.rs#L11350) | Dragging the Brush panel to 20 px under Tools and letting go snaps it to 8 px under Tools. |
+| [`a_panel_near_another_settles_a_padding_from_it`](../../../src/ui/shell.rs#L11165) | A panel let go near another panel (below it or beside it, even overlapping a little) snaps to one padding away from it, but one dropped right on top of it or well clear is left alone; the window edge beats a neighbour, and a panel caught between two neighbours hangs from the one above. |
+| [`a_panel_near_an_edge_settles_at_the_padding`](../../../src/ui/shell.rs#L11191) | A panel within reach of the right, bottom or top edge snaps to exactly the padding from it (clear of the top bar), while one out in the open, already in place, or too far away gets no new position. |
+| [`under_the_top_bar_the_bar_is_the_edge`](../../../src/ui/shell.rs#L11201) | Near the top-left, the bottom of the top bar acts as the edge: a panel just under it, or overlapping it, snaps to one padding below the bar. |
+| [`a_new_padding_moves_the_panels_it_held`](../../../src/ui/shell.rs#L11209) | When the padding changes from 8 to 40, panels that were held at the old padding (left, right, and under the moved bar) move to the new one however far, and a free panel stays where it is. |
+| [`the_first_layout_keeps_the_padding`](../../../src/ui/shell.rs#L11248) | On first open, the top bar sits 8 px from the corner, the Tools panel 8 px under the bar, and the Layers column 8 px from the top-right corner. |
+| [`a_panel_let_go_near_an_edge_settles_at_the_padding_and_no_nearer`](../../../src/ui/shell.rs#L11282) | While held near the right edge the Layers panel follows the pointer, but once let go it snaps to 8 px from the edge; dragged past the edge it still ends 8 px in; dropped in the open it stays exactly where it was let go. |
+| [`changing_the_padding_moves_the_bar_and_the_panels_it_held`](../../../src/ui/shell.rs#L11300) | Setting the padding to 30 moves the top bar, the Tools panel, the right column and the Brush panel stacked under Tools to their 30 px positions within a few frames. |
+| [`the_first_layout_stacks_the_panels_a_padding_apart`](../../../src/ui/shell.rs#L11321) | On first open, panels stacked in a column (Tools/Brush, Layers/Onion/Camera/X-sheet) are exactly one padding apart and no two panels overlap. |
+| [`a_panel_let_go_under_another_settles_a_padding_below_it`](../../../src/ui/shell.rs#L11344) | Dragging the Brush panel to 20 px under Tools and letting go snaps it to 8 px under Tools. |
 
 **Test helpers** (used only by the tests above):
 
-- [`edges`](../../../src/ui/shell.rs#L11156) — builds a `PanelEdges` (the test screen, padding 8, the test top bar, and an optional old padding `was`).
-- [`panel`](../../../src/ui/shell.rs#L11160) — reads the Timeline panel's rectangle from egui's memory.
-- [`padded_pos_alone`](../../../src/ui/shell.rs#L11164) — calls `padded_pos` with no other panels around.
-- [`run`](../../../src/ui/shell.rs#L11223) — runs one frame on the 1400 × 900 screen that calls the given `show` function, and returns the shapes.
-- [`rect`](../../../src/ui/shell.rs#L11232) — reads an area's rectangle (by egui `Id`) from egui's memory.
-- [`setup`](../../../src/ui/shell.rs#L11236) — a test state with a 1920 × 1080 project loaded and a themed context.
-- [`layers`](../../../src/ui/shell.rs#L11247) — the egui `Id` of the Layers panel's area.
-- [`drag_to`](../../../src/ui/shell.rs#L11266) — drags a panel by its title bar so its top-left heads for `to`, and returns its rect while still held and after letting go.
+- [`edges`](../../../src/ui/shell.rs#L11150) — builds a `PanelEdges` (the test screen, padding 8, the test top bar, and an optional old padding `was`).
+- [`panel`](../../../src/ui/shell.rs#L11154) — reads the Timeline panel's rectangle from egui's memory.
+- [`padded_pos_alone`](../../../src/ui/shell.rs#L11158) — calls `padded_pos` with no other panels around.
+- [`run`](../../../src/ui/shell.rs#L11217) — runs one frame on the 1400 × 900 screen that calls the given `show` function, and returns the shapes.
+- [`rect`](../../../src/ui/shell.rs#L11226) — reads an area's rectangle (by egui `Id`) from egui's memory.
+- [`setup`](../../../src/ui/shell.rs#L11230) — a test state with a 1920 × 1080 project loaded and a themed context.
+- [`layers`](../../../src/ui/shell.rs#L11241) — the egui `Id` of the Layers panel's area.
+- [`drag_to`](../../../src/ui/shell.rs#L11260) — drags a panel by its title bar so its top-left heads for `to`, and returns its rect while still held and after letting go.
 
-**Test-only types and constants:** [`SCREEN`](../../../src/ui/shell.rs#L11153), [`BAR`](../../../src/ui/shell.rs#L11154)
+**Test-only types and constants:** [`SCREEN`](../../../src/ui/shell.rs#L11147), [`BAR`](../../../src/ui/shell.rs#L11148)
 
 ### `mod size_strip_tests`
 
@@ -4396,23 +4399,23 @@ Run with `cargo test ui::shell::size_strip_tests` · 6 tests
 
 | Test | What it checks |
 |---|---|
-| [`the_strip_offers_sizes_drawn_at_pins_and_removes_them`](../../../src/ui/shell.rs#L11408) | Sizes drawn at show under the slider: a click draws at one, a right-click pins it, and a pinned size shows once, with its pin. |
-| [`the_screen_size_lock_sits_at_the_end_of_the_size_row`](../../../src/ui/shell.rs#L11453) | The lock to screen size is an icon at the end of the Size row, not a line of its own, and clicking it turns the lock on and off. |
-| [`the_size_slider_marks_pinned_and_recent_sizes_where_the_handle_sits`](../../../src/ui/shell.rs#L11515) | The slider draws one accent tick for each pinned size and one faint tick for each recent (unpinned) size, each exactly where the handle sits at that size; the ticks don't move when the size changes, and they're painted after (on top of) the slider handle. |
-| [`long_values_leave_the_tools_panel_its_width`](../../../src/ui/shell.rs#L11557) | Long decimal values such as radius 16.89237 or opacity 0.92254 don't make the Tools panel grow, even over 20 frames (guards against a slider feeding its own overflow back and widening the panel every frame). |
-| [`the_tools_panel_goes_no_wider_than_its_cap`](../../../src/ui/shell.rs#L11580) | Dragging the Tools panel's right edge 1200 px out widens it, but never past `TOOLS_MAX_W` plus its margins. |
-| [`the_strip_keeps_to_one_row`](../../../src/ui/shell.rs#L11612) | With five pinned and five recent sizes, all pinned sizes show and every size that shows is on the same single row (recent ones only as many as fit). |
+| [`the_strip_offers_sizes_drawn_at_pins_and_removes_them`](../../../src/ui/shell.rs#L11402) | Sizes drawn at show under the slider: a click draws at one, a right-click pins it, and a pinned size shows once, with its pin. |
+| [`the_screen_size_lock_sits_at_the_end_of_the_size_row`](../../../src/ui/shell.rs#L11447) | The lock to screen size is an icon at the end of the Size row, not a line of its own, and clicking it turns the lock on and off. |
+| [`the_size_slider_marks_pinned_and_recent_sizes_where_the_handle_sits`](../../../src/ui/shell.rs#L11509) | The slider draws one accent tick for each pinned size and one faint tick for each recent (unpinned) size, each exactly where the handle sits at that size; the ticks don't move when the size changes, and they're painted after (on top of) the slider handle. |
+| [`long_values_leave_the_tools_panel_its_width`](../../../src/ui/shell.rs#L11551) | Long decimal values such as radius 16.89237 or opacity 0.92254 don't make the Tools panel grow, even over 20 frames (guards against a slider feeding its own overflow back and widening the panel every frame). |
+| [`the_tools_panel_goes_no_wider_than_its_cap`](../../../src/ui/shell.rs#L11574) | Dragging the Tools panel's right edge 1200 px out widens it, but never past `TOOLS_MAX_W` plus its margins. |
+| [`the_strip_keeps_to_one_row`](../../../src/ui/shell.rs#L11606) | With five pinned and five recent sizes, all pinned sizes show and every size that shows is on the same single row (recent ones only as many as fit). |
 
 **Test helpers** (used only by the tests above):
 
-- [`frame`](../../../src/ui/shell.rs#L11365) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
-- [`text_pos`](../../../src/ui/shell.rs#L11378) — the centre of the painted text exactly equal to `text`, if any.
-- [`find`](../../../src/ui/shell.rs#L11379) — Find.
-- [`click`](../../../src/ui/shell.rs#L11393) — a press and its release, one frame each.
-- [`all`](../../../src/ui/shell.rs#L11470) — flattens every painted shape (unpacking nested `Shape::Vec` groups) into one list.
-- [`walk`](../../../src/ui/shell.rs#L11471) — Walk.
-- [`marks`](../../../src/ui/shell.rs#L11485) — finds the short vertical line segments drawn in a given colour (the slider's size ticks) and returns each one's x and middle y.
-- [`handle_x`](../../../src/ui/shell.rs#L11502) — the x of the Size slider's round handle on the row at height `y`.
+- [`frame`](../../../src/ui/shell.rs#L11359) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
+- [`text_pos`](../../../src/ui/shell.rs#L11372) — the centre of the painted text exactly equal to `text`, if any.
+- [`find`](../../../src/ui/shell.rs#L11373) — Find.
+- [`click`](../../../src/ui/shell.rs#L11387) — a press and its release, one frame each.
+- [`all`](../../../src/ui/shell.rs#L11464) — flattens every painted shape (unpacking nested `Shape::Vec` groups) into one list.
+- [`walk`](../../../src/ui/shell.rs#L11465) — Walk.
+- [`marks`](../../../src/ui/shell.rs#L11479) — finds the short vertical line segments drawn in a given colour (the slider's size ticks) and returns each one's x and middle y.
+- [`handle_x`](../../../src/ui/shell.rs#L11496) — the x of the Size slider's round handle on the row at height `y`.
 
 ### `mod stroke_source_tests`
 
@@ -4420,17 +4423,17 @@ Run with `cargo test ui::shell::stroke_source_tests` · 6 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_pen_frame_without_packets_adds_nothing`](../../../src/ui/shell.rs#L11659) | The "wobble" regression: on a frame where the pen sent no packets, a pen stroke adds no point at all (it doesn't fall back to the pixel-rounded cursor) and stays a pen stroke. |
-| [`a_pen_frame_takes_every_packet_and_only_packets`](../../../src/ui/shell.rs#L11667) | A pen frame with two packets adds exactly those two points, at their sub-pixel positions with pressure data, and ignores the cursor. |
-| [`an_untrusted_pen_hands_over_to_the_cursor_for_good`](../../../src/ui/shell.rs#L11682) | When the pen's screen mapping stops agreeing with the cursor, the stroke switches to the cursor once and stays on it, even if good packets arrive later in the same stroke. |
-| [`a_cursor_stroke_ignores_packets`](../../../src/ui/shell.rs#L11697) | A stroke that is already drawing from the cursor uses the cursor position and ignores any pen packets. |
-| [`a_cursor_trailing_a_fast_pen_still_agrees`](../../../src/ui/shell.rs#L11721) | The fast-flick regression: a cursor lagging 12 ms behind the newest packet (far beyond the tolerance in distance) still lies on the pen's path, even rounded to whole pixels, so the pen keeps the stroke. |
-| [`a_path_away_from_the_cursor_disagrees`](../../../src/ui/shell.rs#L11737) | A pen path that is Y-flipped (a buggy driver), or offset sideways by 1.5× the tolerance, or empty, is judged not to agree with the cursor; a single packet 3 px away does agree. |
+| [`a_pen_frame_without_packets_adds_nothing`](../../../src/ui/shell.rs#L11653) | The "wobble" regression: on a frame where the pen sent no packets, a pen stroke adds no point at all (it doesn't fall back to the pixel-rounded cursor) and stays a pen stroke. |
+| [`a_pen_frame_takes_every_packet_and_only_packets`](../../../src/ui/shell.rs#L11661) | A pen frame with two packets adds exactly those two points, at their sub-pixel positions with pressure data, and ignores the cursor. |
+| [`an_untrusted_pen_hands_over_to_the_cursor_for_good`](../../../src/ui/shell.rs#L11676) | When the pen's screen mapping stops agreeing with the cursor, the stroke switches to the cursor once and stays on it, even if good packets arrive later in the same stroke. |
+| [`a_cursor_stroke_ignores_packets`](../../../src/ui/shell.rs#L11691) | A stroke that is already drawing from the cursor uses the cursor position and ignores any pen packets. |
+| [`a_cursor_trailing_a_fast_pen_still_agrees`](../../../src/ui/shell.rs#L11715) | The fast-flick regression: a cursor lagging 12 ms behind the newest packet (far beyond the tolerance in distance) still lies on the pen's path, even rounded to whole pixels, so the pen keeps the stroke. |
+| [`a_path_away_from_the_cursor_disagrees`](../../../src/ui/shell.rs#L11731) | A pen path that is Y-flipped (a buggy driver), or offset sideways by 1.5× the tolerance, or empty, is judged not to agree with the cursor; a single packet 3 px away does agree. |
 
 **Test helpers** (used only by the tests above):
 
-- [`packet`](../../../src/ui/shell.rs#L11643) — a `PenPacket` at (x, y) with half pressure and no tilt or rotation.
-- [`flick`](../../../src/ui/shell.rs#L11708) — 32 points 50 px apart along a gentle curve, standing in for a fast pen flick.
+- [`packet`](../../../src/ui/shell.rs#L11637) — a `PenPacket` at (x, y) with half pressure and no tilt or rotation.
+- [`flick`](../../../src/ui/shell.rs#L11702) — 32 points 50 px apart along a gentle curve, standing in for a fast pen flick.
 
 ### `mod stroke_latency_tests`
 
@@ -4438,17 +4441,17 @@ Run with `cargo test ui::shell::stroke_latency_tests` · 2 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_stroke_s_ink_goes_up_on_the_frame_it_is_drawn`](../../../src/ui/shell.rs#L11812) | Every brush engine: each move frame sends its own ink, and leaves nothing for the next frame to send. The regression this pins: the texture sync ran before the frame's samples were painted, so every stroke showed a frame behind the pen. |
-| [`the_live_tail_draws_in_its_slot`](../../../src/ui/shell.rs#L11844) | The live tail goes where `paint_canvas` kept its place — under the overlays painted after it, not on top of everything. |
+| [`a_stroke_s_ink_goes_up_on_the_frame_it_is_drawn`](../../../src/ui/shell.rs#L11806) | Every brush engine: each move frame sends its own ink, and leaves nothing for the next frame to send. The regression this pins: the texture sync ran before the frame's samples were painted, so every stroke showed a frame behind the pen. |
+| [`the_live_tail_draws_in_its_slot`](../../../src/ui/shell.rs#L11838) | The live tail goes where `paint_canvas` kept its place — under the overlays painted after it, not on top of everything. |
 
 **Test helpers** (used only by the tests above):
 
-- [`frame`](../../../src/ui/shell.rs#L11759) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
-- [`run`](../../../src/ui/shell.rs#L11765) — runs one frame on the 1400 × 900 screen that calls the given `show` function, and returns the shapes.
-- [`button`](../../../src/ui/shell.rs#L11779) — builds a primary-button press or release event with given modifiers.
-- [`stroke`](../../../src/ui/shell.rs#L11790) — presses at the first point, moves through the rest (one frame each), releases at the last, then runs a settle frame.
+- [`frame`](../../../src/ui/shell.rs#L11753) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
+- [`run`](../../../src/ui/shell.rs#L11759) — runs one frame on the 1400 × 900 screen that calls the given `show` function, and returns the shapes.
+- [`button`](../../../src/ui/shell.rs#L11773) — builds a primary-button press or release event with given modifiers.
+- [`stroke`](../../../src/ui/shell.rs#L11784) — presses at the first point, moves through the rest (one frame each), releases at the last, then runs a settle frame.
 
-**Test-only types and constants:** [`SCREEN`](../../../src/ui/shell.rs#L11757)
+**Test-only types and constants:** [`SCREEN`](../../../src/ui/shell.rs#L11751)
 
 ### `mod new_project_tests`
 
@@ -4456,16 +4459,16 @@ Run with `cargo test ui::shell::new_project_tests` · 4 tests
 
 | Test | What it checks |
 |---|---|
-| [`dialog_draws_saved_presets_and_a_rename_in_progress`](../../../src/ui/shell.rs#L11898) | With three saved presets and one being renamed, the dialog stays open, keeps all three presets, gives the rename box keyboard focus, and starts on the starred (default) preset's size, 1080 × 1920. |
-| [`clipboard_button_takes_the_image_size_as_it_is`](../../../src/ui/shell.rs#L11954) | The button shows the clipboard image's size ("Clipboard 1000×2000"), and clicking it sets that exact width and height, without flipping a portrait image to match the current landscape setting. |
-| [`clipboard_button_does_nothing_without_an_image`](../../../src/ui/shell.rs#L11970) | With no image on the clipboard, clicking the button leaves the size unchanged. |
-| [`an_oversized_clipboard_image_fits_the_side_limit`](../../../src/ui/shell.rs#L11983) | `fit_side` leaves a normal size alone and scales an oversized one down, keeping its shape, so its longest side is `MAX_SIDE` (16384) and no side drops below 1. |
+| [`dialog_draws_saved_presets_and_a_rename_in_progress`](../../../src/ui/shell.rs#L11892) | With three saved presets and one being renamed, the dialog stays open, keeps all three presets, gives the rename box keyboard focus, and starts on the starred (default) preset's size, 1080 × 1920. |
+| [`clipboard_button_takes_the_image_size_as_it_is`](../../../src/ui/shell.rs#L11948) | The button shows the clipboard image's size ("Clipboard 1000×2000"), and clicking it sets that exact width and height, without flipping a portrait image to match the current landscape setting. |
+| [`clipboard_button_does_nothing_without_an_image`](../../../src/ui/shell.rs#L11964) | With no image on the clipboard, clicking the button leaves the size unchanged. |
+| [`an_oversized_clipboard_image_fits_the_side_limit`](../../../src/ui/shell.rs#L11977) | `fit_side` leaves a normal size alone and scales an oversized one down, keeping its shape, so its longest side is `MAX_SIDE` (16384) and no side drops below 1. |
 
 **Test helpers** (used only by the tests above):
 
-- [`preset`](../../../src/ui/shell.rs#L11887) — builds a `ProjectPreset` with a name, size, 24 fps and whether it is the starred default.
-- [`draw`](../../../src/ui/shell.rs#L11926) — runs one frame of just the dialog on a 1600 × 1000 screen and returns the centre of the first text containing `find`, if drawn.
-- [`click`](../../../src/ui/shell.rs#L11941) — a press and its release, one frame each.
+- [`preset`](../../../src/ui/shell.rs#L11881) — builds a `ProjectPreset` with a name, size, 24 fps and whether it is the starred default.
+- [`draw`](../../../src/ui/shell.rs#L11920) — runs one frame of just the dialog on a 1600 × 1000 screen and returns the centre of the first text containing `find`, if drawn.
+- [`click`](../../../src/ui/shell.rs#L11935) — a press and its release, one frame each.
 
 ### `mod timeline_panel_tests`
 
@@ -4473,18 +4476,18 @@ Run with `cargo test ui::shell::timeline_panel_tests` · 3 tests
 
 | Test | What it checks |
 |---|---|
-| [`dragging_a_side_edge_keeps_the_height`](../../../src/ui/shell.rs#L12046) | With the theme causing a title-bar shortfall, dragging the right edge 60 px or the left edge 40 px moves that edge to follow the pointer and leaves the panel's height unchanged. |
-| [`dragging_the_top_or_bottom_edge_moves_just_that_edge`](../../../src/ui/shell.rs#L12064) | Dragging the top edge up 30 px moves only the top (the bottom stays), and dragging the bottom edge up 50 px moves only the bottom (the top stays). |
-| [`the_insert_before_button_adds_frames_at_the_start`](../../../src/ui/shell.rs#L12082) | With frame step 2 and two layers, clicking the toolbar's "insert before" button adds two blank frames in front of the first drawing on every layer and moves the playhead with the old first frame (to frame 2). |
+| [`dragging_a_side_edge_keeps_the_height`](../../../src/ui/shell.rs#L12040) | With the theme causing a title-bar shortfall, dragging the right edge 60 px or the left edge 40 px moves that edge to follow the pointer and leaves the panel's height unchanged. |
+| [`dragging_the_top_or_bottom_edge_moves_just_that_edge`](../../../src/ui/shell.rs#L12058) | Dragging the top edge up 30 px moves only the top (the bottom stays), and dragging the bottom edge up 50 px moves only the bottom (the top stays). |
+| [`the_insert_before_button_adds_frames_at_the_start`](../../../src/ui/shell.rs#L12077) | With frame step 2 and two layers, clicking the toolbar's "insert before" button adds two blank frames in front of the first drawing on every layer and moves the playhead with the old first frame (to frame 2). |
 
 **Test helpers** (used only by the tests above):
 
-- [`frame`](../../../src/ui/shell.rs#L12000) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
-- [`panel`](../../../src/ui/shell.rs#L12009) — reads the Timeline panel's rectangle from egui's memory.
-- [`drag`](../../../src/ui/shell.rs#L12016) — press at `from`, move by `by` over 10 frames, release, settle a frame.
-- [`setup`](../../../src/ui/shell.rs#L12033) — a test state with a 1920 × 1080 project loaded and a themed context.
+- [`frame`](../../../src/ui/shell.rs#L11994) — one frame with held modifiers that first lets `state.read_input` read the input (as the app's update does), then draws.
+- [`panel`](../../../src/ui/shell.rs#L12003) — reads the Timeline panel's rectangle from egui's memory.
+- [`drag`](../../../src/ui/shell.rs#L12010) — press at `from`, move by `by` over 10 frames, release, settle a frame.
+- [`setup`](../../../src/ui/shell.rs#L12027) — a test state with a 1920 × 1080 project loaded and a themed context.
 
-**Test-only types and constants:** [`SCREEN`](../../../src/ui/shell.rs#L11998)
+**Test-only types and constants:** [`SCREEN`](../../../src/ui/shell.rs#L11992)
 
 ### `mod layers_panel_tests`
 

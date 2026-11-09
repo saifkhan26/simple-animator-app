@@ -1978,57 +1978,43 @@ fn timeline_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui
 
         let n = state.frame_step_count();
         let before_base = if n == 1 {
-            "Insert a frame before this one, on every layer — blank at the start".to_string()
+            "Insert a frame before this one, on the selected layers — blank at the start".to_string()
         } else {
-            format!("Insert {n} frames before this one, on every layer — blank at the start")
+            format!("Insert {n} frames before this one, on the selected layers — blank at the start")
         };
         let before_tip = tip(state, Action::FrameInsertBefore, &before_base);
         if theme::icon_button(ui, ic::COLUMNS_PLUS_LEFT, &before_tip).clicked() {
             state.insert_frames_before();
         }
+        // Every frame button acts on the selected layers (the active one when
+        // none are picked) — the whole scene when every layer is selected —
+        // and by the step size: adds grow the timeline, deletes keep it.
         let add_base = if n == 1 {
-            "Add frame (hold)".to_string()
+            "Add a frame after this one, on the selected layers (hold)".to_string()
         } else {
-            format!("Add {n} frames (hold)")
+            format!("Add {n} frames after this one, on the selected layers (hold)")
         };
         let add_tip = tip(state, Action::FrameAdd, &add_base);
         if theme::icon_button(ui, ic::PLUS, &add_tip).clicked() {
             state.add_frames();
         }
         let dup_base = if n == 1 {
-            "Duplicate frame".to_string()
+            "Duplicate this frame, on the selected layers".to_string()
         } else {
-            format!("Duplicate frame ×{n}")
+            format!("Duplicate this frame ×{n}, on the selected layers")
         };
         let dup_tip = tip(state, Action::FrameDuplicate, &dup_base);
         if theme::icon_button(ui, ic::COPY, &dup_tip).clicked() {
             state.duplicate_frames();
         }
-        let del_tip = tip(state, Action::FrameDelete, "Delete frame");
-        if theme::icon_button(ui, ic::TRASH, &del_tip).clicked() {
-            state.delete_frame();
-        }
-        gap(ui);
-
-        // The same step size, on the active layer alone: its drawings slide,
-        // every other layer stays where it is.
-        let frames = if n == 1 {
-            "a frame".to_string()
+        let del_base = if n == 1 {
+            "Delete this frame, on the selected layers — later drawings slide up".to_string()
         } else {
-            format!("{n} frames")
+            format!("Delete {n} frames from this one, on the selected layers — later drawings slide up")
         };
-        let ins_tip = format!(
-            "Insert {frames} on this layer — the drawing at the playhead holds longer, \
-             later ones slide"
-        );
-        if theme::icon_button(ui, ic::ARROWS_OUT_LINE_HORIZONTAL, &ins_tip).clicked() {
-            state.insert_layer_frames_here(n);
-        }
-        let rem_tip = format!(
-            "Remove {frames} on this layer, from the playhead — later drawings slide up"
-        );
-        if theme::icon_button(ui, ic::ARROWS_IN_LINE_HORIZONTAL, &rem_tip).clicked() {
-            state.remove_layer_frames_here(n);
+        let del_tip = tip(state, Action::FrameDelete, &del_base);
+        if theme::icon_button(ui, ic::TRASH, &del_tip).clicked() {
+            state.delete_frames();
         }
 
         // Right to left: fps at the edge, the frame counter beside it.
@@ -4809,6 +4795,14 @@ fn xsheet_content(state: &mut AppState, ui: &mut egui::Ui) {
                     state.structural_edit(false, |p| {
                         p.insert_duplicate_key_here();
                     });
+                }
+                let between = tip(
+                    state,
+                    Action::KeyInbetween,
+                    "Insert in-between: a blank drawing in the middle of the gap to the next one",
+                );
+                if theme::icon_button(ui, ic::SQUARE_SPLIT_HORIZONTAL, &between).clicked() {
+                    state.insert_inbetween_here();
                 }
                 if theme::icon_button(ui, ic::PUSH_PIN, "Hold (delete key)").clicked() {
                     state.structural_edit(false, |p| p.hold_here());
@@ -12077,7 +12071,8 @@ mod timeline_panel_tests {
     }
 
     /// The toolbar's insert-before button puts the step size's worth of
-    /// blank frames in front of the first drawing, on every layer.
+    /// blank frames in front of the first drawing, on the selected layers
+    /// only — here the active one — and the timeline grows by as many.
     #[test]
     fn the_insert_before_button_adds_frames_at_the_start() {
         let (mut state, ctx) = setup();
@@ -12113,8 +12108,13 @@ mod timeline_panel_tests {
         frame(&ctx, &mut state, vec![button(false)]);
         assert_eq!(state.project.frame_count, 3);
         assert_eq!(state.project.current_frame, 2);
-        for (l, was) in state.project.layers.iter().zip(was) {
-            assert_eq!(l.exposures[..], [None, None, was], "{}: blank in front, then what was first", l.name);
+        let active = state.project.current_layer;
+        for (i, (l, was)) in state.project.layers.iter().zip(was).enumerate() {
+            if i == active {
+                assert_eq!(l.exposures[..], [None, None, was], "{}: blank in front, then what was first", l.name);
+            } else {
+                assert_eq!(l.exposures[..], [was, None, None], "{}: unselected, held to the new end", l.name);
+            }
         }
     }
 }
@@ -14821,7 +14821,7 @@ mod window_layout_tests {
         let shapes = settle(&ctx, &mut show);
         let t = texts(&shapes);
         let at = |s: &str| t.iter().find(|(x, _)| x == s).unwrap_or_else(|| panic!("no {s:?} drawn")).1;
-        let last_button = at(ic::ARROWS_IN_LINE_HORIZONTAL);
+        let last_button = at(ic::TRASH);
         let clock = at(ic::CLOCK);
         assert!(clock.min.x > last_button.max.x, "counter {clock:?} over the buttons {last_button:?}");
         assert!(window(&ctx, id).width() > 300.0, "the panel stopped at the toolbar");

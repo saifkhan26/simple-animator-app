@@ -33,7 +33,7 @@ use crate::doc::camera::{CamGrab, Camera, Ease};
 use crate::doc::canvas::{par_rows, Canvas, DirtyRect};
 use crate::doc::layer::{CellId, TrackSample};
 use crate::doc::orient::Orient;
-use crate::doc::project::{Block, Project};
+use crate::doc::project::{Block, NewFrames, Project};
 use crate::doc::transform::Transform;
 use crate::input::button_drag::ButtonDrag;
 use crate::input::pointer::PointerSample;
@@ -1107,6 +1107,15 @@ pub enum BgJob {
     },
     /// Reading a `.kra` for File ▸ Import .kra.
     KraImport(Receiver<Result<KraDoc>>),
+}
+
+/// What a frame add or remove acts on ([`AppState::frame_scope`]).
+enum FrameScope {
+    /// Every layer is selected: the frames go into or out of the whole
+    /// scene, camera and grid keys included.
+    Scene,
+    /// These layers alone.
+    Layers(Vec<usize>),
 }
 
 /// A project write running on a worker thread.
@@ -2679,53 +2688,114 @@ impl AppState {
         self.history.push(if cmds.len() == 1 { cmds.remove(0) } else { undo::Command::Compound(cmds) });
     }
 
-    /// The step size's worth of held frames after the playhead, on every
-    /// layer. One undo step for all of them.
+    /// What a frame add or remove acts on — the one rule every frame command
+    /// follows: the selected layers (a picked group stands for its layers;
+    /// the active layer alone when none are picked), less locked and
+    /// reference ones. When every layer is selected it is the whole scene
+    /// instead. `None` when nothing selected may be edited.
+    fn frame_scope(&self) -> Option<FrameScope> {
+        let picked = self.selected_drawing_layers();
+        let drawing_layers = (0..self.project.layers.len()).filter(|&i| !self.project.is_group(i)).count();
+        if picked.len() >= drawing_layers {
+            return Some(FrameScope::Scene);
+        }
+        let layers: Vec<usize> = picked.into_iter().filter(|&i| self.project.paintable(i)).collect();
+        (!layers.is_empty()).then_some(FrameScope::Layers(layers))
+    }
+
+    /// Add frame: the step size's worth of held frames after the playhead,
+    /// on the selected layers ([`AppState::frame_scope`]). The timeline grows
+    /// by as many; the playhead goes to the last new frame. One undo step.
     pub fn add_frames(&mut self) {
         let n = self.frame_step_count();
         let at = (self.project.current_frame + 1).min(self.project.frame_count);
-        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| {
-            for _ in 0..n {
-                p.add_frame();
-            }
-        });
+        match self.frame_scope() {
+            Some(FrameScope::Scene) => self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| {
+                for _ in 0..n {
+                    p.add_frame();
+                }
+            }),
+            Some(FrameScope::Layers(layers)) => self.structural_edit(false, |p| {
+                p.insert_layer_frames_at(&layers, at, n, NewFrames::Hold);
+                p.goto(at + n - 1);
+            }),
+            None => {}
+        }
     }
 
-    /// The step size's worth of copies of this frame after it, on every
-    /// layer.
+    /// Duplicate frame: as [`AppState::add_frames`], with each new frame
+    /// showing the drawing at the playhead again.
     pub fn duplicate_frames(&mut self) {
         let n = self.frame_step_count();
         let at = (self.project.current_frame + 1).min(self.project.frame_count);
-        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| {
-            for _ in 0..n {
-                p.duplicate_frame();
-            }
-        });
-    }
-
-    /// Delete the frame under the playhead from every layer. The only frame
-    /// left is cleared instead.
-    pub fn delete_frame(&mut self) {
-        let wipes_pixels = self.project.frame_count <= 1;
-        let at = self.project.current_frame;
-        self.frame_edit(
-            wipes_pixels,
-            |g| {
-                if !wipes_pixels {
-                    g.keys_remove_frames(at, 1);
+        match self.frame_scope() {
+            Some(FrameScope::Scene) => self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| {
+                for _ in 0..n {
+                    p.duplicate_frame();
                 }
-            },
-            Project::delete_frame,
-        );
+            }),
+            Some(FrameScope::Layers(layers)) => self.structural_edit(false, |p| {
+                p.insert_layer_frames_at(&layers, at, n, NewFrames::Repeat);
+                p.goto(at + n - 1);
+            }),
+            None => {}
+        }
     }
 
-    /// The step size's worth of frames before the playhead, on every layer
-    /// — blank ones at the start — with every key from the playhead on,
-    /// the grids' too, moved along. The playhead stays on its drawing.
+    /// Delete frame: the step size's worth of frames from the playhead on,
+    /// on the selected layers ([`AppState::frame_scope`]). There the later
+    /// drawings and transform keys slide up, and the timeline keeps its
+    /// length. With every layer selected the frames leave the whole scene —
+    /// camera and grid keys with them — and the timeline is that much
+    /// shorter; the only frame left is cleared instead. One undo step.
+    pub fn delete_frames(&mut self) {
+        let n = self.frame_step_count();
+        let at = self.project.current_frame;
+        match self.frame_scope() {
+            Some(FrameScope::Scene) => {
+                let fc = self.project.frame_count;
+                let n = n.min(fc.saturating_sub(at)).max(1);
+                // Taking every frame ends by clearing the last one left.
+                let wipes_pixels = n >= fc;
+                let removed = n.min(fc.saturating_sub(1));
+                self.frame_edit(
+                    wipes_pixels,
+                    |g| {
+                        if removed > 0 {
+                            g.keys_remove_frames(at, removed);
+                        }
+                    },
+                    |p| {
+                        for _ in 0..n {
+                            p.delete_frame();
+                        }
+                    },
+                );
+            }
+            Some(FrameScope::Layers(layers)) => {
+                self.structural_edit(false, |p| p.remove_layer_frames_at(&layers, at, n));
+            }
+            None => {}
+        }
+    }
+
+    /// Insert frames before: the step size's worth of frames before the
+    /// playhead, on the selected layers ([`AppState::frame_scope`]) — holds
+    /// of what shows before them, blank at the start. The timeline grows by
+    /// as many and the playhead stays on its drawing. One undo step.
     pub fn insert_frames_before(&mut self) {
         let n = self.frame_step_count();
         let at = self.project.current_frame.min(self.project.frame_count);
-        self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| p.insert_frames_before(n));
+        match self.frame_scope() {
+            Some(FrameScope::Scene) => {
+                self.frame_edit(false, |g| g.keys_insert_frames(at, n), |p| p.insert_frames_before(n));
+            }
+            Some(FrameScope::Layers(layers)) => self.structural_edit(false, |p| {
+                p.insert_layer_frames_at(&layers, at, n, NewFrames::Hold);
+                p.goto(at + n);
+            }),
+            None => {}
+        }
     }
 
     /// Insert `cells` as a brand-new layer *below* the active layer, recorded as
@@ -5976,27 +6046,38 @@ impl AppState {
         });
     }
 
-    /// Insert `n` held frames on the active layer after the playhead.
-    pub fn insert_layer_frames_here(&mut self, n: usize) {
-        let (layer, frame) = (self.project.current_layer, self.project.current_frame);
-        if !self.layers_editable([layer]) {
+    /// Insert in-between: on every selected layer (a picked group stands for
+    /// its layers; the active layer alone when none are picked), a new blank
+    /// drawing in the middle of the gap between the drawing at the playhead
+    /// and the next one — see [`Project::insert_inbetweens`]. Locked and
+    /// reference layers are left alone. A drawing-by-drawing edit, so it
+    /// stays on the layers even with every layer selected. One undo step; the
+    /// playhead lands on the active layer's new drawing (or the first one
+    /// made) and the new drawings are selected in the timeline.
+    pub fn insert_inbetween_here(&mut self) {
+        let frame = self.project.current_frame;
+        let active = self.project.current_layer;
+        let layers: Vec<usize> = self
+            .selected_drawing_layers()
+            .into_iter()
+            .filter(|&i| self.project.paintable(i))
+            .collect();
+        let has_gap = |p: &Project, i: usize| p.block_at(i, frame).is_some_and(|b| b.len.is_some());
+        if !layers.iter().any(|&i| has_gap(&self.project, i)) {
+            self.save_toast = Some((
+                "No drawing after this one to put an in-between before".to_string(),
+                Instant::now() + Self::TOAST_TTL,
+            ));
             return;
         }
         self.track_edit(|p| {
-            p.insert_layer_frames(layer, frame, n);
-            Vec::new()
-        });
-    }
-
-    /// Remove `n` frames from the active layer, starting at the playhead.
-    pub fn remove_layer_frames_here(&mut self, n: usize) {
-        let (layer, frame) = (self.project.current_layer, self.project.current_frame);
-        if !self.layers_editable([layer]) {
-            return;
-        }
-        self.track_edit(|p| {
-            p.remove_layer_frames(layer, frame, n);
-            Vec::new()
+            let made = p.insert_inbetweens(&layers, frame);
+            let land = made.iter().find(|&&(i, _)| i == active).or(made.first());
+            if let Some(&(_, at)) = land {
+                // Inside the edit, so undo puts the playhead back too.
+                p.goto(at);
+            }
+            made
         });
     }
 
@@ -6939,7 +7020,7 @@ impl AppState {
             // Insert the user's step size worth of frames, as one undo entry.
             Action::FrameAdd => self.add_frames(),
             Action::FrameDuplicate => self.duplicate_frames(),
-            Action::FrameDelete => self.delete_frame(),
+            Action::FrameDelete => self.delete_frames(),
             Action::FrameInsertBefore => self.insert_frames_before(),
             Action::OnionToggle => self.onion.enabled = !self.onion.enabled,
             Action::LayerAdd => self.structural_edit(false, |p| {
@@ -7001,6 +7082,7 @@ impl AppState {
                 });
             }
             Action::Hold => self.structural_edit(false, Project::hold_here),
+            Action::KeyInbetween => self.insert_inbetween_here(),
             Action::SizeDown => {
                 self.brush.radius = (self.brush.radius * 0.85).max(0.5);
             }
@@ -12940,5 +13022,166 @@ mod pen_tex_tests {
             let _ = frame(&mut st, &ctx);
         }
         assert_ne!(st.cell_textures[&id].rect, whole_rect(W, H));
+    }
+}
+
+#[cfg(test)]
+mod inbetween_tests {
+    use super::*;
+
+    /// Three layers over 8 frames, each with drawings on 0 and 4, loaded
+    /// into a test state with the playhead on 0 and layer 2 active.
+    fn three_layers() -> AppState {
+        let mut p = Project::new(16, 16, 24.0);
+        p.ensure_frame_count(8);
+        p.layers[0].exposures.iter_mut().for_each(|e| *e = None);
+        for i in 0..3 {
+            if i > 0 {
+                p.layers.push(crate::doc::layer::Layer::new(format!("L{i}"), 8));
+            }
+            for f in [0, 4] {
+                let id = p.alloc_cell_for(i);
+                p.layers[i].set_key(f, id);
+            }
+        }
+        let mut st = AppState::for_test();
+        st.load_project(p, None);
+        st.project.current_layer = 2;
+        st.project.goto(0);
+        st
+    }
+
+    fn keys(st: &AppState, layer: usize) -> Vec<usize> {
+        (0..st.project.frame_count).filter(|&f| st.project.layers[layer].is_key(f)).collect()
+    }
+
+    fn pick(st: &mut AppState, layer: usize) {
+        let uid = st.project.layers[layer].uid;
+        st.selected_layers.insert(uid);
+    }
+
+    #[test]
+    fn an_in_between_lands_on_every_picked_layer_in_one_undo() {
+        let mut st = three_layers();
+        pick(&mut st, 0);
+        let steps = st.history.undo_len();
+        st.dispatch(Action::KeyInbetween);
+        assert_eq!(keys(&st, 0), [0, 2, 4]);
+        assert_eq!(keys(&st, 1), [0, 4], "an unpicked layer got one");
+        assert_eq!(keys(&st, 2), [0, 2, 4]);
+        assert_eq!(st.project.current_frame, 2, "the playhead goes to the new drawing");
+        assert_eq!(st.track_sel, [(0, 2), (2, 2)].into_iter().collect());
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        assert_eq!((keys(&st, 0), keys(&st, 2)), (vec![0, 4], vec![0, 4]));
+        assert_eq!(st.project.current_frame, 0);
+    }
+
+    #[test]
+    fn a_locked_layer_keeps_its_timing() {
+        let mut st = three_layers();
+        pick(&mut st, 0);
+        st.project.layers[0].locked = true;
+        st.insert_inbetween_here();
+        assert_eq!(keys(&st, 0), [0, 4]);
+        assert_eq!(keys(&st, 2), [0, 2, 4]);
+    }
+
+    #[test]
+    fn with_nothing_after_it_says_so_and_changes_nothing() {
+        let mut st = three_layers();
+        st.project.goto(5);
+        let steps = st.history.undo_len();
+        st.insert_inbetween_here();
+        assert_eq!(st.history.undo_len(), steps);
+        assert!(st.save_toast.as_ref().is_some_and(|(t, _)| t.contains("No drawing after")));
+    }
+
+    #[test]
+    fn insert_before_moves_only_the_selected_layers() {
+        let mut st = three_layers();
+        st.project.set_camera_key(4, Default::default());
+        st.frame_step = 2;
+        st.project.goto(2);
+        pick(&mut st, 1);
+        let steps = st.history.undo_len();
+        st.dispatch(Action::FrameInsertBefore);
+        assert_eq!(keys(&st, 0), [0, 4], "an unpicked layer moved");
+        assert_eq!(keys(&st, 1), [0, 6]);
+        assert_eq!(keys(&st, 2), [0, 6]);
+        assert_eq!(st.project.camera_keys[0].frame, 4);
+        assert_eq!((st.project.frame_count, st.project.current_frame), (10, 4));
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        assert_eq!((keys(&st, 1), keys(&st, 2)), (vec![0, 4], vec![0, 4]));
+        assert_eq!(st.project.frame_count, 8);
+    }
+
+    #[test]
+    fn add_duplicate_and_delete_follow_the_same_selection() {
+        let mut st = three_layers();
+        st.frame_step = 2;
+        pick(&mut st, 1);
+        st.project.goto(0);
+        st.dispatch(Action::FrameAdd);
+        assert_eq!(keys(&st, 0), [0, 4], "an unpicked layer moved");
+        assert_eq!((keys(&st, 1), keys(&st, 2)), (vec![0, 6], vec![0, 6]));
+        assert_eq!((st.project.frame_count, st.project.current_frame), (10, 2));
+
+        st.project.goto(0);
+        st.dispatch(Action::FrameDuplicate);
+        assert_eq!(keys(&st, 0), [0, 4]);
+        assert_eq!(keys(&st, 2), [0, 1, 2, 8]);
+        assert_eq!(st.project.frame_count, 12);
+
+        st.project.goto(1);
+        st.dispatch(Action::FrameDelete);
+        assert_eq!(keys(&st, 0), [0, 4]);
+        // The cut took both duplicates' keys; the drawing they showed carries
+        // on past it, so it is keyed again where the cut was.
+        assert_eq!(keys(&st, 2), [0, 1, 6], "the later drawing slid up");
+        assert_eq!(st.project.frame_count, 12, "deleting keeps the length");
+    }
+
+    #[test]
+    fn a_frame_command_on_locked_layers_alone_does_nothing() {
+        let mut st = three_layers();
+        st.project.layers[2].locked = true;
+        let steps = st.history.undo_len();
+        st.add_frames();
+        st.delete_frames();
+        assert_eq!(st.history.undo_len(), steps);
+        assert_eq!(st.project.frame_count, 8);
+    }
+
+    #[test]
+    fn delete_with_every_layer_selected_shortens_the_scene() {
+        let mut st = three_layers();
+        st.project.set_camera_key(6, Default::default());
+        pick(&mut st, 0);
+        pick(&mut st, 1);
+        st.frame_step = 2;
+        st.project.goto(2);
+        st.dispatch(Action::FrameDelete);
+        assert_eq!(st.project.frame_count, 6);
+        assert_eq!(st.project.camera_keys[0].frame, 4);
+        for i in 0..3 {
+            assert_eq!(keys(&st, i), [0, 2]);
+        }
+    }
+
+    #[test]
+    fn insert_before_with_every_layer_selected_moves_the_whole_scene() {
+        let mut st = three_layers();
+        st.project.set_camera_key(4, Default::default());
+        st.project.goto(2);
+        pick(&mut st, 0);
+        pick(&mut st, 1);
+        st.dispatch(Action::FrameInsertBefore);
+        for i in 0..3 {
+            assert_eq!(keys(&st, i), [0, 5]);
+        }
+        assert_eq!(st.project.camera_keys[0].frame, 5, "the camera kept to its drawing");
+        assert_eq!(st.project.frame_count, 9, "a whole-scene insert lengthens the timeline");
     }
 }
