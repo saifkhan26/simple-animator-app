@@ -65,6 +65,14 @@ impl Mask {
         Some(Mask { x: x0, y: y0, w, h, cov })
     }
 
+    /// Every pixel all in or all out, split at half: the edge without its
+    /// anti-aliasing, for an aliased fill.
+    pub fn harden(&mut self) {
+        for c in &mut self.cov {
+            *c = if *c >= 128 { 255 } else { 0 };
+        }
+    }
+
     /// True where the mask actually covers something — the hit test for
     /// "did the user press inside the selection".
     pub fn contains(&self, x: i32, y: i32) -> bool {

@@ -1,6 +1,6 @@
 # `src/app/lasso_fill.rs` — the Fill tool's lasso mode
 
-> **Source:** [src/app/lasso_fill.rs](../../../src/app/lasso_fill.rs) · **Module:** `crate::app::lasso_fill` · **Size:** 441 lines · Line links as of commit `36405ad`
+> **Source:** [src/app/lasso_fill.rs](../../../src/app/lasso_fill.rs) · **Module:** `crate::app::lasso_fill` · **Size:** 470 lines · Line links as of commit `0599d0a`
 
 ## What this file is for
 
@@ -213,25 +213,26 @@ its lines enclose with "Enclose & fill" — as one undo step. An outline that en
 
 ### `mod tests`
 
-Run with `cargo test app::lasso_fill::tests` · 9 tests
+Run with `cargo test app::lasso_fill::tests` · 10 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_held_erase_clears_the_shape`](../../../src/app/lasso_fill.rs#L301) | A held erase clears the shape. |
-| [`the_selection_holds_the_fill`](../../../src/app/lasso_fill.rs#L313) | The selection holds the fill. |
-| [`behind_fills_round_the_lines_and_held_enclose_fills_only_inside_them`](../../../src/app/lasso_fill.rs#L324) | Behind fills round the lines and held enclose fills only inside them. |
-| [`a_grainy_lasso_fill_matches_the_bucket`](../../../src/app/lasso_fill.rs#L349) | The lasso and the bucket lay down the same specks of paper. |
-| [`enclose_fills_a_shape_closed_by_the_canvas_edge`](../../../src/app/lasso_fill.rs#L366) | A lasso dragged out past the canvas's corner fills the shape two strokes make with its edges. |
-| [`backspace_and_undo_take_back_corners_and_esc_drops_the_polygon`](../../../src/app/lasso_fill.rs#L378) | Backspace and undo take back corners and esc drops the polygon. |
-| [`a_held_snap_turns_polygon_edges_to_15_degrees`](../../../src/app/lasso_fill.rs#L394) | A held snap turns polygon edges to 15 degrees. |
-| [`a_polygon_fill_takes_a_freehand_stretch`](../../../src/app/lasso_fill.rs#L412) | Between tapped corners a drag adds a freehand stretch to the fill's outline, as on the selection. |
-| [`switching_mode_drops_a_lasso_half_drawn`](../../../src/app/lasso_fill.rs#L431) | Switching mode drops a lasso half drawn. |
+| [`a_held_erase_clears_the_shape`](../../../src/app/lasso_fill.rs#L309) | A held erase clears the shape. |
+| [`the_selection_holds_the_fill`](../../../src/app/lasso_fill.rs#L321) | The selection holds the fill. |
+| [`an_aliased_lasso_fill_has_no_soft_edge`](../../../src/app/lasso_fill.rs#L332) | An aliased lasso fill has no soft edge. |
+| [`behind_fills_round_the_lines_and_held_enclose_fills_only_inside_them`](../../../src/app/lasso_fill.rs#L353) | Behind fills round the lines and held enclose fills only inside them. |
+| [`a_grainy_lasso_fill_matches_the_bucket`](../../../src/app/lasso_fill.rs#L378) | The lasso and the bucket lay down the same specks of paper. |
+| [`enclose_fills_a_shape_closed_by_the_canvas_edge`](../../../src/app/lasso_fill.rs#L395) | A lasso dragged out past the canvas's corner fills the shape two strokes make with its edges. |
+| [`backspace_and_undo_take_back_corners_and_esc_drops_the_polygon`](../../../src/app/lasso_fill.rs#L407) | Backspace and undo take back corners and esc drops the polygon. |
+| [`a_held_snap_turns_polygon_edges_to_15_degrees`](../../../src/app/lasso_fill.rs#L423) | A held snap turns polygon edges to 15 degrees. |
+| [`a_polygon_fill_takes_a_freehand_stretch`](../../../src/app/lasso_fill.rs#L441) | Between tapped corners a drag adds a freehand stretch to the fill's outline, as on the selection. |
+| [`switching_mode_drops_a_lasso_half_drawn`](../../../src/app/lasso_fill.rs#L460) | Switching mode drops a lasso half drawn. |
 
 **Test helpers** (used only by the tests above):
 
-- [`state`](../../../src/app/lasso_fill.rs#L263) — The Fill tool's lasso, red, on a fresh project.
-- [`paint`](../../../src/app/lasso_fill.rs#L272) — Paint.
-- [`px`](../../../src/app/lasso_fill.rs#L283) — Px.
-- [`drag_square`](../../../src/app/lasso_fill.rs#L292) — A freehand square from (x0, y0) to (x1, y1), drawn and let go.
+- [`state`](../../../src/app/lasso_fill.rs#L271) — The Fill tool's lasso, red, on a fresh project.
+- [`paint`](../../../src/app/lasso_fill.rs#L280) — Paint.
+- [`px`](../../../src/app/lasso_fill.rs#L291) — Px.
+- [`drag_square`](../../../src/app/lasso_fill.rs#L300) — A freehand square from (x0, y0) to (x1, y1), drawn and let go.
 
-**Test-only types and constants:** [`RED`](../../../src/app/lasso_fill.rs#L259), [`BLACK`](../../../src/app/lasso_fill.rs#L260)
+**Test-only types and constants:** [`RED`](../../../src/app/lasso_fill.rs#L267), [`BLACK`](../../../src/app/lasso_fill.rs#L268)

@@ -1,6 +1,6 @@
 # `src/tools/mod.rs` — the tools folder, tool list and brush settings
 
-> **Source:** [src/tools/mod.rs](../../../src/tools/mod.rs) · **Module:** `crate::tools` · **Size:** 597 lines · Line links as of commit `36405ad`
+> **Source:** [src/tools/mod.rs](../../../src/tools/mod.rs) · **Module:** `crate::tools` · **Size:** 603 lines · Line links as of commit `0599d0a`
 
 ## What this file is for
 
@@ -210,6 +210,7 @@ Everything about how a tool paints. One per tool is kept in `AppState::tool_brus
 | `krita_id` | `Option<String>` | A Krita preset from the brush library (`krita/…` shipped, `user/…` imported), which takes the place of `krita` when set. Kept as an id so a preferences file names the brush, not its contents; an id the library no longer has falls back to `krita`. |
 | `krita_overrides` | `Vec<(String, String)>` | The brush editor's changes to that preset: `(param, value)` pairs set over its own. Empty for the preset as it comes. |
 | `cap` | `StrokeCap` | Shape of the stroke's two ends. `Ribbon` mode only: a dab brush's coverage builds up, so its ends cannot be re-cut after the fact. |
+| `aliased` | `bool` | Every pixel the tool reaches is either fully covered or left alone: no anti-aliased rim, so a fill meets the line exactly. Opacity still applies over that. Used by `Ribbon` and `Dab` brushes (pens, Eraser, Shape) and the Fill tool's lasso; a `Krita` preset keeps its own edge. |
 | `fill_tolerance` | `u8` | Flood-fill tolerance per channel (0..=255). Only used by Fill tool. |
 | `fill_expand` | `u8` | Grow the filled region by this many pixels after the flood, so colour tucks under the anti-aliased edge of lines living on another layer. Only used by the Fill tool. |
 | `fill_gap` | `u8` | Treat breaks in the lines up to this many pixels wide as shut. Only used by the Fill tool. |
@@ -225,7 +226,7 @@ Everything about how a tool paints. One per tool is kept in `AppState::tool_brus
 | `liquify_mesh` | `bool` | Draw the warp as a deformed grid. Only used by Liquify. |
 
 ### `const BrushSettings::PRESETS`
-[src/tools/mod.rs:554](../../../src/tools/mod.rs#L554)
+[src/tools/mod.rs:560](../../../src/tools/mod.rs#L560)
 
 ```rust
 pub const PRESETS: &'static [(&'static str, &'static str, fn() -> Self)] = &[
@@ -310,7 +311,7 @@ Turns an input `p` (0–1, e.g. pressure) into a multiplier between `1 − amoun
 ## `impl Default for BrushSettings`
 
 ### `BrushSettings::default`
-[src/tools/mod.rs:341](../../../src/tools/mod.rs#L341)
+[src/tools/mod.rs:346](../../../src/tools/mod.rs#L346)
 
 ```rust
 fn default() -> Self
@@ -321,7 +322,7 @@ The plain ribbon brush every preset starts from (and that fills in missing field
 ## `impl BrushSettings`
 
 ### `BrushSettings::default_pencil`
-[src/tools/mod.rs:386](../../../src/tools/mod.rs#L386)
+[src/tools/mod.rs:392](../../../src/tools/mod.rs#L392)
 
 ```rust
 pub fn default_pencil() -> Self
@@ -330,7 +331,7 @@ pub fn default_pencil() -> Self
 The everyday pencil, modelled on Krita's `Pencil-4_Soft`: soft round tip, visible tooth, tapering at both ends.
 
 ### `BrushSettings::pencil_4b`
-[src/tools/mod.rs:406](../../../src/tools/mod.rs#L406)
+[src/tools/mod.rs:412](../../../src/tools/mod.rs#L412)
 
 ```rust
 pub fn pencil_4b() -> Self
@@ -339,7 +340,7 @@ pub fn pencil_4b() -> Self
 Modelled on Krita's `Pencil-3_Large_4B`: broad, dark soft graphite with strong grain.
 
 ### `BrushSettings::pencil_tilted`
-[src/tools/mod.rs:427](../../../src/tools/mod.rs#L427)
+[src/tools/mod.rs:433](../../../src/tools/mod.rs#L433)
 
 ```rust
 pub fn pencil_tilted() -> Self
@@ -348,7 +349,7 @@ pub fn pencil_tilted() -> Self
 Modelled on Krita's `Pencil-5_Tilted`: tilting the pen flattens the dab into a broad ellipse for shading.
 
 ### `BrushSettings::pencil5_krita`
-[src/tools/mod.rs:449](../../../src/tools/mod.rs#L449)
+[src/tools/mod.rs:455](../../../src/tools/mod.rs#L455)
 
 ```rust
 pub fn pencil5_krita() -> Self
@@ -358,7 +359,7 @@ Krita's real `Pencil-5_Tilted` preset on the ported Krita engine (`BrushMode::Kr
 Krita's 40 px size.
 
 ### `BrushSettings::default_ink`
-[src/tools/mod.rs:463](../../../src/tools/mod.rs#L463)
+[src/tools/mod.rs:469](../../../src/tools/mod.rs#L469)
 
 ```rust
 pub fn default_ink() -> Self
@@ -368,7 +369,7 @@ Modelled on Krita's `Ink-3_G-Pen`: opaque, crisp, sharp pressure taper, drawn as
 where it crosses itself.
 
 ### `BrushSettings::airbrush`
-[src/tools/mod.rs:483](../../../src/tools/mod.rs#L483)
+[src/tools/mod.rs:489](../../../src/tools/mod.rs#L489)
 
 ```rust
 pub fn airbrush() -> Self
@@ -377,7 +378,7 @@ pub fn airbrush() -> Self
 Modelled on Krita's `Airbrush_Soft`: a wide, soft dab with low flow that builds up over passes.
 
 ### `BrushSettings::grainy_airbrush`
-[src/tools/mod.rs:499](../../../src/tools/mod.rs#L499)
+[src/tools/mod.rs:505](../../../src/tools/mod.rs#L505)
 
 ```rust
 pub fn grainy_airbrush() -> Self
@@ -386,7 +387,7 @@ pub fn grainy_airbrush() -> Self
 The airbrush with midtone noise (fine specks in its soft falloff).
 
 ### `BrushSettings::default_eraser`
-[src/tools/mod.rs:506](../../../src/tools/mod.rs#L506)
+[src/tools/mod.rs:512](../../../src/tools/mod.rs#L512)
 
 ```rust
 pub fn default_eraser() -> Self
@@ -395,7 +396,7 @@ pub fn default_eraser() -> Self
 The default eraser: radius 16, transparent colour, half the size and some of the strength follow pressure.
 
 ### `BrushSettings::default_fill`
-[src/tools/mod.rs:516](../../../src/tools/mod.rs#L516)
+[src/tools/mod.rs:522](../../../src/tools/mod.rs#L522)
 
 ```rust
 pub fn default_fill() -> Self
@@ -405,7 +406,7 @@ Fill tool defaults: no pressure dynamics, tolerance 24, no expansion (expanding 
 lines on a same-layer fill).
 
 ### `BrushSettings::default_liquify`
-[src/tools/mod.rs:532](../../../src/tools/mod.rs#L532)
+[src/tools/mod.rs:538](../../../src/tools/mod.rs#L538)
 
 ```rust
 pub fn default_liquify() -> Self
@@ -414,7 +415,7 @@ pub fn default_liquify() -> Self
 Liquify brush defaults: radius 60, big enough to move a limb at once.
 
 ### `BrushSettings::default_shape`
-[src/tools/mod.rs:540](../../../src/tools/mod.rs#L540)
+[src/tools/mod.rs:546](../../../src/tools/mod.rs#L546)
 
 ```rust
 pub fn default_shape() -> Self

@@ -198,14 +198,22 @@ impl AppState {
         let Some((x, y, w, h, cov)) = lasso::coverage_rect(&cell, (0, 0, cw as i32, ch as i32)) else {
             return;
         };
-        let shape = Mask {
+        let mut shape = Mask {
             x: x as u32,
             y: y as u32,
             w,
             h,
             cov,
         };
-        let clip = self.active_cell_clip();
+        let aliased = self.brush.aliased;
+        if aliased {
+            shape.harden();
+        }
+        let mut clip = self.active_cell_clip();
+        if let (true, Some(c)) = (aliased, &mut clip) {
+            // A soft-edged selection would put the rim back.
+            std::sync::Arc::make_mut(c).harden();
+        }
         // Held to the selection; nothing at all outside it.
         let held_shape = match &clip {
             Some(c) => match shape.intersect(c) {
@@ -318,6 +326,27 @@ mod tests {
         drag_square(&mut st, (50.0, 50.0, 150.0, 150.0), LassoHeld::default());
         assert_eq!(px(&st, 75, 100), RED);
         assert_eq!(px(&st, 125, 100)[3], 0, "outside the selection");
+    }
+
+    #[test]
+    fn an_aliased_lasso_fill_has_no_soft_edge() {
+        for aliased in [false, true] {
+            let mut st = state();
+            st.brush.fill_grain = 0.0;
+            st.brush.aliased = aliased;
+            // Soft-edged selection over the right half, cut by the fill.
+            let right = [(100.4, 0.0), (400.0, 0.0), (400.0, 400.0), (100.4, 400.0)];
+            let m = SelectionMask::from_path(&right, st.selection_universe());
+            st.set_mask(m, false);
+            drag_square(&mut st, (50.3, 50.6, 150.4, 149.7), LassoHeld::default());
+            let alphas: Vec<u8> = (40..160)
+                .flat_map(|y| (40..160).map(move |x| (x, y)))
+                .map(|(x, y)| px(&st, x, y)[3])
+                .collect();
+            let soft = alphas.iter().any(|&a| a > 0 && a < 255);
+            assert_eq!(soft, !aliased, "aliased {aliased}: soft pixels {soft}");
+            assert!(alphas.iter().any(|&a| a == 255));
+        }
     }
 
     #[test]
