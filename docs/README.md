@@ -31,6 +31,7 @@ Each link opens that file's page. The page links to the source itself.
 | File | What it is |
 |---|---|
 | [`src/app.rs`](src/app.md) | the app's central state (`AppState`) |
+| [`src/app/autosave.rs`](src/app/autosave.md) | autosave, crash recovery and the unsaved-changes prompt |
 | [`src/app/brush_sizes.rs`](src/app/brush_sizes.md) | remembered brush sizes (recent, pinned, swap, detents) |
 | [`src/app/button_drag.rs`](src/app/button_drag.md) | what middle/right-button drags do on the canvas |
 | [`src/app/grids.rs`](src/app/grids.md) | perspective grids on the app side (per-file store, follow, keys, drags) |
@@ -140,6 +141,7 @@ Each link opens that file's page. The page links to the source itself.
 
 | File | What it is |
 |---|---|
+| [`src/io/autosave.rs`](src/io/autosave.md) | the autosave folders, and finding what a crash left |
 | [`src/io/composite.rs`](src/io/composite.md) | flatten all layers of a frame into one picture |
 | [`src/io/fit.rs`](src/io/fit.md) | fit an image inside the canvas, centred, without stretching |
 | [`src/io/frame_order.rs`](src/io/frame_order.md) | which timeline frame each exported frame shows |
@@ -197,4 +199,4 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/platform.rs`](src/platform.md) | rounded corners and a border for the frameless window (Windows) |
 | [`src/undo.rs`](src/undo.md) | undo and redo history |
 
-_116 pages._
+_118 pages._

@@ -1,5 +1,6 @@
 //! Top-level application state. Wires project (timeline + layers), tools, UI.
 
+pub mod autosave;
 pub mod brush_sizes;
 mod button_drag;
 mod grids;
@@ -533,6 +534,8 @@ struct UiPrefs {
     /// finds them as they were.
     color_scheme: Scheme,
     custom_colors: BaseColors,
+    /// Minutes between autosaves; 0 = off. See [`autosave::Autosave`].
+    autosave_minutes: u32,
 }
 
 /// Opacity multipliers for the layers around the active one while "fade other
@@ -671,6 +674,7 @@ impl Default for UiPrefs {
             panel_padding: DEFAULT_PANEL_PADDING,
             color_scheme: Scheme::default(),
             custom_colors: BaseColors::default(),
+            autosave_minutes: autosave::DEFAULT_AUTOSAVE_MINUTES,
         }
     }
 }
@@ -1116,6 +1120,9 @@ pub struct SaveJob {
     path: PathBuf,
     /// File name, for the success toast.
     name: String,
+    /// Content key of the snapshot being written: what counts as saved once
+    /// it lands (see `app::autosave`).
+    key: u64,
 }
 
 /// The worker writing the `.kra` for Edit in Krita.
@@ -1151,6 +1158,21 @@ pub struct AppState {
     /// Write in flight on a worker thread. Serialising and compressing a few
     /// hundred MB would otherwise stall the window.
     pub save_job: Option<SaveJob>,
+    /// Content key (`project_file::content_key`) of the project as last
+    /// loaded, started or saved; `None` for recovered work, which is in no
+    /// file. Unsaved changes = the project's key differs from this.
+    saved_key: Option<u64>,
+    /// The timed autosave and what earlier runs left to recover.
+    pub autosave: autosave::Autosave,
+    /// Waiting on "Save changes before …?".
+    pub unsaved_prompt: Option<autosave::Pending>,
+    /// Chosen Save in that prompt: carried out when the save lands.
+    after_save: Option<autosave::Pending>,
+    /// Closing was confirmed (nothing unsaved, or Don't save): let the
+    /// window's close through, and end the autosave session cleanly.
+    pub quit_ok: bool,
+    /// Ask the window to close next frame.
+    close_now: bool,
     /// Two-way link with Krita (File ▸ Edit in Krita). Session-only: it ends
     /// with the app, a New or an Open.
     pub krita: Option<KritaLink>,
@@ -1767,6 +1789,9 @@ impl AppState {
             .unwrap_or_default();
         let root = shortcuts::config_dir().map(|d| d.join("brushes"));
         let mut state = Self::with_prefs(prefs, max_tex, root);
+        // Here, not in `with_prefs`: tests build through that, and must
+        // never find or write the real autosave folder.
+        state.autosave.start();
         state.canvas_gpu = cc.wgpu_render_state.as_ref().and_then(CanvasGpu::new);
         state.apply_scheme(&cc.egui_ctx);
         state
@@ -1784,6 +1809,7 @@ impl AppState {
     fn with_prefs(prefs: UiPrefs, max_tex: u32, brush_root: Option<PathBuf>) -> Self {
         let mut project = Project::new(1280, 720, 24.0);
         project.keep_inside_by_default();
+        let saved_key = Some(crate::io::project_file::content_key(&project));
         let (shortcuts, shortcuts_err) = shortcuts::load();
         let mut cell_dirty = HashMap::new();
         for id in 0..project.cells.len() {
@@ -1800,6 +1826,12 @@ impl AppState {
             save_toast: None,
             save_error: None,
             save_job: None,
+            saved_key,
+            autosave: autosave::Autosave::new(prefs.autosave_minutes),
+            unsaved_prompt: None,
+            after_save: None,
+            quit_ok: false,
+            close_now: false,
             krita: None,
             krita_send: None,
             krita_toast: None,
@@ -2120,6 +2152,11 @@ impl AppState {
         self.bg_label = None;
         self.preview_tex.clear();
         self.preview_rx = None;
+        // Last, once nothing above can still touch the project: a new
+        // project starts with nothing unsaved, and the old one's autosave
+        // goes with it — it was saved, or thrown away on purpose.
+        self.mark_saved();
+        self.clear_autosave();
     }
 
     /// Open the New project dialog on the starred preset, or on the current
@@ -7015,11 +7052,7 @@ impl AppState {
             Action::SelectionFill => self.fill_selection(),
             Action::SaveProject => self.save_project(),
             Action::SaveProjectAs => self.save_project_as(),
-            Action::OpenProject => match crate::io::project_file::load_dialog() {
-                Ok(Some((p, path))) => self.load_project(p, Some(path)),
-                Ok(None) => {}
-                Err(e) => log::error!("Open project failed: {e:#}"),
-            },
+            Action::OpenProject => self.request(autosave::Pending::Open),
             Action::CopyFrame => self.copy_frame(),
             // Held, not pressed: read by the canvas input code as a drag
             // starts, never dispatched.
@@ -7104,12 +7137,13 @@ impl AppState {
         // Snapshot so drawing can continue while the write runs. The same
         // clone-and-move `start_export` already does, and the same cost.
         let project = self.project.clone();
+        let key = crate::io::project_file::content_key(&project);
         let dest = path.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let _ = tx.send(crate::io::project_file::save_to(&project, &dest));
         });
-        self.save_job = Some(SaveJob { rx, path, name });
+        self.save_job = Some(SaveJob { rx, path, name, key });
     }
 
     /// Collect a finished background write. `project_path` moves only on
@@ -7125,16 +7159,21 @@ impl AppState {
                 self.project_path = Some(job.path);
                 self.save_toast = Some((format!("Saved  {}", job.name), Instant::now() + Self::TOAST_TTL));
                 self.save_error = None;
+                // Last: it may go on to what was waiting for this save — a
+                // quit, an open — which wants everything above in place.
+                self.saved(job.key);
             }
             Ok(Err(e)) => {
                 log::error!("Save project failed: {e:#}");
                 self.save_error = Some(format!("{e:#}"));
+                self.save_failed();
             }
             // The worker died without reporting. Treat it as a failure rather
             // than as a save that quietly never happened.
             Err(TryRecvError::Disconnected) => {
                 log::error!("Save project worker vanished");
                 self.save_error = Some("the save worker stopped unexpectedly".into());
+                self.save_failed();
             }
         }
     }
@@ -7150,9 +7189,25 @@ impl AppState {
         };
         log::info!("Waiting for the in-flight save to finish");
         match job.rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => log::error!("Save project failed: {e:#}"),
-            Err(e) => log::error!("Save project worker vanished: {e}"),
+            // Landed: on disk, so it counts as saved — the close prompt
+            // waits here, and must not then ask about work just written.
+            // Whatever was waiting on it is dropped: every caller is about to
+            // replace the project or close, and a quit left waiting would
+            // fire on some later save.
+            Ok(Ok(())) => {
+                self.grids_saved_as(&job.path);
+                self.project_path = Some(job.path);
+                self.saved_key = Some(job.key);
+                self.after_save = None;
+            }
+            Ok(Err(e)) => {
+                log::error!("Save project failed: {e:#}");
+                self.save_failed();
+            }
+            Err(e) => {
+                log::error!("Save project worker vanished: {e}");
+                self.save_failed();
+            }
         }
     }
 
@@ -7217,6 +7272,9 @@ impl AppState {
         self.cam_box = None;
         self.cam_key_drag = None;
         self.shot_cam = None;
+        // As in `reset_with`: what was just loaded is what is on disk.
+        self.mark_saved();
+        self.clear_autosave();
     }
 
     pub fn undo(&mut self) {
@@ -7441,6 +7499,7 @@ impl eframe::App for AppState {
     /// it instead.
     fn on_exit(&mut self) {
         self.finish_pending_save();
+        self.end_autosave();
     }
 
     /// Put back the Ctrl+C / X / V presses egui-winit turned into clipboard
@@ -7507,6 +7566,7 @@ impl eframe::App for AppState {
                 panel_padding: self.panel_padding,
                 color_scheme: self.color_scheme,
                 custom_colors: self.custom_colors,
+                autosave_minutes: self.autosave.minutes,
             },
         );
     }
@@ -7522,6 +7582,9 @@ impl eframe::App for AppState {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // A close with unsaved work is held for the prompt; this frame's
+        // events are the only chance to cancel it.
+        self.intercept_close(ctx);
         // Pick up any layer selection made last frame, whatever moved it.
         self.track_layer_change();
         // Krita presets and thumbnails arrive from the library's loader.
@@ -7622,6 +7685,11 @@ impl eframe::App for AppState {
         // Advance background import jobs / preview fetches without blocking.
         self.poll_bg_jobs();
         self.poll_save_job();
+        // The pen can draw without egui seeing a button held.
+        let dragging = ctx.input(|i| i.pointer.any_down()) || self.stroke.is_some();
+        if let Some(wait) = self.tick_autosave(Instant::now(), dragging) {
+            ctx.request_repaint_after(wait);
+        }
         self.poll_krita(ctx);
         self.poll_preview(ctx);
         // A save reports back on a channel, not an input event, so without this
@@ -10813,6 +10881,7 @@ mod tests {
         assert_eq!(prefs.krita_path, want.krita_path);
         assert_eq!(prefs.bg_color, want.bg_color);
         assert_eq!(prefs.panel_padding, DEFAULT_PANEL_PADDING, "a padding it never had");
+        assert_eq!(prefs.autosave_minutes, autosave::DEFAULT_AUTOSAVE_MINUTES, "autosave on, as for everyone");
         assert!(prefs.hidden_panels.is_empty() && prefs.panel_layout_gen == 0, "every panel where it was");
         assert_eq!(prefs.color_scheme, Scheme::Graphite);
         // The onion sliders it saved (Prev 1, Next 1, Max α 0.75) become the

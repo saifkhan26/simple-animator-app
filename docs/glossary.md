@@ -184,3 +184,12 @@ zlib ([io/project_file.rs](src/io/project_file.md)).
 **Wintab** — the Windows tablet driver API used for pen input ([input/tablet.rs](src/input/tablet.md)).
 
 **ffmpeg** — an external video tool used for MP4 export and video import.
+
+**Autosave** — a copy of unsaved work written every few minutes to a separate file in the app's settings folder,
+never over the project's own `.anim` ([app/autosave.rs](src/app/autosave.md), [io/autosave.rs](src/io/autosave.md)).
+
+**Orphan (autosave)** — an autosave a run left behind when it ended without cleaning up (a crash, a kill, a
+shutdown that never asked); offered at the next launch in *Recover unsaved work*.
+
+**Content key** — a hash of what a save would write, using each drawing's `rev` instead of its pixels; when it
+differs from the one taken at the last save, there is unsaved work ([io/project_file.rs](src/io/project_file.md)).

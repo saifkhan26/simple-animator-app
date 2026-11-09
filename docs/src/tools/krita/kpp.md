@@ -1,6 +1,6 @@
 # `src/tools/krita/kpp.rs` — reading Krita brush presets (.kpp)
 
-> **Source:** [src/tools/krita/kpp.rs](../../../../src/tools/krita/kpp.rs) · **Module:** `crate::tools::krita::kpp` · **Size:** 813 lines · Line links as of commit `36405ad`
+> **Source:** [src/tools/krita/kpp.rs](../../../../src/tools/krita/kpp.rs) · **Module:** `crate::tools::krita::kpp` · **Size:** 813 lines · Line links as of commit `8192137`
 
 ## What this file is for
 

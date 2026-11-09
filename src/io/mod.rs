@@ -2,6 +2,7 @@
 //!
 //! Phase A: only `png_save` (single canvas → PNG file via rfd dialog).
 
+pub mod autosave;
 pub mod composite;
 pub mod frame_order;
 pub mod gif_export;

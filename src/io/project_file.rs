@@ -9,7 +9,8 @@
 //! of zeros, which compresses by one to two orders of magnitude. Deflate is
 //! lossless, so the pixels that come back are bit-identical to the ones saved.
 
-use std::io::{BufReader, BufWriter, Read};
+use std::hash::{Hash, Hasher};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -18,6 +19,7 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 
 use crate::doc::project::Project;
+use crate::doc::transform::Transform;
 
 const MAGIC: &[u8; 4] = b"ANIM";
 // v2 adds per-layer transform + transform keyframes to each Layer. postcard is
@@ -755,14 +757,18 @@ mod tests {
     }
 }
 
-/// Write `project` to `path`, overwriting whatever is there.
+/// Write `project` to `path`, replacing whatever is there.
 ///
 /// Deliberately separate from [`ask_save_path`]: the caller keeps the path so it
 /// can save to the same file again without prompting.
+///
+/// The old file is replaced only once the new one is whole on disk (see
+/// [`write_replacing`]), so a crash or a full disk mid-save leaves the last
+/// good save where it was.
 pub fn save_to(project: &Project, path: &Path) -> Result<()> {
     let (bytes, raw_len) = encode(project)?;
     let packed = bytes.len() as u64;
-    std::fs::write(path, bytes).with_context(|| format!("writing {path:?}"))?;
+    write_replacing(path, &bytes)?;
     // Log the ratio: a format change that quietly stopped compressing would
     // otherwise only show up as a surprise in the file manager.
     let mib = |n: u64| n as f64 / (1024.0 * 1024.0);
@@ -774,6 +780,98 @@ pub fn save_to(project: &Project, path: &Path) -> Result<()> {
         raw_len as f64 / packed.max(1) as f64,
     );
     Ok(())
+}
+
+/// Write `bytes` to `path` without ever leaving a half-written file there.
+///
+/// They go to a sibling `<name>.saving` first, are flushed to the disk, and
+/// only then renamed over `path` — on Windows a rename replaces the target in
+/// one step. Writing straight into `path` would truncate the last good save
+/// before the first new byte landed: a crash, a power cut or a full disk
+/// part-way through would leave neither version. On failure the `.saving`
+/// file is removed and `path` is untouched.
+pub fn write_replacing(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = sibling(path, ".saving");
+    let written = (|| -> Result<()> {
+        let mut file = std::fs::File::create(&tmp).with_context(|| format!("creating {tmp:?}"))?;
+        file.write_all(bytes).with_context(|| format!("writing {tmp:?}"))?;
+        // On the disk, not just in the OS cache, before it takes the real
+        // name: otherwise a power cut could still leave `path` empty.
+        file.sync_all().with_context(|| format!("flushing {tmp:?}"))?;
+        drop(file);
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {path:?}"))?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// `path` with `suffix` added to its file name: `a.anim` → `a.anim.saving`.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// A number that changes whenever what [`save_to`] would write changes, and
+/// otherwise stays put: compare it with the one taken at the last save to
+/// know whether there is unsaved work.
+///
+/// Cheap enough to take every few minutes on any project. It never reads a
+/// pixel: a cell's `rev` names its pixels exactly (every write gives a new
+/// one, and packing or cloning keeps it), so the revs of the cells on the
+/// timeline stand in for them. Everything else the file holds is small and
+/// is hashed as it would be written.
+///
+/// Left out on purpose, because they move without the work changing:
+/// * where the playhead and the active layer are;
+/// * a layer's `transform` when it has transform keys, and the `camera` when
+///   there are camera keys — those are working buffers rewritten from the
+///   keys on every frame change, and scrubbing is not an edit;
+/// * cells nothing on the timeline shows (undo still holds them; the file
+///   gets them back only by an undo, which changes the exposures anyway).
+pub fn content_key(project: &Project) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    project.width.hash(&mut h);
+    project.height.hash(&mut h);
+    project.fps.to_bits().hash(&mut h);
+    project.frame_count.hash(&mut h);
+    project.loop_start.hash(&mut h);
+    project.loop_end.hash(&mut h);
+    let mut w = HashWriter(&mut h);
+    if project.camera_keys.is_empty() {
+        let _ = postcard::to_io(&project.camera, &mut w);
+    }
+    let _ = postcard::to_io(&project.camera_keys, &mut w);
+    for layer in &project.layers {
+        if layer.transform_keys.is_empty() {
+            let _ = postcard::to_io(layer, &mut w);
+        } else {
+            let mut keyed = layer.clone();
+            keyed.transform = Transform::default();
+            let _ = postcard::to_io(&keyed, &mut w);
+        }
+    }
+    for id in project.layers.iter().flat_map(|l| l.exposures.iter().flatten()) {
+        project.cells.get(*id).map_or(u64::MAX, |c| c.rev()).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Feeds what postcard writes straight into a hasher, so hashing a layer
+/// never builds its bytes in memory.
+struct HashWriter<'a, H: Hasher>(&'a mut H);
+
+impl<H: Hasher> std::io::Write for HashWriter<'_, H> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Prompt for a destination. When `current` is set the dialog opens on that
@@ -846,5 +944,85 @@ mod pins {
         let back = super::decode(&bytes).unwrap();
         assert_eq!(back.camera_opts, Default::default());
         assert_eq!(back.output_size(), (24, 16));
+    }
+}
+
+#[cfg(test)]
+mod replace_and_key_tests {
+    use super::*;
+    use crate::doc::camera::Camera;
+    use std::sync::Arc;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("animator-pf-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_save_replaces_the_old_file_and_leaves_no_temp_behind() {
+        let dir = scratch("replace");
+        let path = dir.join("a.anim");
+        std::fs::write(&path, b"old").unwrap();
+        let mut p = Project::new(16, 16, 12.0);
+        p.layers[0].name = "New".into();
+        save_to(&p, &path).unwrap();
+        assert_eq!(load_from(&path).unwrap().layers[0].name, "New");
+        assert!(!sibling(&path, ".saving").exists(), "the .saving file was left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_replace_leaves_what_was_there() {
+        let dir = scratch("fail");
+        // A folder where the file should go: the rename can't replace it.
+        let path = dir.join("taken.anim");
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_replacing(&path, b"new").is_err());
+        assert!(path.is_dir(), "the folder in the way was touched");
+        assert!(!sibling(&path, ".saving").exists(), "the .saving file was left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_content_key_follows_the_work_and_nothing_else() {
+        let mut p = Project::new(32, 32, 24.0);
+        p.insert_frames_before(3);
+        let base = content_key(&p);
+        assert_eq!(content_key(&p.clone()), base, "a copy is the same work");
+
+        p.current_frame = 2;
+        p.current_layer = 0;
+        assert_eq!(content_key(&p), base, "moving the playhead is not an edit");
+
+        let id = p.layers[0].exposures.iter().flatten().next().copied().unwrap();
+        Arc::make_mut(&mut p.cells[id]).pixels_mut()[3] = 255;
+        let painted = content_key(&p);
+        assert_ne!(painted, base, "a pixel write is an edit");
+        Arc::make_mut(&mut p.cells[id]).pack();
+        assert_eq!(content_key(&p), painted, "packing keeps the pixels");
+
+        p.layers[0].name = "Renamed".into();
+        let renamed = content_key(&p);
+        assert_ne!(renamed, painted, "a rename is an edit");
+
+        p.layers[0].transform.tx = 5.0;
+        assert_ne!(content_key(&p), renamed, "an unkeyed transform is the layer's own");
+    }
+
+    #[test]
+    fn keyed_working_buffers_are_not_edits() {
+        let mut p = Project::new(32, 32, 24.0);
+        p.layers[0].set_transform_key(0, Transform::default());
+        p.set_camera_key(0, Camera::default());
+        let base = content_key(&p);
+        // What scrubbing does: the buffers follow the keys.
+        p.layers[0].transform.tx = 40.0;
+        p.camera.tx = 12.0;
+        assert_eq!(content_key(&p), base);
+        // A key moving is.
+        p.layers[0].set_transform_key(0, Transform { tx: 9.0, ..Transform::default() });
+        assert_ne!(content_key(&p), base);
     }
 }

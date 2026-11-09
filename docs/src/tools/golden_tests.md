@@ -1,6 +1,6 @@
 # `src/tools/golden_tests.rs` — golden-image tests for every brush (test-only)
 
-> **Source:** [src/tools/golden_tests.rs](../../../src/tools/golden_tests.rs) · **Module:** `crate::tools::golden_tests` · **Size:** 845 lines · Line links as of commit `36405ad`
+> **Source:** [src/tools/golden_tests.rs](../../../src/tools/golden_tests.rs) · **Module:** `crate::tools::golden_tests` · **Size:** 845 lines · Line links as of commit `8192137`
 
 ## What this file is for
 
