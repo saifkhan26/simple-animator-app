@@ -117,6 +117,20 @@ impl Frame {
         let (w, h) = (len(across) * 0.5, dot(down, n) * 0.5);
         (w > 1e-6 && h > 1e-6).then_some(Self { o: centroid(c), u, n, w, h })
     }
+
+    /// The document point `x` along `u` and `y` along `n` from the centre.
+    pub fn at(&self, x: f32, y: f32) -> P {
+        [
+            self.o[0] + self.u[0] * x + self.n[0] * y,
+            self.o[1] + self.u[1] * x + self.n[1] * y,
+        ]
+    }
+
+    /// The box this frame reads off, TL, TR, BR, BL.
+    pub fn corners(&self) -> [P; 4] {
+        let (w, h) = (self.w, self.h);
+        [self.at(-w, -h), self.at(w, -h), self.at(w, h), self.at(-w, h)]
+    }
 }
 
 /// The wave of a pan's family through `p`: `None` when `p` sits square
@@ -444,7 +458,9 @@ pub fn candidates(g: &PerspectiveGrid, s: &Space, start: P, vertical: bool, grid
 /// Which way a pan bends, in its box's [`Frame`]: its curves are graphs
 /// across `u`, out along `n`, with side points `a` apart along `u`; drawn
 /// `span` side points' spacing either side; its third family straight
-/// along `straight`.
+/// along `straight`. Its box reaches `reach` out along `n` either side: the
+/// outermost arch drawn, which carries the curve-shape handle on its `side`
+/// (−1 or 1 along `n`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanAxis {
     pub u: P,
@@ -452,25 +468,81 @@ pub struct PanAxis {
     pub a: f32,
     pub span: f32,
     pub straight: P,
+    pub reach: f32,
+    pub side: f32,
 }
 
 /// A pan's axis. A horizontal pan's side points are at its box's sides and
 /// its verticals stay straight; a vertical pan's are at the top and bottom
 /// and its horizontals stay straight. A 360° pan's box is a whole turn, its
-/// side points a quarter turn apart, and its curves run on past it.
+/// side points a quarter turn apart, and its curves run on past it. The
+/// shape handle sits top right, or on a vertical pan bottom right, as in
+/// Harmony.
 pub fn pan_axis(kind: GridKind, f: &Frame) -> Option<PanAxis> {
+    let across = |a: f32, span: f32| PanAxis {
+        u: f.u,
+        n: f.n,
+        a,
+        span,
+        straight: f.n,
+        reach: f.h,
+        side: -1.0,
+    };
     match kind {
-        GridKind::PanHorizontal => Some(PanAxis { u: f.u, n: f.n, a: f.w, span: 1.0, straight: f.n }),
-        GridKind::PanVertical => Some(PanAxis { u: f.n, n: f.u, a: f.h, span: 1.0, straight: f.u }),
-        GridKind::PanLoop => Some(PanAxis {
-            u: f.u,
-            n: f.n,
-            a: f.w * 0.5,
-            span: f32::INFINITY,
-            straight: f.n,
+        GridKind::PanHorizontal => Some(across(f.w, 1.0)),
+        GridKind::PanLoop => Some(across(f.w * 0.5, f32::INFINITY)),
+        GridKind::PanVertical => Some(PanAxis {
+            u: f.n,
+            n: f.u,
+            a: f.h,
+            span: 1.0,
+            straight: f.u,
+            reach: f.w,
+            side: 1.0,
         }),
         _ => None,
     }
+}
+
+/// Where a pan's curve-shape handle sits: on its outermost arch, half way
+/// from the middle to a side point.
+pub fn bend_handle(kind: GridKind, bend: f32, c: &[P; 4]) -> Option<P> {
+    let f = Frame::of(c)?;
+    let ax = pan_axis(kind, &f)?;
+    let y = ax.side * ax.reach * arch(bend, 0.5);
+    Some(add(f.o, add(ax.u.map(|k| k * ax.a * 0.5), ax.n.map(|k| k * y))))
+}
+
+/// The bend that puts a pan's shape handle as near `p` as it can go:
+/// out toward the box's edge for fuller arches, in for flatter ones.
+pub fn bend_at(kind: GridKind, c: &[P; 4], p: P) -> Option<f32> {
+    let f = Frame::of(c)?;
+    let ax = pan_axis(kind, &f)?;
+    let out = ax.side * dot(sub(p, f.o), ax.n) / ax.reach;
+    // `arch(c, ½)` is ¾ + 3c⁄16.
+    let b = (out - 0.75) / 0.1875;
+    Some(b.clamp(*BEND.start(), *BEND.end()))
+}
+
+/// A curved guide's side points, each with the grab that stretches it: a
+/// pan's two, a 360° pan's four (the inner pair a quarter turn out, the
+/// outer the box's ends), a fisheye's four. See [`dragged`].
+pub fn side_points(kind: GridKind, c: &[P; 4]) -> Vec<(P, GridGrab)> {
+    let Some(f) = Frame::of(c) else {
+        return Vec::new();
+    };
+    let along = |v: P, k: f32, g| [(add(f.o, v.map(|x| x * k)), g), (sub(f.o, v.map(|x| x * k)), g)];
+    let mut out = Vec::new();
+    if matches!(kind, GridKind::PanHorizontal | GridKind::PanLoop | GridKind::Fisheye) {
+        out.extend(along(f.u, f.w, GridGrab::Vp(0)));
+    }
+    if matches!(kind, GridKind::PanVertical | GridKind::Fisheye) {
+        out.extend(along(f.n, f.h, GridGrab::Vp(1)));
+    }
+    if kind == GridKind::PanLoop {
+        out.extend(along(f.u, f.w * 0.5, GridGrab::Vp(2)));
+    }
+    out
 }
 
 /// A curved guide's families through the start. A pan's: its arch through
@@ -577,7 +649,10 @@ pub fn ellipse(c: &[P; 4]) -> Option<SnapCurve> {
 /// - A vanishing point: the point, a helper's end, else a helper to move it.
 /// - An ellipse: a corner, inside to move it, just outside a corner to turn
 ///   it.
-pub fn grab_at(kind: GridKind, c: &[P; 4], p: P, tol: f32) -> Option<GridGrab> {
+/// - A pan or a fisheye: its centre point to move it, a side point to
+///   stretch it, a pan's curve-shape handle (for `bend`), else its horizon
+///   to turn it.
+pub fn grab_at(kind: GridKind, bend: f32, c: &[P; 4], p: P, tol: f32) -> Option<GridGrab> {
     let near = |q: P, k: f32| len(sub(p, q)) <= tol * k;
     let corner = |n: usize, k: f32| (0..n).find(|&i| near(c[i], k)).map(|i| GridGrab::Corner(i as u8));
     match kind {
@@ -597,19 +672,53 @@ pub fn grab_at(kind: GridKind, c: &[P; 4], p: P, tol: f32) -> Option<GridGrab> {
             .or_else(|| inside(c, p).then_some(GridGrab::Move))
             .or_else(|| corner(4, 4.0).map(|_| GridGrab::Rotate)),
         GridKind::Perspective | GridKind::Flat | GridKind::Isometric => None,
-        GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye => None,
+        GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye => {
+            let f = Frame::of(c)?;
+            if near(f.o, 1.5) {
+                return Some(GridGrab::Move);
+            }
+            if let Some(&(_, g)) = side_points(kind, c).iter().find(|(q, _)| near(*q, 1.5)) {
+                return Some(g);
+            }
+            if bend_handle(kind, bend, c).is_some_and(|h| near(h, 1.5)) {
+                return Some(GridGrab::Bend);
+            }
+            (perspective::cross(f.u, sub(p, f.o)).abs() <= tol).then_some(GridGrab::Rotate)
+        }
     }
 }
 
 /// A non-plane guide's corners after dragging `grab` from `start` to `now`,
 /// solved against the corners at the press. `snap` (Shift, once dragging)
-/// turns a ruler or a helper line in 15° steps about its other end. `None`
-/// for a drag that would leave the guide meaningless — a ruler of no
-/// length, helper lines that never meet.
+/// turns a ruler or a helper line in 15° steps about its other end, and a
+/// curved guide by its horizon; on a curved guide's side point it scales
+/// the whole guide instead of stretching it one way. `None` for a drag that
+/// would leave the guide meaningless — a ruler of no length, helper lines
+/// that never meet. A pan's shape handle leaves the corners be (see
+/// [`bend_at`]).
 pub fn dragged(kind: GridKind, c0: &[P; 4], grab: GridGrab, start: P, now: P, snap: bool) -> Option<[P; 4]> {
     let d = sub(now, start);
     match (kind, grab) {
         (GridKind::Ellipse, _) => perspective::dragged(c0, grab, start, now, snap, false),
+        (k, GridGrab::Vp(which)) if k.is_curved() => {
+            // Both points of the pair stay mirrored about the centre point,
+            // so the side point's distance from it scales the box that way.
+            let f = Frame::of(c0)?;
+            let axis = if which == 1 { f.n } else { f.u };
+            let (d0, d1) = (dot(sub(start, f.o), axis).abs(), dot(sub(now, f.o), axis).abs());
+            if d0 < 1e-6 {
+                return None;
+            }
+            let k = (d1 / d0).max(1e-3);
+            let (w, h) = match (snap, which) {
+                (true, _) => (f.w * k, f.h * k),
+                (false, 1) => (f.w, f.h * k),
+                (false, _) => (f.w * k, f.h),
+            };
+            Some(Frame { w, h, ..f }.corners())
+        }
+        (k, GridGrab::Rotate) if k.is_curved() => perspective::dragged(c0, grab, start, now, snap, false),
+        (_, GridGrab::Bend) => Some(*c0),
         (_, GridGrab::Move) => Some(c0.map(|q| add(q, d))),
         (GridKind::Ruler | GridKind::Parallel, GridGrab::Corner(i)) => {
             let i = (i & 1) as usize;
@@ -841,9 +950,9 @@ mod tests {
         let a = c[1][1].atan2(c[1][0]).to_degrees();
         assert!((a - 15.0).abs() < 1e-3, "{a}");
         assert!(dragged(GridKind::Ruler, &c0, GridGrab::Corner(1), [100.0, 0.0], [0.0, 0.0], false).is_none());
-        assert_eq!(grab_at(GridKind::Ruler, &c0, [50.0, 3.0], 5.0), Some(GridGrab::Move));
-        assert_eq!(grab_at(GridKind::Ruler, &c0, [98.0, 2.0], 5.0), Some(GridGrab::Corner(1)));
-        assert_eq!(grab_at(GridKind::Ruler, &c0, [50.0, 30.0], 5.0), None);
+        assert_eq!(grab_at(GridKind::Ruler, 0.0, &c0, [50.0, 3.0], 5.0), Some(GridGrab::Move));
+        assert_eq!(grab_at(GridKind::Ruler, 0.0, &c0, [98.0, 2.0], 5.0), Some(GridGrab::Corner(1)));
+        assert_eq!(grab_at(GridKind::Ruler, 0.0, &c0, [50.0, 30.0], 5.0), None);
     }
 
     #[test]
@@ -851,7 +960,7 @@ mod tests {
         let (g, s) = fresh_doc(GridKind::Point);
         let c0 = g.doc_corners(&s);
         let v0 = point_vp(&c0).unwrap();
-        assert_eq!(grab_at(GridKind::Point, &c0, v0, 5.0), Some(GridGrab::Vp(0)));
+        assert_eq!(grab_at(GridKind::Point, 0.0, &c0, v0, 5.0), Some(GridGrab::Vp(0)));
         let to = [v0[0] + 80.0, v0[1] - 40.0];
         let c = dragged(GridKind::Point, &c0, GridGrab::Vp(0), v0, to, false).unwrap();
         assert!(near(point_vp(&c).unwrap(), to));
@@ -1086,6 +1195,99 @@ mod tests {
         assert!(pts.iter().all(|&p| c.distance(p) < 1e-2));
         // Clear of the box, nothing.
         assert!(c.bend_points([3000.0, 0.0], [4000.0, 1000.0]).is_empty());
+    }
+
+    #[test]
+    fn a_curved_guide_moves_by_its_centre_stretches_by_its_points_and_turns_by_its_horizon() {
+        let (g, s) = fresh_doc(GridKind::PanHorizontal);
+        let c0 = g.doc_corners(&s);
+        let f = Frame::of(&c0).unwrap();
+        let grab = |p: P| grab_at(GridKind::PanHorizontal, 0.0, &c0, p, 5.0);
+        assert_eq!(grab([502.0, 499.0]), Some(GridGrab::Move));
+        assert_eq!(grab([500.0 + f.w, 503.0]), Some(GridGrab::Vp(0)));
+        assert_eq!(grab([500.0 - f.w, 500.0]), Some(GridGrab::Vp(0)));
+        let handle = bend_handle(GridKind::PanHorizontal, 0.0, &c0).unwrap();
+        assert!(near(handle, [500.0 + f.w / 2.0, 500.0 - f.h * 0.75]), "top right, on the outer arch");
+        assert_eq!(grab(handle), Some(GridGrab::Bend));
+        assert_eq!(grab([200.0, 503.0]), Some(GridGrab::Rotate), "anywhere on the horizon");
+        assert_eq!(grab([200.0, 300.0]), None);
+
+        // A side point stretches the box its way only, both sides alike.
+        let r = [500.0 + f.w, 500.0];
+        let c = dragged(GridKind::PanHorizontal, &c0, GridGrab::Vp(0), r, [500.0 + f.w * 1.5, 520.0], false).unwrap();
+        let f1 = Frame::of(&c).unwrap();
+        assert!((f1.w - f.w * 1.5).abs() < 1e-2 && (f1.h - f.h).abs() < 1e-2 && near(f1.o, f.o));
+        assert!(near(f1.u, f.u), "it doesn't turn");
+        // With Shift the whole guide scales.
+        let c = dragged(GridKind::PanHorizontal, &c0, GridGrab::Vp(0), r, [500.0 + f.w * 1.5, 500.0], true).unwrap();
+        let f1 = Frame::of(&c).unwrap();
+        assert!((f1.w - f.w * 1.5).abs() < 1e-2 && (f1.h - f.h * 1.5).abs() < 1e-2);
+        // The horizon turns it about the centre point; Shift in 15° steps.
+        let from = [800.0, 500.0];
+        let to = [500.0 + 300.0 * 0.4f32.cos(), 500.0 + 300.0 * 0.4f32.sin()];
+        let c = dragged(GridKind::PanHorizontal, &c0, GridGrab::Rotate, from, to, false).unwrap();
+        let f1 = Frame::of(&c).unwrap();
+        assert!((f1.u[1].atan2(f1.u[0]) - 0.4).abs() < 1e-3 && near(f1.o, f.o));
+        let c = dragged(GridKind::PanHorizontal, &c0, GridGrab::Rotate, from, to, true).unwrap();
+        let f1 = Frame::of(&c).unwrap();
+        assert!((f1.u[1].atan2(f1.u[0]).to_degrees() - 30.0).abs() < 1e-2);
+        // The centre point moves it.
+        let c = dragged(GridKind::PanHorizontal, &c0, GridGrab::Move, f.o, [530.0, 480.0], false).unwrap();
+        assert!(near(Frame::of(&c).unwrap().o, [530.0, 480.0]));
+    }
+
+    #[test]
+    fn each_curved_kind_has_its_own_side_points() {
+        let points = |kind| {
+            let (g, s) = fresh_doc(kind);
+            side_points(kind, &g.doc_corners(&s)).iter().map(|&(_, g)| g).collect::<Vec<_>>()
+        };
+        use GridGrab::Vp;
+        assert_eq!(points(GridKind::PanHorizontal), [Vp(0), Vp(0)]);
+        assert_eq!(points(GridKind::PanVertical), [Vp(1), Vp(1)]);
+        assert_eq!(points(GridKind::PanLoop), [Vp(0), Vp(0), Vp(2), Vp(2)]);
+        assert_eq!(points(GridKind::Fisheye), [Vp(0), Vp(0), Vp(1), Vp(1)]);
+        // A 360° pan's inner points stretch the turn as much again.
+        let (g, s) = fresh_doc(GridKind::PanLoop);
+        let c0 = g.doc_corners(&s);
+        let f = Frame::of(&c0).unwrap();
+        let inner = [500.0 + f.w / 2.0, 500.0];
+        let c = dragged(GridKind::PanLoop, &c0, Vp(2), inner, [500.0 + f.w, 500.0], false).unwrap();
+        assert!((Frame::of(&c).unwrap().w - f.w * 2.0).abs() < 1e-2);
+        // A fisheye's top point stretches it up and down only.
+        let (g, s) = fresh_doc(GridKind::Fisheye);
+        let c0 = g.doc_corners(&s);
+        let f = Frame::of(&c0).unwrap();
+        let top = [500.0, 500.0 - f.h];
+        assert_eq!(grab_at(GridKind::Fisheye, 0.0, &c0, top, 5.0), Some(Vp(1)));
+        let c = dragged(GridKind::Fisheye, &c0, Vp(1), top, [510.0, 500.0 - f.h * 0.5], false).unwrap();
+        let f1 = Frame::of(&c).unwrap();
+        assert!((f1.h - f.h * 0.5).abs() < 1e-2 && (f1.w - f.w).abs() < 1e-2);
+        assert!(bend_handle(GridKind::Fisheye, 0.0, &c0).is_none(), "no curve-shape handle: its points shape it");
+    }
+
+    #[test]
+    fn a_pans_shape_handle_sets_its_bend_from_how_far_out_it_is() {
+        for kind in [GridKind::PanHorizontal, GridKind::PanVertical, GridKind::PanLoop] {
+            let (g, s) = fresh_doc(kind);
+            let c = g.doc_corners(&s);
+            for bend in [-0.5, 0.0, 0.6] {
+                let h = bend_handle(kind, bend, &c).unwrap();
+                let back = bend_at(kind, &c, h).unwrap();
+                assert!((back - bend).abs() < 1e-4, "{kind:?}: {bend} → {back}");
+            }
+            // Out to the box's edge and past: as full as it goes; in to the
+            // horizon: as flat.
+            let f = Frame::of(&c).unwrap();
+            let ax = pan_axis(kind, &f).unwrap();
+            let out = add(f.o, ax.n.map(|k| k * ax.side * ax.reach * 2.0));
+            assert_eq!(bend_at(kind, &c, out), Some(*BEND.end()), "{kind:?}");
+            assert_eq!(bend_at(kind, &c, f.o), Some(*BEND.start()), "{kind:?}");
+        }
+        // A vertical pan's handle is at the bottom right, as in Harmony.
+        let (g, s) = fresh_doc(GridKind::PanVertical);
+        let h = bend_handle(GridKind::PanVertical, 0.0, &g.doc_corners(&s)).unwrap();
+        assert!(h[0] > 500.0 && h[1] > 500.0, "{h:?}");
     }
 
     #[test]

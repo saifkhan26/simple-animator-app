@@ -10786,6 +10786,35 @@ mod tests {
     }
 
     #[test]
+    fn a_pans_handles_stretch_it_and_bend_its_curves_each_one_undo() {
+        use perspective::GridKind;
+        let c = perspective::box_quad([400.0, 300.0], 300.0, 150.0);
+        let mut state = guide_state(GridKind::PanHorizontal, c);
+        state.dispatch(Action::ToolPerspective);
+        let (w, h) = state.frame_size();
+        let space = perspective::Space::flat(w, h);
+        // The right side point, out by half again: the left one goes too.
+        state.perspective_down([700.0, 300.0]);
+        state.perspective_move([850.0, 310.0]);
+        state.pointer_up();
+        let stretched = state.perspective.grids[0].doc_corners(&space);
+        assert!(near(stretched[0], [-50.0, 150.0]) && near(stretched[2], [850.0, 450.0]), "{stretched:?}");
+        // The shape handle, out toward the box's top: fuller arches.
+        let at = guides::bend_handle(GridKind::PanHorizontal, 0.0, &stretched).unwrap();
+        state.perspective_down(at);
+        state.perspective_move([at[0] + 4.0, 300.0 - 150.0 * 0.9]);
+        assert_eq!(state.grid_drag_readout().as_deref(), Some("Shape +80%"));
+        state.pointer_up();
+        let g = &state.perspective.grids[0];
+        assert!((g.bend - 0.8).abs() < 1e-3, "{}", g.bend);
+        assert_eq!(g.doc_corners(&space), stretched, "the box stays");
+        state.undo();
+        assert_eq!(state.perspective.grids[0].bend, 0.0);
+        state.undo();
+        assert_eq!(state.perspective.grids[0].doc_corners(&space), c);
+    }
+
+    #[test]
     fn a_ruler_end_drag_shows_its_heading() {
         let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
         let mut state = guide_state(perspective::GridKind::Ruler, ruler);

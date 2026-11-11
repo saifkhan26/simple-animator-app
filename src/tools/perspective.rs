@@ -286,6 +286,8 @@ pub enum GridGrab {
     Tilt,
     Rotate,
     Move,
+    /// A pan's curve-shape handle, on its outermost arch.
+    Bend,
 }
 
 /// What kind of guide a grid is. Every kind keeps four corners, so keys,
@@ -1956,8 +1958,9 @@ pub fn dragged(
             }
             tilt_horizon(start_c, hz.p, a)
         }
-        // The point moves, not the grid: see `place_extra`.
-        GridGrab::Extra(_) => Some(*start_c),
+        // The point moves, not the grid: see `place_extra`. A plane has no
+        // curve shape to bend.
+        GridGrab::Extra(_) | GridGrab::Bend => Some(*start_c),
         GridGrab::Rotate => {
             let o = centroid(start_c);
             let a0 = (start[1] - o[1]).atan2(start[0] - o[0]);

@@ -541,7 +541,7 @@ impl AppState {
             let grab = if g.kind.is_plane() {
                 perspective::grab_at(&corners, &extra_at, p, tol, eye_level)
             } else {
-                guides::grab_at(g.kind, &corners, p, tol)
+                guides::grab_at(g.kind, g.bend, &corners, p, tol)
             };
             let Some(grab) = grab else {
                 continue;
@@ -621,6 +621,12 @@ impl AppState {
         let Some(g) = self.perspective.grids.get_mut(d.grid) else {
             return;
         };
+        if d.grab == GridGrab::Bend {
+            if let Some(b) = guides::bend_at(kind, &d.corners, p) {
+                g.bend = b;
+            }
+            return;
+        }
         if let GridGrab::Extra(i) = d.grab {
             let (Some(from), Some(v)) = (d.extra[i as usize], g.extra_vps.get(i as usize)) else {
                 return;
@@ -692,6 +698,7 @@ impl AppState {
                 Some(line(perspective::sub(a, b)))
             }
             (_, GridGrab::Rotate) => Some(format!("{:.1}°", -g.angle().to_degrees())),
+            (_, GridGrab::Bend) => Some(format!("Shape {:+.0}%", g.bend * 100.0)),
             (GridKind::Perspective, GridGrab::Tilt) => {
                 let hz = perspective::Plane::new(c)?.horizon()?;
                 Some(line(hz.d))
