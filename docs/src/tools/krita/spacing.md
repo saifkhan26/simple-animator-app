@@ -1,6 +1,6 @@
 # `src/tools/krita/spacing.rs` — dab spacing and the path walker
 
-> **Source:** [src/tools/krita/spacing.rs](../../../../src/tools/krita/spacing.rs) · **Module:** `crate::tools::krita::spacing` · **Size:** 228 lines · Line links as of commit `18d4119`
+> **Source:** [src/tools/krita/spacing.rs](../../../../src/tools/krita/spacing.rs) · **Module:** `crate::tools::krita::spacing` · **Size:** 228 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

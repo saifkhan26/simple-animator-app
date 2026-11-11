@@ -1,6 +1,6 @@
 # `src/input/pointer.rs` — one pointer sample (position, pressure, tilt, time)
 
-> **Source:** [src/input/pointer.rs](../../../src/input/pointer.rs) · **Module:** `crate::input::pointer` · **Size:** 64 lines · Line links as of commit `18d4119`
+> **Source:** [src/input/pointer.rs](../../../src/input/pointer.rs) · **Module:** `crate::input::pointer` · **Size:** 64 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

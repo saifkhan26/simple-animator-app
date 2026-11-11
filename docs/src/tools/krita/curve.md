@@ -1,6 +1,6 @@
 # `src/tools/krita/curve.rs` — Krita's sensor curves (cubic splines)
 
-> **Source:** [src/tools/krita/curve.rs](../../../../src/tools/krita/curve.rs) · **Module:** `crate::tools::krita::curve` · **Size:** 292 lines · Line links as of commit `18d4119`
+> **Source:** [src/tools/krita/curve.rs](../../../../src/tools/krita/curve.rs) · **Module:** `crate::tools::krita::curve` · **Size:** 292 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

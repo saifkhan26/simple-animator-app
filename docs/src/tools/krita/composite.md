@@ -1,6 +1,6 @@
 # `src/tools/krita/composite.rs` — Krita's 8-bit blending of dabs
 
-> **Source:** [src/tools/krita/composite.rs](../../../../src/tools/krita/composite.rs) · **Module:** `crate::tools::krita::composite` · **Size:** 383 lines · Line links as of commit `18d4119`
+> **Source:** [src/tools/krita/composite.rs](../../../../src/tools/krita/composite.rs) · **Module:** `crate::tools::krita::composite` · **Size:** 383 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

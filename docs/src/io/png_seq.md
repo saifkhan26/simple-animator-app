@@ -1,6 +1,6 @@
 # `src/io/png_seq.rs` — PNG sequence export
 
-> **Source:** [src/io/png_seq.rs](../../../src/io/png_seq.rs) · **Module:** `crate::io::png_seq` · **Size:** 155 lines · Line links as of commit `18d4119`
+> **Source:** [src/io/png_seq.rs](../../../src/io/png_seq.rs) · **Module:** `crate::io::png_seq` · **Size:** 155 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

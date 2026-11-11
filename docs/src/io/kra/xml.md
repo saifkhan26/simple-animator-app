@@ -1,6 +1,6 @@
 # `src/io/kra/xml.rs` — the XML parts of a .kra
 
-> **Source:** [src/io/kra/xml.rs](../../../../src/io/kra/xml.rs) · **Module:** `crate::io::kra::xml` · **Size:** 203 lines · Line links as of commit `18d4119`
+> **Source:** [src/io/kra/xml.rs](../../../../src/io/kra/xml.rs) · **Module:** `crate::io::kra::xml` · **Size:** 203 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

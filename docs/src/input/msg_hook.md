@@ -1,6 +1,6 @@
 # `src/input/msg_hook.rs` — peeking at raw Windows messages before egui does
 
-> **Source:** [src/input/msg_hook.rs](../../../src/input/msg_hook.rs) · **Module:** `crate::input::msg_hook` · **Size:** 23 lines · Line links as of commit `18d4119`
+> **Source:** [src/input/msg_hook.rs](../../../src/input/msg_hook.rs) · **Module:** `crate::input::msg_hook` · **Size:** 23 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

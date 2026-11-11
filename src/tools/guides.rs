@@ -15,7 +15,7 @@
 //! a wobbly hand flip between families.
 
 use super::perspective::{
-    self, add, cross, dot, inside, intersect, len, line_quad, normalize, project, sub, GridGrab,
+    self, add, dot, inside, intersect, len, line_quad, normalize, project, sub, GridGrab,
     GridKind, Homography, PerspectiveGrid, Space, Vp, P,
 };
 
@@ -201,8 +201,8 @@ fn plane_candidates(g: &PerspectiveGrid, s: &Space, start: P, vertical: bool, gr
 }
 
 /// Of the curves through the start, the one whose direction there best
-/// matches `motion`, either way along it. Ties go to the later one, as
-/// [`super::perspective::pick_dir`] has it.
+/// matches `motion`, either way along it. Ties go to the later one, so with
+/// one grid the pick is the one it always was.
 pub fn pick(cands: &[Candidate], start: P, motion: P) -> Option<Candidate> {
     let m = normalize(motion)?;
     let score = |c: &Candidate| c.curve.tangent_at(start).map_or(-1.0, |t| dot(t, m).abs());
@@ -340,7 +340,7 @@ fn turn_in_steps(o: P, p: P) -> P {
 /// Whether two vectors run the same way or opposite, near enough.
 #[cfg(test)]
 fn parallel(a: P, b: P) -> bool {
-    cross(a, b).abs() <= 1e-3 * len(a) * len(b)
+    perspective::cross(a, b).abs() <= 1e-3 * len(a) * len(b)
 }
 
 /// Angle of `uv` about the square's middle.

@@ -1,6 +1,6 @@
 # `src/tools/perspective.rs` — perspective grids: geometry, walls, snapping
 
-> **Source:** [src/tools/perspective.rs](../../../src/tools/perspective.rs) · **Module:** `crate::tools::perspective` · **Size:** 3218 lines · Line links as of commit `18d4119`
+> **Source:** [src/tools/perspective.rs](../../../src/tools/perspective.rs) · **Module:** `crate::tools::perspective` · **Size:** 3220 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 
@@ -333,7 +333,7 @@ A ready-made perspective setup, as the Add menu offers them.
 | `WormsEye` | Two-point from below: the horizon low, verticals running up to a third point above the frame. |
 
 ### `struct PoseFrame`
-[src/tools/perspective.rs:1090](../../../src/tools/perspective.rs#L1090)
+[src/tools/perspective.rs:1091](../../../src/tools/perspective.rs#L1091)
 
 A quad's similarity frame: centroid, spread and heading. Tweening goes through it, so a grid turning between two keys turns rather than shrinking through the chord.
 
@@ -344,7 +344,7 @@ A quad's similarity frame: centroid, spread and heading. Tweening goes through i
 | `a` | `f32` | Heading (angle). |
 
 ### `struct PerspectiveConfig`
-[src/tools/perspective.rs:1190](../../../src/tools/perspective.rs#L1190)
+[src/tools/perspective.rs:1191](../../../src/tools/perspective.rs#L1191)
 
 All grids of the open file plus the global switches (show, snap, auto-key, ghosts). Kept by the app per file, never inside the `.anim`.
 
@@ -362,7 +362,7 @@ All grids of the open file plus the global switches (show, snap, auto-key, ghost
 | `cursor_guides` | `bool` | While a stroke would snap, faint lines from the cursor along every way it could go. |
 
 ### `const WALL_COLOR`
-[src/tools/perspective.rs:1353](../../../src/tools/perspective.rs#L1353)
+[src/tools/perspective.rs:1354](../../../src/tools/perspective.rs#L1354)
 
 ```rust
 const WALL_COLOR: [u8; 3] = [255, 150, 80];
@@ -371,7 +371,7 @@ const WALL_COLOR: [u8; 3] = [255, 150, 80];
 A new wall's colour: warm, against the default grid's blue.
 
 ### `struct Plane`
-[src/tools/perspective.rs:1515](../../../src/tools/perspective.rs#L1515)
+[src/tools/perspective.rs:1516](../../../src/tools/perspective.rs#L1516)
 
 Everything derived from a grid's corners that drawing and snapping need.
 
@@ -384,7 +384,7 @@ Everything derived from a grid's corners that drawing and snapping need.
 | `size` | `f32` | The quad's reach from `near`, the scale "far away" is judged against. |
 
 ### `const TILT_KNOB`
-[src/tools/perspective.rs:1776](../../../src/tools/perspective.rs#L1776)
+[src/tools/perspective.rs:1777](../../../src/tools/perspective.rs#L1777)
 
 ```rust
 pub const TILT_KNOB: f32 = 12.0;
@@ -393,7 +393,7 @@ pub const TILT_KNOB: f32 = 12.0;
 How far out along the horizon its tilt knobs sit from the point above the grid, in handle radii.
 
 ### `struct Tile`
-[src/tools/perspective.rs:2030](../../../src/tools/perspective.rs#L2030)
+[src/tools/perspective.rs:2031](../../../src/tools/perspective.rs#L2031)
 
 One tiled line on screen: its index in its family, and its two ends.
 
@@ -404,7 +404,7 @@ One tiled line on screen: its index in its family, and its two ends.
 | `b` | `P` | The other end. |
 
 ### `const MAX_TILES`
-[src/tools/perspective.rs:2037](../../../src/tools/perspective.rs#L2037)
+[src/tools/perspective.rs:2038](../../../src/tools/perspective.rs#L2038)
 
 ```rust
 const MAX_TILES: i32 = 400;
@@ -413,7 +413,7 @@ const MAX_TILES: i32 = 400;
 Most lines tiled each way from the quad, per family.
 
 ### `const FADE_FROM_GAP`
-[src/tools/perspective.rs:2202](../../../src/tools/perspective.rs#L2202)
+[src/tools/perspective.rs:2203](../../../src/tools/perspective.rs#L2203)
 
 ```rust
 const FADE_FROM_GAP: f32 = 1.5;
@@ -422,7 +422,7 @@ const FADE_FROM_GAP: f32 = 1.5;
 Where a fan's rays crowd closer than this many pixels they would only smudge together, so they don't show...
 
 ### `const FADE_TO_GAP`
-[src/tools/perspective.rs:2204](../../../src/tools/perspective.rs#L2204)
+[src/tools/perspective.rs:2205](../../../src/tools/perspective.rs#L2205)
 
 ```rust
 const FADE_TO_GAP: f32 = 8.0;
@@ -431,7 +431,7 @@ const FADE_TO_GAP: f32 = 8.0;
 ...and from where they are this far apart they show in full.
 
 ### `const FADE_STEPS`
-[src/tools/perspective.rs:2205](../../../src/tools/perspective.rs#L2205)
+[src/tools/perspective.rs:2206](../../../src/tools/perspective.rs#L2206)
 
 ```rust
 const FADE_STEPS: usize = 5;
@@ -858,7 +858,7 @@ pub fn snap_targets(&self, s: &Space, vertical: bool) -> Vec<Vp>
 Everything strokes may snap toward, in document space: the families switched on, the vertical when asked (perspective grids only — square to the horizon, or to the rows when it is at infinity), and the extra vanishing points switched on.
 
 ### `PerspectiveGrid::snap_dirs`
-[src/tools/perspective.rs:911](../../../src/tools/perspective.rs#L911)
+[src/tools/perspective.rs:912](../../../src/tools/perspective.rs#L912)
 
 ```rust
 pub fn snap_dirs(&self, s: &Space, at: P, vertical: bool) -> Vec<P>
@@ -867,7 +867,7 @@ pub fn snap_dirs(&self, s: &Space, at: P, vertical: bool) -> Vec<P>
 Candidate snap directions at `at`: toward each of `Self::snap_targets`.
 
 ### `PerspectiveGrid::centre`
-[src/tools/perspective.rs:924](../../../src/tools/perspective.rs#L924)
+[src/tools/perspective.rs:925](../../../src/tools/perspective.rs#L925)
 
 ```rust
 pub fn centre(&self) -> P
@@ -876,7 +876,7 @@ pub fn centre(&self) -> P
 Where the grid sits: its corner centroid, from the frame centre.
 
 ### `PerspectiveGrid::translate`
-[src/tools/perspective.rs:928](../../../src/tools/perspective.rs#L928)
+[src/tools/perspective.rs:929](../../../src/tools/perspective.rs#L929)
 
 ```rust
 pub fn translate(&mut self, d: P)
@@ -885,7 +885,7 @@ pub fn translate(&mut self, d: P)
 Moves the grid (and its extra vanishing points) by `d`.
 
 ### `PerspectiveGrid::scale`
-[src/tools/perspective.rs:936](../../../src/tools/perspective.rs#L936)
+[src/tools/perspective.rs:937](../../../src/tools/perspective.rs#L937)
 
 ```rust
 pub fn scale(&self) -> f32
@@ -894,7 +894,7 @@ pub fn scale(&self) -> f32
 Size relative to a fresh grid of its kind, which reads 1.
 
 ### `PerspectiveGrid::scale_by`
-[src/tools/perspective.rs:942](../../../src/tools/perspective.rs#L942)
+[src/tools/perspective.rs:943](../../../src/tools/perspective.rs#L943)
 
 ```rust
 pub fn scale_by(&mut self, k: f32)
@@ -903,7 +903,7 @@ pub fn scale_by(&mut self, k: f32)
 Scale by `k` about the centroid. Ignores a `k` that would collapse or flip the grid.
 
 ### `PerspectiveGrid::angle`
-[src/tools/perspective.rs:957](../../../src/tools/perspective.rs#L957)
+[src/tools/perspective.rs:958](../../../src/tools/perspective.rs#L958)
 
 ```rust
 pub fn angle(&self) -> f32
@@ -912,7 +912,7 @@ pub fn angle(&self) -> f32
 Heading of the grid, in radians, against a fresh grid of its kind (which reads 0): from the middle of its left edge to the middle of its right. `Self::rotate` turns it by exactly its angle.
 
 ### `PerspectiveGrid::pose`
-[src/tools/perspective.rs:964](../../../src/tools/perspective.rs#L964)
+[src/tools/perspective.rs:965](../../../src/tools/perspective.rs#L965)
 
 ```rust
 pub fn pose(&self) -> GridPose
@@ -921,7 +921,7 @@ pub fn pose(&self) -> GridPose
 The live pose.
 
 ### `PerspectiveGrid::set_pose`
-[src/tools/perspective.rs:974](../../../src/tools/perspective.rs#L974)
+[src/tools/perspective.rs:975](../../../src/tools/perspective.rs#L975)
 
 ```rust
 pub fn set_pose(&mut self, p: &GridPose)
@@ -930,7 +930,7 @@ pub fn set_pose(&mut self, p: &GridPose)
 Make `p` the live pose. Extra vanishing points it has no spot for stay where they are.
 
 ### `PerspectiveGrid::key_at`
-[src/tools/perspective.rs:982](../../../src/tools/perspective.rs#L982)
+[src/tools/perspective.rs:983](../../../src/tools/perspective.rs#L983)
 
 ```rust
 pub fn key_at(&self, frame: usize) -> Option<&GridKey>
@@ -939,7 +939,7 @@ pub fn key_at(&self, frame: usize) -> Option<&GridKey>
 The key on `frame`, if any.
 
 ### `PerspectiveGrid::has_key`
-[src/tools/perspective.rs:986](../../../src/tools/perspective.rs#L986)
+[src/tools/perspective.rs:987](../../../src/tools/perspective.rs#L987)
 
 ```rust
 pub fn has_key(&self, frame: usize) -> bool
@@ -948,7 +948,7 @@ pub fn has_key(&self, frame: usize) -> bool
 Whether there's a key on `frame`.
 
 ### `PerspectiveGrid::set_key`
-[src/tools/perspective.rs:992](../../../src/tools/perspective.rs#L992)
+[src/tools/perspective.rs:993](../../../src/tools/perspective.rs#L993)
 
 ```rust
 pub fn set_key(&mut self, frame: usize)
@@ -957,7 +957,7 @@ pub fn set_key(&mut self, frame: usize)
 Key the live pose on `frame`, replacing a key there but keeping its ease.
 
 ### `PerspectiveGrid::delete_key`
-[src/tools/perspective.rs:1007](../../../src/tools/perspective.rs#L1007)
+[src/tools/perspective.rs:1008](../../../src/tools/perspective.rs#L1008)
 
 ```rust
 pub fn delete_key(&mut self, frame: usize)
@@ -966,7 +966,7 @@ pub fn delete_key(&mut self, frame: usize)
 Removes the key on `frame`.
 
 ### `PerspectiveGrid::keys_insert_frames`
-[src/tools/perspective.rs:1013](../../../src/tools/perspective.rs#L1013)
+[src/tools/perspective.rs:1014](../../../src/tools/perspective.rs#L1014)
 
 ```rust
 pub fn keys_insert_frames(&mut self, at: usize, n: usize)
@@ -975,7 +975,7 @@ pub fn keys_insert_frames(&mut self, at: usize, n: usize)
 Keep the keys on their frames after `n` frames are inserted at `at`, as the timeline's frame ops do for every other key.
 
 ### `PerspectiveGrid::keys_remove_frames`
-[src/tools/perspective.rs:1023](../../../src/tools/perspective.rs#L1023)
+[src/tools/perspective.rs:1024](../../../src/tools/perspective.rs#L1024)
 
 ```rust
 pub fn keys_remove_frames(&mut self, at: usize, n: usize)
@@ -984,7 +984,7 @@ pub fn keys_remove_frames(&mut self, at: usize, n: usize)
 Keep the keys on their frames after `[at, at + n)` is removed. A key on a removed frame goes with it.
 
 ### `PerspectiveGrid::set_key_ease`
-[src/tools/perspective.rs:1032](../../../src/tools/perspective.rs#L1032)
+[src/tools/perspective.rs:1033](../../../src/tools/perspective.rs#L1033)
 
 ```rust
 pub fn set_key_ease(&mut self, frame: usize, ease: Ease)
@@ -993,7 +993,7 @@ pub fn set_key_ease(&mut self, frame: usize, ease: Ease)
 Sets the easing of the key on `frame`.
 
 ### `PerspectiveGrid::resolve`
-[src/tools/perspective.rs:1040](../../../src/tools/perspective.rs#L1040)
+[src/tools/perspective.rs:1041](../../../src/tools/perspective.rs#L1041)
 
 ```rust
 pub fn resolve(&self, frame: usize) -> GridPose
@@ -1002,7 +1002,7 @@ pub fn resolve(&self, frame: usize) -> GridPose
 The pose on `frame`: tweened from the keys, or the live pose when there are none.
 
 ### `PerspectiveGrid::restore_motion`
-[src/tools/perspective.rs:1047](../../../src/tools/perspective.rs#L1047)
+[src/tools/perspective.rs:1048](../../../src/tools/perspective.rs#L1048)
 
 ```rust
 pub fn restore_motion(&mut self, snap: &PerspectiveGrid)
@@ -1011,7 +1011,7 @@ pub fn restore_motion(&mut self, snap: &PerspectiveGrid)
 Take back everything a drag or a key step can change — the pose, the keys, a wall's height — from `snap`, leaving the look and the switches as they are now.
 
 ### `PerspectiveGrid::neighbour_keys`
-[src/tools/perspective.rs:1056](../../../src/tools/perspective.rs#L1056)
+[src/tools/perspective.rs:1057](../../../src/tools/perspective.rs#L1057)
 
 ```rust
 pub fn neighbour_keys(&self, frame: usize) -> (Option<&GridKey>, Option<&GridKey>)
@@ -1022,7 +1022,7 @@ The nearest keys strictly before and strictly after `frame`.
 ## Free functions
 
 ### `spread`
-[src/tools/perspective.rs:1064](../../../src/tools/perspective.rs#L1064)
+[src/tools/perspective.rs:1065](../../../src/tools/perspective.rs#L1065)
 
 ```rust
 fn spread(c: &[P; 4]) -> f32
@@ -1031,7 +1031,7 @@ fn spread(c: &[P; 4]) -> f32
 Mean distance of the corners from their centroid.
 
 ### `heading`
-[src/tools/perspective.rs:1071](../../../src/tools/perspective.rs#L1071)
+[src/tools/perspective.rs:1072](../../../src/tools/perspective.rs#L1072)
 
 ```rust
 fn heading(c: &[P; 4]) -> f32
@@ -1040,7 +1040,7 @@ fn heading(c: &[P; 4]) -> f32
 From the middle of the quad's left edge to the middle of its right, in radians.
 
 ### `to_doc`
-[src/tools/perspective.rs:1077](../../../src/tools/perspective.rs#L1077)
+[src/tools/perspective.rs:1078](../../../src/tools/perspective.rs#L1078)
 
 ```rust
 pub fn to_doc(n: P, w: f32, h: f32) -> P
@@ -1049,7 +1049,7 @@ pub fn to_doc(n: P, w: f32, h: f32) -> P
 Frame-relative point to document coordinates for a `w`×`h` frame.
 
 ### `from_doc`
-[src/tools/perspective.rs:1081](../../../src/tools/perspective.rs#L1081)
+[src/tools/perspective.rs:1082](../../../src/tools/perspective.rs#L1082)
 
 ```rust
 pub fn from_doc(p: P, w: f32, h: f32) -> P
@@ -1060,7 +1060,7 @@ The reverse of `to_doc`.
 ## `impl PoseFrame`
 
 ### `PoseFrame::of`
-[src/tools/perspective.rs:1097](../../../src/tools/perspective.rs#L1097)
+[src/tools/perspective.rs:1098](../../../src/tools/perspective.rs#L1098)
 
 ```rust
 fn of(c: &[P; 4]) -> Self
@@ -1069,7 +1069,7 @@ fn of(c: &[P; 4]) -> Self
 The similarity frame of a quad.
 
 ### `PoseFrame::local`
-[src/tools/perspective.rs:1105](../../../src/tools/perspective.rs#L1105)
+[src/tools/perspective.rs:1106](../../../src/tools/perspective.rs#L1106)
 
 ```rust
 fn local(&self, p: P) -> P
@@ -1078,7 +1078,7 @@ fn local(&self, p: P) -> P
 A point expressed relative to the frame.
 
 ### `PoseFrame::world`
-[src/tools/perspective.rs:1110](../../../src/tools/perspective.rs#L1110)
+[src/tools/perspective.rs:1111](../../../src/tools/perspective.rs#L1111)
 
 ```rust
 fn world(&self, l: P) -> P
@@ -1089,7 +1089,7 @@ A frame-relative point back in world coordinates.
 ## Free functions
 
 ### `lerp_p`
-[src/tools/perspective.rs:1116](../../../src/tools/perspective.rs#L1116)
+[src/tools/perspective.rs:1117](../../../src/tools/perspective.rs#L1117)
 
 ```rust
 fn lerp_p(a: P, b: P, t: f32) -> P
@@ -1098,7 +1098,7 @@ fn lerp_p(a: P, b: P, t: f32) -> P
 Linear interpolation between two points.
 
 ### `tween`
-[src/tools/perspective.rs:1126](../../../src/tools/perspective.rs#L1126)
+[src/tools/perspective.rs:1127](../../../src/tools/perspective.rs#L1127)
 
 ```rust
 pub fn tween(a: &GridPose, b: &GridPose, t: f32) -> GridPose
@@ -1107,7 +1107,7 @@ pub fn tween(a: &GridPose, b: &GridPose, t: f32) -> GridPose
 The pose `t` of the way from `a` to `b`. Like the camera: the centre moves in a straight line, the size at a steady rate, the heading the short way round. What is left of the corners' shape once that is taken out blends straight across, so a 90° turn keeps its size. A blend that would fold the quad falls back to sliding each corner straight, then to holding the nearer key.
 
 ### `resolve_keys`
-[src/tools/perspective.rs:1168](../../../src/tools/perspective.rs#L1168)
+[src/tools/perspective.rs:1169](../../../src/tools/perspective.rs#L1169)
 
 ```rust
 pub fn resolve_keys(keys: &[GridKey], frame: usize) -> Option<GridPose>
@@ -1118,7 +1118,7 @@ The pose keys give `frame`, or `None` with no keys. Held flat before the first k
 ## `impl Default for PerspectiveConfig`
 
 ### `PerspectiveConfig::default`
-[src/tools/perspective.rs:1223](../../../src/tools/perspective.rs#L1223)
+[src/tools/perspective.rs:1224](../../../src/tools/perspective.rs#L1224)
 
 ```rust
 fn default() -> Self
@@ -1129,7 +1129,7 @@ Default settings: no grids, show on, snap off, vertical snap off, auto-key on, g
 ## `impl PerspectiveConfig`
 
 ### `PerspectiveConfig::active_grid`
-[src/tools/perspective.rs:1242](../../../src/tools/perspective.rs#L1242)
+[src/tools/perspective.rs:1243](../../../src/tools/perspective.rs#L1243)
 
 ```rust
 pub fn active_grid(&self) -> Option<&PerspectiveGrid>
@@ -1138,7 +1138,7 @@ pub fn active_grid(&self) -> Option<&PerspectiveGrid>
 The grid being edited, if any.
 
 ### `PerspectiveConfig::active_grid_mut`
-[src/tools/perspective.rs:1246](../../../src/tools/perspective.rs#L1246)
+[src/tools/perspective.rs:1247](../../../src/tools/perspective.rs#L1247)
 
 ```rust
 pub fn active_grid_mut(&mut self) -> Option<&mut PerspectiveGrid>
@@ -1147,7 +1147,7 @@ pub fn active_grid_mut(&mut self) -> Option<&mut PerspectiveGrid>
 The grid being edited, writable.
 
 ### `PerspectiveConfig::remove`
-[src/tools/perspective.rs:1252](../../../src/tools/perspective.rs#L1252)
+[src/tools/perspective.rs:1253](../../../src/tools/perspective.rs#L1253)
 
 ```rust
 pub fn remove(&mut self, i: usize)
@@ -1156,7 +1156,7 @@ pub fn remove(&mut self, i: usize)
 Remove grid `i`, keeping `active` on the same grid where it can. Walls standing on it come loose on the next `Self::relink`.
 
 ### `PerspectiveConfig::index_of`
-[src/tools/perspective.rs:1262](../../../src/tools/perspective.rs#L1262)
+[src/tools/perspective.rs:1263](../../../src/tools/perspective.rs#L1263)
 
 ```rust
 pub fn index_of(&self, id: u32) -> Option<usize>
@@ -1165,7 +1165,7 @@ pub fn index_of(&self, id: u32) -> Option<usize>
 The index of the grid with id `id`.
 
 ### `PerspectiveConfig::next_id`
-[src/tools/perspective.rs:1266](../../../src/tools/perspective.rs#L1266)
+[src/tools/perspective.rs:1267](../../../src/tools/perspective.rs#L1267)
 
 ```rust
 fn next_id(&self) -> u32
@@ -1174,7 +1174,7 @@ fn next_id(&self) -> u32
 The next unused grid id.
 
 ### `PerspectiveConfig::ensure_ids`
-[src/tools/perspective.rs:1272](../../../src/tools/perspective.rs#L1272)
+[src/tools/perspective.rs:1273](../../../src/tools/perspective.rs#L1273)
 
 ```rust
 pub fn ensure_ids(&mut self)
@@ -1183,7 +1183,7 @@ pub fn ensure_ids(&mut self)
 Give every grid an id, and make them unique — grids from before ids all read 0.
 
 ### `PerspectiveConfig::push`
-[src/tools/perspective.rs:1284](../../../src/tools/perspective.rs#L1284)
+[src/tools/perspective.rs:1285](../../../src/tools/perspective.rs#L1285)
 
 ```rust
 pub fn push(&mut self, mut g: PerspectiveGrid) -> usize
@@ -1192,7 +1192,7 @@ pub fn push(&mut self, mut g: PerspectiveGrid) -> usize
 Add `g` with a fresh id and make it the active grid. Returns its index.
 
 ### `PerspectiveConfig::add_wall`
-[src/tools/perspective.rs:1294](../../../src/tools/perspective.rs#L1294)
+[src/tools/perspective.rs:1295](../../../src/tools/perspective.rs#L1295)
 
 ```rust
 pub fn add_wall(&mut self, i: usize, edge: u8) -> Option<usize>
@@ -1201,7 +1201,7 @@ pub fn add_wall(&mut self, i: usize, edge: u8) -> Option<usize>
 Stand a wall on edge `edge` of grid `i`, which must be a perspective grid. It takes the edge's divisions across, so its lines meet the floor's, and becomes the active grid.
 
 ### `PerspectiveConfig::relink`
-[src/tools/perspective.rs:1325](../../../src/tools/perspective.rs#L1325)
+[src/tools/perspective.rs:1326](../../../src/tools/perspective.rs#L1326)
 
 ```rust
 pub fn relink(&mut self)
@@ -1212,7 +1212,7 @@ Rebuild every wall from its parent as the parent is now. A wall whose parent is 
 ## Free functions
 
 ### `edge_ends`
-[src/tools/perspective.rs:1357](../../../src/tools/perspective.rs#L1357)
+[src/tools/perspective.rs:1358](../../../src/tools/perspective.rs#L1358)
 
 ```rust
 fn edge_ends(c: &[P; 4], e: u8) -> (P, P)
@@ -1221,7 +1221,7 @@ fn edge_ends(c: &[P; 4], e: u8) -> (P, P)
 The two ends of edge `e`, in the order the wall on it runs: its BL, then its BR.
 
 ### `edge_vp`
-[src/tools/perspective.rs:1367](../../../src/tools/perspective.rs#L1367)
+[src/tools/perspective.rs:1368](../../../src/tools/perspective.rs#L1368)
 
 ```rust
 fn edge_vp(plane: &Plane, e: u8) -> Vp
@@ -1230,7 +1230,7 @@ fn edge_vp(plane: &Plane, e: u8) -> Vp
 Where the lines along edge `e` run.
 
 ### `floor_up`
-[src/tools/perspective.rs:1377](../../../src/tools/perspective.rs#L1377)
+[src/tools/perspective.rs:1378](../../../src/tools/perspective.rs#L1378)
 
 ```rust
 fn floor_up(plane: &Plane, o: P) -> Option<P>
@@ -1239,7 +1239,7 @@ fn floor_up(plane: &Plane, o: P) -> Option<P>
 "Up" off a floor, in `Space::unit`: square to its horizon and toward it, or — horizon at infinity — square to the rows and up the screen.
 
 ### `wall_vertical`
-[src/tools/perspective.rs:1395](../../../src/tools/perspective.rs#L1395)
+[src/tools/perspective.rs:1396](../../../src/tools/perspective.rs#L1396)
 
 ```rust
 fn wall_vertical(parent: &PerspectiveGrid) -> Option<(Vp, bool)>
@@ -1248,7 +1248,7 @@ fn wall_vertical(parent: &PerspectiveGrid) -> Option<(Vp, bool)>
 What a wall on `parent` stands up toward, in `Space::unit`: the first extra vanishing point off the horizon, with whether it is above the floor (verticals rise to it) or below (they rise away from it, as from a bird's eye); or, with none, straight up — parallel verticals.
 
 ### `lift`
-[src/tools/perspective.rs:1413](../../../src/tools/perspective.rs#L1413)
+[src/tools/perspective.rs:1414](../../../src/tools/perspective.rs#L1414)
 
 ```rust
 fn lift(p: P, hz: Line, v: Vp, k: f32) -> Option<P>
@@ -1257,7 +1257,7 @@ fn lift(p: P, hz: Line, v: Vp, k: f32) -> Option<P>
 Floor point `p` carried along its vertical, through `v`, to the plane `k` times as far above eye level as the floor is below it: the homology about the horizon `hz` whose cross-ratio is −k. With parallel verticals that is a mirror across the horizon, stretched `k` times. `None` where the plane would pass behind the viewer.
 
 ### `rise`
-[src/tools/perspective.rs:1433](../../../src/tools/perspective.rs#L1433)
+[src/tools/perspective.rs:1434](../../../src/tools/perspective.rs#L1434)
 
 ```rust
 fn rise(a: P, v: Vp, toward: bool, height: f32, edge_len: f32) -> P
@@ -1266,7 +1266,7 @@ fn rise(a: P, v: Vp, toward: bool, height: f32, edge_len: f32) -> P
 The top of the vertical from `a`, `height` up (see `WallLink::height`).
 
 ### `height_of`
-[src/tools/perspective.rs:1444](../../../src/tools/perspective.rs#L1444)
+[src/tools/perspective.rs:1445](../../../src/tools/perspective.rs#L1445)
 
 ```rust
 fn height_of(a: P, top: P, v: Vp, toward: bool, edge_len: f32) -> f32
@@ -1275,7 +1275,7 @@ fn height_of(a: P, top: P, v: Vp, toward: bool, edge_len: f32) -> f32
 The height a vertical from `a` reaching up to `top` stands for.
 
 ### `wall_corners`
-[src/tools/perspective.rs:1460](../../../src/tools/perspective.rs#L1460)
+[src/tools/perspective.rs:1461](../../../src/tools/perspective.rs#L1461)
 
 ```rust
 pub fn wall_corners(parent: &PerspectiveGrid, edge: u8, height: f32) -> Option<[P; 4]>
@@ -1284,7 +1284,7 @@ pub fn wall_corners(parent: &PerspectiveGrid, edge: u8, height: f32) -> Option<[
 A wall's corners (TL, TR, BR, BL, frame-relative) standing on edge `edge` of `parent`: verticals up from both ends toward the vertical vanishing point, and a top edge running to the same point as the base, so it is level in the scene.
 
 ### `default_wall_height`
-[src/tools/perspective.rs:1474](../../../src/tools/perspective.rs#L1474)
+[src/tools/perspective.rs:1475](../../../src/tools/perspective.rs#L1475)
 
 ```rust
 fn default_wall_height(parent: &PerspectiveGrid, edge: u8) -> Option<f32>
@@ -1293,7 +1293,7 @@ fn default_wall_height(parent: &PerspectiveGrid, edge: u8) -> Option<f32>
 A new wall's height: about six tenths of its edge's length.
 
 ### `wall_height_at`
-[src/tools/perspective.rs:1495](../../../src/tools/perspective.rs#L1495)
+[src/tools/perspective.rs:1496](../../../src/tools/perspective.rs#L1496)
 
 ```rust
 pub fn wall_height_at(parent: &PerspectiveGrid, edge: u8, corner: u8, p: P) -> Option<f32>
@@ -1304,7 +1304,7 @@ The height a wall on `edge` of `parent` takes when its top corner `corner` (0 TL
 ## `impl Plane`
 
 ### `Plane::new`
-[src/tools/perspective.rs:1528](../../../src/tools/perspective.rs#L1528)
+[src/tools/perspective.rs:1529](../../../src/tools/perspective.rs#L1529)
 
 ```rust
 pub fn new(corners: [P; 4]) -> Option<Self>
@@ -1314,7 +1314,7 @@ Builds the plane data (homography, both vanishing points, a reference corner and
 `None` for degenerate corners.
 
 ### `Plane::grid_lines`
-[src/tools/perspective.rs:1546](../../../src/tools/perspective.rs#L1546)
+[src/tools/perspective.rs:1547](../../../src/tools/perspective.rs#L1547)
 
 ```rust
 pub fn grid_lines(&self, rows: u32, cols: u32) -> Vec<(P, P, Vp, u32)>
@@ -1323,7 +1323,7 @@ pub fn grid_lines(&self, rows: u32, cols: u32) -> Vec<(P, P, Vp, u32)>
 Row and column segments across the quad, borders included. Each is tagged with the vanishing point its line runs to, and its index from the quad's first edge — for picking out the major lines.
 
 ### `Plane::family_vp`
-[src/tools/perspective.rs:1561](../../../src/tools/perspective.rs#L1561)
+[src/tools/perspective.rs:1562](../../../src/tools/perspective.rs#L1562)
 
 ```rust
 pub fn family_vp(&self, f: Family) -> Vp
@@ -1332,7 +1332,7 @@ pub fn family_vp(&self, f: Family) -> Vp
 Where a family's lines converge.
 
 ### `Plane::family_line`
-[src/tools/perspective.rs:1570](../../../src/tools/perspective.rs#L1570)
+[src/tools/perspective.rs:1571](../../../src/tools/perspective.rs#L1571)
 
 ```rust
 pub fn family_line(&self, f: Family, k: f32) -> Option<Shown>
@@ -1341,7 +1341,7 @@ pub fn family_line(&self, f: Family, k: f32) -> Option<Shown>
 Line `k` of family `f` across the whole plane, as much of it as is in front of the viewer: all of it when the family stays parallel, else the ray from its vanishing point out through the plane. `None` when the line is wholly behind the viewer.
 
 ### `Plane::quad_family`
-[src/tools/perspective.rs:1608](../../../src/tools/perspective.rs#L1608)
+[src/tools/perspective.rs:1609](../../../src/tools/perspective.rs#L1609)
 
 ```rust
 pub fn quad_family(&self, f: Family) -> Vec<(i32, P, P)>
@@ -1350,7 +1350,7 @@ pub fn quad_family(&self, f: Family) -> Vec<(i32, P, P)>
 The lines of family `f` inside the quad only, as document segments with their index `k`.
 
 ### `Plane::horizon`
-[src/tools/perspective.rs:1636](../../../src/tools/perspective.rs#L1636)
+[src/tools/perspective.rs:1637](../../../src/tools/perspective.rs#L1637)
 
 ```rust
 pub fn horizon(&self) -> Option<Line>
@@ -1361,7 +1361,7 @@ The plane's vanishing line. `None` when both families stay parallel — a plane 
 Its point is the one nearest the grid, not a vanishing point: a nearly parallel pair of edges puts its vanishing point hundreds of grid-widths away, and once the view zooms in that is far enough out for `f32` screen coordinates to lose the line's angle.
 
 ### `Plane::snap_dirs`
-[src/tools/perspective.rs:1652](../../../src/tools/perspective.rs#L1652)
+[src/tools/perspective.rs:1653](../../../src/tools/perspective.rs#L1653)
 
 ```rust
 pub fn snap_dirs(&self, at: P, vertical: bool) -> Vec<P>
@@ -1370,7 +1370,7 @@ pub fn snap_dirs(&self, at: P, vertical: bool) -> Vec<P>
 Candidate snap directions at `at`: toward each vanishing point, plus, with `vertical`, the vertical — perpendicular to the horizon, or to the rows when the horizon is at infinity.
 
 ### `Plane::vp_point`
-[src/tools/perspective.rs:1669](../../../src/tools/perspective.rs#L1669)
+[src/tools/perspective.rs:1670](../../../src/tools/perspective.rs#L1670)
 
 ```rust
 pub fn vp_point(&self, which: u8) -> Option<P>
@@ -1381,7 +1381,7 @@ Vanishing point 0 (rows) or 1 (columns), when finite.
 ## Free functions
 
 ### `is_convex`
-[src/tools/perspective.rs:1679](../../../src/tools/perspective.rs#L1679)
+[src/tools/perspective.rs:1680](../../../src/tools/perspective.rs#L1680)
 
 ```rust
 pub fn is_convex(c: &[P; 4]) -> bool
@@ -1390,7 +1390,7 @@ pub fn is_convex(c: &[P; 4]) -> bool
 Whether the quad is strictly convex, in either winding. A corner drag that would fold it into a bow-tie or a dart is refused.
 
 ### `centroid`
-[src/tools/perspective.rs:1698](../../../src/tools/perspective.rs#L1698)
+[src/tools/perspective.rs:1699](../../../src/tools/perspective.rs#L1699)
 
 ```rust
 pub fn centroid(c: &[P; 4]) -> P
@@ -1399,7 +1399,7 @@ pub fn centroid(c: &[P; 4]) -> P
 The average of the four corners.
 
 ### `rotate`
-[src/tools/perspective.rs:1706](../../../src/tools/perspective.rs#L1706)
+[src/tools/perspective.rs:1707](../../../src/tools/perspective.rs#L1707)
 
 ```rust
 pub fn rotate(c: &[P; 4], angle: f32) -> [P; 4]
@@ -1408,7 +1408,7 @@ pub fn rotate(c: &[P; 4], angle: f32) -> [P; 4]
 Rotate the corners about their centroid.
 
 ### `rotate_about`
-[src/tools/perspective.rs:1711](../../../src/tools/perspective.rs#L1711)
+[src/tools/perspective.rs:1712](../../../src/tools/perspective.rs#L1712)
 
 ```rust
 fn rotate_about(o: P, p: P, angle: f32) -> P
@@ -1417,7 +1417,7 @@ fn rotate_about(o: P, p: P, angle: f32) -> P
 Rotates `p` by `angle` about `o`.
 
 ### `carry`
-[src/tools/perspective.rs:1720](../../../src/tools/perspective.rs#L1720)
+[src/tools/perspective.rs:1721](../../../src/tools/perspective.rs#L1721)
 
 ```rust
 pub fn carry(from: &[P; 4], to: &[P; 4], p: P) -> P
@@ -1426,7 +1426,7 @@ pub fn carry(from: &[P; 4], to: &[P; 4], p: P) -> P
 `p` carried along by the move, turn or scale that took corners `from` to `to` — the similarity fixed by the first two corners. For a grid moved or rotated whole, which is when its extra vanishing points come along.
 
 ### `place_extra`
-[src/tools/perspective.rs:1738](../../../src/tools/perspective.rs#L1738)
+[src/tools/perspective.rs:1739](../../../src/tools/perspective.rs#L1739)
 
 ```rust
 pub fn place_extra(
@@ -1441,7 +1441,7 @@ pub fn place_extra(
 Where an extra vanishing point dragged to document point `to` lands, and whether it keeps to the horizon. One on the horizon slides along it until pulled more than `detach` off it, and is then free; a free one sticks back on once within `attach`. Without a horizon it goes where it is put.
 
 ### `inside`
-[src/tools/perspective.rs:1758](../../../src/tools/perspective.rs#L1758)
+[src/tools/perspective.rs:1759](../../../src/tools/perspective.rs#L1759)
 
 ```rust
 pub(crate) fn inside(c: &[P; 4], p: P) -> bool
@@ -1450,7 +1450,7 @@ pub(crate) fn inside(c: &[P; 4], p: P) -> bool
 Whether `p` is inside the quad.
 
 ### `tilt_knobs`
-[src/tools/perspective.rs:1779](../../../src/tools/perspective.rs#L1779)
+[src/tools/perspective.rs:1780](../../../src/tools/perspective.rs#L1780)
 
 ```rust
 pub fn tilt_knobs(hz: Line, tol: f32) -> [P; 2]
@@ -1459,7 +1459,7 @@ pub fn tilt_knobs(hz: Line, tol: f32) -> [P; 2]
 The two tilt knobs on horizon `hz`, for a handle radius of `tol`.
 
 ### `grab_at`
-[src/tools/perspective.rs:1789](../../../src/tools/perspective.rs#L1789)
+[src/tools/perspective.rs:1790](../../../src/tools/perspective.rs#L1790)
 
 ```rust
 pub fn grab_at(c: &[P; 4], extra: &[P], p: P, tol: f32, eye_level: bool) -> Option<GridGrab>
@@ -1468,7 +1468,7 @@ pub fn grab_at(c: &[P; 4], extra: &[P], p: P, tol: f32, eye_level: bool) -> Opti
 What a press at `p` grabs on a grid with corners `c` and extra vanishing points at `extra`, with `tol` the handle radius in document units. Corners win, then the vanishing points, then — with `eye_level`, when the grid shows its horizon — the tilt knobs and the horizon line, then a ring just outside the corners rotates, then anywhere inside moves.
 
 ### `dragged`
-[src/tools/perspective.rs:1833](../../../src/tools/perspective.rs#L1833)
+[src/tools/perspective.rs:1834](../../../src/tools/perspective.rs#L1834)
 
 ```rust
 pub fn dragged(
@@ -1484,7 +1484,7 @@ pub fn dragged(
 The corners after dragging `grab` from `start` to `now`, solved against the corners at press time rather than accumulated. `snap` rounds a rotation to 15° steps, and a tilt to a horizon a whole 15° off level. A `rigid` grid (flat, isometric) keeps its shape: a corner drag turns and scales it about its centre instead. A drag that would break convexity returns `None`.
 
 ### `intersect`
-[src/tools/perspective.rs:1902](../../../src/tools/perspective.rs#L1902)
+[src/tools/perspective.rs:1903](../../../src/tools/perspective.rs#L1903)
 
 ```rust
 pub(crate) fn intersect(p: P, d: P, q: P, e: P) -> Option<P>
@@ -1493,7 +1493,7 @@ pub(crate) fn intersect(p: P, d: P, q: P, e: P) -> Option<P>
 Where `p + s·d` meets `q + r·e`, or `None` for parallel lines.
 
 ### `move_vp`
-[src/tools/perspective.rs:1919](../../../src/tools/perspective.rs#L1919)
+[src/tools/perspective.rs:1920](../../../src/tools/perspective.rs#L1920)
 
 ```rust
 pub fn move_vp(c: &[P; 4], which: u8, v: P) -> Option<[P; 4]>
@@ -1504,7 +1504,7 @@ The corners re-aimed so vanishing point `which` (0 rows, 1 columns) sits at `v`,
 The two edges that run to it swing to meet at `v`. Of the two edges across them, the one farther from the vanishing point — the near edge of the plane — stays put. The far edge keeps its fraction of the way toward the vanishing point and keeps running to the *other* vanishing point, so dragging one never disturbs the other. `None` if that would fold the quad.
 
 ### `near_corner`
-[src/tools/perspective.rs:1957](../../../src/tools/perspective.rs#L1957)
+[src/tools/perspective.rs:1958](../../../src/tools/perspective.rs#L1958)
 
 ```rust
 fn near_corner(c: &[P; 4], hz: Line) -> usize
@@ -1513,7 +1513,7 @@ fn near_corner(c: &[P; 4], hz: Line) -> usize
 The corner nearest the viewer: farthest from the horizon.
 
 ### `re_aim`
-[src/tools/perspective.rs:1967](../../../src/tools/perspective.rs#L1967)
+[src/tools/perspective.rs:1968](../../../src/tools/perspective.rs#L1968)
 
 ```rust
 pub fn re_aim(c: &[P; 4], rows: Vp, cols: Vp) -> Option<[P; 4]>
@@ -1522,7 +1522,7 @@ pub fn re_aim(c: &[P; 4], rows: Vp, cols: Vp) -> Option<[P; 4]>
 The corners re-aimed so the rows run to `rows` and the columns to `cols`. The corner nearest the viewer stays put; its two edges swing to the new vanishing points keeping their share of the way there (or their length, when either end is at infinity), and the far corner closes the quad. `None` without a horizon, or if the quad would fold.
 
 ### `raise_horizon`
-[src/tools/perspective.rs:2007](../../../src/tools/perspective.rs#L2007)
+[src/tools/perspective.rs:2008](../../../src/tools/perspective.rs#L2008)
 
 ```rust
 pub fn raise_horizon(c: &[P; 4], by: f32) -> Option<[P; 4]>
@@ -1531,7 +1531,7 @@ pub fn raise_horizon(c: &[P; 4], by: f32) -> Option<[P; 4]>
 The corners re-aimed for an eye level moved `by` square to the horizon — along its left normal, the way `cross(d, ·)` measures.
 
 ### `tilt_horizon`
-[src/tools/perspective.rs:2019](../../../src/tools/perspective.rs#L2019)
+[src/tools/perspective.rs:2020](../../../src/tools/perspective.rs#L2020)
 
 ```rust
 pub fn tilt_horizon(c: &[P; 4], pivot: P, angle: f32) -> Option<[P; 4]>
@@ -1540,7 +1540,7 @@ pub fn tilt_horizon(c: &[P; 4], pivot: P, angle: f32) -> Option<[P; 4]>
 The corners re-aimed for a horizon turned `angle` about `pivot`.
 
 ### `tile_family`
-[src/tools/perspective.rs:2049](../../../src/tools/perspective.rs#L2049)
+[src/tools/perspective.rs:2050](../../../src/tools/perspective.rs#L2050)
 
 ```rust
 pub fn tile_family(
@@ -1558,7 +1558,7 @@ Screen segments of family `f`'s lines across the whole plane, clipped to the scr
 On a parallelogram every line is parallel and evenly spaced on screen, so the lines that cross the rect are found directly; packed closer than `min_gap` screen px, only every 2nd, 4th... is kept. On a receding plane the lines are walked out from the quad's first, both ways, and a way stops once they crowd closer than `min_gap` (they are running into the horizon), pass behind the viewer, or reach `MAX_TILES`.
 
 ### `vp_rays`
-[src/tools/perspective.rs:2148](../../../src/tools/perspective.rs#L2148)
+[src/tools/perspective.rs:2149](../../../src/tools/perspective.rs#L2149)
 
 ```rust
 pub fn vp_rays(c: &[P; 4], v: P, n: u32) -> Vec<(P, P)>
@@ -1567,7 +1567,7 @@ pub fn vp_rays(c: &[P; 4], v: P, n: u32) -> Vec<(P, P)>
 Guide rays from vanishing point `v` fanned across a grid with corners `c`, as segments starting at `v`: `n + 1` of them, spread evenly in angle between the two outermost corners as seen from `v`, each running a little past the farthest corner. All the way round, `2n` of them, when `v` sits inside the grid.
 
 ### `fan`
-[src/tools/perspective.rs:2184](../../../src/tools/perspective.rs#L2184)
+[src/tools/perspective.rs:2185](../../../src/tools/perspective.rs#L2185)
 
 ```rust
 pub fn fan(v: P, base: P, n: u32, lo: P, hi: P) -> Vec<(u32, P, P)>
@@ -1576,7 +1576,7 @@ pub fn fan(v: P, base: P, n: u32, lo: P, hi: P) -> Vec<(u32, P, P)>
 Rays fanned evenly all the way round `v`, `n` of them, the first along `base`: each with its index, as the part of it inside the rect `lo..hi` — from `v`, or from where it comes in, out to the rect's edge. For a fan over the whole canvas, worked in screen space.
 
 ### `fade_pieces`
-[src/tools/perspective.rs:2211](../../../src/tools/perspective.rs#L2211)
+[src/tools/perspective.rs:2212](../../../src/tools/perspective.rs#L2212)
 
 ```rust
 pub fn fade_pieces(ra: f32, rb: f32, n: u32) -> Vec<(f32, f32, f32)>
@@ -1585,7 +1585,7 @@ pub fn fade_pieces(ra: f32, rb: f32, n: u32) -> Vec<(f32, f32, f32)>
 A ray of an `n`-ray fan, running from `ra` to `rb` pixels out of its vanishing point, cut into pieces `(from, to, strength)`: nothing where the rays are closer together than `FADE_FROM_GAP`, rising in steps to full strength where they are `FADE_TO_GAP` apart.
 
 ### `pick_dir`
-[src/tools/perspective.rs:2232](../../../src/tools/perspective.rs#L2232)
+[src/tools/perspective.rs:2234](../../../src/tools/perspective.rs#L2234)
 
 ```rust
 pub fn pick_dir(dirs: &[P], motion: P) -> Option<P>
@@ -1594,7 +1594,7 @@ pub fn pick_dir(dirs: &[P], motion: P) -> Option<P>
 Of `dirs`, the one most nearly parallel to `motion` (either sense).
 
 ### `project`
-[src/tools/perspective.rs:2240](../../../src/tools/perspective.rs#L2240)
+[src/tools/perspective.rs:2242](../../../src/tools/perspective.rs#L2242)
 
 ```rust
 pub fn project(origin: P, dir: P, p: P) -> P
@@ -1603,7 +1603,7 @@ pub fn project(origin: P, dir: P, p: P) -> P
 `p` projected onto the line through `origin` along unit `dir`.
 
 ### `clip_line`
-[src/tools/perspective.rs:2247](../../../src/tools/perspective.rs#L2247)
+[src/tools/perspective.rs:2249](../../../src/tools/perspective.rs#L2249)
 
 ```rust
 pub fn clip_line(a: P, b: P, lo: P, hi: P) -> Option<(f32, f32)>
@@ -1619,73 +1619,73 @@ Run with `cargo test tools::perspective::tests` · 60 tests
 
 | Test | What it checks |
 |---|---|
-| [`presets_put_their_points_where_they_say`](../../../src/tools/perspective.rs#L2278) | Presets put their points where they say. |
-| [`the_homography_hits_the_corners`](../../../src/tools/perspective.rs#L2302) | The homography hits the corners. |
-| [`unmap_inverts_map`](../../../src/tools/perspective.rs#L2319) | Unmap inverts map. |
-| [`nothing_past_the_horizon_is_on_the_plane`](../../../src/tools/perspective.rs#L2333) | Nothing past the horizon is on the plane. |
-| [`collinear_corners_have_no_homography`](../../../src/tools/perspective.rs#L2346) | Collinear corners have no homography. |
-| [`a_rectangle_has_both_vanishing_points_at_infinity`](../../../src/tools/perspective.rs#L2352) | A rectangle has both vanishing points at infinity. |
-| [`a_trapezoid_is_one_point_perspective`](../../../src/tools/perspective.rs#L2360) | A trapezoid is one point perspective. |
-| [`a_general_quad_is_two_point_and_its_horizon_joins_them`](../../../src/tools/perspective.rs#L2375) | A general quad is two point and its horizon joins them. |
-| [`a_far_vanishing_point_still_anchors_the_horizon_near_the_grid`](../../../src/tools/perspective.rs#L2395) | A far vanishing point still anchors the horizon near the grid. |
-| [`dragging_a_vanishing_point_re_aims_the_grid`](../../../src/tools/perspective.rs#L2405) | Dragging a vanishing point re aims the grid. |
-| [`dragging_one_vanishing_point_keeps_the_other`](../../../src/tools/perspective.rs#L2418) | Dragging one vanishing point keeps the other. |
-| [`a_vanishing_point_is_grabbable_and_drags`](../../../src/tools/perspective.rs#L2432) | A vanishing point is grabbable and drags. |
-| [`grid_lines_include_the_borders`](../../../src/tools/perspective.rs#L2441) | Grid lines include the borders. |
-| [`convexity_rejects_a_bow_tie`](../../../src/tools/perspective.rs#L2450) | Convexity rejects a bow tie. |
-| [`rotation_keeps_the_centroid_and_edges`](../../../src/tools/perspective.rs#L2460) | Rotation keeps the centroid and edges. |
-| [`grab_priority_is_corner_then_ring_then_inside`](../../../src/tools/perspective.rs#L2471) | Grab priority is corner then ring then inside. |
-| [`grabbing_follows_a_rotation`](../../../src/tools/perspective.rs#L2483) | Grabbing follows a rotation. |
-| [`corner_drags_move_one_corner_and_refuse_to_fold`](../../../src/tools/perspective.rs#L2495) | Corner drags move one corner and refuse to fold. |
-| [`rotate_drags_snap_to_fifteen_degrees`](../../../src/tools/perspective.rs#L2506) | Rotate drags snap to fifteen degrees. |
-| [`snapping_picks_the_nearest_family_and_projects_onto_it`](../../../src/tools/perspective.rs#L2521) | Snapping picks the nearest family and projects onto it. |
-| [`frame_relative_corners_follow_the_frame`](../../../src/tools/perspective.rs#L2539) | Frame relative corners follow the frame. |
-| [`a_fresh_grid_is_unscaled_and_level`](../../../src/tools/perspective.rs#L2561) | A fresh grid is unscaled and level. |
-| [`each_pose_edit_moves_only_its_own_value`](../../../src/tools/perspective.rs#L2569) | Each pose edit moves only its own value. |
-| [`clipping_an_infinite_line_to_a_rect`](../../../src/tools/perspective.rs#L2595) | Clipping an infinite line to a rect. |
-| [`removing_a_grid_keeps_the_selection_sane`](../../../src/tools/perspective.rs#L2602) | Removing a grid keeps the selection sane. |
-| [`an_extra_vp_lands_on_the_horizon_and_rides_it_when_the_grid_is_reaimed`](../../../src/tools/perspective.rs#L2633) | An extra vp lands on the horizon and rides it when the grid is reaimed. |
-| [`a_grid_takes_two_extra_vps_one_to_each_side`](../../../src/tools/perspective.rs#L2647) | A grid takes two extra vps one to each side. |
-| [`pulling_an_extra_vp_off_the_horizon_frees_it_and_near_it_sticks_again`](../../../src/tools/perspective.rs#L2663) | Pulling an extra vp off the horizon frees it and near it sticks again. |
-| [`moving_turning_and_scaling_a_grid_carries_its_extra_vps`](../../../src/tools/perspective.rs#L2677) | Moving turning and scaling a grid carries its extra vps. |
-| [`carry_follows_a_whole_grid_move_or_turn`](../../../src/tools/perspective.rs#L2699) | Carry follows a whole grid move or turn. |
-| [`extra_vps_are_grabbed_after_the_planes_own`](../../../src/tools/perspective.rs#L2708) | Extra vps are grabbed after the planes own. |
-| [`strokes_can_snap_toward_an_extra_vp`](../../../src/tools/perspective.rs#L2720) | Strokes can snap toward an extra vp. |
-| [`rays_fan_between_the_outermost_corners`](../../../src/tools/perspective.rs#L2735) | Rays fan between the outermost corners. |
-| [`a_quarter_turn_tweens_at_full_size`](../../../src/tools/perspective.rs#L2768) | A quarter turn tweens at full size. |
-| [`a_tween_turns_the_short_way_round`](../../../src/tools/perspective.rs#L2780) | A tween turns the short way round. |
-| [`scale_and_opacity_tween_like_the_camera`](../../../src/tools/perspective.rs#L2790) | Scale and opacity tween like the camera. |
-| [`keys_hold_outside_their_range_and_ease_within`](../../../src/tools/perspective.rs#L2802) | Keys hold outside their range and ease within. |
-| [`keys_carry_the_extra_vanishing_points`](../../../src/tools/perspective.rs#L2823) | Keys carry the extra vanishing points. |
-| [`a_space_maps_there_and_back`](../../../src/tools/perspective.rs#L2837) | A space maps there and back. |
-| [`raising_the_horizon_moves_both_vanishing_points_and_keeps_the_near_corner`](../../../src/tools/perspective.rs#L2863) | Raising the horizon moves both vanishing points and keeps the near corner. |
-| [`tilting_the_horizon_turns_it_about_its_pivot`](../../../src/tools/perspective.rs#L2883) | Tilting the horizon turns it about its pivot. |
-| [`the_horizon_and_its_knobs_are_grabbable_only_with_the_eye_level_on`](../../../src/tools/perspective.rs#L2900) | The horizon and its knobs are grabbable only with the eye level on. |
-| [`a_tilt_snaps_to_level`](../../../src/tools/perspective.rs#L2918) | A tilt snaps to level. |
-| [`a_rigid_corner_drag_turns_and_scales_but_keeps_the_square`](../../../src/tools/perspective.rs#L2932) | A rigid corner drag turns and scales but keeps the square. |
-| [`a_fresh_flat_or_isometric_grid_is_level_unscaled_and_centred`](../../../src/tools/perspective.rs#L2946) | A fresh flat or isometric grid is level unscaled and centred. |
-| [`an_isometric_grid_snaps_three_ways_and_the_third_is_vertical`](../../../src/tools/perspective.rs#L2957) | An isometric grid snaps three ways and the third is vertical. |
-| [`a_flat_grid_tiles_the_whole_rect_and_thins_when_dense`](../../../src/tools/perspective.rs#L2975) | A flat grid tiles the whole rect and thins when dense. |
-| [`an_infinite_floor_runs_to_the_horizon_and_stops_there`](../../../src/tools/perspective.rs#L2990) | An infinite floor runs to the horizon and stops there. |
-| [`a_line_behind_the_viewer_is_not_shown`](../../../src/tools/perspective.rs#L3009) | A line behind the viewer is not shown. |
-| [`cell_diagonals_cross_every_cell`](../../../src/tools/perspective.rs#L3019) | Cell diagonals cross every cell. |
-| [`a_wall_stands_on_its_edge_and_rises_to_the_vertical_point`](../../../src/tools/perspective.rs#L3032) | A wall stands on its edge and rises to the vertical point. |
-| [`a_wall_follows_its_floor_and_comes_loose_without_it`](../../../src/tools/perspective.rs#L3061) | A wall follows its floor and comes loose without it. |
-| [`dragging_a_walls_top_corner_sets_its_height`](../../../src/tools/perspective.rs#L3082) | Dragging a walls top corner sets its height. |
-| [`ids_are_handed_out_and_kept_unique`](../../../src/tools/perspective.rs#L3100) | Ids are handed out and kept unique. |
-| [`the_ceiling_mirrors_a_one_point_floor_across_the_horizon`](../../../src/tools/perspective.rs#L3126) | The ceiling mirrors a one point floor across the horizon. |
-| [`the_ceiling_rises_toward_a_vertical_vanishing_point`](../../../src/tools/perspective.rs#L3146) | The ceiling rises toward a vertical vanishing point. |
-| [`a_floor_seen_square_on_has_no_ceiling`](../../../src/tools/perspective.rs#L3173) | A floor seen square on has no ceiling. |
-| [`a_fan_goes_evenly_round_from_its_base`](../../../src/tools/perspective.rs#L3179) | A fan goes evenly round from its base. |
-| [`a_fan_ray_fades_in_where_the_rays_crowd`](../../../src/tools/perspective.rs#L3197) | A fan ray fades in where the rays crowd. |
-| [`grids_saved_before_fill_canvas_load_without_it`](../../../src/tools/perspective.rs#L3213) | Grids saved before fill canvas load without it. |
+| [`presets_put_their_points_where_they_say`](../../../src/tools/perspective.rs#L2280) | Presets put their points where they say. |
+| [`the_homography_hits_the_corners`](../../../src/tools/perspective.rs#L2304) | The homography hits the corners. |
+| [`unmap_inverts_map`](../../../src/tools/perspective.rs#L2321) | Unmap inverts map. |
+| [`nothing_past_the_horizon_is_on_the_plane`](../../../src/tools/perspective.rs#L2335) | Nothing past the horizon is on the plane. |
+| [`collinear_corners_have_no_homography`](../../../src/tools/perspective.rs#L2348) | Collinear corners have no homography. |
+| [`a_rectangle_has_both_vanishing_points_at_infinity`](../../../src/tools/perspective.rs#L2354) | A rectangle has both vanishing points at infinity. |
+| [`a_trapezoid_is_one_point_perspective`](../../../src/tools/perspective.rs#L2362) | A trapezoid is one point perspective. |
+| [`a_general_quad_is_two_point_and_its_horizon_joins_them`](../../../src/tools/perspective.rs#L2377) | A general quad is two point and its horizon joins them. |
+| [`a_far_vanishing_point_still_anchors_the_horizon_near_the_grid`](../../../src/tools/perspective.rs#L2397) | A far vanishing point still anchors the horizon near the grid. |
+| [`dragging_a_vanishing_point_re_aims_the_grid`](../../../src/tools/perspective.rs#L2407) | Dragging a vanishing point re aims the grid. |
+| [`dragging_one_vanishing_point_keeps_the_other`](../../../src/tools/perspective.rs#L2420) | Dragging one vanishing point keeps the other. |
+| [`a_vanishing_point_is_grabbable_and_drags`](../../../src/tools/perspective.rs#L2434) | A vanishing point is grabbable and drags. |
+| [`grid_lines_include_the_borders`](../../../src/tools/perspective.rs#L2443) | Grid lines include the borders. |
+| [`convexity_rejects_a_bow_tie`](../../../src/tools/perspective.rs#L2452) | Convexity rejects a bow tie. |
+| [`rotation_keeps_the_centroid_and_edges`](../../../src/tools/perspective.rs#L2462) | Rotation keeps the centroid and edges. |
+| [`grab_priority_is_corner_then_ring_then_inside`](../../../src/tools/perspective.rs#L2473) | Grab priority is corner then ring then inside. |
+| [`grabbing_follows_a_rotation`](../../../src/tools/perspective.rs#L2485) | Grabbing follows a rotation. |
+| [`corner_drags_move_one_corner_and_refuse_to_fold`](../../../src/tools/perspective.rs#L2497) | Corner drags move one corner and refuse to fold. |
+| [`rotate_drags_snap_to_fifteen_degrees`](../../../src/tools/perspective.rs#L2508) | Rotate drags snap to fifteen degrees. |
+| [`snapping_picks_the_nearest_family_and_projects_onto_it`](../../../src/tools/perspective.rs#L2523) | Snapping picks the nearest family and projects onto it. |
+| [`frame_relative_corners_follow_the_frame`](../../../src/tools/perspective.rs#L2541) | Frame relative corners follow the frame. |
+| [`a_fresh_grid_is_unscaled_and_level`](../../../src/tools/perspective.rs#L2563) | A fresh grid is unscaled and level. |
+| [`each_pose_edit_moves_only_its_own_value`](../../../src/tools/perspective.rs#L2571) | Each pose edit moves only its own value. |
+| [`clipping_an_infinite_line_to_a_rect`](../../../src/tools/perspective.rs#L2597) | Clipping an infinite line to a rect. |
+| [`removing_a_grid_keeps_the_selection_sane`](../../../src/tools/perspective.rs#L2604) | Removing a grid keeps the selection sane. |
+| [`an_extra_vp_lands_on_the_horizon_and_rides_it_when_the_grid_is_reaimed`](../../../src/tools/perspective.rs#L2635) | An extra vp lands on the horizon and rides it when the grid is reaimed. |
+| [`a_grid_takes_two_extra_vps_one_to_each_side`](../../../src/tools/perspective.rs#L2649) | A grid takes two extra vps one to each side. |
+| [`pulling_an_extra_vp_off_the_horizon_frees_it_and_near_it_sticks_again`](../../../src/tools/perspective.rs#L2665) | Pulling an extra vp off the horizon frees it and near it sticks again. |
+| [`moving_turning_and_scaling_a_grid_carries_its_extra_vps`](../../../src/tools/perspective.rs#L2679) | Moving turning and scaling a grid carries its extra vps. |
+| [`carry_follows_a_whole_grid_move_or_turn`](../../../src/tools/perspective.rs#L2701) | Carry follows a whole grid move or turn. |
+| [`extra_vps_are_grabbed_after_the_planes_own`](../../../src/tools/perspective.rs#L2710) | Extra vps are grabbed after the planes own. |
+| [`strokes_can_snap_toward_an_extra_vp`](../../../src/tools/perspective.rs#L2722) | Strokes can snap toward an extra vp. |
+| [`rays_fan_between_the_outermost_corners`](../../../src/tools/perspective.rs#L2737) | Rays fan between the outermost corners. |
+| [`a_quarter_turn_tweens_at_full_size`](../../../src/tools/perspective.rs#L2770) | A quarter turn tweens at full size. |
+| [`a_tween_turns_the_short_way_round`](../../../src/tools/perspective.rs#L2782) | A tween turns the short way round. |
+| [`scale_and_opacity_tween_like_the_camera`](../../../src/tools/perspective.rs#L2792) | Scale and opacity tween like the camera. |
+| [`keys_hold_outside_their_range_and_ease_within`](../../../src/tools/perspective.rs#L2804) | Keys hold outside their range and ease within. |
+| [`keys_carry_the_extra_vanishing_points`](../../../src/tools/perspective.rs#L2825) | Keys carry the extra vanishing points. |
+| [`a_space_maps_there_and_back`](../../../src/tools/perspective.rs#L2839) | A space maps there and back. |
+| [`raising_the_horizon_moves_both_vanishing_points_and_keeps_the_near_corner`](../../../src/tools/perspective.rs#L2865) | Raising the horizon moves both vanishing points and keeps the near corner. |
+| [`tilting_the_horizon_turns_it_about_its_pivot`](../../../src/tools/perspective.rs#L2885) | Tilting the horizon turns it about its pivot. |
+| [`the_horizon_and_its_knobs_are_grabbable_only_with_the_eye_level_on`](../../../src/tools/perspective.rs#L2902) | The horizon and its knobs are grabbable only with the eye level on. |
+| [`a_tilt_snaps_to_level`](../../../src/tools/perspective.rs#L2920) | A tilt snaps to level. |
+| [`a_rigid_corner_drag_turns_and_scales_but_keeps_the_square`](../../../src/tools/perspective.rs#L2934) | A rigid corner drag turns and scales but keeps the square. |
+| [`a_fresh_flat_or_isometric_grid_is_level_unscaled_and_centred`](../../../src/tools/perspective.rs#L2948) | A fresh flat or isometric grid is level unscaled and centred. |
+| [`an_isometric_grid_snaps_three_ways_and_the_third_is_vertical`](../../../src/tools/perspective.rs#L2959) | An isometric grid snaps three ways and the third is vertical. |
+| [`a_flat_grid_tiles_the_whole_rect_and_thins_when_dense`](../../../src/tools/perspective.rs#L2977) | A flat grid tiles the whole rect and thins when dense. |
+| [`an_infinite_floor_runs_to_the_horizon_and_stops_there`](../../../src/tools/perspective.rs#L2992) | An infinite floor runs to the horizon and stops there. |
+| [`a_line_behind_the_viewer_is_not_shown`](../../../src/tools/perspective.rs#L3011) | A line behind the viewer is not shown. |
+| [`cell_diagonals_cross_every_cell`](../../../src/tools/perspective.rs#L3021) | Cell diagonals cross every cell. |
+| [`a_wall_stands_on_its_edge_and_rises_to_the_vertical_point`](../../../src/tools/perspective.rs#L3034) | A wall stands on its edge and rises to the vertical point. |
+| [`a_wall_follows_its_floor_and_comes_loose_without_it`](../../../src/tools/perspective.rs#L3063) | A wall follows its floor and comes loose without it. |
+| [`dragging_a_walls_top_corner_sets_its_height`](../../../src/tools/perspective.rs#L3084) | Dragging a walls top corner sets its height. |
+| [`ids_are_handed_out_and_kept_unique`](../../../src/tools/perspective.rs#L3102) | Ids are handed out and kept unique. |
+| [`the_ceiling_mirrors_a_one_point_floor_across_the_horizon`](../../../src/tools/perspective.rs#L3128) | The ceiling mirrors a one point floor across the horizon. |
+| [`the_ceiling_rises_toward_a_vertical_vanishing_point`](../../../src/tools/perspective.rs#L3148) | The ceiling rises toward a vertical vanishing point. |
+| [`a_floor_seen_square_on_has_no_ceiling`](../../../src/tools/perspective.rs#L3175) | A floor seen square on has no ceiling. |
+| [`a_fan_goes_evenly_round_from_its_base`](../../../src/tools/perspective.rs#L3181) | A fan goes evenly round from its base. |
+| [`a_fan_ray_fades_in_where_the_rays_crowd`](../../../src/tools/perspective.rs#L3199) | A fan ray fades in where the rays crowd. |
+| [`grids_saved_before_fill_canvas_load_without_it`](../../../src/tools/perspective.rs#L3215) | Grids saved before fill canvas load without it. |
 
 **Test helpers** (used only by the tests above):
 
-- [`close`](../../../src/tools/perspective.rs#L2271) — Close.
-- [`grid`](../../../src/tools/perspective.rs#L2620) — Grid.
-- [`off_horizon`](../../../src/tools/perspective.rs#L2627) — How far `p` is off `g`'s horizon, in document units.
-- [`pose`](../../../src/tools/perspective.rs#L2759) — Pose.
-- [`room`](../../../src/tools/perspective.rs#L3117) — A one-point floor whose vanishing point is the middle of a 1000 px frame, its rows level, its near edge at y = 800.
+- [`close`](../../../src/tools/perspective.rs#L2273) — Close.
+- [`grid`](../../../src/tools/perspective.rs#L2622) — Grid.
+- [`off_horizon`](../../../src/tools/perspective.rs#L2629) — How far `p` is off `g`'s horizon, in document units.
+- [`pose`](../../../src/tools/perspective.rs#L2761) — Pose.
+- [`room`](../../../src/tools/perspective.rs#L3119) — A one-point floor whose vanishing point is the middle of a 1000 px frame, its rows level, its near edge at y = 800.
 
-**Test-only types and constants:** [`TRAP`](../../../src/tools/perspective.rs#L2275), [`QUAD`](../../../src/tools/perspective.rs#L2299), [`W`](../../../src/tools/perspective.rs#L2617), [`H`](../../../src/tools/perspective.rs#L2618), [`FLOOR2`](../../../src/tools/perspective.rs#L2860)
+**Test-only types and constants:** [`TRAP`](../../../src/tools/perspective.rs#L2277), [`QUAD`](../../../src/tools/perspective.rs#L2301), [`W`](../../../src/tools/perspective.rs#L2619), [`H`](../../../src/tools/perspective.rs#L2620), [`FLOOR2`](../../../src/tools/perspective.rs#L2862)

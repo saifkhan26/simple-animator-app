@@ -1,6 +1,6 @@
 # `src/platform.rs` — rounded corners and a border for the frameless window (Windows)
 
-> **Source:** [src/platform.rs](../../src/platform.rs) · **Module:** `crate::platform` · **Size:** 37 lines · Line links as of commit `18d4119`
+> **Source:** [src/platform.rs](../../src/platform.rs) · **Module:** `crate::platform` · **Size:** 37 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

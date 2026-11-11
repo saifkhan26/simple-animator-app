@@ -1,6 +1,6 @@
 # `src/tools/mod.rs` — the tools folder, tool list and brush settings
 
-> **Source:** [src/tools/mod.rs](../../../src/tools/mod.rs) · **Module:** `crate::tools` · **Size:** 604 lines · Line links as of commit `18d4119`
+> **Source:** [src/tools/mod.rs](../../../src/tools/mod.rs) · **Module:** `crate::tools` · **Size:** 604 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

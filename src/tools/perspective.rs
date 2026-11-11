@@ -908,6 +908,7 @@ impl PerspectiveGrid {
 
     /// Candidate snap directions at `at`: toward each of
     /// [`Self::snap_targets`].
+    #[cfg(test)]
     pub fn snap_dirs(&self, s: &Space, at: P, vertical: bool) -> Vec<P> {
         self.snap_targets(s, vertical)
             .into_iter()
@@ -2229,6 +2230,7 @@ pub fn fade_pieces(ra: f32, rb: f32, n: u32) -> Vec<(f32, f32, f32)> {
 }
 
 /// Of `dirs`, the one most nearly parallel to `motion` (either sense).
+#[cfg(test)]
 pub fn pick_dir(dirs: &[P], motion: P) -> Option<P> {
     let m = normalize(motion)?;
     dirs.iter()

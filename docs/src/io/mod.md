@@ -1,6 +1,6 @@
 # `src/io/mod.rs` — the list of file-format modules
 
-> **Source:** [src/io/mod.rs](../../../src/io/mod.rs) · **Module:** `crate::io` · **Size:** 22 lines · Line links as of commit `18d4119`
+> **Source:** [src/io/mod.rs](../../../src/io/mod.rs) · **Module:** `crate::io` · **Size:** 22 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

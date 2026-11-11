@@ -1,6 +1,6 @@
 # `src/app/autosave.rs` — autosave, crash recovery and the unsaved-changes prompt
 
-> **Source:** [src/app/autosave.rs](../../../src/app/autosave.rs) · **Module:** `crate::app::autosave` · **Size:** 741 lines · Line links as of commit `18d4119`
+> **Source:** [src/app/autosave.rs](../../../src/app/autosave.rs) · **Module:** `crate::app::autosave` · **Size:** 741 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

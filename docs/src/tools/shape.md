@@ -1,6 +1,6 @@
 # `src/tools/shape.rs` — the Shape tool's lines, rectangles and ellipses
 
-> **Source:** [src/tools/shape.rs](../../../src/tools/shape.rs) · **Module:** `crate::tools::shape` · **Size:** 348 lines · Line links as of commit `18d4119`
+> **Source:** [src/tools/shape.rs](../../../src/tools/shape.rs) · **Module:** `crate::tools::shape` · **Size:** 348 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

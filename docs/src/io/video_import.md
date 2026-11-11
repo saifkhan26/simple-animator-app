@@ -1,6 +1,6 @@
 # `src/io/video_import.rs` — importing frames from a video (ffmpeg)
 
-> **Source:** [src/io/video_import.rs](../../../src/io/video_import.rs) · **Module:** `crate::io::video_import` · **Size:** 241 lines · Line links as of commit `18d4119`
+> **Source:** [src/io/video_import.rs](../../../src/io/video_import.rs) · **Module:** `crate::io::video_import` · **Size:** 241 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

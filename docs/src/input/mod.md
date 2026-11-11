@@ -1,6 +1,6 @@
 # `src/input/mod.rs` — the input folder's table of contents
 
-> **Source:** [src/input/mod.rs](../../../src/input/mod.rs) · **Module:** `crate::input` · **Size:** 14 lines · Line links as of commit `18d4119`
+> **Source:** [src/input/mod.rs](../../../src/input/mod.rs) · **Module:** `crate::input` · **Size:** 14 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 

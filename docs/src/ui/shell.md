@@ -1,6 +1,6 @@
 # `src/ui/shell.rs` — the whole app window: panels, menus, canvas input and overlays
 
-> **Source:** [src/ui/shell.rs](../../../src/ui/shell.rs) · **Module:** `crate::ui::shell` · **Size:** 16273 lines · Line links as of commit `18d4119`
+> **Source:** [src/ui/shell.rs](../../../src/ui/shell.rs) · **Module:** `crate::ui::shell` · **Size:** 16273 lines · Line links as of commit `bdc0f67`
 
 ## What this file is for
 
