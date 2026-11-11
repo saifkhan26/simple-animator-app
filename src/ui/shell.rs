@@ -7821,6 +7821,8 @@ fn draw_guide(
     let handles = editing && active;
     let mut knobs: Vec<egui::Pos2> = Vec::new();
     let mut round_knob = None;
+    // A pan's curve-shape handle: a diamond, to tell it from the points.
+    let mut bend_knob = None;
     match g.kind {
         GridKind::Ruler => {
             let (a, b) = (to_screen(c[0]), to_screen(c[1]));
@@ -7916,7 +7918,124 @@ fn draw_guide(
             }
             knobs = c.iter().map(|&p| to_screen(p)).collect();
         }
-        GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye => {}
+        GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye => {
+            let Some(f) = guides::Frame::of(&c) else {
+                return;
+            };
+            let (dlo, dhi) = doc_bounds(xf, clip);
+            // How far `q` lies from the centre point along unit `v`, and the
+            // point `k` along `v` from `p`.
+            let along = |q: [f32; 2], v: [f32; 2]| (q[0] - f.o[0]) * v[0] + (q[1] - f.o[1]) * v[1];
+            let step = |p: [f32; 2], v: [f32; 2], k: f32| [p[0] + v[0] * k, p[1] + v[1] * k];
+            let poly = |curve: SnapCurve, s: Stroke| {
+                for run in curve.bend_points(dlo, dhi) {
+                    painter.add(egui::Shape::line(run.into_iter().map(to_screen).collect(), s));
+                }
+            };
+            // The horizon, right across: what turns the guide.
+            across(to_screen(f.o), to_screen(f.at(100.0, 0.0)), main);
+            if let Some(ax) = guides::pan_axis(g.kind, &f) {
+                let rows = g.rows.max(1) as i32;
+                let gap = ax.reach / rows as f32;
+                let wave = |shift: f32, amp: f32| SnapCurve::Wave {
+                    o: f.o,
+                    u: ax.u,
+                    n: ax.n,
+                    a: ax.a,
+                    shift,
+                    amp,
+                    bend: g.bend,
+                    span: ax.span,
+                };
+                // Out to where the canvas ends, at the box's spacing: the
+                // arches through the side points firm inside the box and
+                // faint past it, the depth curves through the centre point
+                // faint, inside it only.
+                let corners_vis = [dlo, [dhi[0], dlo[1]], dhi, [dlo[0], dhi[1]]];
+                let reach = corners_vis.iter().map(|&q| along(q, ax.n).abs()).fold(0.0f32, f32::max);
+                let on_screen = (to_screen(f.o) - to_screen(step(f.o, ax.n, gap))).length();
+                let k_max = if on_screen >= 3.0 { ((reach / gap).ceil() as i32).min(400) } else { rows };
+                for k in 1..=k_max {
+                    let amp = gap * k as f32;
+                    for sign in [-1.0, 1.0] {
+                        poly(wave(0.0, sign * amp), if k <= rows { thin } else { faint });
+                        if k <= rows {
+                            poly(wave(1.0, sign * amp), faint);
+                        }
+                    }
+                }
+                // Straight across the pan at each side point and the centre:
+                // the quarter turns. A 360° pan's box ends are where it
+                // loops, dashed.
+                let xs: Vec<f32> = corners_vis.iter().map(|&q| along(q, ax.u)).collect();
+                let (x0, x1) = (
+                    xs.iter().copied().fold(f32::INFINITY, f32::min) / ax.a,
+                    xs.iter().copied().fold(f32::NEG_INFINITY, f32::max) / ax.a,
+                );
+                let (j0, j1) = if ax.span.is_finite() {
+                    (-1, 1)
+                } else {
+                    ((x0.floor() as i64).max(-400), (x1.ceil() as i64).min(400))
+                };
+                for j in j0..=j1 {
+                    let p = step(f.o, ax.u, ax.a * j as f32);
+                    let (a, b) = (to_screen(p), to_screen(step(p, ax.straight, 100.0)));
+                    if !ax.span.is_finite() && j.rem_euclid(4) == 2 {
+                        if let Some((t0, t1)) = clip_line([a.x, a.y], [b.x, b.y], lo, hi) {
+                            painter.extend(egui::Shape::dashed_line(&[a + (b - a) * t0, a + (b - a) * t1], main, 8.0, 5.0));
+                        }
+                    } else if j != 0 || g.kind != GridKind::PanVertical {
+                        across(a, b, faint);
+                    }
+                }
+            } else {
+                // A fisheye: its rim, the 180° ellipse through all four side
+                // points; arcs each way inside it; the vertical through the
+                // centre; and depth lines straight out from it.
+                let rows = g.rows.max(1);
+                let arc = |across: bool, apex: f32| {
+                    if across {
+                        SnapCurve::Arc { o: f.o, u: f.u, n: f.n, a: f.w, b: f.h, apex }
+                    } else {
+                        SnapCurve::Arc { o: f.o, u: f.n, n: f.u, a: f.h, b: f.w, apex }
+                    }
+                };
+                let vs = to_screen(f.o);
+                let n = g.fan_rays.max(4);
+                for i in 0..n {
+                    let th = std::f32::consts::TAU * i as f32 / n as f32;
+                    let rim = to_screen(f.at(f.w * th.cos(), f.h * th.sin()));
+                    let u = (rim - vs).normalized();
+                    for (r0, r1, k) in fade_pieces(0.0, (rim - vs).length(), n) {
+                        painter.line_segment([vs + u * r0, vs + u * r1], Stroke::new(faint.width, faint.color.gamma_multiply(k)));
+                    }
+                }
+                for k in 1..rows {
+                    let apex = k as f32 / rows as f32;
+                    for sign in [-1.0, 1.0] {
+                        poly(arc(true, sign * apex), thin);
+                        poly(arc(false, sign * apex), thin);
+                    }
+                }
+                painter.line_segment([to_screen(f.at(0.0, -f.h)), to_screen(f.at(0.0, f.h))], thin);
+                for apex in [-1.0, 1.0] {
+                    poly(arc(true, apex), main);
+                }
+            }
+            let points: Vec<egui::Pos2> =
+                guides::side_points(g.kind, &c).iter().map(|&(p, _)| to_screen(p)).collect();
+            if handles {
+                closed(c.iter().map(|&p| to_screen(p)).collect(), faint);
+                knobs = points;
+                bend_knob = guides::bend_handle(g.kind, g.bend, &c).map(to_screen);
+            } else {
+                for p in points.into_iter().chain([to_screen(f.o)]).filter(|p| clip.contains(*p)) {
+                    painter.circle_filled(p, 3.5, color);
+                    painter.circle_stroke(p, 3.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
+                }
+            }
+            round_knob = Some(to_screen(f.o));
+        }
         GridKind::Perspective | GridKind::Flat | GridKind::Isometric => {}
     }
     if !handles {
@@ -7935,6 +8054,12 @@ fn draw_guide(
     if let Some(v) = round_knob.filter(|_| !g.locked) {
         painter.circle_filled(v, r * 1.3, Color32::WHITE);
         painter.circle_stroke(v, r * 1.3, Stroke::new(1.0, Color32::from_black_alpha(200)));
+        painter.circle_filled(v, 2.0, color);
+    }
+    if let Some(v) = bend_knob.filter(|_| !g.locked) {
+        let d = r * 1.4;
+        let diamond = vec![v + egui::vec2(0.0, -d), v + egui::vec2(d, 0.0), v + egui::vec2(0.0, d), v + egui::vec2(-d, 0.0)];
+        painter.add(egui::Shape::convex_polygon(diamond, Color32::WHITE, Stroke::new(1.0, Color32::from_black_alpha(200))));
         painter.circle_filled(v, 2.0, color);
     }
 }
@@ -10901,6 +11026,59 @@ mod perspective_tests {
             state.undo();
             let back = state.perspective.grids[0].doc_corners(&Space::flat(w, h));
             assert_eq!(back, before, "{kind:?} undoes");
+        }
+    }
+
+    #[test]
+    fn every_curved_guide_paints_and_moves_by_its_centre_point() {
+        use crate::tools::guides::Frame;
+        use crate::tools::perspective::{GridKind, PerspectiveGrid};
+        for kind in [GridKind::PanHorizontal, GridKind::PanVertical, GridKind::PanLoop, GridKind::Fisheye] {
+            let mut state = state();
+            state.perspective.grids = vec![PerspectiveGrid::fresh(kind)];
+            state.perspective.ensure_ids();
+            state.perspective.show = true;
+            let lines = |state: &AppState| {
+                grid_shapes(state)
+                    .iter()
+                    .filter(|s| matches!(s, egui::Shape::Path(p) if !p.closed && p.points.len() > 8))
+                    .count()
+            };
+            assert!(lines(&state) >= 6, "{kind:?} paints its curves");
+            // While edited: its handles, one of them a diamond for a pan's
+            // curve shape.
+            state.dispatch(Action::ToolPerspective);
+            let diamond = grid_shapes(&state)
+                .iter()
+                .any(|s| matches!(s, egui::Shape::Path(p) if p.closed && p.points.len() == 4 && p.fill == Color32::WHITE));
+            assert_eq!(diamond, kind != GridKind::Fisheye, "{kind:?}");
+            // Its centre point, dragged on the canvas, takes it along.
+            let ctx = egui::Context::default();
+            frame(&ctx, &mut state, vec![]);
+            let (w, h) = (state.project.width as f32, state.project.height as f32);
+            let before = state.perspective.grids[0].doc_corners(&Space::flat(w, h));
+            let o = Frame::of(&before).unwrap().o;
+            let xf = Xform::new(&state, SCREEN);
+            let from = xf.doc_to_screen(o[0], o[1]);
+            let to = from + vec2(40.0, -25.0);
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+            for i in 1..=4 {
+                let p = from + (to - from) * (i as f32 / 4.0);
+                frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+            }
+            frame(&ctx, &mut state, vec![button(to, false)]);
+            frame(&ctx, &mut state, vec![]);
+            let after = Frame::of(&state.perspective.grids[0].doc_corners(&Space::flat(w, h))).unwrap();
+            let moved = xf.screen_to_doc(to);
+            assert!((after.o[0] - moved.0).abs() < 0.5 && (after.o[1] - moved.1).abs() < 0.5, "{kind:?}");
+            state.undo();
+            assert_eq!(state.perspective.grids[0].doc_corners(&Space::flat(w, h)), before, "{kind:?} undoes");
         }
     }
 

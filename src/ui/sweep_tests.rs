@@ -847,7 +847,9 @@ fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage {
     image::RgbaImage::from_raw(w as u32, h as u32, bytes).expect("sized to fit")
 }
 
-/// A floor and one guide of every other kind, spread out so each shows.
+/// A floor and one guide of every other kind, spread out so each shows —
+/// the curved ones last, each a box round the middle, so they are drawn on
+/// their own.
 fn guide_set() -> Vec<crate::tools::perspective::PerspectiveGrid> {
     use crate::tools::perspective::{GridKind, PerspectiveGrid};
     let at = |kind, d: [f32; 2]| {
@@ -863,12 +865,20 @@ fn guide_set() -> Vec<crate::tools::perspective::PerspectiveGrid> {
     // Squashed into a floor-like quad: a circle in perspective.
     ring.corners[0][0] += 0.06;
     ring.corners[1][0] -= 0.06;
+    let mut tilt = PerspectiveGrid::fresh(GridKind::PanVertical);
+    tilt.bend = 0.6;
+    let mut round = PerspectiveGrid::fresh(GridKind::PanLoop);
+    round.bend = -0.4;
     vec![
         PerspectiveGrid::preset(crate::tools::perspective::Preset::TwoPoint),
         ruler,
         at(GridKind::Parallel, [-0.55, -0.3]),
         at(GridKind::Point, [0.0, -0.05]),
         ring,
+        PerspectiveGrid::fresh(GridKind::PanHorizontal),
+        tilt,
+        round,
+        PerspectiveGrid::fresh(GridKind::Fisheye),
     ]
 }
 
@@ -918,15 +928,26 @@ fn snapshots() {
     rig.state.perspective.ensure_ids();
     rig.state.perspective.grids[2].magnet = false;
     snapshot(&mut rig, 2.0).save(dir.join("guide_list.png")).unwrap();
+    let (straight, curved): (Vec<_>, Vec<_>) = guides.iter().cloned().partition(|g| !g.kind.is_curved());
     for tool in [ActiveTool::Perspective, ActiveTool::Pen(0)] {
+        let name = if tool == ActiveTool::Perspective { "edit" } else { "draw" };
         let mut rig = Rig::new(Win::Guides);
-        rig.state.perspective.grids = guides.clone();
+        rig.state.perspective.grids = straight.clone();
         rig.state.perspective.ensure_ids();
         rig.state.perspective.show = true;
         rig.state.perspective.active = 1;
         rig.state.set_tool(tool);
-        let name = if tool == ActiveTool::Perspective { "edit" } else { "draw" };
         snapshot_of(&mut rig, 1.0, SCREEN).save(dir.join(format!("guides_{name}.png"))).unwrap();
+        // Each curved guide alone: it covers the canvas.
+        for g in &curved {
+            let mut rig = Rig::new(Win::Guides);
+            rig.state.perspective.grids = vec![g.clone()];
+            rig.state.perspective.ensure_ids();
+            rig.state.perspective.show = true;
+            rig.state.set_tool(tool);
+            let kind = format!("{:?}", g.kind).to_lowercase();
+            snapshot_of(&mut rig, 1.0, SCREEN).save(dir.join(format!("guides_{kind}_{name}.png"))).unwrap();
+        }
     }
 
     // Brush settings with noise on, tall enough to see it.
