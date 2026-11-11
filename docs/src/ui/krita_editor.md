@@ -1,6 +1,6 @@
 # `src/ui/krita_editor.rs` — the Krita brush editor
 
-> **Source:** [src/ui/krita_editor.rs](../../../src/ui/krita_editor.rs) · **Module:** `crate::ui::krita_editor` · **Size:** 489 lines · Line links as of commit `c224d51`
+> **Source:** [src/ui/krita_editor.rs](../../../src/ui/krita_editor.rs) · **Module:** `crate::ui::krita_editor` · **Size:** 489 lines · Line links as of commit `18d4119`
 
 ## What this file is for
 

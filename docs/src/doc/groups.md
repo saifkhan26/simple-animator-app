@@ -1,6 +1,6 @@
 # `src/doc/groups.rs` — layer groups in the flat layer list
 
-> **Source:** [src/doc/groups.rs](../../../src/doc/groups.rs) · **Module:** `crate::doc::groups` · **Size:** 647 lines · Line links as of commit `c224d51`
+> **Source:** [src/doc/groups.rs](../../../src/doc/groups.rs) · **Module:** `crate::doc::groups` · **Size:** 647 lines · Line links as of commit `18d4119`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/io/fit.rs` — fit an image inside the canvas, centred, without stretching
 
-> **Source:** [src/io/fit.rs](../../../src/io/fit.rs) · **Module:** `crate::io::fit` · **Size:** 40 lines · Line links as of commit `c224d51`
+> **Source:** [src/io/fit.rs](../../../src/io/fit.rs) · **Module:** `crate::io::fit` · **Size:** 40 lines · Line links as of commit `18d4119`
 
 ## What this file is for
 

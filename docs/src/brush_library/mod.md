@@ -1,6 +1,6 @@
 # `src/brush_library/mod.rs` — the brush library (every preset the picker offers)
 
-> **Source:** [src/brush_library/mod.rs](../../../src/brush_library/mod.rs) · **Module:** `crate::brush_library` · **Size:** 617 lines · Line links as of commit `c224d51`
+> **Source:** [src/brush_library/mod.rs](../../../src/brush_library/mod.rs) · **Module:** `crate::brush_library` · **Size:** 617 lines · Line links as of commit `18d4119`
 
 ## What this file is for
 

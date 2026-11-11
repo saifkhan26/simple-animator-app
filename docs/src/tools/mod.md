@@ -1,6 +1,6 @@
 # `src/tools/mod.rs` — the tools folder, tool list and brush settings
 
-> **Source:** [src/tools/mod.rs](../../../src/tools/mod.rs) · **Module:** `crate::tools` · **Size:** 603 lines · Line links as of commit `c224d51`
+> **Source:** [src/tools/mod.rs](../../../src/tools/mod.rs) · **Module:** `crate::tools` · **Size:** 604 lines · Line links as of commit `18d4119`
 
 ## What this file is for
 
@@ -59,7 +59,7 @@ More: [Serde and file formats](../../rust-primer.md#serde-and-file-formats)
 ## Types
 
 ### `enum ActiveTool`
-[src/tools/mod.rs:25](../../../src/tools/mod.rs#L25)
+[src/tools/mod.rs:26](../../../src/tools/mod.rs#L26)
 
 Which tool is active.
 
@@ -75,7 +75,7 @@ Which tool is active.
 | `Liquify` | Push the current drawing's pixels around inside the selection. |
 
 ### `const ActiveTool::PENCIL`
-[src/tools/mod.rs:46](../../../src/tools/mod.rs#L46)
+[src/tools/mod.rs:47](../../../src/tools/mod.rs#L47)
 
 ```rust
 pub const PENCIL: ActiveTool = ActiveTool::Pen(0);
@@ -84,7 +84,7 @@ pub const PENCIL: ActiveTool = ActiveTool::Pen(0);
 The first pen slot, which starts as the pencil.
 
 ### `const ActiveTool::INK`
-[src/tools/mod.rs:49](../../../src/tools/mod.rs#L49)
+[src/tools/mod.rs:50](../../../src/tools/mod.rs#L50)
 
 ```rust
 pub const INK: ActiveTool = ActiveTool::Pen(1);
@@ -93,7 +93,7 @@ pub const INK: ActiveTool = ActiveTool::Pen(1);
 The second pen slot, which starts as the ink.
 
 ### `const ActiveTool::OTHERS`
-[src/tools/mod.rs:52](../../../src/tools/mod.rs#L52)
+[src/tools/mod.rs:53](../../../src/tools/mod.rs#L53)
 
 ```rust
 pub const OTHERS: [ActiveTool; 7] = [
@@ -108,7 +108,7 @@ pub const OTHERS: [ActiveTool; 7] = [
 The tools that are not pen slots, in `Self::idx` order.
 
 ### `enum ShapeKind`
-[src/tools/mod.rs:92](../../../src/tools/mod.rs#L92)
+[src/tools/mod.rs:93](../../../src/tools/mod.rs#L93)
 
 Outline shape drawn by the Shape tool.
 
@@ -119,7 +119,7 @@ Outline shape drawn by the Shape tool.
 | `Ellipse` | An ellipse outline (Shift makes it a circle). |
 
 ### `enum Smoothing`
-[src/tools/mod.rs:100](../../../src/tools/mod.rs#L100)
+[src/tools/mod.rs:101](../../../src/tools/mod.rs#L101)
 
 Line smoothing, following Krita's `KisSmoothingOptions`.
 
@@ -131,7 +131,7 @@ Line smoothing, following Krita's `KisSmoothingOptions`.
 | `Stabilizer` | Krita's "Stabilizer": the line follows the pen on a timer, averaging the last `distance_max` milliseconds of movement, and with the delay on it trails the pen on a string `delay_distance` long. |
 
 ### `struct SmoothingOptions`
-[src/tools/mod.rs:124](../../../src/tools/mod.rs#L124)
+[src/tools/mod.rs:125](../../../src/tools/mod.rs#L125)
 
 Smoothing parameters. Defaults are Krita's own, read from `kis_config.cc`: Basic smoothing, a 50-pixel filter width, 0.15 tail aggressiveness, pressure unsmoothed, distances scaled by zoom.
 
@@ -150,7 +150,7 @@ Smoothing parameters. Defaults are Krita's own, read from `kis_config.cc`: Basic
 | `stabilizer_poll_ms` | `u32` | Stabilizer: how often the line catches up, milliseconds. Krita's `stabilizerSampleSize`. |
 
 ### `enum BrushMode`
-[src/tools/mod.rs:177](../../../src/tools/mod.rs#L177)
+[src/tools/mod.rs:178](../../../src/tools/mod.rs#L178)
 
 How a stroke is turned into pixels.
 
@@ -161,7 +161,7 @@ How a stroke is turned into pixels.
 | `Krita` | A real Krita preset on Krita's own pixel-brush engine (`krita`): its tip, sensors, texture and 8-bit build-up, painted dab by dab straight onto the layer. Which preset is `krita`. |
 
 ### `enum StrokeCap`
-[src/tools/mod.rs:195](../../../src/tools/mod.rs#L195)
+[src/tools/mod.rs:196](../../../src/tools/mod.rs#L196)
 
 How a ribbon stroke ends, at pen-down and at pen-up.
 
@@ -171,7 +171,7 @@ How a ribbon stroke ends, at pen-down and at pen-up.
 | `Flat` | Cut straight across, square to the stroke, flush with where the pen touched down and lifted. |
 
 ### `struct Dyn`
-[src/tools/mod.rs:206](../../../src/tools/mod.rs#L206)
+[src/tools/mod.rs:207](../../../src/tools/mod.rs#L207)
 
 Response of a brush property to pressure or tilt.
 
@@ -181,7 +181,7 @@ Response of a brush property to pressure or tilt.
 | `gamma` | `f32` | Curve shape. Below 1 the property rises early, like a blunt nib that reaches full width the moment it touches the paper. Above 1 it holds back until you lean on it, which is what gives a pencil its long taper. |
 
 ### `struct BrushSettings`
-[src/tools/mod.rs:232](../../../src/tools/mod.rs#L232)
+[src/tools/mod.rs:233](../../../src/tools/mod.rs#L233)
 
 Everything about how a tool paints. One per tool is kept in `AppState::tool_brushes`; the active tool's is
 `AppState::brush`. Many fields only matter to some tools (marked in their descriptions).
@@ -226,7 +226,7 @@ Everything about how a tool paints. One per tool is kept in `AppState::tool_brus
 | `liquify_mesh` | `bool` | Draw the warp as a deformed grid. Only used by Liquify. |
 
 ### `const BrushSettings::PRESETS`
-[src/tools/mod.rs:560](../../../src/tools/mod.rs#L560)
+[src/tools/mod.rs:561](../../../src/tools/mod.rs#L561)
 
 ```rust
 pub const PRESETS: &'static [(&'static str, &'static str, fn() -> Self)] = &[
@@ -243,7 +243,7 @@ Presets offered in the brush panel, as (label, tooltip, builder). Most are start
 ## `impl ActiveTool`
 
 ### `ActiveTool::idx`
-[src/tools/mod.rs:64](../../../src/tools/mod.rs#L64)
+[src/tools/mod.rs:65](../../../src/tools/mod.rs#L65)
 
 ```rust
 pub fn idx(self) -> Option<usize>
@@ -254,7 +254,7 @@ pen slot, which keeps its own. The order must stay stable, because saved prefere
 the pencil and the ink, in the prefs' layout).
 
 ### `ActiveTool::pen`
-[src/tools/mod.rs:78](../../../src/tools/mod.rs#L78)
+[src/tools/mod.rs:79](../../../src/tools/mod.rs#L79)
 
 ```rust
 pub fn pen(self) -> Option<usize>
@@ -263,7 +263,7 @@ pub fn pen(self) -> Option<usize>
 The pen slot this is, if it is one.
 
 ### `ActiveTool::is_pen`
-[src/tools/mod.rs:85](../../../src/tools/mod.rs#L85)
+[src/tools/mod.rs:86](../../../src/tools/mod.rs#L86)
 
 ```rust
 pub fn is_pen(self) -> bool
@@ -274,7 +274,7 @@ Whether this is a pen slot — `self.pen().is_some()`.
 ## `impl Default for SmoothingOptions`
 
 ### `SmoothingOptions::default`
-[src/tools/mod.rs:156](../../../src/tools/mod.rs#L156)
+[src/tools/mod.rs:157](../../../src/tools/mod.rs#L157)
 
 ```rust
 fn default() -> Self
@@ -287,7 +287,7 @@ timers are coarse) and 15 ms elsewhere.
 ## `impl Dyn`
 
 ### `Dyn::new`
-[src/tools/mod.rs:218](../../../src/tools/mod.rs#L218)
+[src/tools/mod.rs:219](../../../src/tools/mod.rs#L219)
 
 ```rust
 pub const fn new(amount: f32, gamma: f32) -> Self
@@ -296,7 +296,7 @@ pub const fn new(amount: f32, gamma: f32) -> Self
 A pressure/tilt response with the given `amount` and `gamma`.
 
 ### `Dyn::apply`
-[src/tools/mod.rs:224](../../../src/tools/mod.rs#L224)
+[src/tools/mod.rs:225](../../../src/tools/mod.rs#L225)
 
 ```rust
 pub fn apply(&self, p: f32) -> f32
@@ -311,7 +311,7 @@ Turns an input `p` (0–1, e.g. pressure) into a multiplier between `1 − amoun
 ## `impl Default for BrushSettings`
 
 ### `BrushSettings::default`
-[src/tools/mod.rs:346](../../../src/tools/mod.rs#L346)
+[src/tools/mod.rs:347](../../../src/tools/mod.rs#L347)
 
 ```rust
 fn default() -> Self
@@ -322,7 +322,7 @@ The plain ribbon brush every preset starts from (and that fills in missing field
 ## `impl BrushSettings`
 
 ### `BrushSettings::default_pencil`
-[src/tools/mod.rs:392](../../../src/tools/mod.rs#L392)
+[src/tools/mod.rs:393](../../../src/tools/mod.rs#L393)
 
 ```rust
 pub fn default_pencil() -> Self
@@ -331,7 +331,7 @@ pub fn default_pencil() -> Self
 The everyday pencil, modelled on Krita's `Pencil-4_Soft`: soft round tip, visible tooth, tapering at both ends.
 
 ### `BrushSettings::pencil_4b`
-[src/tools/mod.rs:412](../../../src/tools/mod.rs#L412)
+[src/tools/mod.rs:413](../../../src/tools/mod.rs#L413)
 
 ```rust
 pub fn pencil_4b() -> Self
@@ -340,7 +340,7 @@ pub fn pencil_4b() -> Self
 Modelled on Krita's `Pencil-3_Large_4B`: broad, dark soft graphite with strong grain.
 
 ### `BrushSettings::pencil_tilted`
-[src/tools/mod.rs:433](../../../src/tools/mod.rs#L433)
+[src/tools/mod.rs:434](../../../src/tools/mod.rs#L434)
 
 ```rust
 pub fn pencil_tilted() -> Self
@@ -349,7 +349,7 @@ pub fn pencil_tilted() -> Self
 Modelled on Krita's `Pencil-5_Tilted`: tilting the pen flattens the dab into a broad ellipse for shading.
 
 ### `BrushSettings::pencil5_krita`
-[src/tools/mod.rs:455](../../../src/tools/mod.rs#L455)
+[src/tools/mod.rs:456](../../../src/tools/mod.rs#L456)
 
 ```rust
 pub fn pencil5_krita() -> Self
@@ -359,7 +359,7 @@ Krita's real `Pencil-5_Tilted` preset on the ported Krita engine (`BrushMode::Kr
 Krita's 40 px size.
 
 ### `BrushSettings::default_ink`
-[src/tools/mod.rs:469](../../../src/tools/mod.rs#L469)
+[src/tools/mod.rs:470](../../../src/tools/mod.rs#L470)
 
 ```rust
 pub fn default_ink() -> Self
@@ -369,7 +369,7 @@ Modelled on Krita's `Ink-3_G-Pen`: opaque, crisp, sharp pressure taper, drawn as
 where it crosses itself.
 
 ### `BrushSettings::airbrush`
-[src/tools/mod.rs:489](../../../src/tools/mod.rs#L489)
+[src/tools/mod.rs:490](../../../src/tools/mod.rs#L490)
 
 ```rust
 pub fn airbrush() -> Self
@@ -378,7 +378,7 @@ pub fn airbrush() -> Self
 Modelled on Krita's `Airbrush_Soft`: a wide, soft dab with low flow that builds up over passes.
 
 ### `BrushSettings::grainy_airbrush`
-[src/tools/mod.rs:505](../../../src/tools/mod.rs#L505)
+[src/tools/mod.rs:506](../../../src/tools/mod.rs#L506)
 
 ```rust
 pub fn grainy_airbrush() -> Self
@@ -387,7 +387,7 @@ pub fn grainy_airbrush() -> Self
 The airbrush with midtone noise (fine specks in its soft falloff).
 
 ### `BrushSettings::default_eraser`
-[src/tools/mod.rs:512](../../../src/tools/mod.rs#L512)
+[src/tools/mod.rs:513](../../../src/tools/mod.rs#L513)
 
 ```rust
 pub fn default_eraser() -> Self
@@ -396,7 +396,7 @@ pub fn default_eraser() -> Self
 The default eraser: radius 16, transparent colour, half the size and some of the strength follow pressure.
 
 ### `BrushSettings::default_fill`
-[src/tools/mod.rs:522](../../../src/tools/mod.rs#L522)
+[src/tools/mod.rs:523](../../../src/tools/mod.rs#L523)
 
 ```rust
 pub fn default_fill() -> Self
@@ -406,7 +406,7 @@ Fill tool defaults: no pressure dynamics, tolerance 24, no expansion (expanding 
 lines on a same-layer fill).
 
 ### `BrushSettings::default_liquify`
-[src/tools/mod.rs:538](../../../src/tools/mod.rs#L538)
+[src/tools/mod.rs:539](../../../src/tools/mod.rs#L539)
 
 ```rust
 pub fn default_liquify() -> Self
@@ -415,7 +415,7 @@ pub fn default_liquify() -> Self
 Liquify brush defaults: radius 60, big enough to move a limb at once.
 
 ### `BrushSettings::default_shape`
-[src/tools/mod.rs:546](../../../src/tools/mod.rs#L546)
+[src/tools/mod.rs:547](../../../src/tools/mod.rs#L547)
 
 ```rust
 pub fn default_shape() -> Self

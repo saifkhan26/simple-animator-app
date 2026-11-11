@@ -1,6 +1,6 @@
 # `src/app/grids.rs` — perspective grids on the app side (per-file store, follow, keys, drags)
 
-> **Source:** [src/app/grids.rs](../../../src/app/grids.rs) · **Module:** `crate::app::grids` · **Size:** 489 lines · Line links as of commit `c224d51`
+> **Source:** [src/app/grids.rs](../../../src/app/grids.rs) · **Module:** `crate::app::grids` · **Size:** 875 lines · Line links as of commit `18d4119`
 
 ## What this file is for
 
@@ -125,7 +125,7 @@ More: [collections](../../rust-primer.md#collections)
 ## Types
 
 ### `struct GridFile`
-[src/app/grids.rs:27](../../../src/app/grids.rs#L27)
+[src/app/grids.rs:32](../../../src/app/grids.rs#L32)
 
 One project file's grids, as the app keeps them between sessions. A list of these
 (`AppState::grid_files`) is saved in the workspace preferences. Derives
@@ -138,8 +138,23 @@ One project file's grids, as the app keeps them between sessions. A list of thes
 | `active` | `usize` | Which of them was the active grid. |
 | `used` | `u64` | When the file was last open, in seconds since 1 Jan 1970 (the Unix epoch). When more than `MAX_GRID_FILES` are kept, the least recently used are forgotten first. |
 
+### `struct GridFileRepr`
+[src/app/grids.rs:48](../../../src/app/grids.rs#L48)
+
+`GridFile` as written. `grids` and `active` keep their old shape and hold only planes, so an older build reads them as it always did; the other guides go in `guides`, each with its place in the whole list, where an older build doesn't look.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `PathBuf` | As in `GridFile`. |
+| `grids` | `Vec<PerspectiveGrid>` | The planes only (perspective, flat, isometric), in list order — all an older build looks at. |
+| `active` | `usize` | Into `grids` — what an older build makes active. |
+| `used` | `u64` | As in `GridFile`. |
+| `guides` | `Vec<(usize, PerspectiveGrid)>` | Every other guide, each with its place in the whole list. An older build skips this field. |
+| `active_all` | `usize` | The active guide's place in the whole list. Only meant when `split` is set: a file from before has none, and `active` is it. |
+| `split` | `u8` | 1 once written this way; 0 (missing) in an older file. |
+
 ### `const MAX_GRID_FILES`
-[src/app/grids.rs:37](../../../src/app/grids.rs#L37)
+[src/app/grids.rs:118](../../../src/app/grids.rs#L118)
 
 ```rust
 const MAX_GRID_FILES: usize = 256;
@@ -147,10 +162,66 @@ const MAX_GRID_FILES: usize = 256;
 
 `usize = 256`. The most project files whose grids the app remembers.
 
+### `struct GuidesFile`
+[src/app/grids.rs:124](../../../src/app/grids.rs#L124)
+
+A `.guides` file: guides exported from one project, to bring into another. Text, so it can be read and mailed about.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `version` | `u32` | 1 for now; a later layout bumps it. |
+| `guides` | `Vec<PerspectiveGrid>` | The exported guides, as the list had them. |
+
+## `impl From<GridFile> for GridFileRepr`
+
+### `GridFileRepr::from`
+[src/app/grids.rs:63](../../../src/app/grids.rs#L63)
+
+```rust
+fn from(f: GridFile) -> Self
+```
+
+Splits a `GridFile` for writing: planes into `grids`, every other guide into `guides` with its index.
+The active guide's index goes in `active_all`; `active` points at the last plane at or before it, so
+an older build opens on something sensible. `split` is set to 1. serde calls this through the
+`#[serde(into = "GridFileRepr")]` attribute on `GridFile`.
+
+## `impl From<GridFileRepr> for GridFile`
+
+### `GridFile::from`
+[src/app/grids.rs:90](../../../src/app/grids.rs#L90)
+
+```rust
+fn from(r: GridFileRepr) -> Self
+```
+
+Puts a written `GridFileRepr` back together: each guide goes back to its index, and the planes fill
+the gaps in order (anything out of range goes on the end). With `split` 0 — a file an older build
+wrote — `active` is the active index as it always was; otherwise `active_all` is. Called by serde
+through `#[serde(from = "GridFileRepr")]`.
+
 ## Free functions
 
+### `write_guides`
+[src/app/grids.rs:131](../../../src/app/grids.rs#L131)
+
+```rust
+pub fn write_guides(path: &Path, guides: &[PerspectiveGrid]) -> anyhow::Result<()>
+```
+
+Write `guides` to a `.guides` file at `path`.
+
+### `read_guides`
+[src/app/grids.rs:142](../../../src/app/grids.rs#L142)
+
+```rust
+pub fn read_guides(path: &Path) -> anyhow::Result<Vec<PerspectiveGrid>>
+```
+
+The guides in the `.guides` file at `path`.
+
 ### `now_secs`
-[src/app/grids.rs:39](../../../src/app/grids.rs#L39)
+[src/app/grids.rs:148](../../../src/app/grids.rs#L148)
 
 ```rust
 fn now_secs() -> u64
@@ -163,7 +234,7 @@ fn now_secs() -> u64
 **Used by:** `AppState::store_grids_as`.
 
 ### `same_path`
-[src/app/grids.rs:48](../../../src/app/grids.rs#L48)
+[src/app/grids.rs:157](../../../src/app/grids.rs#L157)
 
 ```rust
 fn same_path(a: &Path, b: &Path) -> bool
@@ -177,7 +248,7 @@ it ignores letter case (because the Windows file system does); elsewhere it comp
 ## `impl AppState`
 
 ### `AppState::stash_grids`
-[src/app/grids.rs:60](../../../src/app/grids.rs#L60)
+[src/app/grids.rs:169](../../../src/app/grids.rs#L169)
 
 ```rust
 pub(super) fn stash_grids(&mut self)
@@ -190,7 +261,7 @@ project has a path (an unsaved project has none, and nothing happens).
 `load_project` in [src/app.rs](../app.md), before the project changes.
 
 ### `AppState::store_grids_as`
-[src/app/grids.rs:66](../../../src/app/grids.rs#L66)
+[src/app/grids.rs:175](../../../src/app/grids.rs#L175)
 
 ```rust
 fn store_grids_as(&mut self, path: &Path)
@@ -204,7 +275,7 @@ it is sorted newest first and the oldest are dropped.
 **Used by:** `stash_grids`, `grids_saved_as`.
 
 ### `AppState::unstash_grids`
-[src/app/grids.rs:91](../../../src/app/grids.rs#L91)
+[src/app/grids.rs:200](../../../src/app/grids.rs#L200)
 
 ```rust
 pub(super) fn unstash_grids(&mut self, path: Option<&Path>)
@@ -227,7 +298,7 @@ pub(super) fn unstash_grids(&mut self, path: Option<&Path>)
 **Used by:** `reset_with` (with `None`) and `load_project` in [src/app.rs](../app.md).
 
 ### `AppState::grids_saved_as`
-[src/app/grids.rs:108](../../../src/app/grids.rs#L108)
+[src/app/grids.rs:217](../../../src/app/grids.rs#L217)
 
 ```rust
 pub(super) fn grids_saved_as(&mut self, path: &Path)
@@ -240,7 +311,7 @@ grids along to the new file.
 **Used by:** `poll_save_job` in [src/app.rs](../app.md); tests in `app.rs`.
 
 ### `AppState::grid_files_for_prefs`
-[src/app/grids.rs:115](../../../src/app/grids.rs#L115)
+[src/app/grids.rs:224](../../../src/app/grids.rs#L224)
 
 ```rust
 pub(super) fn grid_files_for_prefs(&mut self) -> Vec<GridFile>
@@ -251,8 +322,35 @@ first filing the live grids so the latest changes are included.
 
 **Used by:** `save` (the preferences save) in [src/app.rs](../app.md); tests.
 
+### `AppState::export_guides`
+[src/app/grids.rs:233](../../../src/app/grids.rs#L233)
+
+```rust
+pub fn export_guides(&mut self)
+```
+
+Export every guide of the open file to a `.guides` file the artist picks.
+
+### `AppState::import_guides`
+[src/app/grids.rs:251](../../../src/app/grids.rs#L251)
+
+```rust
+pub fn import_guides(&mut self)
+```
+
+Add the guides in a `.guides` file the artist picks to the open file's own.
+
+### `AppState::merge_guides`
+[src/app/grids.rs:271](../../../src/app/grids.rs#L271)
+
+```rust
+pub(super) fn merge_guides(&mut self, incoming: Vec<PerspectiveGrid>) -> usize
+```
+
+Append `incoming` to the live guides under fresh ids, keeping each wall on its own floor — or freeing it, if its floor didn't come too. The last one added becomes active. How many came in.
+
 ### `AppState::followed_layer`
-[src/app/grids.rs:123](../../../src/app/grids.rs#L123)
+[src/app/grids.rs:297](../../../src/app/grids.rs#L297)
 
 ```rust
 fn followed_layer(&self, f: &Follow) -> Option<usize>
@@ -265,7 +363,7 @@ returns `None`.
 **Used by:** `grid_space`.
 
 ### `AppState::refresh_follow_links`
-[src/app/grids.rs:133](../../../src/app/grids.rs#L133)
+[src/app/grids.rs:307](../../../src/app/grids.rs#L307)
 
 ```rust
 fn refresh_follow_links(&mut self)
@@ -286,7 +384,7 @@ values, so a rename or reorder keeps the link and the next session finds it too.
 **Used by:** `sync_grid_buffers`.
 
 ### `AppState::grid_space`
-[src/app/grids.rs:160](../../../src/app/grids.rs#L160)
+[src/app/grids.rs:334](../../../src/app/grids.rs#L334)
 
 ```rust
 pub fn grid_space(&self, g: &PerspectiveGrid, frame: usize) -> Space
@@ -309,7 +407,7 @@ the frame size and the transform to apply:
 `draw_cursor_guides` in [ui/shell.rs](../ui/shell.md).
 
 ### `AppState::follow_layer`
-[src/app/grids.rs:174](../../../src/app/grids.rs#L174)
+[src/app/grids.rs:348](../../../src/app/grids.rs#L348)
 
 ```rust
 pub fn follow_layer(&self, i: usize) -> Option<Follow>
@@ -321,7 +419,7 @@ pass to `set_grid_follow`. `None` if there is no layer `i` (the `?` returns earl
 **Used by:** `grid_settings` in [ui/shell.rs](../ui/shell.md); tests in `app.rs`.
 
 ### `AppState::set_grid_follow`
-[src/app/grids.rs:186](../../../src/app/grids.rs#L186)
+[src/app/grids.rs:360](../../../src/app/grids.rs#L360)
 
 ```rust
 pub fn set_grid_follow(&mut self, i: usize, follow: Follow)
@@ -344,7 +442,7 @@ follow is unchanged, or if the grid is a wall (a wall follows whatever its floor
 **Used by:** `grid_settings` in [ui/shell.rs](../ui/shell.md); tests.
 
 ### `AppState::sync_grid_buffers`
-[src/app/grids.rs:216](../../../src/app/grids.rs#L216)
+[src/app/grids.rs:390](../../../src/app/grids.rs#L390)
 
 ```rust
 pub(super) fn sync_grid_buffers(&mut self)
@@ -359,7 +457,7 @@ follows, so a drag is never overwritten under the pen.
 **Used by:** `update` in [src/app.rs](../app.md) (every frame); tests.
 
 ### `AppState::grid_edit`
-[src/app/grids.rs:235](../../../src/app/grids.rs#L235)
+[src/app/grids.rs:409](../../../src/app/grids.rs#L409)
 
 ```rust
 pub fn grid_edit(&mut self, i: usize, edit: impl FnOnce(&mut PerspectiveGrid, usize))
@@ -378,7 +476,7 @@ step is added. Walls are rebuilt at the end (`relink`).
 **Used by:** `add_grid_key`, `delete_grid_key`, `set_grid_key_ease`.
 
 ### `AppState::add_grid_key`
-[src/app/grids.rs:254](../../../src/app/grids.rs#L254)
+[src/app/grids.rs:428](../../../src/app/grids.rs#L428)
 
 ```rust
 pub fn add_grid_key(&mut self)
@@ -390,7 +488,7 @@ skipped — they take their motion from their floor and have no keys. Undoable.
 **Used by:** `grid_settings` in [ui/shell.rs](../ui/shell.md); tests.
 
 ### `AppState::delete_grid_key`
-[src/app/grids.rs:265](../../../src/app/grids.rs#L265)
+[src/app/grids.rs:439](../../../src/app/grids.rs#L439)
 
 ```rust
 pub fn delete_grid_key(&mut self)
@@ -402,7 +500,7 @@ shows the pose the remaining keys give this frame. Undoable.
 **Used by:** `grid_settings` in [ui/shell.rs](../ui/shell.md).
 
 ### `AppState::set_grid_key_ease`
-[src/app/grids.rs:278](../../../src/app/grids.rs#L278)
+[src/app/grids.rs:452](../../../src/app/grids.rs#L452)
 
 ```rust
 pub fn set_grid_key_ease(&mut self, ease: Ease)
@@ -414,7 +512,7 @@ speed curve of the tween towards the next key (e.g. linear, or slow-in/slow-out)
 **Used by:** `grid_settings` in [ui/shell.rs](../ui/shell.md).
 
 ### `AppState::grid_pose_edited`
-[src/app/grids.rs:286](../../../src/app/grids.rs#L286)
+[src/app/grids.rs:460](../../../src/app/grids.rs#L460)
 
 ```rust
 pub fn grid_pose_edited(&mut self, i: usize)
@@ -428,7 +526,7 @@ nothing happens.
 **Used by:** `finish_grid_drag` (this file); `grid_settings` in [ui/shell.rs](../ui/shell.md).
 
 ### `AppState::restore_grid`
-[src/app/grids.rs:300](../../../src/app/grids.rs#L300)
+[src/app/grids.rs:474](../../../src/app/grids.rs#L474)
 
 ```rust
 pub(super) fn restore_grid(&mut self, snap: &PerspectiveGrid)
@@ -442,7 +540,7 @@ Clears any grid drag and rebuilds walls.
 **Used by:** `apply_touched` in [src/app.rs](../app.md) (undo/redo).
 
 ### `AppState::ensure_perspective_grid`
-[src/app/grids.rs:320](../../../src/app/grids.rs#L320)
+[src/app/grids.rs:494](../../../src/app/grids.rs#L494)
 
 ```rust
 pub fn ensure_perspective_grid(&mut self)
@@ -454,7 +552,7 @@ deleted, adds a default one. Also clamps the active index into range.
 **Used by:** `AppState::set_tool` in [app/select.rs](select.md).
 
 ### `AppState::cycle_perspective_grid`
-[src/app/grids.rs:333](../../../src/app/grids.rs#L333)
+[src/app/grids.rs:507](../../../src/app/grids.rs#L507)
 
 ```rust
 pub fn cycle_perspective_grid(&mut self)
@@ -471,7 +569,7 @@ grid, nothing changes.
 **Used by:** `dispatch` in [src/app.rs](../app.md) (`Action::PerspectiveNextGrid`).
 
 ### `AppState::perspective_down`
-[src/app/grids.rs:348](../../../src/app/grids.rs#L348)
+[src/app/grids.rs:522](../../../src/app/grids.rs#L522)
 
 ```rust
 pub fn perspective_down(&mut self, p: P)
@@ -491,8 +589,9 @@ to move…) was hit, makes that grid active, and starts a drag on it.
 2. Try the active grid first, then every other grid
    (`std::iter::once(active).chain(…)`).
 3. Skip hidden grids. For each, get its corners and extra vanishing points in document
-   space (via `grid_space`) and ask `perspective::grab_at` what the press hits. The horizon
-   handles count only for a perspective grid (not a wall) that shows its horizon.
+   space (via `grid_space`) and ask what the press hits: `perspective::grab_at` for a plane,
+   `guides::grab_at` for a ruler, vanishing point or ellipse. The horizon handles count only
+   for a perspective grid (not a wall) that shows its horizon.
 4. On the first hit, make that grid active. If it can be grabbed — not *locked*, and if
    it is a wall only by its top corners (0 or 1; the rest of a wall belongs to its floor) —
    save a copy for undo (`grid_drag_before`) and store a `GridDrag` with the grab, the
@@ -503,7 +602,7 @@ to move…) was hit, makes that grid active, and starts a drag on it.
 `app.rs`.
 
 ### `AppState::perspective_move`
-[src/app/grids.rs:400](../../../src/app/grids.rs#L400)
+[src/app/grids.rs:579](../../../src/app/grids.rs#L579)
 
 ```rust
 pub fn perspective_move(&mut self, p: P)
@@ -519,6 +618,8 @@ grabbed grid. The new shape is always solved from the shape *at the press* (stor
 2. Decide whether this grab *slides* something (moving the grid, a vanishing point, an
    extra point, or a corner of a non-rigid grid). If Shift axis lock is on and it slides,
    hold `p` to the horizontal or vertical line through the press (`axis_lock::lock_hv`).
+   A ruler's end and a helper line's end don't slide: Shift turns them in 15° steps
+   instead (inside `guides::dragged`).
    `moved(from)` is a closure that shifts a point by the drag offset.
 3. **Wall:** only its top corners do anything — they set how tall the wall stands
    (`wall_height_at` on its floor). Then rebuild walls and return.
@@ -526,9 +627,12 @@ grabbed grid. The new shape is always solved from the shape *at the press* (stor
    slides along it until pulled more than `HORIZON_DETACH_PX` screen points off; a free one
    snaps back on within `HORIZON_ATTACH_PX`. Store its new position and whether it is on the
    horizon, then return.
-5. **Anything else:** ask `perspective::dragged` for the new corners (it handles corners,
-   vanishing points, horizon, tilt, rotate, move, the 15° snapping, and rigid grids). If it
-   returns `None` — the drag would fold the quad inside out — leave the grid as it was.
+5. **Anything else:** with the centre key (Alt) held on a perspective grid's vanishing
+   point, move both points evenly (`mirror_vps`). Otherwise ask `perspective::dragged` (a
+   plane: corners, vanishing points, horizon, tilt, rotate, move, the 15° snapping, rigid
+   grids) or `guides::dragged` (a ruler, vanishing point or ellipse) for the new corners. If
+   it returns `None` — the drag would fold the quad, or leave a guide meaningless — leave
+   the grid as it was.
 6. If the whole grid moved or turned (or a rigid grid's corner was dragged, which turns
    and scales it), carry the extra vanishing points along with `perspective::carry`.
    Reshaping leaves them where they are.
@@ -536,8 +640,17 @@ grabbed grid. The new shape is always solved from the shape *at the press* (stor
 
 **Used by:** the canvas input in [ui/shell.rs](../ui/shell.md) (`draw`); tests in `app.rs`.
 
+### `AppState::grid_drag_readout`
+[src/app/grids.rs:672](../../../src/app/grids.rs#L672)
+
+```rust
+pub fn grid_drag_readout(&self) -> Option<String>
+```
+
+What the grid drag in hand is turning, in degrees, for beside the pen: a ruler's or a helper line's heading, a grid turned whole, a horizon tilted. Up the screen counts positive, as on a protractor.
+
 ### `AppState::finish_grid_drag`
-[src/app/grids.rs:472](../../../src/app/grids.rs#L472)
+[src/app/grids.rs:703](../../../src/app/grids.rs#L703)
 
 ```rust
 pub(super) fn finish_grid_drag(&mut self)
@@ -548,3 +661,35 @@ copy (doing nothing if either is missing), applies auto-key (`grid_pose_edited`)
 the grid changed pushes one `undo::Command::Grid` for the whole drag.
 
 **Used by:** `pointer_up` in [src/app.rs](../app.md).
+
+## Free functions
+
+### `mirror_vps`
+[src/app/grids.rs:725](../../../src/app/grids.rs#L725)
+
+```rust
+fn mirror_vps(c: &[P; 4], which: u8, delta: P) -> Option<[P; 4]>
+```
+
+A grid's corners re-aimed with its vanishing point `which` moved by `delta` and the other moved the opposite way, so both stay as far from the middle between them. `None` unless both are finite, or if the quad would fold.
+
+## Tests
+
+### `mod tests`
+
+Run with `cargo test app::grids::tests` · 6 tests
+
+| Test | What it checks |
+|---|---|
+| [`exported_guides_come_back_in_another_file_with_their_walls`](../../../src/app/grids.rs#L785) | Exported guides come back in another file with their walls. |
+| [`a_wall_without_its_floor_comes_in_free`](../../../src/app/grids.rs#L812) | A wall without its floor comes in free. |
+| [`the_centre_key_moves_both_vanishing_points_evenly`](../../../src/app/grids.rs#L824) | The centre key moves both vanishing points evenly. |
+| [`the_store_keeps_every_guide_kind_in_order`](../../../src/app/grids.rs#L837) | The store keeps every guide kind in order. |
+| [`an_older_build_reads_only_the_planes`](../../../src/app/grids.rs#L845) | An older build reads only the planes. |
+| [`a_store_an_older_build_wrote_still_loads`](../../../src/app/grids.rs#L857) | A store an older build wrote still loads. |
+
+**Test helpers** (used only by the tests above):
+
+- [`file`](../../../src/app/grids.rs#L743) — File.
+
+**Test-only types and constants:** [`KEY`](../../../src/app/grids.rs#L741), [`OldGridFile`](../../../src/app/grids.rs#L762), [`OldGrid`](../../../src/app/grids.rs#L771), [`OldKind`](../../../src/app/grids.rs#L777)
