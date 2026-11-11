@@ -1074,6 +1074,127 @@ impl Project {
         out
     }
 
+    /// Reverse: each run of selected drawings plays backwards — in reverse
+    /// order, each keeping its own length. Nothing else moves.
+    pub fn reverse_runs(&mut self, starts: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        self.rework_runs(starts, |run| run.iter().rev().map(|&(id, n)| (id, n, false)).collect())
+    }
+
+    /// Swing: each run plays forward, then back — `A B C D` becomes
+    /// `A B C D C B`. The way back stops before the first drawing, so a loop
+    /// doesn't play it twice; the drawings on the way back are copies.
+    pub fn swing_runs(&mut self, starts: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        self.rework_runs(starts, |run| {
+            let mut out: Vec<_> = run.iter().map(|&(id, n)| (id, n, false)).collect();
+            if run.len() > 2 {
+                out.extend(run[1..run.len() - 1].iter().rev().map(|&(id, n)| (id, n, true)));
+            }
+            out
+        })
+    }
+
+    /// Repeat: each run `times` times over in all, back to back; the
+    /// repeats are copies.
+    pub fn repeat_runs(&mut self, starts: &[(usize, usize)], times: usize) -> Vec<(usize, usize)> {
+        self.rework_runs(starts, |run| {
+            (0..times.max(1))
+                .flat_map(|k| run.iter().map(move |&(id, n)| (id, n, k > 0)))
+                .collect()
+        })
+    }
+
+    /// Time-stretch: each run's drawings share out the length `target` gives
+    /// for it (asked with the run's current length), in proportion to how
+    /// long each held — see [`stretch_lengths`]. Never shorter than a frame
+    /// per drawing.
+    pub fn stretch_runs(&mut self, starts: &[(usize, usize)], target: impl Fn(usize) -> usize) -> Vec<(usize, usize)> {
+        self.rework_runs(starts, |run| {
+            let lens: Vec<usize> = run.iter().map(|&(_, n)| n).collect();
+            let total = lens.iter().sum();
+            let new = stretch_lengths(&lens, target(total));
+            run.iter().zip(new).map(|(&(id, _), n)| (id, n, false)).collect()
+        })
+    }
+
+    /// The selected drawings at `starts` (layer, key frame), taken a run at a
+    /// time — drawings that follow each other on one layer with nothing
+    /// unselected between — and laid out again as `plan` says: drawing,
+    /// frames to hold, and whether it has to be a copy. Returns where every
+    /// drawing of the new runs starts, to select.
+    ///
+    /// The timeline follows the rule every frame edit does: a layer's net
+    /// gain grows it (the largest gain, across layers), a loss keeps the
+    /// length, the last drawing holding on. Later drawings and the layer's
+    /// transform keys slide by what the run gained or lost. A run that held
+    /// to the end and now ends sooner is stopped with a blank, as a
+    /// shortened last drawing is. Copies share pixels until one is drawn on.
+    fn rework_runs(
+        &mut self,
+        starts: &[(usize, usize)],
+        mut plan: impl FnMut(&[(CellId, usize)]) -> Vec<(CellId, usize, bool)>,
+    ) -> Vec<(usize, usize)> {
+        let fc = self.frame_count;
+        let mut need = fc;
+        let mut out = Vec::new();
+        for layer in distinct_layers(starts) {
+            let Some(l) = self.layers.get(layer).filter(|l| !l.is_group()) else {
+                continue;
+            };
+            let runs = runs_of(l, layer, starts);
+            let mut shift: isize = 0;
+            for run in runs {
+                let len_now = self.layers[layer].exposures.len();
+                let first = (run[0].start as isize + shift) as usize;
+                let held: Vec<(CellId, usize)> = run
+                    .iter()
+                    .filter_map(|b| {
+                        let s = (b.start as isize + shift) as usize;
+                        let id = self.layers[layer].exposures[s]?;
+                        Some((id, b.len.unwrap_or(len_now - s)))
+                    })
+                    .collect();
+                let open = run.last().is_some_and(|b| b.len.is_none());
+                let old: usize = held.iter().map(|&(_, n)| n).sum();
+                let seq: Vec<(CellId, usize)> = plan(&held)
+                    .into_iter()
+                    .map(|(id, n, copy)| (if copy { self.copy_cell(id) } else { id }, n.max(1)))
+                    .collect();
+                let new: usize = seq.iter().map(|&(_, n)| n).sum();
+                let stop = (open && new < old).then(|| self.alloc_cell_for(layer));
+                let l = &mut self.layers[layer];
+                if new > old {
+                    layer_insert_at(l, first + old, new - old);
+                    l.transform_keys_insert_frames(first + old, new - old);
+                } else if new < old {
+                    layer_remove(l, first + new, old - new);
+                    l.transform_keys_remove_frames(first + new, old - new);
+                }
+                let mut pos = first;
+                for &(id, n) in &seq {
+                    l.exposures[pos] = Some(id);
+                    l.exposures[pos + 1..pos + n].iter_mut().for_each(|e| *e = None);
+                    out.push((layer, pos));
+                    pos += n;
+                }
+                if let Some(blank) = stop {
+                    l.exposures[pos] = Some(blank);
+                }
+                shift += new as isize - old as isize;
+            }
+            need = need.max(layer_fit(&mut self.layers[layer], fc + shift.max(0) as usize));
+        }
+        self.settle_length(need);
+        out
+    }
+
+    /// A new cell id with `id`'s pixels — shared until one of them is drawn
+    /// on, as `insert_duplicate_key_here` does.
+    fn copy_cell(&mut self, id: CellId) -> CellId {
+        let c = self.cells[id].clone();
+        self.cells.push(c);
+        self.cells.len() - 1
+    }
+
     /// Delete the drawings keyed at `starts`, leaving blank frames: each run
     /// of adjacent ones becomes one fresh blank key, and nothing else moves.
     /// Returns the blank runs' starts.
@@ -1410,6 +1531,61 @@ impl Block {
     pub fn span(&self, frame_count: usize) -> Range<usize> {
         self.start..self.len.map_or(frame_count, |n| self.start + n)
     }
+}
+
+/// The selected drawings of `layer` (its frames in `starts`), grouped into
+/// runs: drawings that follow one another with no unselected drawing between.
+fn runs_of(l: &Layer, layer: usize, starts: &[(usize, usize)]) -> Vec<Vec<Block>> {
+    let len = l.exposures.len();
+    let mut blocks: Vec<Block> = starts
+        .iter()
+        .filter(|s| s.0 == layer)
+        .filter_map(|&(_, f)| block_keyed_on(l, layer, len, f))
+        .collect();
+    blocks.sort_by_key(|b| b.start);
+    blocks.dedup();
+    let mut runs: Vec<Vec<Block>> = Vec::new();
+    for b in blocks {
+        match runs.last_mut() {
+            Some(run) if run.last().and_then(|p| p.len.map(|n| p.start + n)) == Some(b.start) => run.push(b),
+            _ => runs.push(vec![b]),
+        }
+    }
+    runs
+}
+
+/// Share `target` frames out among drawings that held `lens` frames, in
+/// proportion, each at least one — so a run on twos stretched by half goes
+/// onto threes. Rounding goes to the largest remainders first, the earlier
+/// drawing winning a tie, and the lengths always add up to `target` (or to
+/// one frame each, when `target` is fewer than the drawings).
+pub fn stretch_lengths(lens: &[usize], target: usize) -> Vec<usize> {
+    let n = lens.len();
+    let total: usize = lens.iter().sum();
+    if n == 0 || total == 0 {
+        return lens.to_vec();
+    }
+    let target = target.max(n);
+    let mut out: Vec<usize> = lens.iter().map(|&l| (l * target / total).max(1)).collect();
+    let mut sum: usize = out.iter().sum();
+    let mut by_remainder: Vec<usize> = (0..n).collect();
+    by_remainder.sort_by_key(|&i| std::cmp::Reverse(lens[i] * target % total));
+    for &i in by_remainder.iter().cycle() {
+        if sum >= target {
+            break;
+        }
+        out[i] += 1;
+        sum += 1;
+    }
+    while sum > target {
+        // The longest that can spare a frame; the later one on a tie.
+        let Some(i) = (0..n).filter(|&i| out[i] > 1).max_by_key(|&i| (out[i], i)) else {
+            break;
+        };
+        out[i] -= 1;
+        sum -= 1;
+    }
+    out
 }
 
 /// Each layer named in `starts`, once, in order.
@@ -2212,6 +2388,119 @@ mod tests {
         assert_eq!(key_frames(&p, 0), vec![0, 2, 4, 6]);
         assert_eq!(row(&p, 0)[..6], [1, 1, 2, 2, 3, 3]);
         assert_sound(&p);
+    }
+
+    // --- Range operations ---
+
+    #[test]
+    fn reverse_plays_a_run_backwards_each_drawing_keeping_its_length() {
+        // 1 holds two, 3 one, 4 three; 7 is the last.
+        let mut p = sheet(10, &[0, 2, 3, 6]);
+        let out = p.reverse_runs(&[(0, 0), (0, 2), (0, 3)]);
+        assert_eq!(row(&p, 0), vec![4, 4, 4, 3, 1, 1, 7, 7, 7, 7]);
+        assert_eq!(out, vec![(0, 0), (0, 3), (0, 4)], "the reversed run is what gets selected");
+        assert_eq!(p.frame_count, 10);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn swing_goes_back_without_repeating_the_first_drawing() {
+        let mut p = sheet(10, &[0, 1, 2, 3]);
+        let b = p.layers[0].exposures[1].unwrap();
+        let out = p.swing_runs(&[(0, 0), (0, 1), (0, 2)]);
+        // A B C, then B on the way back; D slides along and keeps its 7.
+        assert_eq!(row(&p, 0), vec![1, 2, 3, 2, 4, 4, 4, 4, 4, 4, 4]);
+        assert_eq!(p.frame_count, 11);
+        assert_eq!(out, vec![(0, 0), (0, 1), (0, 2), (0, 3)]);
+        let back = p.layers[0].exposures[3].unwrap();
+        assert_ne!(back, b, "the way back is a copy");
+        assert!(Arc::ptr_eq(&p.cells[back], &p.cells[b]), "sharing pixels until drawn on");
+        assert_sound(&p);
+
+        // Two drawings already swing: nothing to add.
+        let mut p = sheet(6, &[0, 1, 2]);
+        p.swing_runs(&[(0, 0), (0, 1)]);
+        assert_eq!(key_frames(&p, 0), vec![0, 1, 2]);
+        assert_eq!(p.frame_count, 6);
+    }
+
+    #[test]
+    fn repeat_lays_the_run_down_again_as_copies() {
+        let mut p = sheet(8, &[0, 2, 4]);
+        let out = p.repeat_runs(&[(0, 0), (0, 2)], 3);
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 4, 6, 8, 10, 12]);
+        assert_eq!(row(&p, 0)[..12], [1, 1, 3, 3, 1, 1, 3, 3, 1, 1, 3, 3]);
+        assert_eq!(p.frame_count, 16, "eight frames gained; the last drawing keeps its four");
+        assert_eq!(out.len(), 6);
+        let ids: std::collections::HashSet<_> = out.iter().map(|&(_, f)| p.layers[0].exposures[f]).collect();
+        assert_eq!(ids.len(), 6, "every repeat is its own drawing");
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn stretch_shares_the_new_length_out_in_proportion() {
+        // On twos, stretched by half: threes. The last drawing keeps its three.
+        let mut p = sheet(9, &[0, 2, 4, 6]);
+        let out = p.stretch_runs(&[(0, 0), (0, 2), (0, 4)], |now| now * 3 / 2);
+        assert_eq!(key_frames(&p, 0), vec![0, 3, 6, 9]);
+        assert_eq!(out, vec![(0, 0), (0, 3), (0, 6)]);
+        assert_eq!(p.frame_count, 12);
+        // Squeezed to ones: the length stays and the last drawing holds on.
+        p.stretch_runs(&[(0, 0), (0, 3), (0, 6)], |_| 3);
+        assert_eq!(key_frames(&p, 0), vec![0, 1, 2, 3]);
+        assert_eq!(p.frame_count, 12);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn a_shortened_run_that_held_to_the_end_is_stopped() {
+        let mut p = sheet(10, &[0, 4]);
+        p.stretch_runs(&[(0, 0), (0, 4)], |_| 5);
+        assert_eq!(row(&p, 0), vec![1, 1, 5, 5, 5, 0, 0, 0, 0, 0], "a blank stops it, as a retime does");
+        assert_eq!(p.frame_count, 10);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn a_gap_in_the_selection_splits_it_into_runs() {
+        let mut p = sheet(10, &[0, 1, 2, 3, 4]);
+        // 1 2 | 4 5, with 3 unselected between: each pair reversed on its own.
+        p.reverse_runs(&[(0, 0), (0, 1), (0, 3), (0, 4)]);
+        assert_eq!(row(&p, 0), vec![2, 1, 3, 5, 5, 5, 5, 5, 5, 4]);
+        assert_eq!(p.frame_count, 10);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn range_ops_follow_the_timeline_rule_across_layers() {
+        let mut p = sheet(10, &[0, 2, 4]);
+        p.add_layer();
+        for f in [0, 1, 5] {
+            key(&mut p, 1, f, 50 + f as u8);
+        }
+        p.layers[0].set_transform_key(4, Default::default());
+        p.layers[1].set_transform_key(5, Default::default());
+        // Layer 0 gains 4 (two drawings of two), layer 1 gains 1: grows by 4.
+        p.repeat_runs(&[(0, 0), (0, 2), (1, 0)], 2);
+        assert_eq!(p.frame_count, 14);
+        assert_eq!(p.layers[0].transform_keys[0].frame, 8, "keys after the run slide with it");
+        assert_eq!(p.layers[1].transform_keys[0].frame, 6);
+        assert_eq!(key_frames(&p, 1), vec![0, 1, 2, 6]);
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn stretch_lengths_add_up_and_keep_a_frame_each() {
+        assert_eq!(stretch_lengths(&[2, 2, 2], 9), vec![3, 3, 3]);
+        assert_eq!(stretch_lengths(&[1, 1, 1, 1], 8), vec![2, 2, 2, 2]);
+        assert_eq!(stretch_lengths(&[2, 1], 4), vec![3, 1], "the larger remainder gets the frame");
+        assert_eq!(stretch_lengths(&[5, 1], 3), vec![2, 1], "never below one frame");
+        assert_eq!(stretch_lengths(&[3, 3, 3], 2), vec![1, 1, 1], "fewer frames than drawings: ones");
+        for (lens, t) in [(vec![7, 1, 4], 20), (vec![1, 9], 5), (vec![3], 11)] {
+            let out = stretch_lengths(&lens, t);
+            assert_eq!(out.iter().sum::<usize>(), t.max(lens.len()), "{lens:?} -> {t}");
+            assert!(out.iter().all(|&n| n >= 1));
+        }
     }
 
     #[test]

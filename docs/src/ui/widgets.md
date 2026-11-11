@@ -1,6 +1,6 @@
 # `src/ui/widgets.rs` — custom widgets
 
-> **Source:** [src/ui/widgets.rs](../../../src/ui/widgets.rs) · **Module:** `crate::ui::widgets` · **Size:** 72 lines · Line links as of commit `c224d51`
+> **Source:** [src/ui/widgets.rs](../../../src/ui/widgets.rs) · **Module:** `crate::ui::widgets` · **Size:** 72 lines · Line links as of commit `a1aa764`
 
 ## What this file is for
 

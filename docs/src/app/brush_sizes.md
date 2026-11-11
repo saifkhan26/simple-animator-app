@@ -1,6 +1,6 @@
 # `src/app/brush_sizes.rs` — remembered brush sizes (recent, pinned, swap, detents)
 
-> **Source:** [src/app/brush_sizes.rs](../../../src/app/brush_sizes.rs) · **Module:** `crate::app::brush_sizes` · **Size:** 281 lines · Line links as of commit `c224d51`
+> **Source:** [src/app/brush_sizes.rs](../../../src/app/brush_sizes.rs) · **Module:** `crate::app::brush_sizes` · **Size:** 281 lines · Line links as of commit `a1aa764`
 
 ## What this file is for
 

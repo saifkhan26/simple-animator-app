@@ -164,6 +164,10 @@ pub enum Action {
     // Timeline tracks: the drawings selected there.
     TrackClear,
     TrackCloseGap,
+    /// Play the selected drawings backwards. Unbound by default.
+    TrackReverse,
+    /// Forward, then back (`A B C D C B`). Unbound by default.
+    TrackSwing,
     SaveProject,
     SaveProjectAs,
     OpenProject,
@@ -301,6 +305,8 @@ impl Action {
         Action::ShapeCentre,
         Action::TrackClear,
         Action::TrackCloseGap,
+        Action::TrackReverse,
+        Action::TrackSwing,
         Action::SaveProject,
         Action::SaveProjectAs,
         Action::OpenProject,
@@ -432,6 +438,8 @@ impl Action {
             Action::ShapeCentre => "Shape / box being dragged: from the centre (hold)",
             Action::TrackClear => "Timeline: delete drawings (leave blank)",
             Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
+            Action::TrackReverse => "Timeline: reverse drawings",
+            Action::TrackSwing => "Timeline: swing drawings (forward, then back)",
             Action::SaveProject => "Save project",
             Action::SaveProjectAs => "Save project as…",
             Action::OpenProject => "Open project",
