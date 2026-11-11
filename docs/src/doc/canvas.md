@@ -1,6 +1,6 @@
 # `src/doc/canvas.rs` — Pixel storage for one drawing (a cell)
 
-> **Source:** [src/doc/canvas.rs](../../../src/doc/canvas.rs) · **Module:** `crate::doc::canvas` · **Size:** 831 lines · Line links as of commit `a1aa764`
+> **Source:** [src/doc/canvas.rs](../../../src/doc/canvas.rs) · **Module:** `crate::doc::canvas` · **Size:** 879 lines · Line links as of commit `7901e50`
 
 ## What this file is for
 
@@ -249,7 +249,7 @@ const PAR_MIN: usize = 2 << 20;
 thread, because starting threads would cost more than they save.
 
 ### `struct Canvas`
-[src/doc/canvas.rs:59](../../../src/doc/canvas.rs#L59)
+[src/doc/canvas.rs:66](../../../src/doc/canvas.rs#L66)
 
 The pixels of one cell, plus bookkeeping. Derives `Clone` (a clone copies the pixel buffer
 and keeps the same `rev`, since it holds the same pixels). Its save format is hand-written
@@ -266,7 +266,7 @@ derived code wrote.
 | `unwritten` | `Option<(u64, DirtyRect, Vec<u8>)>` | After [`unpack`](#canvasunpack): the rev at the time, the packed rect and the packed bytes. Kept until something writes, so packing again before that is free. |
 
 ### `enum Store`
-[src/doc/canvas.rs:78](../../../src/doc/canvas.rs#L78)
+[src/doc/canvas.rs:85](../../../src/doc/canvas.rs#L85)
 
 How a canvas holds its pixels (private to this file).
 
@@ -276,7 +276,7 @@ How a canvas holds its pixels (private to this file).
 | `Packed { rect: DirtyRect, pixels: Vec<u8> }` | Only `rect`, row-major. `rect` is the bounds of every byte that is not zero, so nothing is lost; everything outside is zero. An empty `rect` is a blank canvas and holds no buffer at all. |
 
 ### `type Pixels::Value`
-[src/doc/canvas.rs:118](../../../src/doc/canvas.rs#L118)
+[src/doc/canvas.rs:125](../../../src/doc/canvas.rs#L125)
 
 ```rust
 type Value = Canvas;
@@ -285,7 +285,7 @@ type Value = Canvas;
 What the visitor `V` produces: a `Canvas`.
 
 ### `type Pixels::Value`
-[src/doc/canvas.rs:124](../../../src/doc/canvas.rs#L124)
+[src/doc/canvas.rs:131](../../../src/doc/canvas.rs#L131)
 
 ```rust
 type Value = Canvas;
@@ -294,7 +294,7 @@ type Value = Canvas;
 What the visitor `V` produces: a `Canvas`.
 
 ### `type V::Value`
-[src/doc/canvas.rs:144](../../../src/doc/canvas.rs#L144)
+[src/doc/canvas.rs:151](../../../src/doc/canvas.rs#L151)
 
 ```rust
 type Value = Canvas;
@@ -303,7 +303,7 @@ type Value = Canvas;
 What the visitor `V` produces: a `Canvas`.
 
 ### `struct DirtyRect`
-[src/doc/canvas.rs:160](../../../src/doc/canvas.rs#L160)
+[src/doc/canvas.rs:167](../../../src/doc/canvas.rs#L167)
 
 A pixel rectangle. Despite the name it is used for any rectangle in this file (dirty regions,
 packed bounds, content bounds). Derives `Clone, Copy, Debug, PartialEq, Eq` — `Copy` means it
@@ -317,7 +317,7 @@ is copied on assignment like a number.
 | `max_y` | `u32` | Bottom edge, exclusive. |
 
 ### `const EMPTY`
-[src/doc/canvas.rs:177](../../../src/doc/canvas.rs#L177)
+[src/doc/canvas.rs:184](../../../src/doc/canvas.rs#L184)
 
 ```rust
 const EMPTY: DirtyRect = DirtyRect {
@@ -331,7 +331,7 @@ const EMPTY: DirtyRect = DirtyRect {
 A `DirtyRect` of all zeros: the empty rectangle a blank packed canvas holds.
 
 ### `const ALPHA`
-[src/doc/canvas.rs:185](../../../src/doc/canvas.rs#L185)
+[src/doc/canvas.rs:192](../../../src/doc/canvas.rs#L192)
 
 ```rust
 const ALPHA: u32 = u32::from_le_bytes([0, 0, 0, 255]);
@@ -400,10 +400,19 @@ par_rows(&mut pixels, w, |first_row, band| {
 [../tools/fill.md](../tools/fill.md), [../tools/liquify.md](../tools/liquify.md),
 [../tools/wand.md](../tools/wand.md).
 
+### `par_rows_as`
+[src/doc/canvas.rs:39](../../../src/doc/canvas.rs#L39)
+
+```rust
+pub fn par_rows_as<T: Send>(buf: &mut [T], row: usize, cost: usize, f: impl Fn(usize, &mut [T]) + Sync)
+```
+
+`par_rows` for work that costs about as much per item as moving `cost` bytes — a flag per pixel worked out from that pixel's four bytes, say — so it goes on several threads as soon as the pixels would.
+
 ## `impl serde::Serialize for Canvas`
 
 ### `Canvas::serialize`
-[src/doc/canvas.rs:92](../../../src/doc/canvas.rs#L92)
+[src/doc/canvas.rs:99](../../../src/doc/canvas.rs#L99)
 
 ```rust
 fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error>
@@ -426,7 +435,7 @@ the error up).
 ## `impl serde::Serialize for Bytes<'_>`
 
 #### `Bytes::serialize`
-[src/doc/canvas.rs:96](../../../src/doc/canvas.rs#L96)
+[src/doc/canvas.rs:103](../../../src/doc/canvas.rs#L103)
 
 ```rust
 fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error>
@@ -437,7 +446,7 @@ fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error>
 ## `impl<'de> serde::Deserialize<'de> for Canvas`
 
 ### `Canvas::deserialize`
-[src/doc/canvas.rs:111](../../../src/doc/canvas.rs#L111)
+[src/doc/canvas.rs:118](../../../src/doc/canvas.rs#L118)
 
 ```rust
 fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error>
@@ -466,7 +475,7 @@ structs.
 ## `impl<'de> DeserializeSeed<'de> for Pixels`
 
 #### `Pixels::deserialize`
-[src/doc/canvas.rs:119](../../../src/doc/canvas.rs#L119)
+[src/doc/canvas.rs:126](../../../src/doc/canvas.rs#L126)
 
 ```rust
 fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Canvas, D::Error>
@@ -477,7 +486,7 @@ fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Canvas, D::Err
 ## `impl<'de> Visitor<'de> for Pixels`
 
 #### `Pixels::expecting`
-[src/doc/canvas.rs:125](../../../src/doc/canvas.rs#L125)
+[src/doc/canvas.rs:132](../../../src/doc/canvas.rs#L132)
 
 ```rust
 fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result
@@ -486,7 +495,7 @@ fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result
 Writes `"RGBA8 pixels"` — the phrase serde puts in an error message when the data is the wrong kind.
 
 #### `Pixels::visit_bytes`
-[src/doc/canvas.rs:128](../../../src/doc/canvas.rs#L128)
+[src/doc/canvas.rs:135](../../../src/doc/canvas.rs#L135)
 
 ```rust
 fn visit_bytes<E: Error>(self, v: &[u8]) -> Result<Canvas, E>
@@ -498,7 +507,7 @@ builds the canvas with [`Canvas::packed_from`](#canvaspacked_from), marks it cle
 (`dirty = None`) and returns it.
 
 #### `Pixels::visit_byte_buf`
-[src/doc/canvas.rs:137](../../../src/doc/canvas.rs#L137)
+[src/doc/canvas.rs:144](../../../src/doc/canvas.rs#L144)
 
 ```rust
 fn visit_byte_buf<E: Error>(self, v: Vec<u8>) -> Result<Canvas, E>
@@ -510,7 +519,7 @@ slice: it just calls `visit_bytes(&v)`.
 ## `impl<'de> Visitor<'de> for V`
 
 #### `V::expecting`
-[src/doc/canvas.rs:145](../../../src/doc/canvas.rs#L145)
+[src/doc/canvas.rs:152](../../../src/doc/canvas.rs#L152)
 
 ```rust
 fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result
@@ -519,7 +528,7 @@ fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result
 Writes `"a canvas"` for error messages.
 
 #### `V::visit_seq`
-[src/doc/canvas.rs:148](../../../src/doc/canvas.rs#L148)
+[src/doc/canvas.rs:155](../../../src/doc/canvas.rs#L155)
 
 ```rust
 fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Canvas, A::Error>
@@ -532,7 +541,7 @@ which one (`0`, `1` or `2`) was absent.
 ## `impl DirtyRect`
 
 ### `DirtyRect::is_empty`
-[src/doc/canvas.rs:168](../../../src/doc/canvas.rs#L168)
+[src/doc/canvas.rs:175](../../../src/doc/canvas.rs#L175)
 
 ```rust
 fn is_empty(&self) -> bool
@@ -541,7 +550,7 @@ fn is_empty(&self) -> bool
 True when the rectangle has no area: `max_x <= min_x` or `max_y <= min_y`.
 
 ### `DirtyRect::contains`
-[src/doc/canvas.rs:172](../../../src/doc/canvas.rs#L172)
+[src/doc/canvas.rs:179](../../../src/doc/canvas.rs#L179)
 
 ```rust
 fn contains(&self, x: u32, y: u32) -> bool
@@ -552,7 +561,7 @@ True when pixel `(x, y)` is inside: `min <= coordinate < max` on both axes (max 
 ## Free functions
 
 ### `scan_bounds`
-[src/doc/canvas.rs:191](../../../src/doc/canvas.rs#L191)
+[src/doc/canvas.rs:198](../../../src/doc/canvas.rs#L198)
 
 ```rust
 fn scan_bounds(buf: &[u8], w: usize, mask: u32) -> Option<DirtyRect>
@@ -587,7 +596,7 @@ fn scan_bounds(buf: &[u8], w: usize, mask: u32) -> Option<DirtyRect>
 [`recentered`](#canvasrecentered), [`content_bounds`](#canvascontent_bounds).
 
 ### `no_alpha`
-[src/doc/canvas.rs:227](../../../src/doc/canvas.rs#L227)
+[src/doc/canvas.rs:234](../../../src/doc/canvas.rs#L234)
 
 ```rust
 pub fn no_alpha(px: &[u8]) -> bool
@@ -611,7 +620,7 @@ instead of 25 million separate if-checks.
 **Used by:** [`Canvas::is_blank`](#canvasis_blank); tests in [../app.md](../app.md).
 
 ### `crop`
-[src/doc/canvas.rs:242](../../../src/doc/canvas.rs#L242)
+[src/doc/canvas.rs:249](../../../src/doc/canvas.rs#L249)
 
 ```rust
 fn crop(buf: &[u8], w: u32, rect: DirtyRect) -> Vec<u8>
@@ -623,7 +632,7 @@ tightly-packed buffer of `rect`'s size. **Used by:** [`packed_from`](#canvaspack
 ## `impl Canvas`
 
 ### `Canvas::new`
-[src/doc/canvas.rs:253](../../../src/doc/canvas.rs#L253)
+[src/doc/canvas.rs:260](../../../src/doc/canvas.rs#L260)
 
 ```rust
 pub fn new(width: u32, height: u32) -> Self
@@ -637,7 +646,7 @@ its whole area (so the GPU texture gets built) and with a fresh [`rev`](#canvasr
 [project.md](project.md), [../app.md](../app.md), the tools in `src/tools/`.
 
 ### `Canvas::from_pixels`
-[src/doc/canvas.rs:273](../../../src/doc/canvas.rs#L273)
+[src/doc/canvas.rs:280](../../../src/doc/canvas.rs#L280)
 
 ```rust
 pub fn from_pixels(width: u32, height: u32, pixels: Vec<u8>) -> Self
@@ -655,7 +664,7 @@ stops with a panic (`assert_eq!`) whose message names the size.
 [../io/video_import.md](../io/video_import.md), [../io/png_save.md](../io/png_save.md).
 
 ### `Canvas::packed_from`
-[src/doc/canvas.rs:292](../../../src/doc/canvas.rs#L292)
+[src/doc/canvas.rs:299](../../../src/doc/canvas.rs#L299)
 
 ```rust
 pub fn packed_from(width: u32, height: u32, full: &[u8]) -> Self
@@ -673,7 +682,7 @@ length.
 **Used by:** [`pack`](#canvaspack) and [`Pixels::visit_bytes`](#pixelsvisit_bytes) here.
 
 ### `Canvas::tombstone`
-[src/doc/canvas.rs:304](../../../src/doc/canvas.rs#L304)
+[src/doc/canvas.rs:311](../../../src/doc/canvas.rs#L311)
 
 ```rust
 pub fn tombstone() -> Self
@@ -687,7 +696,7 @@ next load drops it for good (`Project::compact_cells` in [project.md](project.md
 [project.md](project.md) and [../io/project_file.md](../io/project_file.md) tests.
 
 ### `Canvas::is_tombstone`
-[src/doc/canvas.rs:311](../../../src/doc/canvas.rs#L311)
+[src/doc/canvas.rs:318](../../../src/doc/canvas.rs#L318)
 
 ```rust
 pub fn is_tombstone(&self) -> bool
@@ -697,7 +706,7 @@ True when width or height is 0 — a freed cell. **Used by:** [../app.md](../app
 [../io/project_file.md](../io/project_file.md).
 
 ### `Canvas::byte_len`
-[src/doc/canvas.rs:316](../../../src/doc/canvas.rs#L316)
+[src/doc/canvas.rs:323](../../../src/doc/canvas.rs#L323)
 
 ```rust
 pub fn byte_len(&self) -> usize
@@ -708,7 +717,7 @@ held. **Used by:** [../app.md](../app.md), [../app/groups.md](../app/groups.md),
 [../app/select.md](../app/select.md), [../tools/fill.md](../tools/fill.md).
 
 ### `Canvas::is_all_zero`
-[src/doc/canvas.rs:322](../../../src/doc/canvas.rs#L322)
+[src/doc/canvas.rs:329](../../../src/doc/canvas.rs#L329)
 
 ```rust
 pub fn is_all_zero(&self) -> bool
@@ -723,7 +732,7 @@ pub fn is_all_zero(&self) -> bool
 [../krita_stress.md](../krita_stress.md).
 
 ### `Canvas::pixels`
-[src/doc/canvas.rs:332](../../../src/doc/canvas.rs#L332)
+[src/doc/canvas.rs:339](../../../src/doc/canvas.rs#L339)
 
 ```rust
 pub fn pixels(&self) -> Cow<'_, [u8]>
@@ -747,7 +756,7 @@ for i in (3..px.len()).step_by(4) { let a = px[i]; }
 **Used by:** widely — serializing here, exports, compositing, tests.
 
 ### `Canvas::pixels_mut`
-[src/doc/canvas.rs:341](../../../src/doc/canvas.rs#L341)
+[src/doc/canvas.rs:348](../../../src/doc/canvas.rs#L348)
 
 ```rust
 pub fn pixels_mut(&mut self) -> &mut [u8]
@@ -765,7 +774,7 @@ or by setting `dirty` themselves.
 [../tools/fill.md](../tools/fill.md), [../app/select.md](../app/select.md)).
 
 ### `Canvas::into_pixels`
-[src/doc/canvas.rs:354](../../../src/doc/canvas.rs#L354)
+[src/doc/canvas.rs:361](../../../src/doc/canvas.rs#L361)
 
 ```rust
 pub fn into_pixels(self) -> Vec<u8>
@@ -778,7 +787,7 @@ first). Taking `self` (not `&self`) means the canvas is used up — see
 [../tools/fill.md](../tools/fill.md), [../tools/ribbon.md](../tools/ribbon.md).
 
 ### `Canvas::unpacked`
-[src/doc/canvas.rs:361](../../../src/doc/canvas.rs#L361)
+[src/doc/canvas.rs:368](../../../src/doc/canvas.rs#L368)
 
 ```rust
 fn unpacked(&self) -> Vec<u8>
@@ -797,7 +806,7 @@ fn unpacked(&self) -> Vec<u8>
 [`into_pixels`](#canvasinto_pixels), [`unpack`](#canvasunpack).
 
 ### `Canvas::is_packed`
-[src/doc/canvas.rs:382](../../../src/doc/canvas.rs#L382)
+[src/doc/canvas.rs:389](../../../src/doc/canvas.rs#L389)
 
 ```rust
 pub fn is_packed(&self) -> bool
@@ -807,7 +816,7 @@ True when the store is `Packed` (uses the `matches!` macro, a one-line `match` t
 bool). **Used by:** [../app.md](../app.md) (skips already-packed cells when packing idle ones).
 
 ### `Canvas::unpack`
-[src/doc/canvas.rs:390](../../../src/doc/canvas.rs#L390)
+[src/doc/canvas.rs:397](../../../src/doc/canvas.rs#L397)
 
 ```rust
 pub fn unpack(&mut self)
@@ -824,7 +833,7 @@ old value), and moves the old packed rect + bytes into `unwritten`.
 **Used by:** [../app.md](../app.md).
 
 ### `Canvas::unwritten`
-[src/doc/canvas.rs:401](../../../src/doc/canvas.rs#L401)
+[src/doc/canvas.rs:408](../../../src/doc/canvas.rs#L408)
 
 ```rust
 fn unwritten(&self) -> Option<(DirtyRect, &[u8])>
@@ -836,7 +845,7 @@ the rev saved at [`unpack`](#canvasunpack) time (nothing has written since). Oth
 [`content_bounds`](#canvascontent_bounds).
 
 ### `Canvas::rev`
-[src/doc/canvas.rs:409](../../../src/doc/canvas.rs#L409)
+[src/doc/canvas.rs:416](../../../src/doc/canvas.rs#L416)
 
 ```rust
 pub fn rev(&self) -> u64
@@ -847,7 +856,7 @@ Returns the `rev` field: two canvases with the same rev hold the same pixels. **
 [../app/select.md](../app/select.md).
 
 ### `Canvas::held_rect`
-[src/doc/canvas.rs:415](../../../src/doc/canvas.rs#L415)
+[src/doc/canvas.rs:422](../../../src/doc/canvas.rs#L422)
 
 ```rust
 pub fn held_rect(&self) -> Option<DirtyRect>
@@ -860,8 +869,26 @@ rect). Uses `bool::then_some`, which turns `true`/`false` into `Some(value)`/`No
 
 **Used by:** [`oriented`](#canvasoriented); [../app.md](../app.md).
 
+### `Canvas::held`
+[src/doc/canvas.rs:440](../../../src/doc/canvas.rs#L440)
+
+```rust
+pub fn held(&self) -> Option<(DirtyRect, &[u8])>
+```
+
+The pixels this canvas holds and the rect they cover: the packed rect's, or the whole canvas when full. `None` when it holds none. Every pixel outside the rect is zero.
+
+### `Canvas::with_held`
+[src/doc/canvas.rs:460](../../../src/doc/canvas.rs#L460)
+
+```rust
+pub fn with_held(&self, pixels: Vec<u8>) -> Canvas
+```
+
+This canvas with `pixels` in place of the ones `Canvas::held` gives, over the same rect — a packed canvas stays packed — as new pixels: a new rev, dirty over the rect. A packed rect is the bounds of every byte that isn't zero, so a pixel that was all zeros must stay so, and one that wasn't mustn't become so.
+
 ### `Canvas::pack`
-[src/doc/canvas.rs:431](../../../src/doc/canvas.rs#L431)
+[src/doc/canvas.rs:479](../../../src/doc/canvas.rs#L479)
 
 ```rust
 pub fn pack(&mut self) -> bool
@@ -882,7 +909,7 @@ pub fn pack(&mut self) -> bool
 [../io/project_file.md](../io/project_file.md), [../krita_link.md](../krita_link.md).
 
 ### `Canvas::heap_bytes`
-[src/doc/canvas.rs:447](../../../src/doc/canvas.rs#L447)
+[src/doc/canvas.rs:495](../../../src/doc/canvas.rs#L495)
 
 ```rust
 pub fn heap_bytes(&self) -> usize
@@ -893,7 +920,7 @@ of buffer this canvas owns on the heap: the store's buffer capacity plus any kep
 bytes. Tests use it to prove packing really saves memory.
 
 ### `Canvas::px`
-[src/doc/canvas.rs:455](../../../src/doc/canvas.rs#L455)
+[src/doc/canvas.rs:503](../../../src/doc/canvas.rs#L503)
 
 ```rust
 pub fn px(&self, x: u32, y: u32) -> [u8; 4]
@@ -911,7 +938,7 @@ the packed bytes. See the [worked example](#the-pixel-layout-same-as-a-browsers-
 [../ui/shell.md](../ui/shell.md).
 
 ### `Canvas::row_span`
-[src/doc/canvas.rs:473](../../../src/doc/canvas.rs#L473)
+[src/doc/canvas.rs:521](../../../src/doc/canvas.rs#L521)
 
 ```rust
 pub fn row_span(&self, y: u32) -> (u32, &[u8])
@@ -936,7 +963,7 @@ for (i, px) in span.chunks_exact(4).enumerate() {
 [../io/composite.md](../io/composite.md).
 
 ### `Canvas::read_rect`
-[src/doc/canvas.rs:492](../../../src/doc/canvas.rs#L492)
+[src/doc/canvas.rs:540](../../../src/doc/canvas.rs#L540)
 
 ```rust
 pub fn read_rect(&self, rect: DirtyRect) -> Vec<u8>
@@ -947,7 +974,7 @@ a time via [`read_row_into`](#canvasread_row_into). A zero-width rect gives an a
 buffer.
 
 ### `Canvas::read_row_into`
-[src/doc/canvas.rs:506](../../../src/doc/canvas.rs#L506)
+[src/doc/canvas.rs:554](../../../src/doc/canvas.rs#L554)
 
 ```rust
 pub fn read_row_into(&self, y: u32, x: u32, out: &mut [u8])
@@ -966,7 +993,7 @@ pub fn read_row_into(&self, y: u32, x: u32, out: &mut [u8])
 [`oriented`](#canvasoriented); [clip.md](clip.md), [../app.md](../app.md).
 
 ### `Canvas::recentered`
-[src/doc/canvas.rs:524](../../../src/doc/canvas.rs#L524)
+[src/doc/canvas.rs:572](../../../src/doc/canvas.rs#L572)
 
 ```rust
 pub fn recentered(&self, new_w: u32, new_h: u32) -> Canvas
@@ -989,7 +1016,7 @@ so resizing a layer's canvas never holds its cells at full size.
 **Used by:** `recenter` in [project.md](project.md).
 
 ### `Canvas::oriented`
-[src/doc/canvas.rs:557](../../../src/doc/canvas.rs#L557)
+[src/doc/canvas.rs:605](../../../src/doc/canvas.rs#L605)
 
 ```rust
 pub fn oriented(&self, o: crate::doc::orient::Orient) -> Canvas
@@ -1010,7 +1037,7 @@ a doodle in one corner costs only the doodle. A quarter turn swaps width and hei
 **Used by:** [../app/orient.md](../app/orient.md).
 
 ### `Canvas::content_bounds`
-[src/doc/canvas.rs:584](../../../src/doc/canvas.rs#L584)
+[src/doc/canvas.rs:632](../../../src/doc/canvas.rs#L632)
 
 ```rust
 pub fn content_bounds(&self) -> Option<DirtyRect>
@@ -1025,7 +1052,7 @@ the [`ALPHA`](#const-alpha) mask.
 **Used by:** [../app.md](../app.md).
 
 ### `Canvas::is_blank`
-[src/doc/canvas.rs:600](../../../src/doc/canvas.rs#L600)
+[src/doc/canvas.rs:648](../../../src/doc/canvas.rs#L648)
 
 ```rust
 pub fn is_blank(&self) -> bool
@@ -1036,7 +1063,7 @@ Nothing drawn: no pixel has any alpha. Runs [`no_alpha`](#no_alpha) on whichever
 (`cell_is_blank`).
 
 ### `Canvas::clear`
-[src/doc/canvas.rs:607](../../../src/doc/canvas.rs#L607)
+[src/doc/canvas.rs:655](../../../src/doc/canvas.rs#L655)
 
 ```rust
 pub fn clear(&mut self)
@@ -1047,7 +1074,7 @@ with an empty packed one (freeing the buffer), takes a new rev, drops `unwritten
 whole canvas dirty.
 
 ### `Canvas::mark_dirty`
-[src/doc/canvas.rs:622](../../../src/doc/canvas.rs#L622)
+[src/doc/canvas.rs:670](../../../src/doc/canvas.rs#L670)
 
 ```rust
 pub fn mark_dirty(&mut self, x: u32, y: u32, w: u32, h: u32)
@@ -1095,18 +1122,18 @@ Run with `cargo test doc::canvas::tests` · 8 tests
 
 | Test | What it checks |
 |---|---|
-| [`orienting_a_packed_cell_matches_the_unpacked_one`](../../../src/doc/canvas.rs#L664) | Orienting reads only what a packed canvas holds, and must come out the same as turning the whole buffer over. |
-| [`writes_the_bytes_the_derive_wrote`](../../../src/doc/canvas.rs#L701) | Writes the bytes the derive wrote. |
-| [`reads_what_the_derive_wrote_packed`](../../../src/doc/canvas.rs#L720) | Reads what the derive wrote packed. |
-| [`packing_loses_nothing_and_reads_the_same`](../../../src/doc/canvas.rs#L737) | Packing loses nothing and reads the same. |
-| [`unpacking_ahead_of_a_write_packs_back_for_free`](../../../src/doc/canvas.rs#L765) | Unpacked ahead of a write, a canvas reads the same, keeps its rev, and packs back for free; once written, it packs as ever. |
-| [`a_blank_canvas_holds_nothing`](../../../src/doc/canvas.rs#L789) | A blank canvas holds nothing. |
-| [`pixels_that_dont_fit_the_size_are_an_error`](../../../src/doc/canvas.rs#L800) | Pixels that dont fit the size are an error. |
-| [`content_bounds_wraps_every_inked_pixel`](../../../src/doc/canvas.rs#L810) | Content bounds wraps every inked pixel. |
+| [`orienting_a_packed_cell_matches_the_unpacked_one`](../../../src/doc/canvas.rs#L712) | Orienting reads only what a packed canvas holds, and must come out the same as turning the whole buffer over. |
+| [`writes_the_bytes_the_derive_wrote`](../../../src/doc/canvas.rs#L749) | Writes the bytes the derive wrote. |
+| [`reads_what_the_derive_wrote_packed`](../../../src/doc/canvas.rs#L768) | Reads what the derive wrote packed. |
+| [`packing_loses_nothing_and_reads_the_same`](../../../src/doc/canvas.rs#L785) | Packing loses nothing and reads the same. |
+| [`unpacking_ahead_of_a_write_packs_back_for_free`](../../../src/doc/canvas.rs#L813) | Unpacked ahead of a write, a canvas reads the same, keeps its rev, and packs back for free; once written, it packs as ever. |
+| [`a_blank_canvas_holds_nothing`](../../../src/doc/canvas.rs#L837) | A blank canvas holds nothing. |
+| [`pixels_that_dont_fit_the_size_are_an_error`](../../../src/doc/canvas.rs#L848) | Pixels that dont fit the size are an error. |
+| [`content_bounds_wraps_every_inked_pixel`](../../../src/doc/canvas.rs#L858) | Content bounds wraps every inked pixel. |
 
 **Test helpers** (used only by the tests above):
 
-- [`inked`](../../../src/doc/canvas.rs#L653) — Inked.
-- [`sparse`](../../../src/doc/canvas.rs#L687) — A drawing in one corner, with colour under zero alpha around it.
+- [`inked`](../../../src/doc/canvas.rs#L701) — Inked.
+- [`sparse`](../../../src/doc/canvas.rs#L735) — A drawing in one corner, with colour under zero alpha around it.
 
-**Test-only types and constants:** [`Derived`](../../../src/doc/canvas.rs#L647)
+**Test-only types and constants:** [`Derived`](../../../src/doc/canvas.rs#L695)

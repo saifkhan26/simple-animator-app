@@ -11,6 +11,7 @@ pub mod liquify;
 pub mod noise;
 pub mod perspective;
 pub mod paper;
+pub mod recolor;
 pub mod ribbon;
 pub mod scan;
 pub mod select_mask;

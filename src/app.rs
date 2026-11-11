@@ -8,6 +8,7 @@ mod groups;
 mod lasso_fill;
 mod liquify;
 mod orient;
+pub mod recolor;
 pub mod pen_slots;
 mod select;
 
@@ -15,6 +16,7 @@ pub use button_drag::ButtonDragState;
 pub use pen_slots::PenSlot;
 pub use lasso_fill::{FillMode, LassoHeld};
 pub use select::SelGesture;
+pub use recolor::{RecolorCfg, RecolorSpan, Well};
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1291,6 +1293,8 @@ pub struct AppState {
     /// The tracks' Range ▸ Stretch length, as typed: frames (`18`) or a
     /// change to each run's length (`*1.5`, `+4`), read by `ui::expr`.
     pub track_stretch: String,
+    /// The Replace color window: its colours, tolerance and span.
+    pub recolor: RecolorCfg,
     /// What the cell collector last ran against: the history's revision and
     /// the pool's length. `None` makes it run. See `collect_cells`.
     gc_key: Option<(u64, usize)>,
@@ -1888,6 +1892,7 @@ impl AppState {
             track_timing_n: 2,
             track_repeat_n: 2,
             track_stretch: String::new(),
+            recolor: RecolorCfg::default(),
             gc_key: None,
             blank_cache: HashMap::new(),
             blank_scans_left: 0,
@@ -5892,6 +5897,7 @@ impl AppState {
         }
         self.screen_pick = false;
         self.screen_pick_arm = false;
+        self.recolor.picking = None;
         // NB: do NOT free `screen_pick_tex` here. End can be called mid-frame
         // (on a commit tap) *after* the loupe already painted with that texture
         // this frame; dropping the handle now makes wgpu submit a render pass
@@ -6655,6 +6661,17 @@ impl AppState {
     /// Commit a sampled colour: apply it to every tool, restore the drawing tool
     /// that was active before picking, and leave pick mode.
     pub fn commit_screen_pick(&mut self, color: [u8; 4]) {
+        // A pick for the Replace color window fills its well, and leaves
+        // the brush and the tool as they were.
+        if let Some(well) = self.recolor.picking.take() {
+            let rgb = [color[0], color[1], color[2]];
+            match well {
+                Well::From => self.recolor.from = rgb,
+                Well::To => self.recolor.to = rgb,
+            }
+            self.end_screen_pick();
+            return;
+        }
         // The active brush may have changed since its slot was last written
         // (a preset, a slider); keep that before reloading from the slots.
         self.stash_brush();
@@ -7181,6 +7198,7 @@ impl AppState {
             Action::TrackCloseGap => self.close_track_selection(),
             Action::TrackReverse => self.reverse_track_selection(),
             Action::TrackSwing => self.swing_track_selection(),
+            Action::ReplaceColor => self.open_recolor(),
             Action::SelectionDeselect => self.deselect(),
             Action::SelectAll => self.select_all(),
             Action::SelectInvert => self.select_invert(),

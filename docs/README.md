@@ -40,6 +40,7 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/app/liquify.rs`](src/app/liquify.md) | a Liquify session on AppState |
 | [`src/app/orient.rs`](src/app/orient.md) | flipping and turning the artwork |
 | [`src/app/pen_slots.rs`](src/app/pen_slots.md) | the pen slots (the row of pens in the Tools panel) |
+| [`src/app/recolor.rs`](src/app/recolor.md) | the Replace color command |
 | [`src/app/select.rs`](src/app/select.md) | the selection: mask, gestures and floating pixels |
 | [`src/main.rs`](src/main.md) | where the program starts |
 
@@ -71,6 +72,7 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/tools/noise.rs`](src/tools/noise.md) | midtone noise for app brushes |
 | [`src/tools/paper.rs`](src/tools/paper.md) | paper grain texture |
 | [`src/tools/perspective.rs`](src/tools/perspective.md) | perspective grids: geometry, walls, snapping |
+| [`src/tools/recolor.rs`](src/tools/recolor.md) | swapping one colour for another |
 | [`src/tools/ribbon.rs`](src/tools/ribbon.md) | the stroke rasteriser (ribbons and dabs) |
 | [`src/tools/scan.rs`](src/tools/scan.md) | fast byte scans, eight bytes at a time |
 | [`src/tools/select_mask.rs`](src/tools/select_mask.md) | the selection mask in document space |
@@ -199,4 +201,4 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/platform.rs`](src/platform.md) | rounded corners and a border for the frameless window (Windows) |
 | [`src/undo.rs`](src/undo.md) | undo and redo history |
 
-_118 pages._
+_120 pages._

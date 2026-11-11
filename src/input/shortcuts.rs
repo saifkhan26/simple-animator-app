@@ -168,6 +168,8 @@ pub enum Action {
     TrackReverse,
     /// Forward, then back (`A B C D C B`). Unbound by default.
     TrackSwing,
+    /// Open the Replace color window. Unbound by default.
+    ReplaceColor,
     SaveProject,
     SaveProjectAs,
     OpenProject,
@@ -307,6 +309,7 @@ impl Action {
         Action::TrackCloseGap,
         Action::TrackReverse,
         Action::TrackSwing,
+        Action::ReplaceColor,
         Action::SaveProject,
         Action::SaveProjectAs,
         Action::OpenProject,
@@ -440,6 +443,7 @@ impl Action {
             Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
             Action::TrackReverse => "Timeline: reverse drawings",
             Action::TrackSwing => "Timeline: swing drawings (forward, then back)",
+            Action::ReplaceColor => "Replace color…",
             Action::SaveProject => "Save project",
             Action::SaveProjectAs => "Save project as…",
             Action::OpenProject => "Open project",

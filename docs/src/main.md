@@ -1,6 +1,6 @@
 # `src/main.rs` — where the program starts
 
-> **Source:** [src/main.rs](../../src/main.rs) · **Module:** `crate` · **Size:** 101 lines · Line links as of commit `a1aa764`
+> **Source:** [src/main.rs](../../src/main.rs) · **Module:** `crate` · **Size:** 101 lines · Line links as of commit `7901e50`
 
 ## What this file is for
 
