@@ -22,15 +22,95 @@ use crate::tools::perspective::{
 use crate::undo;
 
 /// One project file's grids, as the app keeps them between sessions.
+///
+/// Saved through [`GridFileRepr`], so an older build — which knows only the
+/// plane kinds, and would throw away *every* preference over one guide kind
+/// it can't read — still finds just planes where it looks.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(from = "GridFileRepr", into = "GridFileRepr")]
 pub struct GridFile {
     pub path: PathBuf,
+    /// Every guide, in list order: planes, rulers, points, ellipses.
     pub grids: Vec<PerspectiveGrid>,
     pub active: usize,
     /// Seconds since the Unix epoch it was last open. Past
     /// [`MAX_GRID_FILES`] the stalest are forgotten first.
     pub used: u64,
+}
+
+/// [`GridFile`] as written. `grids` and `active` keep their old shape and
+/// hold only planes, so an older build reads them as it always did; the
+/// other guides go in `guides`, each with its place in the whole list, where
+/// an older build doesn't look.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct GridFileRepr {
+    path: PathBuf,
+    grids: Vec<PerspectiveGrid>,
+    /// Into `grids` — what an older build makes active.
+    active: usize,
+    used: u64,
+    guides: Vec<(usize, PerspectiveGrid)>,
+    /// The active guide's place in the whole list. Only meant when
+    /// `split` is set: a file from before has none, and `active` is it.
+    active_all: usize,
+    /// 1 once written this way; 0 (missing) in an older file.
+    split: u8,
+}
+
+impl From<GridFile> for GridFileRepr {
+    fn from(f: GridFile) -> Self {
+        let mut grids = Vec::new();
+        let mut guides = Vec::new();
+        let mut active = 0;
+        for (i, g) in f.grids.into_iter().enumerate() {
+            if g.kind.is_plane() {
+                if i <= f.active {
+                    active = grids.len();
+                }
+                grids.push(g);
+            } else {
+                guides.push((i, g));
+            }
+        }
+        Self {
+            path: f.path,
+            active: active.min(grids.len().saturating_sub(1)),
+            grids,
+            used: f.used,
+            guides,
+            active_all: f.active,
+            split: 1,
+        }
+    }
+}
+
+impl From<GridFileRepr> for GridFile {
+    fn from(r: GridFileRepr) -> Self {
+        let n = r.grids.len() + r.guides.len();
+        let mut slots: Vec<Option<PerspectiveGrid>> = vec![None; n];
+        let mut late = Vec::new();
+        for (i, g) in r.guides {
+            match slots.get_mut(i) {
+                Some(s @ None) => *s = Some(g),
+                _ => late.push(g),
+            }
+        }
+        let mut planes = r.grids.into_iter();
+        for s in slots.iter_mut().filter(|s| s.is_none()) {
+            *s = planes.next();
+        }
+        let mut grids: Vec<PerspectiveGrid> = slots.into_iter().flatten().collect();
+        grids.extend(planes);
+        grids.extend(late);
+        let active = if r.split == 0 { r.active } else { r.active_all };
+        Self {
+            path: r.path,
+            active: active.min(grids.len().saturating_sub(1)),
+            grids,
+            used: r.used,
+        }
+    }
 }
 
 /// Most files whose grids the app remembers.
@@ -484,5 +564,93 @@ impl AppState {
                 after: Box::new(after.clone()),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::MemStorage;
+    use super::*;
+
+    const KEY: &str = "grid_files";
+
+    fn file() -> GridFile {
+        let kinds = [
+            GridKind::Perspective,
+            GridKind::Ruler,
+            GridKind::Flat,
+            GridKind::Ellipse,
+            GridKind::Point,
+        ];
+        GridFile {
+            path: PathBuf::from("shot.anim"),
+            grids: kinds.map(PerspectiveGrid::fresh).to_vec(),
+            active: 3,
+            used: 7,
+        }
+    }
+
+    /// The store as an older build declares it: planes only.
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    #[serde(default)]
+    struct OldGridFile {
+        path: PathBuf,
+        grids: Vec<OldGrid>,
+        active: usize,
+        used: u64,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    #[serde(default)]
+    struct OldGrid {
+        kind: OldKind,
+        corners: [P; 4],
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Default, Debug, PartialEq)]
+    enum OldKind {
+        #[default]
+        Perspective,
+        Flat,
+        Isometric,
+    }
+
+    #[test]
+    fn the_store_keeps_every_guide_kind_in_order() {
+        let mut storage = MemStorage::default();
+        eframe::set_value(&mut storage, KEY, &vec![file()]);
+        let back: Vec<GridFile> = eframe::get_value(&storage, KEY).expect("reads back");
+        assert_eq!(back, vec![file()]);
+    }
+
+    #[test]
+    fn an_older_build_reads_only_the_planes() {
+        let mut storage = MemStorage::default();
+        eframe::set_value(&mut storage, KEY, &vec![file()]);
+        let old: Vec<OldGridFile> = eframe::get_value(&storage, KEY).expect("an older build still reads it");
+        let kinds: Vec<_> = old[0].grids.iter().map(|g| &g.kind).collect();
+        assert_eq!(kinds, [&OldKind::Perspective, &OldKind::Flat]);
+        // The ellipse was active: the plane before it stands in.
+        assert_eq!(old[0].active, 1);
+        assert_eq!(old[0].used, 7);
+    }
+
+    #[test]
+    fn a_store_an_older_build_wrote_still_loads() {
+        let mut storage = MemStorage::default();
+        let written = vec![OldGridFile {
+            path: PathBuf::from("old.anim"),
+            grids: vec![
+                OldGrid { kind: OldKind::Flat, corners: PerspectiveGrid::fresh(GridKind::Flat).corners },
+                OldGrid { kind: OldKind::Perspective, corners: PerspectiveGrid::default().corners },
+            ],
+            active: 1,
+            used: 3,
+        }];
+        eframe::set_value(&mut storage, KEY, &written);
+        let back: Vec<GridFile> = eframe::get_value(&storage, KEY).expect("reads");
+        let kinds: Vec<_> = back[0].grids.iter().map(|g| g.kind).collect();
+        assert_eq!(kinds, [GridKind::Flat, GridKind::Perspective]);
+        assert_eq!(back[0].active, 1);
     }
 }

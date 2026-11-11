@@ -288,9 +288,24 @@ pub enum GridGrab {
     Move,
 }
 
-/// What kind of guide a grid is. All three are a four-corner quad; flat and
-/// isometric grids hold theirs to a square or a 60° rhombus, and tile it over
-/// the whole canvas.
+/// What kind of guide a grid is. Every kind keeps four corners, so keys,
+/// follow links, undo and the pose fields work the same for all of them.
+///
+/// The first three are planes: a four-corner quad, which flat and isometric
+/// grids hold to a square or a 60° rhombus and tile over the whole canvas.
+/// The rest are single guides (see [`super::guides`]):
+///
+/// - [`Ruler`](Self::Ruler) and [`Parallel`](Self::Parallel) are a line
+///   from corner 0 to corner 1, kept as the flat quad `[a, b, b, a]` so its
+///   centre and turn read off the corners like any grid's.
+/// - [`Point`](Self::Point) is a lone vanishing point where two helper lines
+///   meet, corners 0–1 and 3–2: lay them along lines in a reference and the
+///   point lands where those lines run to.
+/// - [`Ellipse`](Self::Ellipse) is the circle drawn in its quad: a plain
+///   ellipse in a rectangle, a circle in perspective in a floor-like quad.
+///
+/// Older builds know only the planes, so the store keeps the rest apart
+/// where they won't look (see `app::grids`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GridKind {
     #[default]
@@ -300,6 +315,14 @@ pub enum GridKind {
     /// Three families at 60° to each other: the rhombus's two edge
     /// directions, and the vertical through its corners.
     Isometric,
+    /// A straight edge: a press on it draws along it.
+    Ruler,
+    /// Strokes anywhere run parallel to its line.
+    Parallel,
+    /// A vanishing point of its own, fitted by two helper lines.
+    Point,
+    /// A circle or ellipse — in perspective when its quad is.
+    Ellipse,
 }
 
 impl GridKind {
@@ -308,7 +331,29 @@ impl GridKind {
             GridKind::Perspective => "Perspective",
             GridKind::Flat => "Flat",
             GridKind::Isometric => "Isometric",
+            GridKind::Ruler => "Ruler",
+            GridKind::Parallel => "Parallel lines",
+            GridKind::Point => "Vanishing point",
+            GridKind::Ellipse => "Ellipse",
         }
+    }
+
+    /// What its row in the list is called, before its number.
+    pub fn row_name(self) -> &'static str {
+        match self {
+            GridKind::Perspective | GridKind::Flat | GridKind::Isometric => "Grid",
+            GridKind::Ruler => "Ruler",
+            GridKind::Parallel => "Parallels",
+            GridKind::Point => "Point",
+            GridKind::Ellipse => "Ellipse",
+        }
+    }
+
+    /// A plane with rows and columns: perspective, flat or isometric. Only
+    /// these have walls, fill the canvas, and take shapes lying on them —
+    /// and only these are what an older build can read.
+    pub fn is_plane(self) -> bool {
+        matches!(self, GridKind::Perspective | GridKind::Flat | GridKind::Isometric)
     }
 
     /// Whether the quad keeps its shape: flat and isometric grids only move,
@@ -576,10 +621,18 @@ impl Default for PerspectiveGrid {
 /// Side of a fresh flat or isometric grid's home quad, in frame heights.
 const RIGID_SIDE: f32 = 0.4;
 
+/// A line from `a` to `b` as a guide keeps it: the flat quad `[a, b, b, a]`,
+/// whose centre is the line's middle and whose turn is the line's.
+pub fn line_quad(a: P, b: P) -> [P; 4] {
+    [a, b, b, a]
+}
+
 impl PerspectiveGrid {
     /// A fresh grid of `kind`: a floor trapezoid, a square, or a rhombus with
     /// its long diagonal level — each centred, four cells to a side for the
-    /// tiled kinds.
+    /// tiled kinds. A ruler lies level across the middle; a vanishing point
+    /// sits above it with its helper lines fanning down; an ellipse starts as
+    /// a circle.
     pub fn fresh(kind: GridKind) -> Self {
         let base = Self {
             kind,
@@ -605,6 +658,33 @@ impl PerspectiveGrid {
                     rows: 4,
                     cols: 4,
                     horizon: false,
+                    ..base
+                }
+            }
+            GridKind::Ruler | GridKind::Parallel => {
+                let (a, b) = ([-0.25, 0.0], [0.25, 0.0]);
+                Self {
+                    corners: line_quad(a, b),
+                    rows: 8,
+                    horizon: false,
+                    color: [255, 170, 60],
+                    ..base
+                }
+            }
+            // Its helpers are the quad's left and right edges, which meet
+            // up at (0, -0.275).
+            GridKind::Point => Self {
+                corners: [[-0.15, -0.05], [0.15, -0.05], [0.35, 0.25], [-0.35, 0.25]],
+                horizon: false,
+                color: [255, 110, 150],
+                ..base
+            },
+            GridKind::Ellipse => {
+                let r = RIGID_SIDE * 0.375;
+                Self {
+                    corners: [[-r, -r], [r, -r], [r, r], [-r, r]],
+                    horizon: false,
+                    color: [120, 220, 140],
                     ..base
                 }
             }
