@@ -5527,6 +5527,30 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
              just outside a corner to rotate, inside to move. Hold Shift once dragging: \
              turns go in 15° steps."
         }
+        Some(GridKind::PanHorizontal) => {
+            "Level lines bow through the side points, lines going away bend through the \
+             centre point, verticals stay straight. Drag the centre point to move it, the \
+             horizon to turn it, a side point to stretch it — Shift scales it whole — and \
+             the diamond to make the curves fuller or flatter."
+        }
+        Some(GridKind::PanVertical) => {
+            "Verticals bow through the points above and below, lines going away bend \
+             through the centre point, horizontals stay straight. Drag the centre point to \
+             move it, the horizon to turn it, a side point to stretch it — Shift scales it \
+             whole — and the diamond to make the curves fuller or flatter."
+        }
+        Some(GridKind::PanLoop) => {
+            "One whole turn: the box's two ends face the same way, so the background loops, \
+             with a point every quarter turn. Drag the centre point to move it, the horizon \
+             to turn it, a point to stretch the turn — Shift scales it whole — and the \
+             diamond to make the curves fuller or flatter."
+        }
+        Some(GridKind::Fisheye) => {
+            "Horizontals arc through the side points, verticals through the top and bottom \
+             ones, lines going away run straight to the centre. Drag the centre point to \
+             move it, the horizon to turn it, a point to stretch it that way — farther out, \
+             gentler curves; Shift scales it whole."
+        }
         _ => {
             "Drag a corner to reshape, a vanishing point to re-aim, the horizon to raise \
              the eye level or its round knobs to tilt it, just outside a corner to rotate, \
@@ -5548,8 +5572,8 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     )
     .on_hover_text(
         "Pencil, ink, eraser and shape lines lock to the guides: toward whichever \
-         vanishing point the stroke starts out heading for, on any visible guide whose \
-         magnet is on. Rectangles and ellipses lie on the active grid; hold Shift once \
+         vanishing point — or along whichever curve — the stroke starts out heading for, \
+         on any visible guide whose magnet is on. Rectangles and ellipses lie on the active grid; hold Shift once \
          dragging for a square or circle.",
     );
     let snapping = state.perspective.show && state.perspective.snap;
@@ -5651,6 +5675,8 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
                         (GridKind::Flat | GridKind::Isometric, None) => {
                             format!(" · {}", g.kind.label().to_lowercase())
                         }
+                        (GridKind::PanHorizontal, None) => " · horizontal".to_string(),
+                        (GridKind::PanVertical, None) => " · vertical".to_string(),
                         _ => String::new(),
                     };
                     let keyed = if g.keys.is_empty() { "" } else { " ◆" };
@@ -5783,6 +5809,42 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
                 "A circle, in perspective once you pull its corners: press on it and \
                  the stroke runs round it",
             );
+            ui.separator();
+            heading(ui, "Curved");
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::PanHorizontal),
+                ic::PANORAMA,
+                "3-point · horizontal pan",
+                "For a background the camera pans across: level lines bow into arches \
+                 through a point at each side, so the pan reads as the camera turning. \
+                 Lines going away bend through the centre; verticals stay straight",
+            );
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::PanVertical),
+                ic::ARROWS_DOWN_UP,
+                "3-point · vertical pan",
+                "For a tilt: verticals bow through a point above and one below; \
+                 horizontals stay straight",
+            );
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::PanLoop),
+                ic::ARROWS_CLOCKWISE,
+                "4-point · 360° pan",
+                "A pan all the way round: its box is one whole turn with a point every \
+                 quarter, and its curves run on past it so the background loops",
+            );
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::Fisheye),
+                ic::GLOBE_SIMPLE,
+                "5-point · fisheye",
+                "Curved both ways: horizontals arc through points at the sides, verticals \
+                 through points above and below, and lines going away run straight to \
+                 the centre",
+            );
         });
         ui.menu_button(theme::icon_text(ic::DOTS_THREE, ""), |ui| {
             if ui
@@ -5878,6 +5940,7 @@ fn grid_settings_window(state: &mut AppState, ctx: &egui::Context) {
 
 /// The body of [`grid_settings_window`], for the active grid.
 fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
+    use crate::tools::guides::BEND;
     use crate::tools::perspective::{
         Follow, GridKind, PerspectiveGrid, CEILING, EDGE_NAMES, FAN_RAYS, MAX_DIVISIONS,
         MAX_EXTRA_VPS,
@@ -5922,6 +5985,10 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
         GridKind::Parallel => ic::ROWS,
         GridKind::Point => ic::CROSSHAIR,
         GridKind::Ellipse => ic::CIRCLE_DASHED,
+        GridKind::PanHorizontal => ic::PANORAMA,
+        GridKind::PanVertical => ic::ARROWS_DOWN_UP,
+        GridKind::PanLoop => ic::ARROWS_CLOCKWISE,
+        GridKind::Fisheye => ic::GLOBE_SIMPLE,
         _ => ic::PERSPECTIVE,
     };
     theme::section_header(ui, icon, &what);
@@ -5952,6 +6019,33 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
                  where they start",
             );
             ui.checkbox(&mut g.centre_lines, "Axes");
+        }
+        GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop => {
+            ui.horizontal(|ui| {
+                ui.label("Curves");
+                ui.add(egui::DragValue::new(&mut g.rows).range(1..=MAX_DIVISIONS)).on_hover_text(
+                    "Arches either side of the horizon inside the box; more run on past it, fainter",
+                );
+            });
+            ui.add_enabled(
+                !g.locked,
+                egui::Slider::new(&mut g.bend, BEND).fixed_decimals(2).text("Curve shape"),
+            )
+            .on_hover_text(
+                "Lower: flatter curves, closing in on their points at a shallow angle. Higher: \
+                 fuller, square-shouldered ones that close in steeply. Or drag the diamond on \
+                 the outer curve.",
+            );
+        }
+        GridKind::Fisheye => {
+            ui.horizontal(|ui| {
+                ui.label("Arcs");
+                ui.add(egui::DragValue::new(&mut g.rows).range(1..=MAX_DIVISIONS))
+                    .on_hover_text("Arcs either side of the middle, each way");
+                ui.label("Rays");
+                ui.add(egui::DragValue::new(&mut g.fan_rays).range(FAN_RAYS))
+                    .on_hover_text("Depth lines all the way round the centre");
+            });
         }
         _ => {
             ui.horizontal(|ui| {
@@ -6016,7 +6110,9 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
                 .on_hover_text("Back to a fresh grid's shape, keeping rows, columns and look")
                 .clicked()
             {
-                g.corners = PerspectiveGrid::fresh(g.kind).corners;
+                let fresh = PerspectiveGrid::fresh(g.kind);
+                g.corners = fresh.corners;
+                g.bend = fresh.bend;
                 pose_edited = true;
             }
         });
@@ -10847,6 +10943,82 @@ mod perspective_tests {
             find(&s.shape, keep, &mut out);
         }
         out
+    }
+
+    #[test]
+    fn a_curved_guides_settings_show_only_what_it_has() {
+        use crate::tools::perspective::{GridKind, PerspectiveGrid};
+        for kind in [GridKind::PanHorizontal, GridKind::PanVertical, GridKind::PanLoop, GridKind::Fisheye] {
+            let mut state = state();
+            state.show_panels = true;
+            state.perspective.grids = vec![PerspectiveGrid::fresh(kind)];
+            state.perspective.ensure_ids();
+            state.dispatch(Action::ToolPerspective);
+            state.show_grid_settings = true;
+            let ctx = egui::Context::default();
+            crate::ui::theme::install(&ctx);
+            let mut shapes = Vec::new();
+            for _ in 0..3 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(SCREEN),
+                    ..Default::default()
+                };
+                shapes = ctx.run(raw, |ctx| draw(&mut state, ctx)).shapes;
+            }
+            let shown = |text: &str| !texts(&shapes, &|t| t.contains(text)).is_empty();
+            assert!(shown(kind.label()), "{kind:?}: its own heading");
+            let pan = kind != GridKind::Fisheye;
+            assert_eq!(shown("Curve shape"), pan, "{kind:?}");
+            assert_eq!(shown("Curves"), pan, "{kind:?}");
+            assert_eq!(shown("Arcs"), !pan, "{kind:?}");
+            assert!(shown("This guide") && shown("Scale"), "{kind:?}: magnet and pose like any guide");
+            for plane_only in ["Columns", "Major line every", "Fill canvas", "Walls", "Horizon and vanishing points"] {
+                assert!(!shown(plane_only), "{kind:?} has no {plane_only}");
+            }
+            // The Grid tool's hint says how to handle it.
+            assert!(shown("centre point to move it"), "{kind:?}");
+            assert_eq!(shown("diamond"), pan, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_add_menu_lists_the_curved_guides_under_their_own_heading() {
+        let mut state = state();
+        state.show_panels = true;
+        state.dispatch(Action::ToolPerspective);
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        let run = |state: &mut AppState, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(SCREEN),
+                events,
+                ..Default::default()
+            };
+            ctx.run(raw, |ctx| draw(state, ctx)).shapes
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = run(&mut state, vec![]);
+        }
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new(panel_key(PanelId::Tools))));
+        run(&mut state, vec![]);
+        let add = texts(&shapes, &|t| t.ends_with("Add")).first().expect("the Add button").1.center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: add,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&mut state, vec![egui::Event::PointerMoved(add), button(true)]);
+        run(&mut state, vec![button(false)]);
+        let shapes = run(&mut state, vec![]);
+        let at = |text: &str| texts(&shapes, &|t| t.ends_with(text)).first().map(|(_, r)| r.top());
+        let heading = at("Curved").expect("a Curved heading");
+        for item in ["horizontal pan", "vertical pan", "360° pan", "fisheye"] {
+            let y = at(item).unwrap_or_else(|| panic!("{item} listed"));
+            assert!(y > heading, "{item} under the heading");
+        }
+        assert!(at("Ellipse").unwrap() < heading, "after the rulers and curves");
     }
 
     #[test]
