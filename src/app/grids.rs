@@ -117,6 +117,34 @@ impl From<GridFileRepr> for GridFile {
 /// Most files whose grids the app remembers.
 const MAX_GRID_FILES: usize = 256;
 
+/// A `.guides` file: guides exported from one project, to bring into
+/// another. Text, so it can be read and mailed about.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct GuidesFile {
+    /// 1 for now; a later layout bumps it.
+    version: u32,
+    guides: Vec<PerspectiveGrid>,
+}
+
+/// Write `guides` to a `.guides` file at `path`.
+pub fn write_guides(path: &Path, guides: &[PerspectiveGrid]) -> anyhow::Result<()> {
+    let file = GuidesFile {
+        version: 1,
+        guides: guides.to_vec(),
+    };
+    let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())?;
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
+/// The guides in the `.guides` file at `path`.
+pub fn read_guides(path: &Path) -> anyhow::Result<Vec<PerspectiveGrid>> {
+    let text = std::fs::read_to_string(path)?;
+    let file: GuidesFile = ron::from_str(&text)?;
+    Ok(file.guides)
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -196,6 +224,71 @@ impl AppState {
     pub(super) fn grid_files_for_prefs(&mut self) -> Vec<GridFile> {
         self.stash_grids();
         self.grid_files.clone()
+    }
+
+    // --- Guide files ---
+
+    /// Export every guide of the open file to a `.guides` file the artist
+    /// picks.
+    pub fn export_guides(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Guides", &["guides"])
+            .set_file_name("guides.guides")
+            .set_title("Export guides")
+            .save_file()
+        else {
+            return;
+        };
+        let n = self.perspective.grids.len();
+        self.guide_file_note = Some(match write_guides(&path, &self.perspective.grids) {
+            Ok(()) => format!("Exported {n} guide{}", if n == 1 { "" } else { "s" }),
+            Err(e) => format!("Couldn't export the guides: {e:#}"),
+        });
+    }
+
+    /// Add the guides in a `.guides` file the artist picks to the open
+    /// file's own.
+    pub fn import_guides(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Guides", &["guides"])
+            .set_title("Import guides")
+            .pick_file()
+        else {
+            return;
+        };
+        self.guide_file_note = Some(match read_guides(&path) {
+            Ok(guides) => {
+                let n = self.merge_guides(guides);
+                format!("Imported {n} guide{}", if n == 1 { "" } else { "s" })
+            }
+            Err(e) => format!("Couldn't read {}: {e:#}", path.display()),
+        });
+    }
+
+    /// Append `incoming` to the live guides under fresh ids, keeping each
+    /// wall on its own floor — or freeing it, if its floor didn't come too.
+    /// The last one added becomes active. How many came in.
+    pub(super) fn merge_guides(&mut self, incoming: Vec<PerspectiveGrid>) -> usize {
+        let cfg = &mut self.perspective;
+        let first = cfg.grids.len();
+        let mut ids = std::collections::HashMap::new();
+        for g in incoming {
+            let old = g.id;
+            let i = cfg.push(g);
+            if old != 0 {
+                ids.insert(old, cfg.grids[i].id);
+            }
+        }
+        for g in &mut cfg.grids[first..] {
+            if let Some(w) = g.wall.as_mut() {
+                match ids.get(&w.parent) {
+                    Some(&id) => w.parent = id,
+                    None => g.wall = None,
+                }
+            }
+        }
+        cfg.relink();
+        cfg.grids.len() - first
     }
 
     // --- What a grid follows ---
@@ -686,6 +779,45 @@ mod tests {
         Perspective,
         Flat,
         Isometric,
+    }
+
+    #[test]
+    fn exported_guides_come_back_in_another_file_with_their_walls() {
+        let mut from = AppState::for_test();
+        from.perspective.grids = vec![PerspectiveGrid::default(), PerspectiveGrid::fresh(GridKind::Ruler)];
+        from.perspective.ensure_ids();
+        assert!(from.perspective.add_wall(0, 1).is_some());
+        let path = std::env::temp_dir().join(format!("animator_guides_{}.guides", std::process::id()));
+        write_guides(&path, &from.perspective.grids).unwrap();
+        let read = read_guides(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read, from.perspective.grids);
+
+        let mut to = AppState::for_test();
+        to.perspective.grids = vec![PerspectiveGrid::fresh(GridKind::Flat)];
+        to.perspective.ensure_ids();
+        assert_eq!(to.merge_guides(read), 3);
+        let g = &to.perspective.grids;
+        assert_eq!(g.len(), 4);
+        assert_eq!(to.perspective.active, 3);
+        let mut ids: Vec<u32> = g.iter().map(|g| g.id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "every id its own");
+        // The wall stands on the floor that came with it.
+        let wall = g[3].wall.expect("still a wall");
+        assert_eq!(wall.parent, g[1].id);
+    }
+
+    #[test]
+    fn a_wall_without_its_floor_comes_in_free() {
+        let mut from = AppState::for_test();
+        from.perspective.grids = vec![PerspectiveGrid::default()];
+        from.perspective.ensure_ids();
+        let w = from.perspective.add_wall(0, 2).unwrap();
+        let alone = vec![from.perspective.grids[w].clone()];
+        let mut to = AppState::for_test();
+        to.merge_guides(alone);
+        assert!(to.perspective.grids.last().unwrap().wall.is_none());
     }
 
     #[test]

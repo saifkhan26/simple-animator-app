@@ -1443,6 +1443,9 @@ pub struct AppState {
     /// The grids from before grids were kept per file, for files the app
     /// has none kept for.
     grid_seed: Vec<perspective::PerspectiveGrid>,
+    /// How the last guide export or import went, shown under the guide list
+    /// until the next one. Session-only.
+    pub guide_file_note: Option<String>,
     /// Perspective snap for the stroke in progress, or `None` when the stroke
     /// isn't snapping.
     snap_lock: Option<SnapLock>,
@@ -1953,6 +1956,7 @@ impl AppState {
             grid_sync_last: None,
             grid_files: prefs.grid_files.clone(),
             grid_seed: prefs.perspective.grids.clone(),
+            guide_file_note: None,
             snap_lock: None,
             view: View::default(),
             view_scale: 1.0,

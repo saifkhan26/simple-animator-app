@@ -5605,6 +5605,8 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     let cfg = &mut state.perspective;
     let mut open_settings = false;
     let mut remove = None;
+    // Export (false) or import (true), once the list lets go of the state.
+    let mut file_op: Option<bool> = None;
     for i in 0..cfg.grids.len() {
         let selected = i == cfg.active;
         let parent_no = cfg.grids[i]
@@ -5782,6 +5784,26 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
                  the stroke runs round it",
             );
         });
+        ui.menu_button(theme::icon_text(ic::DOTS_THREE, ""), |ui| {
+            if ui
+                .button(theme::icon_text(ic::EXPORT, "Export guides…"))
+                .on_hover_text("Save every guide here to a .guides file, to bring into another project")
+                .clicked()
+            {
+                file_op = Some(false);
+                ui.close_menu();
+            }
+            if ui
+                .button(theme::icon_text(ic::DOWNLOAD_SIMPLE, "Import guides…"))
+                .on_hover_text("Add the guides from a .guides file to this project's")
+                .clicked()
+            {
+                file_op = Some(true);
+                ui.close_menu();
+            }
+        })
+        .response
+        .on_hover_text("More: export or import guides");
         let dup = cfg.active_grid().cloned();
         if ui
             .add_enabled(dup.is_some(), egui::Button::new(theme::icon_text(ic::COPY, "Duplicate")))
@@ -5804,6 +5826,14 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
 
     if open_settings {
         state.show_grid_settings = true;
+    }
+    match file_op {
+        Some(false) => state.export_guides(),
+        Some(true) => state.import_guides(),
+        None => {}
+    }
+    if let Some(note) = &state.guide_file_note {
+        ui.label(egui::RichText::new(note).color(theme::text_muted()).size(11.0));
     }
 }
 
