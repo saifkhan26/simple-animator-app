@@ -8012,7 +8012,27 @@ fn draw_snap_curve(
                 painter.extend(egui::Shape::dashed_line(&pts, stroke, 6.0, 4.0));
             }
         }
+        SnapCurve::Wave { .. } | SnapCurve::Arc { .. } => {
+            let (lo, hi) = doc_bounds(xf, clip);
+            for run in c.curve.bend_points(lo, hi) {
+                let pts: Vec<egui::Pos2> = run.into_iter().map(to_screen).collect();
+                painter.extend(egui::Shape::dashed_line(&pts, stroke, 6.0, 4.0));
+            }
+        }
     }
+}
+
+/// The document-space box round what screen rect `clip` shows, however the
+/// view is turned.
+fn doc_bounds(xf: &Xform, clip: Rect) -> ([f32; 2], [f32; 2]) {
+    let mut lo = [f32::INFINITY; 2];
+    let mut hi = [f32::NEG_INFINITY; 2];
+    for q in [clip.min, clip.right_top(), clip.max, clip.left_bottom()] {
+        let (x, y) = xf.screen_to_doc(q);
+        lo = [lo[0].min(x), lo[1].min(y)];
+        hi = [hi[0].max(x), hi[1].max(y)];
+    }
+    (lo, hi)
 }
 
 /// Fill everything *outside* the convex quad `inner` (TL, TR, BR, BL) with

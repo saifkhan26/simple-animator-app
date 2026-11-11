@@ -10725,6 +10725,67 @@ mod tests {
     }
 
     #[test]
+    fn a_horizontal_pan_bends_a_level_stroke_down_to_its_side_points() {
+        // Side points at (100, 300) and (700, 300).
+        let c = perspective::box_quad([400.0, 300.0], 300.0, 150.0);
+        let mut state = guide_state(perspective::GridKind::PanHorizontal, c);
+        state.snap_begin([450.0, 200.0]);
+        state.snap_doc([470.0, 201.0]);
+        let p = state.snap_doc([620.0, 200.0]);
+        let curve = state.snap_curve().expect("picked").curve;
+        assert!(matches!(curve, guides::SnapCurve::Wave { .. }), "{curve:?}");
+        assert!(curve.distance(p) < 0.5, "held on the arch: {p:?}");
+        assert!(curve.distance([100.0, 300.0]) < 0.5 && curve.distance([700.0, 300.0]) < 0.5);
+        // A level line drawn by hand comes out bent down toward the point.
+        assert!(p[1] > 230.0, "{p:?}");
+        state.pointer_up();
+        // Heading up instead: the vertical, straight.
+        state.snap_begin([450.0, 200.0]);
+        state.snap_doc([451.0, 180.0]);
+        let p = state.snap_doc([447.0, 120.0]);
+        assert!(near(p, [450.0, 120.0]), "{p:?}");
+    }
+
+    #[test]
+    fn a_fisheye_bows_a_downward_stroke_through_its_top_and_bottom_points() {
+        let c = perspective::box_quad([400.0, 300.0], 200.0, 200.0);
+        let mut state = guide_state(perspective::GridKind::Fisheye, c);
+        state.snap_begin([500.0, 250.0]);
+        state.snap_doc([501.0, 270.0]);
+        let p = state.snap_doc([505.0, 380.0]);
+        let curve = state.snap_curve().expect("picked").curve;
+        assert!(matches!(curve, guides::SnapCurve::Arc { .. }), "{curve:?}");
+        assert!(curve.distance([400.0, 100.0]) < 0.5 && curve.distance([400.0, 500.0]) < 0.5);
+        // The circle through those and the start, about (262.5, 300): the
+        // pen at (505, 380) lands straight in from it, at x ≈ 493.
+        assert!(curve.distance(p) < 0.5 && (p[0] - 493.0).abs() < 1.0, "{p:?}");
+        state.pointer_up();
+        // Heading for the centre: straight to it.
+        state.snap_begin([500.0, 250.0]);
+        state.snap_doc([490.0, 255.0]);
+        let p = state.snap_doc([440.0, 270.0]);
+        let (d0, d1) = ([p[0] - 500.0, p[1] - 250.0], [-100.0, 50.0]);
+        assert!((d0[0] * d1[1] - d0[1] * d1[0]).abs() < 1.0, "{p:?}");
+    }
+
+    #[test]
+    fn a_360_pan_takes_a_stroke_on_round_past_the_loop() {
+        // One turn 800 wide: points every 200, the box's ends the same one.
+        let c = perspective::box_quad([400.0, 300.0], 400.0, 150.0);
+        let mut state = guide_state(perspective::GridKind::PanLoop, c);
+        let draw = |state: &mut AppState, dx: f32| {
+            state.snap_begin([350.0 + dx, 220.0]);
+            state.snap_doc([370.0 + dx, 221.0]);
+            let p = state.snap_doc([480.0 + dx, 240.0]);
+            state.pointer_up();
+            p
+        };
+        let inside = draw(&mut state, 0.0);
+        let round = draw(&mut state, 800.0);
+        assert!(near(round, [inside[0] + 800.0, inside[1]]), "{inside:?} then {round:?}");
+    }
+
+    #[test]
     fn a_ruler_end_drag_shows_its_heading() {
         let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
         let mut state = guide_state(perspective::GridKind::Ruler, ruler);
