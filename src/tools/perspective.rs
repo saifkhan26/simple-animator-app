@@ -628,6 +628,22 @@ impl Default for PerspectiveGrid {
 /// Side of a fresh flat or isometric grid's home quad, in frame heights.
 const RIGID_SIDE: f32 = 0.4;
 
+/// A ready-made perspective setup, as the Add menu offers them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    /// A floor facing the viewer: one vanishing point.
+    OnePoint,
+    /// A floor turned to the viewer: two vanishing points out on the
+    /// horizon, past the sides of the frame.
+    TwoPoint,
+    /// Two-point from above: the horizon high, verticals running down to a
+    /// third point below the frame.
+    BirdsEye,
+    /// Two-point from below: the horizon low, verticals running up to a
+    /// third point above the frame.
+    WormsEye,
+}
+
 /// A line from `a` to `b` as a guide keeps it: the flat quad `[a, b, b, a]`,
 /// whose centre is the line's middle and whose turn is the line's.
 pub fn line_quad(a: P, b: P) -> [P; 4] {
@@ -696,6 +712,41 @@ impl PerspectiveGrid {
                 }
             }
         }
+    }
+
+    /// A perspective grid set up as `preset` says: its floor aimed at two
+    /// vanishing points out past the frame's sides, its near corner just
+    /// right of the middle, and — for three-point — a third point for the
+    /// verticals, off the horizon.
+    pub fn preset(preset: Preset) -> Self {
+        let base = Self::fresh(GridKind::Perspective);
+        let (eye, near, third) = match preset {
+            Preset::OnePoint => return base,
+            Preset::TwoPoint => (-0.15, [0.05, 0.32], None),
+            Preset::BirdsEye => (-0.42, [0.05, 0.36], Some([0.05, 2.2])),
+            Preset::WormsEye => (0.22, [0.05, 0.46], Some([0.05, -2.2])),
+        };
+        let (left, right) = ([-1.15, eye], [1.15, eye]);
+        // A third of the way from the near corner to each point, and the far
+        // corner where the lines back to the other points cross.
+        let toward = |v: P| add(near, sub(v, near).map(|x| x * 0.3));
+        let (a, b) = (toward(left), toward(right));
+        let Some(far) = intersect(a, sub(right, a), b, sub(left, b)) else {
+            return base;
+        };
+        let mut g = Self {
+            corners: [a, far, b, near],
+            ..base
+        };
+        if let Some(pos) = third {
+            g.extra_vps.push(ExtraVp {
+                pos,
+                on_horizon: false,
+                rays: true,
+                snap: true,
+            });
+        }
+        g
     }
 
     /// Corners in document space.
@@ -2222,6 +2273,29 @@ mod tests {
     }
 
     const TRAP: [P; 4] = [[40.0, 0.0], [60.0, 0.0], [100.0, 100.0], [0.0, 100.0]];
+
+    #[test]
+    fn presets_put_their_points_where_they_say() {
+        for (preset, eye, third) in [
+            (Preset::TwoPoint, -0.15, None),
+            (Preset::BirdsEye, -0.42, Some(1.0)),
+            (Preset::WormsEye, 0.22, Some(-1.0)),
+        ] {
+            let g = PerspectiveGrid::preset(preset);
+            assert!(is_convex(&g.corners), "{preset:?}");
+            let plane = Plane::new(g.corners).unwrap();
+            let (l, r) = (plane.vp_point(1).unwrap(), plane.vp_point(0).unwrap());
+            let (l, r) = if l[0] < r[0] { (l, r) } else { (r, l) };
+            let at = |p: P, q: P| (p[0] - q[0]).abs() < 1e-2 && (p[1] - q[1]).abs() < 1e-2;
+            assert!(at(l, [-1.15, eye]) && at(r, [1.15, eye]), "{preset:?}: {l:?} {r:?}");
+            match third {
+                None => assert!(g.extra_vps.is_empty()),
+                // Below the frame looking down, above it looking up.
+                Some(side) => assert!(g.extra_vps[0].pos[1] * side > 1.0 && !g.extra_vps[0].on_horizon),
+            }
+        }
+        assert_eq!(PerspectiveGrid::preset(Preset::OnePoint), PerspectiveGrid::default());
+    }
     const QUAD: [P; 4] = [[10.0, 5.0], [90.0, 20.0], [80.0, 70.0], [0.0, 90.0]];
 
     #[test]

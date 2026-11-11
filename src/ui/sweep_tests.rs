@@ -864,7 +864,7 @@ fn guide_set() -> Vec<crate::tools::perspective::PerspectiveGrid> {
     ring.corners[0][0] += 0.06;
     ring.corners[1][0] -= 0.06;
     vec![
-        at(GridKind::Perspective, [-0.2, 0.15]),
+        PerspectiveGrid::preset(crate::tools::perspective::Preset::TwoPoint),
         ruler,
         at(GridKind::Parallel, [-0.55, -0.3]),
         at(GridKind::Point, [0.0, -0.05]),

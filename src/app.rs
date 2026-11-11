@@ -10721,6 +10721,18 @@ mod tests {
     }
 
     #[test]
+    fn a_ruler_end_drag_shows_its_heading() {
+        let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
+        let mut state = guide_state(perspective::GridKind::Ruler, ruler);
+        state.dispatch(Action::ToolPerspective);
+        state.perspective_down([300.0, 300.0]);
+        state.perspective_move([300.0, 100.0]);
+        assert_eq!(state.grid_drag_readout().as_deref(), Some("45.0°"));
+        state.pointer_up();
+        assert!(state.grid_drag_readout().is_none());
+    }
+
+    #[test]
     fn shapes_lie_only_on_a_plane() {
         let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
         let mut state = guide_state(perspective::GridKind::Ruler, ruler);

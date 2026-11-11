@@ -429,7 +429,7 @@ impl Action {
             Action::FillLassoEnclose => "Lasso fill: switch Enclose & fill (hold)",
             Action::FillPolygonSnap => "Lasso fill: polygon edges in 15° steps (hold)",
             Action::ShapeMove => "Shape / box being dragged: move it (hold)",
-            Action::ShapeCentre => "Shape / box being dragged: from the centre (hold)",
+            Action::ShapeCentre => "Shape / box being dragged: from the centre; a grid's vanishing point: both move (hold)",
             Action::TrackClear => "Timeline: delete drawings (leave blank)",
             Action::TrackCloseGap => "Timeline: delete drawings (close gap)",
             Action::SaveProject => "Save project",

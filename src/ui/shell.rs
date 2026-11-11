@@ -570,7 +570,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                             _ => pos,
                         };
                         draw_tool_cursor(state, ui, canvas_rect, ring);
-                        if let Some(text) = state.button_drag_readout() {
+                        if let Some(text) = state.button_drag_readout().or_else(|| state.grid_drag_readout()) {
                             draw_readout(&ui.painter_at(canvas_rect), pos, text);
                         }
                         ctx.set_cursor_icon(egui::CursorIcon::None);
@@ -5509,7 +5509,7 @@ pub(crate) fn floating_frame() -> Frame {
 /// list. A grid's own settings open in a window from its row — see
 /// [`grid_settings_window`] — so the list stays short enough to work from.
 fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
-    use crate::tools::perspective::{GridKind, PerspectiveGrid};
+    use crate::tools::perspective::{GridKind, PerspectiveGrid, Preset};
 
     // How to handle the active guide on the canvas, in its own terms.
     let hint = match state.perspective.active_grid().map(|g| g.kind) {
@@ -5704,10 +5704,34 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
             heading(ui, "Perspective");
             add(
                 ui,
-                PerspectiveGrid::fresh(GridKind::Perspective),
+                PerspectiveGrid::preset(Preset::OnePoint),
                 ic::PERSPECTIVE,
                 "1-point",
                 "A floor facing you: its lines run to one point on the horizon",
+            );
+            add(
+                ui,
+                PerspectiveGrid::preset(Preset::TwoPoint),
+                ic::PERSPECTIVE,
+                "2-point",
+                "A floor turned toward you: two points out on the horizon, past the \
+                 sides of the frame. Hold Alt while dragging one to move both evenly",
+            );
+            add(
+                ui,
+                PerspectiveGrid::preset(Preset::BirdsEye),
+                ic::PERSPECTIVE,
+                "3-point · bird's-eye",
+                "Looking down: two points on a high horizon, and verticals running \
+                 down to a third below the frame",
+            );
+            add(
+                ui,
+                PerspectiveGrid::preset(Preset::WormsEye),
+                ic::PERSPECTIVE,
+                "3-point · worm's-eye",
+                "Looking up: two points on a low horizon, and verticals running up to \
+                 a third above the frame",
             );
             ui.separator();
             heading(ui, "Flat");

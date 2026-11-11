@@ -499,6 +499,7 @@ impl AppState {
             _ => false,
         };
         let snap = self.axis_lock_on();
+        let centred = self.centre_on();
         let p = if snap && slides {
             let (x, y) = axis_lock::lock_hv((d.start[0], d.start[1]), (p[0], p[1]), self.lock_basis_doc());
             [x, y]
@@ -541,7 +542,17 @@ impl AppState {
             g.extra_vps[i as usize].on_horizon = on_horizon;
             return;
         }
-        let c = if kind.is_plane() {
+        // The centre key (Alt) on a two-point grid's vanishing point moves
+        // both, evenly about the middle between them, as in Harmony.
+        let both = match d.grab {
+            GridGrab::Vp(which) if kind == GridKind::Perspective && centred => {
+                mirror_vps(&d.corners, which, [p[0] - d.start[0], p[1] - d.start[1]])
+            }
+            _ => None,
+        };
+        let c = if both.is_some() {
+            both
+        } else if kind.is_plane() {
             perspective::dragged(&d.corners, d.grab, d.start, p, snap, rigid)
         } else {
             guides::dragged(kind, &d.corners, d.grab, d.start, p, snap)
@@ -562,6 +573,38 @@ impl AppState {
         self.perspective.relink();
     }
 
+    /// What the grid drag in hand is turning, in degrees, for beside the pen:
+    /// a ruler's or a helper line's heading, a grid turned whole, a horizon
+    /// tilted. Up the screen counts positive, as on a protractor.
+    pub fn grid_drag_readout(&self) -> Option<String> {
+        let d = self.grid_drag?;
+        let g = self.perspective.grids.get(d.grid)?;
+        let c = g.doc_corners(&d.space);
+        // A line has no head or tail: (-90°, 90°].
+        let line = |v: P| {
+            let mut a = (-v[1]).atan2(v[0]).to_degrees();
+            if a > 90.0 {
+                a -= 180.0;
+            } else if a <= -90.0 {
+                a += 180.0;
+            }
+            format!("{a:.1}°")
+        };
+        match (g.kind, d.grab) {
+            (GridKind::Ruler | GridKind::Parallel, GridGrab::Corner(_)) => Some(line(perspective::sub(c[1], c[0]))),
+            (GridKind::Point, GridGrab::Corner(i)) => {
+                let (a, b) = if matches!(i, 0 | 3) { (c[0], c[3]) } else { (c[1], c[2]) };
+                Some(line(perspective::sub(a, b)))
+            }
+            (_, GridGrab::Rotate) => Some(format!("{:.1}°", -g.angle().to_degrees())),
+            (GridKind::Perspective, GridGrab::Tilt) => {
+                let hz = perspective::Plane::new(c)?.horizon()?;
+                Some(line(hz.d))
+            }
+            _ => None,
+        }
+    }
+
     /// The pen lifted off a grid drag: key it where auto-key says to, and
     /// record the whole drag as one undo step.
     pub(super) fn finish_grid_drag(&mut self) {
@@ -580,6 +623,21 @@ impl AppState {
             });
         }
     }
+}
+
+/// A grid's corners re-aimed with its vanishing point `which` moved by
+/// `delta` and the other moved the opposite way, so both stay as far from the
+/// middle between them. `None` unless both are finite, or if the quad would
+/// fold.
+fn mirror_vps(c: &[P; 4], which: u8, delta: P) -> Option<[P; 4]> {
+    let plane = perspective::Plane::new(*c)?;
+    let (rows, cols) = (plane.vp_point(0)?, plane.vp_point(1)?);
+    let (rows, cols) = if which == 0 {
+        (perspective::add(rows, delta), perspective::sub(cols, delta))
+    } else {
+        (perspective::sub(rows, delta), perspective::add(cols, delta))
+    };
+    perspective::re_aim(c, perspective::Vp::Point(rows), perspective::Vp::Point(cols))
 }
 
 #[cfg(test)]
@@ -628,6 +686,19 @@ mod tests {
         Perspective,
         Flat,
         Isometric,
+    }
+
+    #[test]
+    fn the_centre_key_moves_both_vanishing_points_evenly() {
+        let g = PerspectiveGrid::preset(perspective::Preset::TwoPoint);
+        let plane = perspective::Plane::new(g.corners).unwrap();
+        let (r0, c0) = (plane.vp_point(0).unwrap(), plane.vp_point(1).unwrap());
+        let c = mirror_vps(&g.corners, 0, [0.1, 0.0]).unwrap();
+        let plane = perspective::Plane::new(c).unwrap();
+        let (r1, c1) = (plane.vp_point(0).unwrap(), plane.vp_point(1).unwrap());
+        let near = |a: P, b: P| (a[0] - b[0]).abs() < 2e-3 && (a[1] - b[1]).abs() < 2e-3;
+        assert!(near(r1, [r0[0] + 0.1, r0[1]]), "{r1:?}");
+        assert!(near(c1, [c0[0] - 0.1, c0[1]]), "{c1:?}");
     }
 
     #[test]
