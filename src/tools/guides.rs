@@ -14,7 +14,10 @@
 //! The pick is held for the rest of the stroke: re-picking per point would let
 //! a wobbly hand flip between families.
 
-use super::perspective::{normalize, project, Homography, PerspectiveGrid, Space, Vp, P};
+use super::perspective::{
+    self, add, cross, dot, inside, intersect, len, line_quad, normalize, project, sub, GridGrab,
+    GridKind, Homography, PerspectiveGrid, Space, Vp, P,
+};
 
 /// A curve a stroke can be held to, in document space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,7 +127,63 @@ pub struct Candidate {
 
 /// Everything guide `g` (at `grid` in the list) offers a stroke that starts
 /// at `start`. `vertical` adds a perspective plane's vertical.
+///
+/// - A ruler is fixed: its segment, or with `infinite_ruler` its whole line.
+/// - Parallel lines run through the start along the guide's line.
+/// - A vanishing point's line runs from the start to the point.
+/// - An ellipse is fixed; with `rings`, a stroke starting inside its quad
+///   may also go round the ring through its start.
 pub fn candidates(g: &PerspectiveGrid, s: &Space, start: P, vertical: bool, grid: usize) -> Vec<Candidate> {
+    let c = g.doc_corners(s);
+    let one = |curve, fixed| vec![Candidate { grid, curve, fixed }];
+    match g.kind {
+        GridKind::Ruler => {
+            let (a, b) = (c[0], c[1]);
+            let Some(dir) = normalize(sub(b, a)) else {
+                return Vec::new();
+            };
+            if g.infinite_ruler {
+                one(SnapCurve::Line { origin: a, dir, vp: None }, true)
+            } else {
+                one(SnapCurve::Segment { a, b }, true)
+            }
+        }
+        GridKind::Parallel => match normalize(sub(c[1], c[0])) {
+            Some(dir) => one(SnapCurve::Line { origin: start, dir, vp: None }, false),
+            None => Vec::new(),
+        },
+        GridKind::Point => {
+            let Some(v) = point_vp(&c) else {
+                return Vec::new();
+            };
+            match normalize(sub(v, start)) {
+                Some(dir) => one(SnapCurve::Line { origin: start, dir, vp: Some(v) }, false),
+                None => Vec::new(),
+            }
+        }
+        GridKind::Ellipse => {
+            let Some(h) = Homography::square_to_quad(&c) else {
+                return Vec::new();
+            };
+            let mut out = one(SnapCurve::Conic { h, r: 0.5 }, true);
+            let inner = h
+                .unmap(start)
+                .filter(|uv| (0.0..=1.0).contains(&uv[0]) && (0.0..=1.0).contains(&uv[1]));
+            if let Some(uv) = inner.filter(|_| g.rings) {
+                let r = len(sub(uv, CENTRE));
+                if r > 1e-3 {
+                    out.push(Candidate { grid, curve: SnapCurve::Conic { h, r }, fixed: false });
+                }
+            }
+            out
+        }
+        GridKind::Perspective | GridKind::Flat | GridKind::Isometric => plane_candidates(g, s, start, vertical, grid),
+    }
+}
+
+/// A plane's families through the start, toward their vanishing points or
+/// along their directions, and its extra vanishing points.
+fn plane_candidates(g: &PerspectiveGrid, s: &Space, start: P, vertical: bool, grid: usize) -> Vec<Candidate> {
     g.snap_targets(s, vertical)
         .into_iter()
         .filter_map(|t| {
@@ -175,12 +234,113 @@ pub fn pull(raw: P, to: P, strength: f32) -> P {
     [raw[0] + (to[0] - raw[0]) * s, raw[1] + (to[1] - raw[1]) * s]
 }
 
-fn sub(a: P, b: P) -> P {
-    [a[0] - b[0], a[1] - b[1]]
+/// Where a vanishing-point guide's helper lines meet: its quad's left edge
+/// (corners 0–3) and right edge (1–2). `None` while they run parallel.
+pub fn point_vp(c: &[P; 4]) -> Option<P> {
+    intersect(c[0], sub(c[3], c[0]), c[1], sub(c[2], c[1]))
 }
 
-fn dot(a: P, b: P) -> f32 {
-    a[0] * b[0] + a[1] * b[1]
+/// The ring an ellipse guide draws and snaps to, from its corners in
+/// document space.
+pub fn ellipse(c: &[P; 4]) -> Option<SnapCurve> {
+    Some(SnapCurve::Conic { h: Homography::square_to_quad(c)?, r: 0.5 })
+}
+
+/// What a press at `p` takes hold of on a guide that isn't a plane, within
+/// `tol` document units. Planes go through [`perspective::grab_at`].
+///
+/// - A ruler: its ends, else its line to move it.
+/// - A vanishing point: the point, a helper's end, else a helper to move it.
+/// - An ellipse: a corner, inside to move it, just outside a corner to turn
+///   it.
+pub fn grab_at(kind: GridKind, c: &[P; 4], p: P, tol: f32) -> Option<GridGrab> {
+    let near = |q: P, k: f32| len(sub(p, q)) <= tol * k;
+    let corner = |n: usize, k: f32| (0..n).find(|&i| near(c[i], k)).map(|i| GridGrab::Corner(i as u8));
+    match kind {
+        GridKind::Ruler | GridKind::Parallel => corner(2, 1.0).or_else(|| {
+            (SnapCurve::Segment { a: c[0], b: c[1] }.distance(p) <= tol).then_some(GridGrab::Move)
+        }),
+        GridKind::Point => {
+            if point_vp(c).is_some_and(|v| near(v, 1.5)) {
+                return Some(GridGrab::Vp(0));
+            }
+            corner(4, 1.0).or_else(|| {
+                let on = |a: P, b: P| SnapCurve::Segment { a, b }.distance(p) <= tol;
+                (on(c[0], c[3]) || on(c[1], c[2])).then_some(GridGrab::Move)
+            })
+        }
+        GridKind::Ellipse => corner(4, 1.0)
+            .or_else(|| inside(c, p).then_some(GridGrab::Move))
+            .or_else(|| corner(4, 4.0).map(|_| GridGrab::Rotate)),
+        GridKind::Perspective | GridKind::Flat | GridKind::Isometric => None,
+    }
+}
+
+/// A non-plane guide's corners after dragging `grab` from `start` to `now`,
+/// solved against the corners at the press. `snap` (Shift, once dragging)
+/// turns a ruler or a helper line in 15° steps about its other end. `None`
+/// for a drag that would leave the guide meaningless — a ruler of no
+/// length, helper lines that never meet.
+pub fn dragged(kind: GridKind, c0: &[P; 4], grab: GridGrab, start: P, now: P, snap: bool) -> Option<[P; 4]> {
+    let d = sub(now, start);
+    match (kind, grab) {
+        (GridKind::Ellipse, _) => perspective::dragged(c0, grab, start, now, snap, false),
+        (_, GridGrab::Move) => Some(c0.map(|q| add(q, d))),
+        (GridKind::Ruler | GridKind::Parallel, GridGrab::Corner(i)) => {
+            let i = (i & 1) as usize;
+            let other = c0[1 - i];
+            let mut end = add(c0[i], d);
+            if snap {
+                end = turn_in_steps(other, end);
+            }
+            if len(sub(end, other)) < 1e-4 {
+                return None;
+            }
+            Some(if i == 0 { line_quad(end, other) } else { line_quad(other, end) })
+        }
+        (GridKind::Point, GridGrab::Corner(i)) => {
+            let i = (i & 3) as usize;
+            // Each end's partner on its helper: 0–3 and 1–2.
+            let partner = [3, 2, 1, 0][i];
+            let mut c = *c0;
+            c[i] = add(c0[i], d);
+            if snap {
+                c[i] = turn_in_steps(c0[partner], c[i]);
+            }
+            point_vp(&c).map(|_| c)
+        }
+        (GridKind::Point, GridGrab::Vp(_)) => {
+            let v0 = point_vp(c0)?;
+            let v = add(v0, d);
+            let mut c = *c0;
+            for (a, b) in [(0, 3), (1, 2)] {
+                // The end nearer the point swings round the far one, keeping
+                // its distance from it, so the helper runs to the new point.
+                let (near_i, far_i) = if len(sub(c0[a], v0)) <= len(sub(c0[b], v0)) { (a, b) } else { (b, a) };
+                let far = c0[far_i];
+                let dir = normalize(sub(v, far))?;
+                let l = len(sub(c0[near_i], far));
+                c[near_i] = add(far, [dir[0] * l, dir[1] * l]);
+            }
+            point_vp(&c).map(|_| c)
+        }
+        _ => None,
+    }
+}
+
+/// `p` turned about `o` to the nearest 15° step, at the same distance.
+fn turn_in_steps(o: P, p: P) -> P {
+    let v = sub(p, o);
+    let step = std::f32::consts::PI / 12.0;
+    let a = (v[1].atan2(v[0]) / step).round() * step;
+    let l = len(v);
+    add(o, [l * a.cos(), l * a.sin()])
+}
+
+/// Whether two vectors run the same way or opposite, near enough.
+#[cfg(test)]
+fn parallel(a: P, b: P) -> bool {
+    cross(a, b).abs() <= 1e-3 * len(a) * len(b)
 }
 
 /// Angle of `uv` about the square's middle.
@@ -297,6 +457,87 @@ mod tests {
         let cands = [ruler(0, 0.0), ruler(1, 10.0), line([50.0, 4.0], [1.0, 0.0])];
         assert_eq!(nearest_fixed(&cands, [50.0, 7.0], 5.0).unwrap().grid, 1);
         assert!(nearest_fixed(&cands, [50.0, 40.0], 5.0).is_none(), "too far from both");
+    }
+
+    fn fresh_doc(kind: GridKind) -> (PerspectiveGrid, Space) {
+        (PerspectiveGrid::fresh(kind), Space::flat(1000.0, 1000.0))
+    }
+
+    #[test]
+    fn a_ruler_is_fixed_and_an_infinite_one_runs_on() {
+        let (mut g, s) = fresh_doc(GridKind::Ruler);
+        let c = g.doc_corners(&s);
+        let got = candidates(&g, &s, [0.0, 0.0], false, 4);
+        assert_eq!(got, vec![Candidate { grid: 4, curve: SnapCurve::Segment { a: c[0], b: c[1] }, fixed: true }]);
+        g.infinite_ruler = true;
+        let got = candidates(&g, &s, [0.0, 0.0], false, 4);
+        assert!(matches!(got[0].curve, SnapCurve::Line { .. }) && got[0].fixed);
+        // Past its end the infinite line still holds a point on the line.
+        let far = [c[1][0] + 300.0, c[1][1] + 5.0];
+        assert!(near(got[0].curve.project(far), [far[0], c[1][1]]));
+    }
+
+    #[test]
+    fn parallel_lines_and_a_point_run_through_the_start() {
+        let (g, s) = fresh_doc(GridKind::Parallel);
+        let got = candidates(&g, &s, [10.0, 20.0], false, 0);
+        assert!(matches!(got[0].curve, SnapCurve::Line { origin: [10.0, 20.0], dir, vp: None } if dir[1].abs() < 1e-6));
+        assert!(!got[0].fixed);
+        let (g, s) = fresh_doc(GridKind::Point);
+        let v = point_vp(&g.doc_corners(&s)).unwrap();
+        // Up at (0, -0.275) frame heights from the middle.
+        assert!(near(v, s.to_doc([0.0, -0.275])), "{v:?}");
+        let got = candidates(&g, &s, [10.0, 900.0], false, 0);
+        assert!(matches!(got[0].curve, SnapCurve::Line { vp: Some(p), .. } if near(p, v)));
+    }
+
+    #[test]
+    fn an_ellipse_offers_rings_only_from_inside_it() {
+        let (mut g, s) = fresh_doc(GridKind::Ellipse);
+        let c = g.doc_corners(&s);
+        let mid = [(c[0][0] + c[2][0]) / 2.0, (c[0][1] + c[2][1]) / 2.0];
+        let inside_pt = [mid[0] + 20.0, mid[1]];
+        assert_eq!(candidates(&g, &s, inside_pt, false, 0).len(), 1, "rings off");
+        g.rings = true;
+        let got = candidates(&g, &s, inside_pt, false, 0);
+        assert_eq!(got.len(), 2);
+        assert!(!got[1].fixed);
+        assert!(near(got[1].curve.project([mid[0], mid[1] - 50.0]), [mid[0], mid[1] - 20.0]));
+        // Outside the quad, only the ellipse itself.
+        assert_eq!(candidates(&g, &s, [0.0, 0.0], false, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_ruler_end_drags_alone_and_shift_turns_it_in_steps() {
+        let c0 = line_quad([0.0, 0.0], [100.0, 0.0]);
+        let c = dragged(GridKind::Ruler, &c0, GridGrab::Corner(1), [100.0, 0.0], [100.0, 30.0], false).unwrap();
+        assert_eq!(c, line_quad([0.0, 0.0], [100.0, 30.0]));
+        let c = dragged(GridKind::Ruler, &c0, GridGrab::Corner(1), [100.0, 0.0], [100.0, 30.0], true).unwrap();
+        let a = c[1][1].atan2(c[1][0]).to_degrees();
+        assert!((a - 15.0).abs() < 1e-3, "{a}");
+        assert!(dragged(GridKind::Ruler, &c0, GridGrab::Corner(1), [100.0, 0.0], [0.0, 0.0], false).is_none());
+        assert_eq!(grab_at(GridKind::Ruler, &c0, [50.0, 3.0], 5.0), Some(GridGrab::Move));
+        assert_eq!(grab_at(GridKind::Ruler, &c0, [98.0, 2.0], 5.0), Some(GridGrab::Corner(1)));
+        assert_eq!(grab_at(GridKind::Ruler, &c0, [50.0, 30.0], 5.0), None);
+    }
+
+    #[test]
+    fn dragging_a_vanishing_point_swings_its_helpers_round_their_far_ends() {
+        let (g, s) = fresh_doc(GridKind::Point);
+        let c0 = g.doc_corners(&s);
+        let v0 = point_vp(&c0).unwrap();
+        assert_eq!(grab_at(GridKind::Point, &c0, v0, 5.0), Some(GridGrab::Vp(0)));
+        let to = [v0[0] + 80.0, v0[1] - 40.0];
+        let c = dragged(GridKind::Point, &c0, GridGrab::Vp(0), v0, to, false).unwrap();
+        assert!(near(point_vp(&c).unwrap(), to));
+        // The far ends stay; the near ones keep their reach.
+        assert_eq!((c[2], c[3]), (c0[2], c0[3]));
+        assert!((len(sub(c[0], c[3])) - len(sub(c0[0], c0[3]))).abs() < 1e-2);
+        assert!(parallel(sub(c[0], c[3]), sub(to, c[3])));
+        // Helpers made parallel are refused: they would never meet.
+        let along = sub(c0[2], c0[1]);
+        let to = sub(c0[3], along);
+        assert!(dragged(GridKind::Point, &c0, GridGrab::Corner(0), c0[0], to, false).is_none());
     }
 
     #[test]

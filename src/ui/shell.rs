@@ -5511,13 +5511,31 @@ pub(crate) fn floating_frame() -> Frame {
 fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     use crate::tools::perspective::{GridKind, PerspectiveGrid};
 
-    ui.label(
-        egui::RichText::new(
+    // How to handle the active guide on the canvas, in its own terms.
+    let hint = match state.perspective.active_grid().map(|g| g.kind) {
+        Some(GridKind::Ruler | GridKind::Parallel) => {
+            "Drag an end to turn or stretch it, the line to move it. Hold Shift once \
+             dragging: it turns in 15° steps."
+        }
+        Some(GridKind::Point) => {
+            "Drag the point to move it, a helper line's end to fit it to a line in your \
+             reference — the point goes where the two helpers meet — or a helper to move \
+             it all. Hold Shift once dragging: a helper turns in 15° steps."
+        }
+        Some(GridKind::Ellipse) => {
+            "Drag a corner to reshape — a floor-like shape makes a circle in perspective — \
+             just outside a corner to rotate, inside to move. Hold Shift once dragging: \
+             turns go in 15° steps."
+        }
+        _ => {
             "Drag a corner to reshape, a vanishing point to re-aim, the horizon to raise \
              the eye level or its round knobs to tilt it, just outside a corner to rotate, \
              inside to move. Hold Shift once dragging: turns go in 15° steps, the rest \
-             straight across or down.",
-        )
+             straight across or down."
+        }
+    };
+    ui.label(
+        egui::RichText::new(hint)
         .color(theme::text_muted())
         .size(11.0),
     );
@@ -5628,11 +5646,13 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
                     let [r, gr, b] = g.color;
                     let kind = match (g.kind, parent_no) {
                         (_, Some(p)) => format!(" · wall on {p}"),
-                        (GridKind::Perspective, None) => String::new(),
-                        (k, None) => format!(" · {}", k.label().to_lowercase()),
+                        (GridKind::Flat | GridKind::Isometric, None) => {
+                            format!(" · {}", g.kind.label().to_lowercase())
+                        }
+                        _ => String::new(),
                     };
                     let keyed = if g.keys.is_empty() { "" } else { " ◆" };
-                    let label = format!("Grid {}{kind}{keyed}", i + 1);
+                    let label = format!("{} {}{kind}{keyed}", g.kind.row_name(), i + 1);
                     let name = ui
                         .selectable_label(selected, label)
                         .on_hover_text("Double-click for its settings");
@@ -5671,16 +5691,72 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
     }
     ui.horizontal(|ui| {
         ui.menu_button(theme::icon_text(ic::PLUS, "Add"), |ui| {
-            for (kind, icon, tip) in [
-                (GridKind::Perspective, ic::PERSPECTIVE, "A floor in perspective"),
-                (GridKind::Flat, ic::GRID_FOUR, "A square grid over the whole canvas"),
-                (GridKind::Isometric, ic::CUBE, "An isometric grid over the whole canvas"),
-            ] {
-                if ui.button(theme::icon_text(icon, kind.label())).on_hover_text(tip).clicked() {
-                    cfg.push(PerspectiveGrid::fresh(kind));
+            ui.set_min_width(170.0);
+            let heading = |ui: &mut egui::Ui, text: &str| {
+                ui.label(egui::RichText::new(text).size(11.0).color(theme::text_muted()));
+            };
+            let mut add = |ui: &mut egui::Ui, g: PerspectiveGrid, icon: &str, label: &str, tip: &str| {
+                if ui.button(theme::icon_text(icon, label)).on_hover_text(tip).clicked() {
+                    cfg.push(g);
                     ui.close_menu();
                 }
-            }
+            };
+            heading(ui, "Perspective");
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::Perspective),
+                ic::PERSPECTIVE,
+                "1-point",
+                "A floor facing you: its lines run to one point on the horizon",
+            );
+            ui.separator();
+            heading(ui, "Flat");
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::Flat),
+                ic::GRID_FOUR,
+                "Square grid",
+                "A square grid over the whole canvas",
+            );
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::Isometric),
+                ic::CUBE,
+                "Isometric",
+                "An isometric grid over the whole canvas",
+            );
+            ui.separator();
+            heading(ui, "Rulers and curves");
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::Ruler),
+                ic::RULER,
+                "Ruler",
+                "A straight edge: press on it and the stroke runs along it",
+            );
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::Parallel),
+                ic::ROWS,
+                "Parallel lines",
+                "Strokes anywhere run parallel to its line",
+            );
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::Point),
+                ic::CROSSHAIR,
+                "Vanishing point",
+                "A point strokes run to. Lay its two helper lines along lines in a \
+                 reference and it finds where they meet",
+            );
+            add(
+                ui,
+                PerspectiveGrid::fresh(GridKind::Ellipse),
+                ic::CIRCLE_DASHED,
+                "Ellipse",
+                "A circle, in perspective once you pull its corners: press on it and \
+                 the stroke runs round it",
+            );
         });
         let dup = cfg.active_grid().cloned();
         if ui
@@ -5721,7 +5797,8 @@ fn grid_settings_window(state: &mut AppState, ctx: &egui::Context) {
         state.show_grid_settings = false;
         return;
     };
-    let title = format!("Grid {} settings", state.perspective.active + 1);
+    let name = state.perspective.active_grid().map_or("Grid", |g| g.kind.row_name());
+    let title = format!("{name} {} settings", state.perspective.active + 1);
     let mut open = true;
     let title = theme::icon_text(ic::GEAR, &title);
     let shortfall = title_shortfall(ctx, &title);
@@ -5780,17 +5857,57 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
     };
     let wall = g.is_wall();
     let perspective = g.kind == GridKind::Perspective;
+    let plane = g.kind.is_plane();
     let what = match (g.kind, parent_no) {
         (_, Some(_)) => "A wall".to_string(),
-        (k, None) => format!("{} grid", k.label()),
+        (k, None) if k.is_plane() => format!("{} grid", k.label()),
+        (k, None) => k.label().to_string(),
     };
-    theme::section_header(ui, ic::PERSPECTIVE, &what);
-    ui.horizontal(|ui| {
-        ui.label("Columns");
-        ui.add(egui::DragValue::new(&mut g.cols).range(1..=MAX_DIVISIONS));
-        ui.label("Rows");
-        ui.add(egui::DragValue::new(&mut g.rows).range(1..=MAX_DIVISIONS));
-    });
+    let icon = match g.kind {
+        GridKind::Ruler => ic::RULER,
+        GridKind::Parallel => ic::ROWS,
+        GridKind::Point => ic::CROSSHAIR,
+        GridKind::Ellipse => ic::CIRCLE_DASHED,
+        _ => ic::PERSPECTIVE,
+    };
+    theme::section_header(ui, icon, &what);
+    match g.kind {
+        GridKind::Ruler => {
+            ui.checkbox(&mut g.infinite_ruler, "Infinite").on_hover_text(
+                "Carry the line on past its ends, across the canvas: a press anywhere \
+                 along it draws along it",
+            );
+        }
+        GridKind::Parallel => {
+            ui.horizontal(|ui| {
+                ui.label("Lines");
+                ui.add(egui::DragValue::new(&mut g.rows).range(1..=MAX_DIVISIONS))
+                    .on_hover_text("Guide lines to a frame height");
+            });
+        }
+        GridKind::Point => {
+            ui.horizontal(|ui| {
+                ui.label("Rays");
+                ui.add(egui::DragValue::new(&mut g.fan_rays).range(FAN_RAYS))
+                    .on_hover_text("Guide rays all the way round the point");
+            });
+        }
+        GridKind::Ellipse => {
+            ui.checkbox(&mut g.rings, "Rings").on_hover_text(
+                "Strokes that start inside it go round its centre, on the ring through \
+                 where they start",
+            );
+            ui.checkbox(&mut g.centre_lines, "Axes");
+        }
+        _ => {
+            ui.horizontal(|ui| {
+                ui.label("Columns");
+                ui.add(egui::DragValue::new(&mut g.cols).range(1..=MAX_DIVISIONS));
+                ui.label("Rows");
+                ui.add(egui::DragValue::new(&mut g.rows).range(1..=MAX_DIVISIONS));
+            });
+        }
+    }
     // The grid's pose, laid out like a layer's: X / Y from the frame centre,
     // scale against a fresh grid, heading in degrees. Read off the corners
     // each frame, and an edit applies as the change from what was read. A
@@ -5861,13 +5978,15 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
     });
     ui.add(egui::Slider::new(&mut g.weight, 0.5..=4.0).text("Line weight"));
 
-    ui.add_space(6.0);
-    theme::section_header(ui, ic::LINE_SEGMENTS, "Lines");
-    ui.horizontal(|ui| {
-        ui.label("Major line every");
-        ui.add(egui::DragValue::new(&mut g.major_every).range(0..=MAX_DIVISIONS))
-            .on_hover_text("Draw every Nth line heavier. 0 or 1: none.");
-    });
+    if plane {
+        ui.add_space(6.0);
+        theme::section_header(ui, ic::LINE_SEGMENTS, "Lines");
+        ui.horizontal(|ui| {
+            ui.label("Major line every");
+            ui.add(egui::DragValue::new(&mut g.major_every).range(0..=MAX_DIVISIONS))
+                .on_hover_text("Draw every Nth line heavier. 0 or 1: none.");
+        });
+    }
     if perspective {
         ui.add_enabled(!wall, egui::Checkbox::new(&mut g.fill_canvas, "Fill canvas")).on_hover_text(
             "Cover the whole canvas: rays fanned evenly round each vanishing point, and the \
@@ -5901,6 +6020,11 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     theme::section_header(ui, ic::MAGNET, "Snap strokes to");
     ui.horizontal_wrapped(|ui| {
+        if !plane {
+            ui.checkbox(&mut g.magnet, "This guide")
+                .on_hover_text("The magnet on its row in the list");
+            return;
+        }
         ui.checkbox(&mut g.snap_rows, "Rows");
         ui.checkbox(&mut g.snap_cols, "Columns");
         if g.kind == GridKind::Isometric {
@@ -7304,6 +7428,10 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
         let active = i == state.perspective.active;
         let space = state.grid_space(g, frame);
         let corners = g.doc_corners(&space);
+        if !g.kind.is_plane() {
+            draw_guide(state, painter, xf, clip, g, &space, corners, active, editing);
+            continue;
+        }
         let Some(plane) = Plane::new(corners) else {
             continue;
         };
@@ -7589,6 +7717,173 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
 /// While a stroke would snap, faint dashed lines from the cursor along every
 /// way it could go: through it to each vanishing point, or right across the
 /// canvas for a family that stays parallel.
+/// A guide that isn't a plane — a ruler, parallel lines, a vanishing point
+/// or an ellipse — and, on the active one in the Grid tool, its handles.
+#[allow(clippy::too_many_arguments)]
+fn draw_guide(
+    state: &AppState,
+    painter: &egui::Painter,
+    xf: &Xform,
+    clip: Rect,
+    g: &crate::tools::perspective::PerspectiveGrid,
+    space: &crate::tools::perspective::Space,
+    c: [[f32; 2]; 4],
+    active: bool,
+    editing: bool,
+) {
+    use crate::tools::guides::{self, SnapCurve};
+    use crate::tools::perspective::{clip_line, fade_pieces, fan, GridKind};
+
+    // Recede as a plane would: see `draw_perspective_grids`.
+    let fade = if (editing && !active) || (!editing && state.perspective.snap && !g.magnet) {
+        0.45
+    } else {
+        1.0
+    };
+    let alpha = (g.opacity.clamp(0.0, 1.0) * fade * 255.0) as u8;
+    let tint = |a: u8| theme::premul(g.color[0], g.color[1], g.color[2], a);
+    let color = tint(alpha);
+    let weight = g.weight.max(0.25);
+    let main = Stroke::new(weight + 0.5, color);
+    let thin = Stroke::new(weight, tint(alpha / 2));
+    let faint = Stroke::new(weight * 0.8, tint(alpha / 3));
+    let to_screen = |p: [f32; 2]| xf.doc_to_screen(p[0], p[1]);
+    let pos = |p: [f32; 2]| egui::pos2(p[0], p[1]);
+    let (lo, hi) = ([clip.min.x, clip.min.y], [clip.max.x, clip.max.y]);
+    // The whole line through screen points `a` and `b`, out to the canvas.
+    let across = |a: egui::Pos2, b: egui::Pos2, s: Stroke| {
+        if (b - a).length() < 1e-3 {
+            return;
+        }
+        if let Some((t0, t1)) = clip_line([a.x, a.y], [b.x, b.y], lo, hi) {
+            painter.line_segment([a + (b - a) * t0, a + (b - a) * t1], s);
+        }
+    };
+    let closed = |pts: Vec<egui::Pos2>, s: Stroke| {
+        if pts.len() > 2 {
+            painter.add(egui::Shape::closed_line(pts, s));
+        }
+    };
+    let handles = editing && active;
+    let mut knobs: Vec<egui::Pos2> = Vec::new();
+    let mut round_knob = None;
+    match g.kind {
+        GridKind::Ruler => {
+            let (a, b) = (to_screen(c[0]), to_screen(c[1]));
+            if g.infinite_ruler {
+                across(a, b, thin);
+            }
+            painter.line_segment([a, b], main);
+            // Ticked across at each end, so it reads as an edge with ends.
+            let n = (b - a).normalized().rot90() * 5.0;
+            for e in [a, b] {
+                painter.line_segment([e - n, e + n], main);
+            }
+            knobs = vec![a, b];
+        }
+        GridKind::Parallel => {
+            let (a, b) = (c[0], c[1]);
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let l = d[0].hypot(d[1]);
+            if l > 1e-6 {
+                let dir = [d[0] / l, d[1] / l];
+                let n = [-dir[1], dir[0]];
+                // `rows` lines to a frame height, as the frame is posed.
+                let o = space.to_doc([0.0, 0.0]);
+                let up = space.to_doc([0.0, 1.0]);
+                let gap = (up[0] - o[0]).hypot(up[1] - o[1]) / g.rows.max(1) as f32;
+                let reach: Vec<f32> = [clip.min, clip.right_top(), clip.max, clip.left_bottom()]
+                    .iter()
+                    .map(|&q| {
+                        let (x, y) = xf.screen_to_doc(q);
+                        ((x - a[0]) * n[0] + (y - a[1]) * n[1]) / gap
+                    })
+                    .collect();
+                let k0 = reach.iter().copied().fold(f32::INFINITY, f32::min).floor() as i64;
+                let k1 = reach.iter().copied().fold(f32::NEG_INFINITY, f32::max).ceil() as i64;
+                if k1 - k0 <= 600 {
+                    for k in k0..=k1 {
+                        let p = [a[0] + n[0] * gap * k as f32, a[1] + n[1] * gap * k as f32];
+                        let q = [p[0] + dir[0] * 100.0, p[1] + dir[1] * 100.0];
+                        across(to_screen(p), to_screen(q), if k == 0 { thin } else { faint });
+                    }
+                }
+            }
+            painter.line_segment([to_screen(a), to_screen(b)], main);
+            knobs = vec![to_screen(a), to_screen(b)];
+        }
+        GridKind::Point => {
+            let v = guides::point_vp(&c).map(to_screen);
+            if let Some(vs) = v {
+                // Rays all the way round, fading in where they crowd.
+                for (_, a, b) in fan([vs.x, vs.y], [1.0, 0.0], g.fan_rays, lo, hi) {
+                    let (a, b) = (pos(a), pos(b));
+                    let u = (b - vs).normalized();
+                    for (r0, r1, k) in fade_pieces((a - vs).length(), (b - vs).length(), g.fan_rays) {
+                        painter.line_segment([vs + u * r0, vs + u * r1], Stroke::new(faint.width, faint.color.gamma_multiply(k)));
+                    }
+                }
+            }
+            // The helper lines, solid, carried on to the point while editing.
+            for (far, near) in [(3, 0), (2, 1)] {
+                let (fs, ns) = (to_screen(c[far]), to_screen(c[near]));
+                painter.line_segment([fs, ns], main);
+                if let (true, Some(vs)) = (handles, v) {
+                    painter.extend(egui::Shape::dashed_line(&[ns, vs], thin, 4.0, 3.0));
+                }
+            }
+            if let Some(vs) = v.filter(|v| clip.contains(*v)) {
+                painter.circle_filled(vs, 4.0, color);
+                painter.circle_stroke(vs, 4.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
+            }
+            knobs = c.iter().map(|&p| to_screen(p)).collect();
+            round_knob = v;
+        }
+        GridKind::Ellipse => {
+            let Some(SnapCurve::Conic { h, .. }) = guides::ellipse(&c) else {
+                return;
+            };
+            let ring = |r: f32| -> Vec<egui::Pos2> {
+                SnapCurve::Conic { h, r }.conic_points().into_iter().map(to_screen).collect()
+            };
+            if g.rings {
+                for r in [0.125, 0.25, 0.375] {
+                    closed(ring(r), faint);
+                }
+            }
+            if g.centre_lines {
+                for (u0, v0, u1, v1) in [(0.5, 0.0, 0.5, 1.0), (0.0, 0.5, 1.0, 0.5)] {
+                    painter.line_segment([to_screen(h.map(u0, v0)), to_screen(h.map(u1, v1))], thin);
+                }
+            }
+            closed(ring(0.5), main);
+            if handles {
+                closed(c.iter().map(|&p| to_screen(p)).collect(), faint);
+            }
+            knobs = c.iter().map(|&p| to_screen(p)).collect();
+        }
+        GridKind::Perspective | GridKind::Flat | GridKind::Isometric => {}
+    }
+    if !handles {
+        return;
+    }
+    let r = crate::tools::selection::HANDLE_PX;
+    for k in knobs {
+        let rect = egui::Rect::from_center_size(k, egui::vec2(r * 2.0, r * 2.0));
+        if g.locked {
+            painter.rect_stroke(rect, 1.0, Stroke::new(1.0, color));
+        } else {
+            painter.rect_filled(rect, 1.0, Color32::WHITE);
+            painter.rect_stroke(rect, 1.0, Stroke::new(1.0, Color32::from_black_alpha(200)));
+        }
+    }
+    if let Some(v) = round_knob.filter(|_| !g.locked) {
+        painter.circle_filled(v, r * 1.3, Color32::WHITE);
+        painter.circle_stroke(v, r * 1.3, Stroke::new(1.0, Color32::from_black_alpha(200)));
+        painter.circle_filled(v, 2.0, color);
+    }
+}
+
 fn draw_cursor_guides(
     state: &AppState,
     painter: &egui::Painter,
@@ -10463,6 +10758,16 @@ mod perspective_tests {
         room.extra_vps[0].on_horizon = false;
         room.extra_vps[0].pos[1] -= 1.0;
         state.perspective.push(room);
+        // A guide of every other kind, with its options on.
+        let mut ruler = PerspectiveGrid::fresh(GridKind::Ruler);
+        ruler.infinite_ruler = true;
+        state.perspective.push(ruler);
+        state.perspective.push(PerspectiveGrid::fresh(GridKind::Parallel));
+        state.perspective.push(PerspectiveGrid::fresh(GridKind::Point));
+        let mut ring = PerspectiveGrid::fresh(GridKind::Ellipse);
+        ring.rings = true;
+        ring.centre_lines = true;
+        state.perspective.push(ring);
         // Keys either side of the frame, so the ghosts show.
         state.perspective.active = 0;
         state.add_grid_key();
@@ -10481,6 +10786,47 @@ mod perspective_tests {
             }
         }
         assert_eq!(state.perspective.grids.iter().filter(|g| g.is_wall()).count(), 2);
+    }
+
+    #[test]
+    fn every_guide_kind_paints_and_drags_on_the_canvas() {
+        use crate::tools::perspective::{GridKind, PerspectiveGrid};
+        for kind in [GridKind::Ruler, GridKind::Parallel, GridKind::Point, GridKind::Ellipse] {
+            let mut state = state();
+            state.perspective.grids = vec![PerspectiveGrid::fresh(kind)];
+            state.perspective.ensure_ids();
+            state.perspective.show = true;
+            assert!(!grid_shapes(&state).is_empty(), "{kind:?} paints");
+            // Its first corner, dragged on the canvas, goes where the pen goes.
+            let ctx = egui::Context::default();
+            frame(&ctx, &mut state, vec![]);
+            let (w, h) = (state.project.width as f32, state.project.height as f32);
+            let before = state.perspective.grids[0].doc_corners(&Space::flat(w, h));
+            let xf = Xform::new(&state, SCREEN);
+            let from = xf.doc_to_screen(before[0][0], before[0][1]);
+            let to = from + vec2(-30.0, 12.0);
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(from), button(from, true)]);
+            for i in 1..=4 {
+                let p = from + (to - from) * (i as f32 / 4.0);
+                frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p)]);
+            }
+            frame(&ctx, &mut state, vec![button(to, false)]);
+            frame(&ctx, &mut state, vec![]);
+            let after = state.perspective.grids[0].doc_corners(&Space::flat(w, h));
+            let moved = xf.screen_to_doc(to);
+            assert!((after[0][0] - moved.0).abs() < 0.5 && (after[0][1] - moved.1).abs() < 0.5, "{kind:?}: {:?} vs {moved:?}", after[0]);
+            assert_eq!(after[1], before[1], "{kind:?}: the other end stays");
+            // One drag, one undo step.
+            state.undo();
+            let back = state.perspective.grids[0].doc_corners(&Space::flat(w, h));
+            assert_eq!(back, before, "{kind:?} undoes");
+        }
     }
 
     /// What the grids paint over `SCREEN`, on their own.

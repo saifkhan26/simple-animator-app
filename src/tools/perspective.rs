@@ -29,19 +29,19 @@ use crate::doc::transform::{Ease, Transform};
 /// A point or vector in document space.
 pub type P = [f32; 2];
 
-fn sub(a: P, b: P) -> P {
+pub(crate) fn sub(a: P, b: P) -> P {
     [a[0] - b[0], a[1] - b[1]]
 }
-fn add(a: P, b: P) -> P {
+pub(crate) fn add(a: P, b: P) -> P {
     [a[0] + b[0], a[1] + b[1]]
 }
-fn dot(a: P, b: P) -> f32 {
+pub(crate) fn dot(a: P, b: P) -> f32 {
     a[0] * b[0] + a[1] * b[1]
 }
-fn cross(a: P, b: P) -> f32 {
+pub(crate) fn cross(a: P, b: P) -> f32 {
     a[0] * b[1] - a[1] * b[0]
 }
-fn len(a: P) -> f32 {
+pub(crate) fn len(a: P) -> f32 {
     a[0].hypot(a[1])
 }
 pub(crate) fn normalize(a: P) -> Option<P> {
@@ -343,7 +343,7 @@ impl GridKind {
         match self {
             GridKind::Perspective | GridKind::Flat | GridKind::Isometric => "Grid",
             GridKind::Ruler => "Ruler",
-            GridKind::Parallel => "Parallels",
+            GridKind::Parallel => "Lines",
             GridKind::Point => "Point",
             GridKind::Ellipse => "Ellipse",
         }
@@ -359,7 +359,7 @@ impl GridKind {
     /// Whether the quad keeps its shape: flat and isometric grids only move,
     /// turn and scale.
     pub fn rigid(self) -> bool {
-        self != GridKind::Perspective
+        matches!(self, GridKind::Flat | GridKind::Isometric)
     }
 }
 
@@ -535,6 +535,11 @@ pub struct PerspectiveGrid {
     /// Strokes may snap to this guide at all — the magnet on its row. Every
     /// visible guide with it on is a snap source, not just the active one.
     pub magnet: bool,
+    /// A ruler runs on past its ends, across the whole canvas.
+    pub infinite_ruler: bool,
+    /// An ellipse also takes strokes that start inside it round its centre,
+    /// on the ring through where they start.
+    pub rings: bool,
     pub follow: Follow,
     /// Sorted by frame. None: the grid holds still in its space.
     pub keys: Vec<GridKey>,
@@ -611,6 +616,8 @@ impl Default for PerspectiveGrid {
             snap_cols: true,
             snap_third: true,
             magnet: true,
+            infinite_ruler: false,
+            rings: false,
             follow: Follow::Document,
             keys: Vec::new(),
             wall: None,
@@ -667,7 +674,7 @@ impl PerspectiveGrid {
                     corners: line_quad(a, b),
                     rows: 8,
                     horizon: false,
-                    color: [255, 170, 60],
+                    color: if kind == GridKind::Ruler { [255, 170, 60] } else { [190, 150, 255] },
                     ..base
                 }
             }
@@ -1697,7 +1704,7 @@ pub fn place_extra(
     }
 }
 
-fn inside(c: &[P; 4], p: P) -> bool {
+pub(crate) fn inside(c: &[P; 4], p: P) -> bool {
     let mut sign = 0.0f32;
     for i in 0..4 {
         let z = cross(sub(c[(i + 1) % 4], c[i]), sub(p, c[i]));
@@ -1841,7 +1848,7 @@ pub fn dragged(
 }
 
 /// Where `p + s·d` meets `q + r·e`, or `None` for parallel lines.
-fn intersect(p: P, d: P, q: P, e: P) -> Option<P> {
+pub(crate) fn intersect(p: P, d: P, q: P, e: P) -> Option<P> {
     let den = cross(d, e);
     if den.abs() <= 1e-9 * len(d) * len(e) {
         return None;

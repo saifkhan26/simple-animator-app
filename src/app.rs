@@ -6104,11 +6104,14 @@ impl AppState {
     }
 
     /// Whether the active grid is up for shapes to lie on: snap on, grids
-    /// shown, and the grid itself visible with its magnet on.
+    /// shown, and the grid itself a plane, visible, with its magnet on.
     fn grid_snap_on(&self) -> bool {
         self.perspective.snap
             && self.perspective.show
-            && self.perspective.active_grid().is_some_and(|g| g.visible && g.magnet)
+            && self
+                .perspective
+                .active_grid()
+                .is_some_and(|g| g.visible && g.magnet && g.kind.is_plane())
     }
 
     /// The guides strokes can snap to: every visible one with its magnet on,
@@ -10654,6 +10657,76 @@ mod tests {
         state.snap_begin([150.0, 150.0]);
         state.snap_doc([170.0, 153.0]);
         assert!(state.snap_curve().is_none());
+    }
+
+    /// Pencil, snap on, and grid 1 made into a guide of `kind` with corners
+    /// `c` in document space.
+    fn guide_state(kind: perspective::GridKind, c: [[f32; 2]; 4]) -> AppState {
+        let mut state = perspective_state();
+        let (w, h) = state.frame_size();
+        let g = &mut state.perspective.grids[0];
+        *g = perspective::PerspectiveGrid::fresh(kind);
+        g.set_doc_corners(c, &perspective::Space::flat(w, h));
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        state
+    }
+
+    #[test]
+    fn a_press_on_a_ruler_draws_along_it_from_the_first_point() {
+        let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
+        let mut state = guide_state(perspective::GridKind::Ruler, ruler);
+        // Pressed just off it: on it at once.
+        assert!(near(state.snap_begin([150.0, 306.0]), [150.0, 300.0]));
+        assert!(state.snap_curve().is_some_and(|c| c.fixed));
+        assert!(near(state.snap_doc([200.0, 340.0]), [200.0, 300.0]));
+        // Past its end the stroke stops at the end.
+        assert!(near(state.snap_doc([380.0, 290.0]), [300.0, 300.0]));
+        state.pointer_up();
+        // Pressed well away, the ruler leaves the stroke alone.
+        assert_eq!(state.snap_begin([150.0, 200.0]), [150.0, 200.0]);
+        assert_eq!(state.snap_doc([190.0, 230.0]), [190.0, 230.0]);
+        assert!(state.snap_curve().is_none());
+    }
+
+    #[test]
+    fn an_ellipse_with_rings_keeps_a_stroke_on_the_ring_it_started_on() {
+        let sq = [[100.0, 100.0], [300.0, 100.0], [300.0, 300.0], [100.0, 300.0]];
+        let mut state = guide_state(perspective::GridKind::Ellipse, sq);
+        state.perspective.grids[0].rings = true;
+        // Fifty out from the middle: the ring of radius fifty.
+        state.snap_begin([200.0, 150.0]);
+        let p = state.snap_doc([230.0, 152.0]);
+        let r = (p[0] - 200.0).hypot(p[1] - 200.0);
+        assert!((r - 50.0).abs() < 0.5, "{p:?} is {r} out");
+        state.pointer_up();
+        // Pressed on the ellipse itself: round the ellipse.
+        state.snap_begin([200.0, 104.0]);
+        let p = state.snap_doc([260.0, 140.0]);
+        let r = (p[0] - 200.0).hypot(p[1] - 200.0);
+        assert!((r - 100.0).abs() < 0.5, "{p:?} is {r} out");
+    }
+
+    #[test]
+    fn a_vanishing_point_guide_sends_strokes_to_its_point() {
+        // Helpers meet at (200, 100).
+        let c = [[150.0, 200.0], [250.0, 200.0], [300.0, 300.0], [100.0, 300.0]];
+        let mut state = guide_state(perspective::GridKind::Point, c);
+        state.snap_begin([400.0, 400.0]);
+        let p = state.snap_doc([380.0, 370.0]);
+        // On the line from the start to the point.
+        let (d0, d1) = ([p[0] - 400.0, p[1] - 400.0], [200.0 - 400.0, 100.0 - 400.0]);
+        assert!((d0[0] * d1[1] - d0[1] * d1[0]).abs() < 1e-1, "{p:?}");
+    }
+
+    #[test]
+    fn shapes_lie_only_on_a_plane() {
+        let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
+        let mut state = guide_state(perspective::GridKind::Ruler, ruler);
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = ShapeKind::Rect;
+        assert!(!state.shapes_on_grid(), "a ruler is no plane to lie on");
     }
 
     /// One-point floor whose columns meet at (150, 66.7).

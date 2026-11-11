@@ -45,6 +45,9 @@ enum Win {
     SaveError,
     Unsaved,
     Recovery,
+    /// The canvas's guide overlay alone, over the whole screen: for
+    /// `snapshots`, not the sweeps.
+    Guides,
 }
 
 impl std::fmt::Debug for Win {
@@ -64,6 +67,7 @@ impl std::fmt::Debug for Win {
             Win::SaveError => write!(f, "SaveError"),
             Win::Unsaved => write!(f, "Unsaved"),
             Win::Recovery => write!(f, "Recovery"),
+            Win::Guides => write!(f, "Guides"),
         }
     }
 }
@@ -187,6 +191,7 @@ impl Win {
                 state.autosave.error =
                     Some("Couldn't read the autosave of shot_04_cleanup_final_v12.anim: unexpected end of file".into());
             }
+            Win::Guides => {}
         }
     }
 
@@ -209,6 +214,10 @@ impl Win {
             Win::SaveError => save_error_dialog(state, ctx),
             Win::Unsaved => unsaved_dialog(state, ctx),
             Win::Recovery => recovery_dialog(state, ctx),
+            Win::Guides => {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                draw_perspective_grids(state, &painter, &Xform::new(state, SCREEN), SCREEN);
+            }
         }
     }
 
@@ -838,6 +847,31 @@ fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage {
     image::RgbaImage::from_raw(w as u32, h as u32, bytes).expect("sized to fit")
 }
 
+/// A floor and one guide of every other kind, spread out so each shows.
+fn guide_set() -> Vec<crate::tools::perspective::PerspectiveGrid> {
+    use crate::tools::perspective::{GridKind, PerspectiveGrid};
+    let at = |kind, d: [f32; 2]| {
+        let mut g = PerspectiveGrid::fresh(kind);
+        g.translate(d);
+        g
+    };
+    let mut ruler = at(GridKind::Ruler, [0.45, 0.32]);
+    ruler.infinite_ruler = true;
+    let mut ring = at(GridKind::Ellipse, [0.55, -0.15]);
+    ring.rings = true;
+    ring.centre_lines = true;
+    // Squashed into a floor-like quad: a circle in perspective.
+    ring.corners[0][0] += 0.06;
+    ring.corners[1][0] -= 0.06;
+    vec![
+        at(GridKind::Perspective, [-0.2, 0.15]),
+        ruler,
+        at(GridKind::Parallel, [-0.55, -0.3]),
+        at(GridKind::Point, [0.0, -0.05]),
+        ring,
+    ]
+}
+
 /// Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a
 /// look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots`
 #[test]
@@ -868,6 +902,32 @@ fn snapshots() {
     // A grid's settings, with Fill canvas's rows showing.
     let mut rig = Rig::new(Win::GridSettings);
     snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();
+    // Each other guide kind's settings, the Grid tool's list of them all,
+    // and how they paint on the canvas.
+    let guides = guide_set();
+    for (i, g) in guides.iter().enumerate().skip(1) {
+        let mut rig = Rig::new(Win::GridSettings);
+        rig.state.perspective.grids = guides.clone();
+        rig.state.perspective.ensure_ids();
+        rig.state.perspective.active = i;
+        let name = g.kind.row_name().to_lowercase();
+        snapshot(&mut rig, 2.0).save(dir.join(format!("guide_settings_{name}_{i}.png"))).unwrap();
+    }
+    let mut rig = Rig::new(Win::ToolPanel(ActiveTool::Perspective));
+    rig.state.perspective.grids = guides.clone();
+    rig.state.perspective.ensure_ids();
+    rig.state.perspective.grids[2].magnet = false;
+    snapshot(&mut rig, 2.0).save(dir.join("guide_list.png")).unwrap();
+    for tool in [ActiveTool::Perspective, ActiveTool::Pen(0)] {
+        let mut rig = Rig::new(Win::Guides);
+        rig.state.perspective.grids = guides.clone();
+        rig.state.perspective.ensure_ids();
+        rig.state.perspective.show = true;
+        rig.state.perspective.active = 1;
+        rig.state.set_tool(tool);
+        let name = if tool == ActiveTool::Perspective { "edit" } else { "draw" };
+        snapshot_of(&mut rig, 1.0, SCREEN).save(dir.join(format!("guides_{name}.png"))).unwrap();
+    }
 
     // Brush settings with noise on, tall enough to see it.
     let mut rig = Rig::new(Win::BrushSettings);

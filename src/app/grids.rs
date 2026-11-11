@@ -16,6 +16,7 @@ use super::{AppState, GridDrag, HORIZON_ATTACH_PX, HORIZON_DETACH_PX};
 use crate::doc::camera::Ease;
 use crate::doc::transform::Transform;
 use crate::tools::axis_lock;
+use crate::tools::guides;
 use crate::tools::perspective::{
     self, Follow, GridGrab, GridKind, PerspectiveConfig, PerspectiveGrid, Space, P,
 };
@@ -444,7 +445,12 @@ impl AppState {
             let corners = g.doc_corners(&space);
             let extra_at = g.extra_doc(&space);
             let eye_level = g.horizon && g.kind == GridKind::Perspective && !g.is_wall();
-            let Some(grab) = perspective::grab_at(&corners, &extra_at, p, tol, eye_level) else {
+            let grab = if g.kind.is_plane() {
+                perspective::grab_at(&corners, &extra_at, p, tol, eye_level)
+            } else {
+                guides::grab_at(g.kind, &corners, p, tol)
+            };
+            let Some(grab) = grab else {
                 continue;
             };
             self.perspective.active = i;
@@ -482,10 +488,14 @@ impl AppState {
             return;
         };
         let s = d.space;
-        let rigid = self.perspective.grids.get(d.grid).is_some_and(|g| g.kind.rigid());
+        let kind = self.perspective.grids.get(d.grid).map_or(GridKind::Perspective, |g| g.kind);
+        let rigid = kind.rigid();
+        // A ruler's end and a helper line's end turn in 15° steps about the
+        // other end instead (see `guides::dragged`).
+        let turns = matches!(kind, GridKind::Ruler | GridKind::Parallel | GridKind::Point);
         let slides = match d.grab {
             GridGrab::Move | GridGrab::Vp(_) | GridGrab::Extra(_) => true,
-            GridGrab::Corner(_) => !rigid,
+            GridGrab::Corner(_) => !rigid && !turns,
             _ => false,
         };
         let snap = self.axis_lock_on();
@@ -531,7 +541,12 @@ impl AppState {
             g.extra_vps[i as usize].on_horizon = on_horizon;
             return;
         }
-        let Some(c) = perspective::dragged(&d.corners, d.grab, d.start, p, snap, rigid) else {
+        let c = if kind.is_plane() {
+            perspective::dragged(&d.corners, d.grab, d.start, p, snap, rigid)
+        } else {
+            guides::dragged(kind, &d.corners, d.grab, d.start, p, snap)
+        };
+        let Some(c) = c else {
             return;
         };
         let whole = matches!(d.grab, GridGrab::Move | GridGrab::Rotate)
