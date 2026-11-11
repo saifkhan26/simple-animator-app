@@ -1,6 +1,6 @@
 # `src/app/grids.rs` — perspective grids on the app side (per-file store, follow, keys, drags)
 
-> **Source:** [src/app/grids.rs](../../../src/app/grids.rs) · **Module:** `crate::app::grids` · **Size:** 875 lines · Line links as of commit `bdc0f67`
+> **Source:** [src/app/grids.rs](../../../src/app/grids.rs) · **Module:** `crate::app::grids` · **Size:** 912 lines · Line links as of commit `42a83e1`
 
 ## What this file is for
 
@@ -641,7 +641,7 @@ grabbed grid. The new shape is always solved from the shape *at the press* (stor
 **Used by:** the canvas input in [ui/shell.rs](../ui/shell.md) (`draw`); tests in `app.rs`.
 
 ### `AppState::grid_drag_readout`
-[src/app/grids.rs:672](../../../src/app/grids.rs#L672)
+[src/app/grids.rs:680](../../../src/app/grids.rs#L680)
 
 ```rust
 pub fn grid_drag_readout(&self) -> Option<String>
@@ -650,7 +650,7 @@ pub fn grid_drag_readout(&self) -> Option<String>
 What the grid drag in hand is turning, in degrees, for beside the pen: a ruler's or a helper line's heading, a grid turned whole, a horizon tilted. Up the screen counts positive, as on a protractor.
 
 ### `AppState::finish_grid_drag`
-[src/app/grids.rs:703](../../../src/app/grids.rs#L703)
+[src/app/grids.rs:712](../../../src/app/grids.rs#L712)
 
 ```rust
 pub(super) fn finish_grid_drag(&mut self)
@@ -665,7 +665,7 @@ the grid changed pushes one `undo::Command::Grid` for the whole drag.
 ## Free functions
 
 ### `mirror_vps`
-[src/app/grids.rs:725](../../../src/app/grids.rs#L725)
+[src/app/grids.rs:734](../../../src/app/grids.rs#L734)
 
 ```rust
 fn mirror_vps(c: &[P; 4], which: u8, delta: P) -> Option<[P; 4]>
@@ -677,19 +677,21 @@ A grid's corners re-aimed with its vanishing point `which` moved by `delta` and 
 
 ### `mod tests`
 
-Run with `cargo test app::grids::tests` · 6 tests
+Run with `cargo test app::grids::tests` · 8 tests
 
 | Test | What it checks |
 |---|---|
-| [`exported_guides_come_back_in_another_file_with_their_walls`](../../../src/app/grids.rs#L785) | Exported guides come back in another file with their walls. |
-| [`a_wall_without_its_floor_comes_in_free`](../../../src/app/grids.rs#L812) | A wall without its floor comes in free. |
-| [`the_centre_key_moves_both_vanishing_points_evenly`](../../../src/app/grids.rs#L824) | The centre key moves both vanishing points evenly. |
-| [`the_store_keeps_every_guide_kind_in_order`](../../../src/app/grids.rs#L837) | The store keeps every guide kind in order. |
-| [`an_older_build_reads_only_the_planes`](../../../src/app/grids.rs#L845) | An older build reads only the planes. |
-| [`a_store_an_older_build_wrote_still_loads`](../../../src/app/grids.rs#L857) | A store an older build wrote still loads. |
+| [`exported_guides_come_back_in_another_file_with_their_walls`](../../../src/app/grids.rs#L801) | Exported guides come back in another file with their walls. |
+| [`a_wall_without_its_floor_comes_in_free`](../../../src/app/grids.rs#L828) | A wall without its floor comes in free. |
+| [`the_centre_key_moves_both_vanishing_points_evenly`](../../../src/app/grids.rs#L840) | The centre key moves both vanishing points evenly. |
+| [`the_store_keeps_every_guide_kind_in_order`](../../../src/app/grids.rs#L853) | The store keeps every guide kind in order. |
+| [`an_older_build_reads_only_the_planes`](../../../src/app/grids.rs#L861) | An older build reads only the planes. |
+| [`curved_guides_go_where_an_older_build_does_not_look`](../../../src/app/grids.rs#L873) | Curved guides go where an older build does not look. |
+| [`curved_guides_export_and_come_back_with_their_shape`](../../../src/app/grids.rs#L884) | Curved guides export and come back with their shape. |
+| [`a_store_an_older_build_wrote_still_loads`](../../../src/app/grids.rs#L894) | A store an older build wrote still loads. |
 
 **Test helpers** (used only by the tests above):
 
-- [`file`](../../../src/app/grids.rs#L743) — File.
+- [`file`](../../../src/app/grids.rs#L752) — File.
 
-**Test-only types and constants:** [`KEY`](../../../src/app/grids.rs#L741), [`OldGridFile`](../../../src/app/grids.rs#L762), [`OldGrid`](../../../src/app/grids.rs#L771), [`OldKind`](../../../src/app/grids.rs#L777)
+**Test-only types and constants:** [`KEY`](../../../src/app/grids.rs#L750), [`OldGridFile`](../../../src/app/grids.rs#L778), [`OldGrid`](../../../src/app/grids.rs#L787), [`OldKind`](../../../src/app/grids.rs#L793)

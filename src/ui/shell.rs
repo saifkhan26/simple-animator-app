@@ -7864,11 +7864,9 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
     }
 }
 
-/// While a stroke would snap, faint dashed lines from the cursor along every
-/// way it could go: through it to each vanishing point, or right across the
-/// canvas for a family that stays parallel.
-/// A guide that isn't a plane — a ruler, parallel lines, a vanishing point
-/// or an ellipse — and, on the active one in the Grid tool, its handles.
+/// A guide that isn't a plane — a ruler, parallel lines, a vanishing point,
+/// an ellipse, a pan or a fisheye — and, on the active one in the Grid tool,
+/// its handles.
 #[allow(clippy::too_many_arguments)]
 fn draw_guide(
     state: &AppState,
@@ -8160,6 +8158,9 @@ fn draw_guide(
     }
 }
 
+/// While a stroke would snap, faint dashed lines from the cursor along every
+/// way it could go: through it to each vanishing point, right across the
+/// canvas for a family that stays parallel, or along a curved guide's curve.
 fn draw_cursor_guides(
     state: &AppState,
     painter: &egui::Painter,
@@ -8184,7 +8185,7 @@ fn draw_cursor_guides(
 
 /// One of the curves a stroke can keep to, dashed in its guide's colour: a
 /// line across the canvas (stopping at its vanishing point), a ruler's
-/// segment, or an ellipse's ring.
+/// segment, an ellipse's ring, or a pan's or a fisheye's curve.
 fn draw_snap_curve(
     state: &AppState,
     painter: &egui::Painter,

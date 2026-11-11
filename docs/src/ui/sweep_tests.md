@@ -1,6 +1,6 @@
 # `src/ui/sweep_tests.rs` — headless layout sweep over every window (test-only)
 
-> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 1021 lines · Line links as of commit `bdc0f67`
+> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 1042 lines · Line links as of commit `42a83e1`
 
 ## What this file is for
 
@@ -380,7 +380,7 @@ fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage
 `snapshot`, cropped to `crop` rather than to the window: for a window with a menu open beside it.
 
 ### `guide_set`
-[src/ui/sweep_tests.rs:851](../../../src/ui/sweep_tests.rs#L851)
+[src/ui/sweep_tests.rs:853](../../../src/ui/sweep_tests.rs#L853)
 
 ```rust
 fn guide_set() -> Vec<crate::tools::perspective::PerspectiveGrid>
@@ -404,4 +404,4 @@ Run with `cargo test ui::sweep_tests` · 9 tests
 | [`every_combo_box_opens_on_screen`](../../../src/ui/sweep_tests.rs#L646) | Every combo box opened, one at a time, with every section open: its list lands on the screen, and the window under it keeps its width. |
 | [`the_whole_ui_fits_common_screens`](../../../src/ui/sweep_tests.rs#L700) | The whole UI at common screen sizes: every window on screen, and no ID clashes between windows. |
 | [`the_brush_panel_keeps_its_rows_apart_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L745) | However narrow the Brush panel goes, the H/S/L fields stay clear of the Paste button after them, and the backdrop row keeps its colour and opacity. (Their frames, not their text, would collide, which the overlap sweep doesn't see.) |
-| [`snapshots`](../../../src/ui/sweep_tests.rs#L879) | Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots` |
+| [`snapshots`](../../../src/ui/sweep_tests.rs#L889) | Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots` |

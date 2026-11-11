@@ -96,10 +96,15 @@ pub fn wave(bend: f32, t: f32) -> (f32, f32) {
 /// its top and bottom.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
+    /// The centre point, in document space.
     pub o: P,
+    /// Unit direction along the horizon, left to right across the box.
     pub u: P,
+    /// Unit direction square to the horizon, toward the box's bottom edge.
     pub n: P,
+    /// Half the box's width: how far its side edges are along `u`.
     pub w: f32,
+    /// Half the box's height: how far its top and bottom are along `n`.
     pub h: f32,
 }
 
@@ -463,12 +468,20 @@ pub fn candidates(g: &PerspectiveGrid, s: &Space, start: P, vertical: bool, grid
 /// (−1 or 1 along `n`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanAxis {
+    /// Along the line through the side points.
     pub u: P,
+    /// Across it: the way the curves bow out.
     pub n: P,
+    /// From the centre point to the nearest side point.
     pub a: f32,
+    /// How many `a`s either side of the centre the curves are drawn:
+    /// 1 for a three-point pan, unbounded for a 360° one.
     pub span: f32,
+    /// The direction of the family that stays straight.
     pub straight: P,
+    /// How far the box reaches along `n`: the outermost arch drawn firm.
     pub reach: f32,
+    /// Which side of the axis the shape handle sits, −1 or 1 along `n`.
     pub side: f32,
 }
 

@@ -1,6 +1,6 @@
 # `src/app.rs` — the app's central state (`AppState`)
 
-> **Source:** [src/app.rs](../../src/app.rs) · **Module:** `crate::app` · **Size:** 13442 lines · Line links as of commit `bdc0f67`
+> **Source:** [src/app.rs](../../src/app.rs) · **Module:** `crate::app` · **Size:** 13532 lines · Line links as of commit `42a83e1`
 
 ## What this file is for
 
@@ -5950,7 +5950,7 @@ case — the image is returned as is.
 
 ### `mod tests`
 
-Run with `cargo test app::tests` · 144 tests
+Run with `cargo test app::tests` · 148 tests
 
 | Test | What it checks |
 |---|---|
@@ -6028,76 +6028,80 @@ Run with `cargo test app::tests` · 144 tests
 | [`a_press_on_a_ruler_draws_along_it_from_the_first_point`](../../src/app.rs#L10681) | A press on a ruler draws along it from the first point. |
 | [`an_ellipse_with_rings_keeps_a_stroke_on_the_ring_it_started_on`](../../src/app.rs#L10698) | An ellipse with rings keeps a stroke on the ring it started on. |
 | [`a_vanishing_point_guide_sends_strokes_to_its_point`](../../src/app.rs#L10716) | A vanishing point guide sends strokes to its point. |
-| [`a_ruler_end_drag_shows_its_heading`](../../src/app.rs#L10728) | A ruler end drag shows its heading. |
-| [`shapes_lie_only_on_a_plane`](../../src/app.rs#L10740) | Shapes lie only on a plane. |
-| [`a_rect_lies_on_the_grid_when_snap_is_on`](../../src/app.rs#L10779) | With snap on, a Shape-tool rectangle is drawn lying on the perspective floor (edges follow the grid's rows and leaning columns), not as a flat screen rectangle. |
-| [`with_snap_off_a_rect_stays_flat`](../../src/app.rs#L10791) | With snap off, the same drag draws a plain flat rectangle. |
-| [`a_rect_lies_on_the_grid_on_a_transformed_layer_too`](../../src/app.rs#L10800) | On a scaled, rotated and moved layer, the snapped rectangle still lands in the same place on screen as on an untransformed layer. |
-| [`shift_squares_a_rect_up_in_grid_cells`](../../src/app.rs#L10818) | Holding Shift while drawing a snapped rectangle makes it square in grid cells (equal number of columns and rows); letting go of Shift frees it again. |
-| [`a_shape_line_snaps_like_a_stroke`](../../src/app.rs#L10837) | A Shape-tool line snaps to one grid direction like a pen stroke (it does not lie on the plane), while a rectangle is not direction-locked but lies on the plane instead. |
-| [`shift_down_at_the_press_locks_only_once_pressed_again`](../../src/app.rs#L10878) | If Shift was already down when the drag began (it chose a pan or selection mode), it does not lock an axis until it is released and pressed again; if it goes down partway, it locks at once. |
-| [`shift_partway_turns_a_shape_line_to_a_fifteen_degree_step`](../../src/app.rs#L10896) | Pressing Shift mid-drag snaps a Shape line drawn at 50° to the nearest 15° step (45°), and the final line is drawn along that angle. |
-| [`a_held_line_is_level_on_the_canvas_or_the_screen`](../../src/app.rs#L10916) | The lock's "level" direction is the canvas horizontal, or the screen horizontal when the view is rotated and screen axes are chosen, and it is turned back by the layer's own rotation in cell pixels. |
-| [`shift_partway_squares_a_flat_rect`](../../src/app.rs#L10932) | Pressing Shift mid-drag turns a flat rectangle into a square as tall as it is wide. |
-| [`a_mid_key_down_at_the_press_counts_only_once_pressed_again`](../../src/app.rs#L10959) | Like Shift, the move and centre keys held when the drag began do not count until released and pressed again mid-drag. |
-| [`the_move_key_partway_slides_a_flat_rect`](../../src/app.rs#L10970) | Holding the move key (Space) mid-drag slides the rectangle without resizing it; releasing it resumes growing from where it was slid to, and the result is drawn there, not at the press. |
-| [`the_centre_key_partway_grows_a_rect_from_the_press`](../../src/app.rs#L10988) | Holding the centre key (Alt) makes the rectangle grow out from the press point in both directions, and with Shift as well it becomes a square centred on the press. |
-| [`a_centred_line_runs_both_ways_from_the_press`](../../src/app.rs#L11006) | A centred Shape line runs equally both ways from the press point, and with the move key too its middle follows the pointer. |
-| [`the_move_key_slides_a_rect_along_its_grid`](../../src/app.rs#L11021) | Sliding a perspective-snapped rectangle keeps it the same number of grid cells across while it gets smaller on screen as it moves up the floor toward the horizon. |
-| [`a_snapped_line_slid_stays_snapped_from_where_it_went`](../../src/app.rs#L11044) | Sliding a snapped line moves it to another grid row, and after the key is released it stays snapped to that new row. |
-| [`shift_partway_holds_a_stroke_to_an_axis_from_where_it_was`](../../src/app.rs#L11067) | Pressing Shift mid-stroke holds the stroke still until a direction shows, then keeps it on that axis from the point where Shift went down; releasing frees it, and a new press starts a new hold from the current point. |
-| [`shift_partway_holds_a_grid_move_to_an_axis`](../../src/app.rs#L11089) | Pressing Shift while moving a perspective grid restricts the move to horizontal or vertical, whichever the pointer is going along. |
-| [`next_grid_cycles_the_visible_grids_and_wraps`](../../src/app.rs#L11103) | The "next grid" shortcut cycles through visible grids, skipping hidden ones and wrapping around; with only one visible it stays put, and with no grids it does not crash. |
-| [`selecting_the_tool_brings_back_a_grid`](../../src/app.rs#L11126) | Choosing the Perspective tool when there are no grids creates one and makes it active. |
-| [`write_prefs_fixture`](../../src/app.rs#L11192) | Ignored by default (`#[ignore]`); run by hand with `cargo test write_prefs_fixture -- --ignored` to regenerate the old-format `src/testdata/ui_prefs_v1.ron` fixture. It checks nothing itself. |
-| [`prefs_written_before_the_brush_library_still_load`](../../src/app.rs#L11202) | A `ui.ron` from before the Krita brush library still loads with every saved value intact (one unreadable field would silently reset all preferences); newer fields get defaults, old onion sliders become the onion strip, and old fills stay grain-free. |
-| [`the_active_brush_is_saved_with_its_latest_changes`](../../src/app.rs#L11241) | Saving stores the active tool's brush as it is right now, not as it was at the last tool switch. |
-| [`each_pen_s_smoothing_outlasts_a_restart`](../../src/app.rs#L11256) | Turning the stabilizer on for Ink only is saved per pen: Pencil and Eraser stay on Basic smoothing after a reload. |
-| [`the_pen_slots_outlast_a_restart`](../../src/app.rs#L11271) | The pen slots outlast a restart: how many, and each one's name, icon, brush, smoothing and sizes. The app comes back on the first. |
-| [`the_first_two_slots_are_written_where_an_older_build_reads_them`](../../src/app.rs#L11298) | A build from before the slots finds the first two where the pencil and the ink always were, and the eraser where it was; and prefs from such a build come back the same. |
-| [`prefs_from_before_the_pen_slots_make_the_pencil_and_ink_slots`](../../src/app.rs#L11333) | A prefs file from before the pen slots gives its pencil and ink as the first two slots, and every other tool its own brush, as they were. |
-| [`hidden_panels_and_the_layout_reset_outlast_a_restart`](../../src/app.rs#L11352) | A panel layout reset shows every panel again; hidden panels and the reset counter are saved and come back after a reload. |
-| [`the_color_scheme_and_custom_colors_outlast_a_restart`](../../src/app.rs#L11370) | The default theme is Graphite; a Custom theme and its colours are saved and restored. |
-| [`a_screen_pick_keeps_the_brush`](../../src/app.rs#L11386) | Picking a colour from the screen changes only the brush colour, not its engine or size. |
-| [`a_new_project_keeps_the_brushes`](../../src/app.rs#L11399) | Starting a new project keeps every tool's brush settings and switches back to the Pencil. |
-| [`shape_shares_its_size_with_the_last_pen`](../../src/app.rs#L11413) | The Shape tool takes the size of the pen used last, and a size set on Shape goes back to that pen; the other pen keeps its own size, and Shape keeps its own hard edge (only size is shared). |
-| [`size_keys_keep_shape_and_the_pen_in_step`](../../src/app.rs#L11437) | With the full UI drawn, the `[` / `]` size keys change Ink's size and Shape picks it up, and a size change on Shape goes back to Ink. |
-| [`a_shape_thickness_is_saved_with_its_pen`](../../src/app.rs#L11488) | A thickness set on Shape is saved with the pen it follows, so after a restart both that pen and Shape have it. |
-| [`a_screen_pick_on_shape_keeps_the_pen_size`](../../src/app.rs#L11504) | Picking a colour from the screen while on Shape stays on Shape and does not change its size (or the pen's). |
-| [`a_stabilized_stroke_finishes_at_pen_up`](../../src/app.rs#L11520) | With the Stabilizer on, lifting the pen finishes the line to where the pen lifted, even if no UI frame ran between pen events to advance it. |
-| [`each_pen_keeps_its_own_smoothing`](../../src/app.rs#L11546) | Turning the stabilizer on for Ink does not affect Pencil or Eraser strokes, and Fill has no smoothing at all. |
-| [`the_smoothing_keys_change_the_pen_in_hand`](../../src/app.rs#L11571) | The Stabilizer key toggles the current pen to Stabilizer and back to what it had; the cycle key steps through Weighted, Stabilizer, None, Basic; neither changes other pens or does anything on a tool without smoothing. |
-| [`brushes_saved_before_the_perspective_tool_survive`](../../src/app.rs#L11599) | A saved brush list from before the Perspective tool existed (7 entries) is still restored, while a list of any other wrong length is thrown away. |
-| [`perspective_prefs_round_trip_and_default_when_missing`](../../src/app.rs#L11612) | Perspective settings survive a save/load round trip, and preferences from before grids existed load with the default grid. |
-| [`the_backdrop_is_kept_between_runs_and_across_new_projects`](../../src/app.rs#L11627) | The canvas backdrop colour and opacity are saved, kept across File > New, and default correctly in old preferences; an old "Polygon" selection shape opens as the freehand lasso, and an old checkerboard setting still loads. |
-| [`the_onion_strip_round_trips_and_old_ranges_carry_over`](../../src/app.rs#L11652) | Per-step onion show/hide and opacity survive a round trip, and an old "prev = 3" setting turns into three lit steps back (and one forward). |
-| [`the_magic_select_settings_round_trip_and_old_prefs_get_defaults`](../../src/app.rs#L11666) | Magic-wand selection settings survive a round trip and the app's own save; preferences without them, or with only some fields, fill in defaults. |
-| [`onion_layers_are_the_active_one_and_those_switched_on`](../../src/app.rs#L11699) | Onion skin shows on the active layer plus layers with their own onion switch on, but not on hidden layers, not during playback, and not when onion skin is off. |
-| [`saving_a_preset_needs_a_name_and_replaces_one_it_matches`](../../src/app.rs#L11726) | Saving a New Project preset needs a non-blank name (trimmed); saving under an existing name (any case) overwrites that preset in place and keeps its star. |
-| [`renaming_a_preset_rejects_blank_and_taken_names`](../../src/app.rs#L11746) | Renaming a preset refuses a blank name or one another preset already has, but allows changing the case of its own name. |
-| [`only_one_preset_is_starred`](../../src/app.rs#L11759) | Only one preset can be the starred default: starring another moves the star, starring the starred one clears it, and deleting it leaves none starred. |
-| [`new_project_opens_on_the_starred_preset_as_saved`](../../src/app.rs#L11777) | With no starred preset the New Project dialog starts at the current project's size; with one it starts at that preset, and applying a preset keeps its own orientation. |
-| [`presets_round_trip_and_default_to_none_when_missing`](../../src/app.rs#L11799) | Presets survive a save/load round trip, and preferences from before presets existed load with none. |
-| [`a_pinned_drawing_is_ghosted_once_in_the_pin_colour`](../../src/app.rs#L11818) | A drawing pinned in the onion skin is ghosted once in the pin's colour and not again as a normal onion step; switching onion skin off hides pins too. |
-| [`only_changed_pixels_are_marked_for_upload`](../../src/app.rs#L11850) | Timeline-structure edits (adding frames and keys) mark no texture for re-upload, and a one-pixel edit marks only that pixel's rectangle. |
-| [`undo_of_a_structural_edit_uploads_nothing`](../../src/app.rs#L11873) | Undoing a structural edit (adding a frame) marks no cell for re-upload. |
-| [`undo_of_a_stroke_uploads_its_rect`](../../src/app.rs#L11885) | Undoing a pixel patch marks only that patch's rectangle for re-upload, not the whole cell. |
-| [`fade_others_splits_above_and_below_the_active_layer`](../../src/app.rs#L11917) | With "fade others" on, layers below the active one are drawn at the "below" opacity, layers above at the "above" opacity, and the active layer at full strength. |
-| [`fade_others_spares_reference_and_lines_from_layers`](../../src/app.rs#L11924) | Reference layers, and the layer the active layer takes its lines from, are not faded; another layer's lines link does not count. |
-| [`the_key_link_toggle_links_the_layer_below`](../../src/app.rs#L11939) | The key-link shortcut links the current layer's keys to the nearest drawing layer below (skipping a group header), pressing it again unlinks, the bottom layer has nothing to link to, and linking is not an undo step. |
-| [`a_cleanup_layer_is_linked_and_one_undo`](../../src/app.rs#L11958) | "New cleanup layer" adds a layer directly above the rough, named "<rough> clean", key-linked to it and made active, and one undo takes it all back. |
-| [`fade_others_lifts_while_playing_or_switched_off`](../../src/app.rs#L11977) | During playback, or once the toggle is switched off, every layer shows at full opacity. |
-| [`a_dropped_drawing_lives_as_long_as_undo_can_reach_it`](../../src/app.rs#L11990) | A deleted layer's drawing is kept while undo can still restore it, and is freed (made a tombstone, texture dropped) once that undo step has fallen out of history, without renumbering other cells. |
-| [`packing_changes_nothing_on_screen_or_in_export`](../../src/app.rs#L12020) | Packing an idle cell to save memory leaves its uploaded texture and its flattened export pixels exactly the same. |
-| [`the_packer_leaves_the_drawing_being_drawn_alone`](../../src/app.rs#L12050) | The idle-cell packer never packs the cell a stroke is drawing into, even off the active slot, but does pack it once the stroke is done. |
-| [`play_shortcut_starts_from_the_current_frame`](../../src/app.rs#L12069) | Starting playback by shortcut steps from the frame the playhead is on: the first tick only starts the clock rather than jumping by however long it was paused. |
-| [`stopping_goes_back_to_the_start_frame_unless_paused_here`](../../src/app.rs#L12089) | Play/Pause returns to the frame playback started on when stopped, while the "pause here" action stops on the current frame. |
-| [`running_out_with_the_loop_off_goes_back_to_the_start_frame`](../../src/app.rs#L12114) | With looping off, playback that reaches the end of the range stops and returns to the start frame. |
-| [`fade_others_starts_off`](../../src/app.rs#L12130) | "Fade others" is session-only: a fresh state always starts with it off. |
-| [`perf_big_layer`](../../src/app.rs#L12139) | `#[ignore]` timing probe, not pass/fail: compares old and new ways of uploading, ghosting, blank-scanning and snapshotting one cell of a 3×-wide 4K frame. Run with `cargo test --release perf_big_layer -- --ignored --nocapture`. |
-| [`perf_liquify`](../../src/app.rs#L12317) | `#[ignore]` timing probe: Liquify pen-down, move, per-frame and apply times for several canvas and brush sizes. Run with `cargo test --release perf_liquify -- --ignored --nocapture`. |
-| [`perf_big_canvas_stroke`](../../src/app.rs#L12389) | `#[ignore]` timing probe: stage-by-stage stroke timings (pen-down, stroke frames, pen-up, upload and undo sizes) on a big 4320×7680 canvas for both brush engines, or on the `.anim` named by the `ANIM_PROBE` environment variable. |
-| [`perf_user_strokes`](../../src/app.rs#L12547) | The user's own pens (from a `ui_prefs` blob) on a real project, as wall-clock strokes. Not a pass/fail test — run it for the numbers: `PREFS_PROBE=<ui_prefs.ron> ANIM_PROBE=<x.anim> cargo test --release perf_user_strokes -- --ignored --nocapture` |
+| [`a_horizontal_pan_bends_a_level_stroke_down_to_its_side_points`](../../src/app.rs#L10728) | A horizontal pan bends a level stroke down to its side points. |
+| [`a_fisheye_bows_a_downward_stroke_through_its_top_and_bottom_points`](../../src/app.rs#L10750) | A fisheye bows a downward stroke through its top and bottom points. |
+| [`a_360_pan_takes_a_stroke_on_round_past_the_loop`](../../src/app.rs#L10772) | A 360 pan takes a stroke on round past the loop. |
+| [`a_pans_handles_stretch_it_and_bend_its_curves_each_one_undo`](../../src/app.rs#L10789) | A pans handles stretch it and bend its curves each one undo. |
+| [`a_ruler_end_drag_shows_its_heading`](../../src/app.rs#L10818) | A ruler end drag shows its heading. |
+| [`shapes_lie_only_on_a_plane`](../../src/app.rs#L10830) | Shapes lie only on a plane. |
+| [`a_rect_lies_on_the_grid_when_snap_is_on`](../../src/app.rs#L10869) | With snap on, a Shape-tool rectangle is drawn lying on the perspective floor (edges follow the grid's rows and leaning columns), not as a flat screen rectangle. |
+| [`with_snap_off_a_rect_stays_flat`](../../src/app.rs#L10881) | With snap off, the same drag draws a plain flat rectangle. |
+| [`a_rect_lies_on_the_grid_on_a_transformed_layer_too`](../../src/app.rs#L10890) | On a scaled, rotated and moved layer, the snapped rectangle still lands in the same place on screen as on an untransformed layer. |
+| [`shift_squares_a_rect_up_in_grid_cells`](../../src/app.rs#L10908) | Holding Shift while drawing a snapped rectangle makes it square in grid cells (equal number of columns and rows); letting go of Shift frees it again. |
+| [`a_shape_line_snaps_like_a_stroke`](../../src/app.rs#L10927) | A Shape-tool line snaps to one grid direction like a pen stroke (it does not lie on the plane), while a rectangle is not direction-locked but lies on the plane instead. |
+| [`shift_down_at_the_press_locks_only_once_pressed_again`](../../src/app.rs#L10968) | If Shift was already down when the drag began (it chose a pan or selection mode), it does not lock an axis until it is released and pressed again; if it goes down partway, it locks at once. |
+| [`shift_partway_turns_a_shape_line_to_a_fifteen_degree_step`](../../src/app.rs#L10986) | Pressing Shift mid-drag snaps a Shape line drawn at 50° to the nearest 15° step (45°), and the final line is drawn along that angle. |
+| [`a_held_line_is_level_on_the_canvas_or_the_screen`](../../src/app.rs#L11006) | The lock's "level" direction is the canvas horizontal, or the screen horizontal when the view is rotated and screen axes are chosen, and it is turned back by the layer's own rotation in cell pixels. |
+| [`shift_partway_squares_a_flat_rect`](../../src/app.rs#L11022) | Pressing Shift mid-drag turns a flat rectangle into a square as tall as it is wide. |
+| [`a_mid_key_down_at_the_press_counts_only_once_pressed_again`](../../src/app.rs#L11049) | Like Shift, the move and centre keys held when the drag began do not count until released and pressed again mid-drag. |
+| [`the_move_key_partway_slides_a_flat_rect`](../../src/app.rs#L11060) | Holding the move key (Space) mid-drag slides the rectangle without resizing it; releasing it resumes growing from where it was slid to, and the result is drawn there, not at the press. |
+| [`the_centre_key_partway_grows_a_rect_from_the_press`](../../src/app.rs#L11078) | Holding the centre key (Alt) makes the rectangle grow out from the press point in both directions, and with Shift as well it becomes a square centred on the press. |
+| [`a_centred_line_runs_both_ways_from_the_press`](../../src/app.rs#L11096) | A centred Shape line runs equally both ways from the press point, and with the move key too its middle follows the pointer. |
+| [`the_move_key_slides_a_rect_along_its_grid`](../../src/app.rs#L11111) | Sliding a perspective-snapped rectangle keeps it the same number of grid cells across while it gets smaller on screen as it moves up the floor toward the horizon. |
+| [`a_snapped_line_slid_stays_snapped_from_where_it_went`](../../src/app.rs#L11134) | Sliding a snapped line moves it to another grid row, and after the key is released it stays snapped to that new row. |
+| [`shift_partway_holds_a_stroke_to_an_axis_from_where_it_was`](../../src/app.rs#L11157) | Pressing Shift mid-stroke holds the stroke still until a direction shows, then keeps it on that axis from the point where Shift went down; releasing frees it, and a new press starts a new hold from the current point. |
+| [`shift_partway_holds_a_grid_move_to_an_axis`](../../src/app.rs#L11179) | Pressing Shift while moving a perspective grid restricts the move to horizontal or vertical, whichever the pointer is going along. |
+| [`next_grid_cycles_the_visible_grids_and_wraps`](../../src/app.rs#L11193) | The "next grid" shortcut cycles through visible grids, skipping hidden ones and wrapping around; with only one visible it stays put, and with no grids it does not crash. |
+| [`selecting_the_tool_brings_back_a_grid`](../../src/app.rs#L11216) | Choosing the Perspective tool when there are no grids creates one and makes it active. |
+| [`write_prefs_fixture`](../../src/app.rs#L11282) | Ignored by default (`#[ignore]`); run by hand with `cargo test write_prefs_fixture -- --ignored` to regenerate the old-format `src/testdata/ui_prefs_v1.ron` fixture. It checks nothing itself. |
+| [`prefs_written_before_the_brush_library_still_load`](../../src/app.rs#L11292) | A `ui.ron` from before the Krita brush library still loads with every saved value intact (one unreadable field would silently reset all preferences); newer fields get defaults, old onion sliders become the onion strip, and old fills stay grain-free. |
+| [`the_active_brush_is_saved_with_its_latest_changes`](../../src/app.rs#L11331) | Saving stores the active tool's brush as it is right now, not as it was at the last tool switch. |
+| [`each_pen_s_smoothing_outlasts_a_restart`](../../src/app.rs#L11346) | Turning the stabilizer on for Ink only is saved per pen: Pencil and Eraser stay on Basic smoothing after a reload. |
+| [`the_pen_slots_outlast_a_restart`](../../src/app.rs#L11361) | The pen slots outlast a restart: how many, and each one's name, icon, brush, smoothing and sizes. The app comes back on the first. |
+| [`the_first_two_slots_are_written_where_an_older_build_reads_them`](../../src/app.rs#L11388) | A build from before the slots finds the first two where the pencil and the ink always were, and the eraser where it was; and prefs from such a build come back the same. |
+| [`prefs_from_before_the_pen_slots_make_the_pencil_and_ink_slots`](../../src/app.rs#L11423) | A prefs file from before the pen slots gives its pencil and ink as the first two slots, and every other tool its own brush, as they were. |
+| [`hidden_panels_and_the_layout_reset_outlast_a_restart`](../../src/app.rs#L11442) | A panel layout reset shows every panel again; hidden panels and the reset counter are saved and come back after a reload. |
+| [`the_color_scheme_and_custom_colors_outlast_a_restart`](../../src/app.rs#L11460) | The default theme is Graphite; a Custom theme and its colours are saved and restored. |
+| [`a_screen_pick_keeps_the_brush`](../../src/app.rs#L11476) | Picking a colour from the screen changes only the brush colour, not its engine or size. |
+| [`a_new_project_keeps_the_brushes`](../../src/app.rs#L11489) | Starting a new project keeps every tool's brush settings and switches back to the Pencil. |
+| [`shape_shares_its_size_with_the_last_pen`](../../src/app.rs#L11503) | The Shape tool takes the size of the pen used last, and a size set on Shape goes back to that pen; the other pen keeps its own size, and Shape keeps its own hard edge (only size is shared). |
+| [`size_keys_keep_shape_and_the_pen_in_step`](../../src/app.rs#L11527) | With the full UI drawn, the `[` / `]` size keys change Ink's size and Shape picks it up, and a size change on Shape goes back to Ink. |
+| [`a_shape_thickness_is_saved_with_its_pen`](../../src/app.rs#L11578) | A thickness set on Shape is saved with the pen it follows, so after a restart both that pen and Shape have it. |
+| [`a_screen_pick_on_shape_keeps_the_pen_size`](../../src/app.rs#L11594) | Picking a colour from the screen while on Shape stays on Shape and does not change its size (or the pen's). |
+| [`a_stabilized_stroke_finishes_at_pen_up`](../../src/app.rs#L11610) | With the Stabilizer on, lifting the pen finishes the line to where the pen lifted, even if no UI frame ran between pen events to advance it. |
+| [`each_pen_keeps_its_own_smoothing`](../../src/app.rs#L11636) | Turning the stabilizer on for Ink does not affect Pencil or Eraser strokes, and Fill has no smoothing at all. |
+| [`the_smoothing_keys_change_the_pen_in_hand`](../../src/app.rs#L11661) | The Stabilizer key toggles the current pen to Stabilizer and back to what it had; the cycle key steps through Weighted, Stabilizer, None, Basic; neither changes other pens or does anything on a tool without smoothing. |
+| [`brushes_saved_before_the_perspective_tool_survive`](../../src/app.rs#L11689) | A saved brush list from before the Perspective tool existed (7 entries) is still restored, while a list of any other wrong length is thrown away. |
+| [`perspective_prefs_round_trip_and_default_when_missing`](../../src/app.rs#L11702) | Perspective settings survive a save/load round trip, and preferences from before grids existed load with the default grid. |
+| [`the_backdrop_is_kept_between_runs_and_across_new_projects`](../../src/app.rs#L11717) | The canvas backdrop colour and opacity are saved, kept across File > New, and default correctly in old preferences; an old "Polygon" selection shape opens as the freehand lasso, and an old checkerboard setting still loads. |
+| [`the_onion_strip_round_trips_and_old_ranges_carry_over`](../../src/app.rs#L11742) | Per-step onion show/hide and opacity survive a round trip, and an old "prev = 3" setting turns into three lit steps back (and one forward). |
+| [`the_magic_select_settings_round_trip_and_old_prefs_get_defaults`](../../src/app.rs#L11756) | Magic-wand selection settings survive a round trip and the app's own save; preferences without them, or with only some fields, fill in defaults. |
+| [`onion_layers_are_the_active_one_and_those_switched_on`](../../src/app.rs#L11789) | Onion skin shows on the active layer plus layers with their own onion switch on, but not on hidden layers, not during playback, and not when onion skin is off. |
+| [`saving_a_preset_needs_a_name_and_replaces_one_it_matches`](../../src/app.rs#L11816) | Saving a New Project preset needs a non-blank name (trimmed); saving under an existing name (any case) overwrites that preset in place and keeps its star. |
+| [`renaming_a_preset_rejects_blank_and_taken_names`](../../src/app.rs#L11836) | Renaming a preset refuses a blank name or one another preset already has, but allows changing the case of its own name. |
+| [`only_one_preset_is_starred`](../../src/app.rs#L11849) | Only one preset can be the starred default: starring another moves the star, starring the starred one clears it, and deleting it leaves none starred. |
+| [`new_project_opens_on_the_starred_preset_as_saved`](../../src/app.rs#L11867) | With no starred preset the New Project dialog starts at the current project's size; with one it starts at that preset, and applying a preset keeps its own orientation. |
+| [`presets_round_trip_and_default_to_none_when_missing`](../../src/app.rs#L11889) | Presets survive a save/load round trip, and preferences from before presets existed load with none. |
+| [`a_pinned_drawing_is_ghosted_once_in_the_pin_colour`](../../src/app.rs#L11908) | A drawing pinned in the onion skin is ghosted once in the pin's colour and not again as a normal onion step; switching onion skin off hides pins too. |
+| [`only_changed_pixels_are_marked_for_upload`](../../src/app.rs#L11940) | Timeline-structure edits (adding frames and keys) mark no texture for re-upload, and a one-pixel edit marks only that pixel's rectangle. |
+| [`undo_of_a_structural_edit_uploads_nothing`](../../src/app.rs#L11963) | Undoing a structural edit (adding a frame) marks no cell for re-upload. |
+| [`undo_of_a_stroke_uploads_its_rect`](../../src/app.rs#L11975) | Undoing a pixel patch marks only that patch's rectangle for re-upload, not the whole cell. |
+| [`fade_others_splits_above_and_below_the_active_layer`](../../src/app.rs#L12007) | With "fade others" on, layers below the active one are drawn at the "below" opacity, layers above at the "above" opacity, and the active layer at full strength. |
+| [`fade_others_spares_reference_and_lines_from_layers`](../../src/app.rs#L12014) | Reference layers, and the layer the active layer takes its lines from, are not faded; another layer's lines link does not count. |
+| [`the_key_link_toggle_links_the_layer_below`](../../src/app.rs#L12029) | The key-link shortcut links the current layer's keys to the nearest drawing layer below (skipping a group header), pressing it again unlinks, the bottom layer has nothing to link to, and linking is not an undo step. |
+| [`a_cleanup_layer_is_linked_and_one_undo`](../../src/app.rs#L12048) | "New cleanup layer" adds a layer directly above the rough, named "<rough> clean", key-linked to it and made active, and one undo takes it all back. |
+| [`fade_others_lifts_while_playing_or_switched_off`](../../src/app.rs#L12067) | During playback, or once the toggle is switched off, every layer shows at full opacity. |
+| [`a_dropped_drawing_lives_as_long_as_undo_can_reach_it`](../../src/app.rs#L12080) | A deleted layer's drawing is kept while undo can still restore it, and is freed (made a tombstone, texture dropped) once that undo step has fallen out of history, without renumbering other cells. |
+| [`packing_changes_nothing_on_screen_or_in_export`](../../src/app.rs#L12110) | Packing an idle cell to save memory leaves its uploaded texture and its flattened export pixels exactly the same. |
+| [`the_packer_leaves_the_drawing_being_drawn_alone`](../../src/app.rs#L12140) | The idle-cell packer never packs the cell a stroke is drawing into, even off the active slot, but does pack it once the stroke is done. |
+| [`play_shortcut_starts_from_the_current_frame`](../../src/app.rs#L12159) | Starting playback by shortcut steps from the frame the playhead is on: the first tick only starts the clock rather than jumping by however long it was paused. |
+| [`stopping_goes_back_to_the_start_frame_unless_paused_here`](../../src/app.rs#L12179) | Play/Pause returns to the frame playback started on when stopped, while the "pause here" action stops on the current frame. |
+| [`running_out_with_the_loop_off_goes_back_to_the_start_frame`](../../src/app.rs#L12204) | With looping off, playback that reaches the end of the range stops and returns to the start frame. |
+| [`fade_others_starts_off`](../../src/app.rs#L12220) | "Fade others" is session-only: a fresh state always starts with it off. |
+| [`perf_big_layer`](../../src/app.rs#L12229) | `#[ignore]` timing probe, not pass/fail: compares old and new ways of uploading, ghosting, blank-scanning and snapshotting one cell of a 3×-wide 4K frame. Run with `cargo test --release perf_big_layer -- --ignored --nocapture`. |
+| [`perf_liquify`](../../src/app.rs#L12407) | `#[ignore]` timing probe: Liquify pen-down, move, per-frame and apply times for several canvas and brush sizes. Run with `cargo test --release perf_liquify -- --ignored --nocapture`. |
+| [`perf_big_canvas_stroke`](../../src/app.rs#L12479) | `#[ignore]` timing probe: stage-by-stage stroke timings (pen-down, stroke frames, pen-up, upload and undo sizes) on a big 4320×7680 canvas for both brush engines, or on the `.anim` named by the `ANIM_PROBE` environment variable. |
+| [`perf_user_strokes`](../../src/app.rs#L12637) | The user's own pens (from a `ui_prefs` blob) on a real project, as wall-clock strokes. Not a pass/fail test — run it for the numbers: `PREFS_PROBE=<ui_prefs.ron> ANIM_PROBE=<x.anim> cargo test --release perf_user_strokes -- --ignored --nocapture` |
 
 **Test helpers** (used only by the tests above):
 
@@ -6129,26 +6133,26 @@ Run with `cargo test app::tests` · 144 tests
 - [`grid_centre_doc`](../../src/app.rs#L10182) — a grid's centre in document pixels on the current frame (after keys and follow links).
 - [`two_grid_state`](../../src/app.rs#L10577) — `perspective_state` plus a second grid: a square turned 45°, so its families run along the diagonals.
 - [`guide_state`](../../src/app.rs#L10668) — Pencil, snap on, and grid 1 made into a guide of `kind` with corners `c` in document space.
-- [`shape_state`](../../src/app.rs#L10752) — a state on the Shape tool drawing the given shape kind with snap on over the `FLOOR` grid.
-- [`drag_shape`](../../src/app.rs#L10765) — presses at one cell point, drags to another, and releases.
-- [`alpha`](../../src/app.rs#L10771) — the alpha of the current drawing at a point.
-- [`flat_shapes`](../../src/app.rs#L10861) — a state on the Shape tool with no grid to snap to, 1:1 view.
-- [`shift`](../../src/app.rs#L10870) — egui modifier state with Shift up or down.
-- [`shape_to`](../../src/app.rs#L10947) — feeds a Shape drag's next point through `stroke_point_doc`, as the canvas does (where the move key slides the shape).
-- [`shape_from`](../../src/app.rs#L10953) — starts a Shape drag through `snap_begin`, as the canvas does.
-- [`get_string`](../../src/app.rs#L11140) — Get string.
-- [`set_string`](../../src/app.rs#L11143) — Set string.
-- [`flush`](../../src/app.rs#L11146) — Flush.
-- [`fixture_brushes`](../../src/app.rs#L11153) — the brushes stored in that fixture, every slot changed from its default (including the Krita Pencil-5).
-- [`fixture_prefs`](../../src/app.rs#L11167) — the full `UiPrefs` value the fixture was written from.
-- [`save_as`](../../src/app.rs#L11718) — fills the New Project dialog with a size and fps and saves it as a named preset.
-- [`faded_stack`](../../src/app.rs#L11905) — four layers, the second active, "fade others" on (0.2 above, 0.5 below).
-- [`probe_project`](../../src/app.rs#L12205) — builds an `n`-frame project of a given size, each frame keyed with its own packed drawing of thick lines (for the perf probes).
-- [`probe_frame`](../../src/app.rs#L12234) — runs one full app frame headless (housekeeping, texture sync, whole UI, tessellation) and returns its time and bytes sent to the GPU.
-- [`probe_stroke`](../../src/app.rs#L12260) — draws a straight stroke four samples per frame and prints the cost of each stage.
-- [`wall_stroke`](../../src/app.rs#L12447) — One wall-clock stroke: samples come due at `hz` against real time, so a slow frame takes more of them, as in the app. Prints the frame-time spread and the worst frames, phase by phase.
+- [`shape_state`](../../src/app.rs#L10842) — a state on the Shape tool drawing the given shape kind with snap on over the `FLOOR` grid.
+- [`drag_shape`](../../src/app.rs#L10855) — presses at one cell point, drags to another, and releases.
+- [`alpha`](../../src/app.rs#L10861) — the alpha of the current drawing at a point.
+- [`flat_shapes`](../../src/app.rs#L10951) — a state on the Shape tool with no grid to snap to, 1:1 view.
+- [`shift`](../../src/app.rs#L10960) — egui modifier state with Shift up or down.
+- [`shape_to`](../../src/app.rs#L11037) — feeds a Shape drag's next point through `stroke_point_doc`, as the canvas does (where the move key slides the shape).
+- [`shape_from`](../../src/app.rs#L11043) — starts a Shape drag through `snap_begin`, as the canvas does.
+- [`get_string`](../../src/app.rs#L11230) — Get string.
+- [`set_string`](../../src/app.rs#L11233) — Set string.
+- [`flush`](../../src/app.rs#L11236) — Flush.
+- [`fixture_brushes`](../../src/app.rs#L11243) — the brushes stored in that fixture, every slot changed from its default (including the Krita Pencil-5).
+- [`fixture_prefs`](../../src/app.rs#L11257) — the full `UiPrefs` value the fixture was written from.
+- [`save_as`](../../src/app.rs#L11808) — fills the New Project dialog with a size and fps and saves it as a named preset.
+- [`faded_stack`](../../src/app.rs#L11995) — four layers, the second active, "fade others" on (0.2 above, 0.5 below).
+- [`probe_project`](../../src/app.rs#L12295) — builds an `n`-frame project of a given size, each frame keyed with its own packed drawing of thick lines (for the perf probes).
+- [`probe_frame`](../../src/app.rs#L12324) — runs one full app frame headless (housekeeping, texture sync, whole UI, tessellation) and returns its time and bytes sent to the GPU.
+- [`probe_stroke`](../../src/app.rs#L12350) — draws a straight stroke four samples per frame and prints the cost of each stage.
+- [`wall_stroke`](../../src/app.rs#L12537) — One wall-clock stroke: samples come due at `hz` against real time, so a slow frame takes more of them, as in the app. Prints the frame-time spread and the worst frames, phase by phase.
 
-**Test-only types and constants:** [`FILL_RED`](../../src/app.rs#L8914), [`GpuCopy`](../../src/app.rs#L9982), [`FLOOR`](../../src/app.rs#L10749), [`MemStorage`](../../src/app.rs#L11137), [`PREFS_FIXTURE`](../../src/app.rs#L11149)
+**Test-only types and constants:** [`FILL_RED`](../../src/app.rs#L8914), [`GpuCopy`](../../src/app.rs#L9982), [`FLOOR`](../../src/app.rs#L10839), [`MemStorage`](../../src/app.rs#L11227), [`PREFS_FIXTURE`](../../src/app.rs#L11239)
 
 ### `mod camera_rig_tests`
 
@@ -6156,38 +6160,38 @@ Run with `cargo test app::camera_rig_tests` · 25 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_camera_the_size_of_the_canvas_has_no_size_of_its_own`](../../src/app.rs#L12606) | The output size follows the canvas until a camera size is set; setting it back to the canvas size stores "no size of its own", silly sizes are clamped (at least 1, at most `MAX_CAMERA_SIDE`), and `None` returns to the canvas. |
-| [`a_new_size_leaves_zoom_and_keys_alone`](../../src/app.rs#L12623) | Changing the camera size is not a camera move: zoom and camera keys stay the same. |
-| [`undo_never_changes_the_camera_s_size`](../../src/app.rs#L12634) | Undo and redo take back camera keys but never change the camera's size (the size is session-only, not part of history). |
-| [`the_last_camera_size_is_kept_between_runs`](../../src/app.rs#L12649) | The last camera size set is remembered (even after handing the size back to the canvas) and saved in preferences, but the next run does not apply it to the project; old preferences without it still load. |
-| [`a_free_camera_box_sets_the_camera_size`](../../src/app.rs#L12669) | A free-shape camera box sets the camera to the box's size in even pixels, only on release, framed at zoom 1 and centred on the box, and keys it; a thin drag gets at least `MIN_FREE_CAMERA_SIDE`, a box hanging off the canvas is held on it, and with free shape off the box keeps the camera's shape. |
-| [`a_camera_box_grows_from_its_middle_and_slides`](../../src/app.rs#L12712) | Holding the centre key makes the press point the camera box's middle (free or shape-locked), and the move key slides the box. |
-| [`free_camera_box_and_panel_padding_are_kept_between_runs`](../../src/app.rs#L12737) | The "free camera box" switch and the panel padding are saved and restored with preferences. |
-| [`brush_sizes_are_kept_between_runs`](../../src/app.rs#L12754) | Each brush's pinned sizes are saved per tool: an Eraser pin comes back for the Eraser and not for Ink. |
-| [`keep_inside_is_on_for_every_project_unless_its_camera_leaves_the_canvas`](../../src/app.rs#L12773) | "Keep inside canvas" is on at launch, for new projects, and for opened projects whose camera stays on the canvas; a project whose camera is framed past the edge opens with it off, unchanged, and a toast says so. |
-| [`dragging_inside_the_frame_moves_the_camera_in_one_undo_step`](../../src/app.rs#L12805) | In camera edit mode, dragging inside the frame pans the camera by the drag distance as one undo step. |
-| [`shift_partway_holds_a_camera_move_to_an_axis`](../../src/app.rs#L12819) | Pressing Shift partway through a camera drag keeps the move to one axis. |
-| [`dragging_a_corner_zooms_and_past_a_corner_rolls`](../../src/app.rs#L12831) | Dragging a frame corner outward zooms the camera (twice as far out gives zoom 0.5); grabbing just past a corner rotates (rolls) it instead, each drag one undo step. |
-| [`a_press_off_the_frame_or_outside_edit_mode_is_left_to_the_tool`](../../src/app.rs#L12853) | A press outside the frame, or any press with camera edit off, is not taken by the camera: nothing moves and no undo step is recorded. |
-| [`a_click_on_the_frame_that_moves_nothing_is_no_undo_step`](../../src/app.rs#L12866) | Clicking the frame without moving records no undo step. |
-| [`a_dragged_frame_is_held_on_the_canvas_when_asked`](../../src/app.rs#L12875) | With "keep inside canvas" on, dragging the frame far away stops it at the canvas edge. |
-| [`the_view_holds_still_under_a_dragged_frame`](../../src/app.rs#L12888) | When looking through the camera, the view does not follow the frame during the drag (that would move the canvas under the cursor) and catches up on release. |
-| [`at_one_loop_the_camera_plays_in_step_with_the_frames`](../../src/app.rs#L12940) | With the camera move set to one loop, playback shows each frame with its own keyed camera, round and round. |
-| [`over_three_loops_the_drawings_repeat_under_one_move`](../../src/app.rs#L12949) | With three loops, the drawings repeat three times while the camera makes one continuous move from start to end, then everything starts over. |
-| [`pausing_a_stretched_move_parks_the_playhead_where_the_camera_is`](../../src/app.rs#L12965) | Stopping during a stretched move leaves the camera where it was and moves the playhead to the matching (nearest) frame of the move. |
-| [`a_camera_with_no_move_is_never_stretched`](../../src/app.rs#L12990) | A camera with only one key has no move to stretch, so the loops setting is ignored and playback is normal. |
-| [`copy_frame_takes_an_unkeyed_nudge_of_the_camera`](../../src/app.rs#L13017) | Copy frame copies what the camera shows, including an unkeyed nudge, rather than the keyed camera that Save PNG and exports use. |
-| [`copy_frame_mid_stretched_move_takes_where_the_move_has_got`](../../src/app.rs#L13034) | During playback of a stretched move, Copy frame uses the camera where the move has got to, not the camera keyed on the drawing showing. |
-| [`an_export_of_a_stretched_move_gives_each_frame_its_camera`](../../src/app.rs#L13049) | Exporting a move stretched over three loops repeats the frames three times with a camera per output frame (and the right frame count and length); the camera's ping-pong fill replaces the dialog's own; a sprite sheet stays one cell per frame. |
-| [`a_stretched_export_keeps_the_camera_s_other_options`](../../src/app.rs#L13086) | A stretched export still applies the camera's size and "keep inside canvas", so every exported camera stays on the canvas. |
-| [`opening_a_project_starts_the_camera_on_its_canvas`](../../src/app.rs#L13099) | Opening a project resets the session camera size, so the output is the new project's canvas size. |
+| [`a_camera_the_size_of_the_canvas_has_no_size_of_its_own`](../../src/app.rs#L12696) | The output size follows the canvas until a camera size is set; setting it back to the canvas size stores "no size of its own", silly sizes are clamped (at least 1, at most `MAX_CAMERA_SIDE`), and `None` returns to the canvas. |
+| [`a_new_size_leaves_zoom_and_keys_alone`](../../src/app.rs#L12713) | Changing the camera size is not a camera move: zoom and camera keys stay the same. |
+| [`undo_never_changes_the_camera_s_size`](../../src/app.rs#L12724) | Undo and redo take back camera keys but never change the camera's size (the size is session-only, not part of history). |
+| [`the_last_camera_size_is_kept_between_runs`](../../src/app.rs#L12739) | The last camera size set is remembered (even after handing the size back to the canvas) and saved in preferences, but the next run does not apply it to the project; old preferences without it still load. |
+| [`a_free_camera_box_sets_the_camera_size`](../../src/app.rs#L12759) | A free-shape camera box sets the camera to the box's size in even pixels, only on release, framed at zoom 1 and centred on the box, and keys it; a thin drag gets at least `MIN_FREE_CAMERA_SIDE`, a box hanging off the canvas is held on it, and with free shape off the box keeps the camera's shape. |
+| [`a_camera_box_grows_from_its_middle_and_slides`](../../src/app.rs#L12802) | Holding the centre key makes the press point the camera box's middle (free or shape-locked), and the move key slides the box. |
+| [`free_camera_box_and_panel_padding_are_kept_between_runs`](../../src/app.rs#L12827) | The "free camera box" switch and the panel padding are saved and restored with preferences. |
+| [`brush_sizes_are_kept_between_runs`](../../src/app.rs#L12844) | Each brush's pinned sizes are saved per tool: an Eraser pin comes back for the Eraser and not for Ink. |
+| [`keep_inside_is_on_for_every_project_unless_its_camera_leaves_the_canvas`](../../src/app.rs#L12863) | "Keep inside canvas" is on at launch, for new projects, and for opened projects whose camera stays on the canvas; a project whose camera is framed past the edge opens with it off, unchanged, and a toast says so. |
+| [`dragging_inside_the_frame_moves_the_camera_in_one_undo_step`](../../src/app.rs#L12895) | In camera edit mode, dragging inside the frame pans the camera by the drag distance as one undo step. |
+| [`shift_partway_holds_a_camera_move_to_an_axis`](../../src/app.rs#L12909) | Pressing Shift partway through a camera drag keeps the move to one axis. |
+| [`dragging_a_corner_zooms_and_past_a_corner_rolls`](../../src/app.rs#L12921) | Dragging a frame corner outward zooms the camera (twice as far out gives zoom 0.5); grabbing just past a corner rotates (rolls) it instead, each drag one undo step. |
+| [`a_press_off_the_frame_or_outside_edit_mode_is_left_to_the_tool`](../../src/app.rs#L12943) | A press outside the frame, or any press with camera edit off, is not taken by the camera: nothing moves and no undo step is recorded. |
+| [`a_click_on_the_frame_that_moves_nothing_is_no_undo_step`](../../src/app.rs#L12956) | Clicking the frame without moving records no undo step. |
+| [`a_dragged_frame_is_held_on_the_canvas_when_asked`](../../src/app.rs#L12965) | With "keep inside canvas" on, dragging the frame far away stops it at the canvas edge. |
+| [`the_view_holds_still_under_a_dragged_frame`](../../src/app.rs#L12978) | When looking through the camera, the view does not follow the frame during the drag (that would move the canvas under the cursor) and catches up on release. |
+| [`at_one_loop_the_camera_plays_in_step_with_the_frames`](../../src/app.rs#L13030) | With the camera move set to one loop, playback shows each frame with its own keyed camera, round and round. |
+| [`over_three_loops_the_drawings_repeat_under_one_move`](../../src/app.rs#L13039) | With three loops, the drawings repeat three times while the camera makes one continuous move from start to end, then everything starts over. |
+| [`pausing_a_stretched_move_parks_the_playhead_where_the_camera_is`](../../src/app.rs#L13055) | Stopping during a stretched move leaves the camera where it was and moves the playhead to the matching (nearest) frame of the move. |
+| [`a_camera_with_no_move_is_never_stretched`](../../src/app.rs#L13080) | A camera with only one key has no move to stretch, so the loops setting is ignored and playback is normal. |
+| [`copy_frame_takes_an_unkeyed_nudge_of_the_camera`](../../src/app.rs#L13107) | Copy frame copies what the camera shows, including an unkeyed nudge, rather than the keyed camera that Save PNG and exports use. |
+| [`copy_frame_mid_stretched_move_takes_where_the_move_has_got`](../../src/app.rs#L13124) | During playback of a stretched move, Copy frame uses the camera where the move has got to, not the camera keyed on the drawing showing. |
+| [`an_export_of_a_stretched_move_gives_each_frame_its_camera`](../../src/app.rs#L13139) | Exporting a move stretched over three loops repeats the frames three times with a camera per output frame (and the right frame count and length); the camera's ping-pong fill replaces the dialog's own; a sprite sheet stays one cell per frame. |
+| [`a_stretched_export_keeps_the_camera_s_other_options`](../../src/app.rs#L13176) | A stretched export still applies the camera's size and "keep inside canvas", so every exported camera stays on the canvas. |
+| [`opening_a_project_starts_the_camera_on_its_canvas`](../../src/app.rs#L13189) | Opening a project resets the session camera size, so the output is the new project's canvas size. |
 
 **Test helpers** (used only by the tests above):
 
-- [`framed`](../../src/app.rs#L12795) — a 1280×720 project with a 640×360 camera frame in the middle (x 320..960, y 180..540), 1:1 view, camera edit on.
-- [`panning`](../../src/app.rs#L12901) — a 64×64, 10 fps, five-frame project with the camera keyed from x 0 on the first frame to x 40 on the last, looping on.
-- [`play`](../../src/app.rs#L12922) — advances the app's playback clock a number of frames, as `update` does, and returns the frame and camera x shown after each.
-- [`mark`](../../src/app.rs#L13001) — draws a black vertical bar at x 40..44 on the first drawing so a camera pan visibly moves something.
+- [`framed`](../../src/app.rs#L12885) — a 1280×720 project with a 640×360 camera frame in the middle (x 320..960, y 180..540), 1:1 view, camera edit on.
+- [`panning`](../../src/app.rs#L12991) — a 64×64, 10 fps, five-frame project with the camera keyed from x 0 on the first frame to x 40 on the last, looping on.
+- [`play`](../../src/app.rs#L13012) — advances the app's playback clock a number of frames, as `update` does, and returns the frame and camera x shown after each.
+- [`mark`](../../src/app.rs#L13091) — draws a black vertical bar at x 40..44 on the first drawing so a camera pan visibly moves something.
 
 ### `mod pen_tex_tests`
 
@@ -6195,20 +6199,20 @@ Run with `cargo test app::pen_tex_tests` · 4 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_resting_pen_grows_its_drawing_whole_and_a_stroke_only_patches_it`](../../src/app.rs#L13202) | A resting pen grows its drawing whole and a stroke only patches it. |
-| [`moving_on_crops_the_drawing_left_behind`](../../src/app.rs#L13219) | Only the pen's drawing is kept whole: one per drawing outgrew the texture budget in playback. |
-| [`auto_key_s_new_drawing_takes_the_spare`](../../src/app.rs#L13245) | With auto-key, the press makes a new drawing: it takes the clear whole texture readied for it, and its first stroke only patches it. |
-| [`playback_never_remakes_the_pen_s_drawing_whole`](../../src/app.rs#L13267) | Playing only shows the drawing: one the budget dropped comes back cropped, not whole. |
+| [`a_resting_pen_grows_its_drawing_whole_and_a_stroke_only_patches_it`](../../src/app.rs#L13292) | A resting pen grows its drawing whole and a stroke only patches it. |
+| [`moving_on_crops_the_drawing_left_behind`](../../src/app.rs#L13309) | Only the pen's drawing is kept whole: one per drawing outgrew the texture budget in playback. |
+| [`auto_key_s_new_drawing_takes_the_spare`](../../src/app.rs#L13335) | With auto-key, the press makes a new drawing: it takes the clear whole texture readied for it, and its first stroke only patches it. |
+| [`playback_never_remakes_the_pen_s_drawing_whole`](../../src/app.rs#L13357) | Playing only shows the drawing: one the budget dropped comes back cropped, not whole. |
 
 **Test helpers** (used only by the tests above):
 
-- [`state`](../../src/app.rs#L13118) — Three drawings, each a small blob in the middle, so each texture is cropped well inside its cell.
-- [`frame`](../../src/app.rs#L13145) — One frame as `update` runs it, uploads and all.
-- [`rest`](../../src/app.rs#L13162) — Longer than `WARM_REST` at egui's 60 Hz default step.
-- [`at`](../../src/app.rs#L13168) — At.
-- [`stroke_without_rebuild`](../../src/app.rs#L13180) — From the blob to the far corner, a frame per sample. Panics if the drawing's texture is re-made or re-sent whole on the way; returns how many frames sent it a patch.
+- [`state`](../../src/app.rs#L13208) — Three drawings, each a small blob in the middle, so each texture is cropped well inside its cell.
+- [`frame`](../../src/app.rs#L13235) — One frame as `update` runs it, uploads and all.
+- [`rest`](../../src/app.rs#L13252) — Longer than `WARM_REST` at egui's 60 Hz default step.
+- [`at`](../../src/app.rs#L13258) — At.
+- [`stroke_without_rebuild`](../../src/app.rs#L13270) — From the blob to the far corner, a frame per sample. Panics if the drawing's texture is re-made or re-sent whole on the way; returns how many frames sent it a patch.
 
-**Test-only types and constants:** [`W`](../../src/app.rs#L13113), [`H`](../../src/app.rs#L13114)
+**Test-only types and constants:** [`W`](../../src/app.rs#L13203), [`H`](../../src/app.rs#L13204)
 
 ### `mod inbetween_tests`
 
@@ -6216,17 +6220,17 @@ Run with `cargo test app::inbetween_tests` · 8 tests
 
 | Test | What it checks |
 |---|---|
-| [`an_in_between_lands_on_every_picked_layer_in_one_undo`](../../src/app.rs#L13318) | An in between lands on every picked layer in one undo. |
-| [`a_locked_layer_keeps_its_timing`](../../src/app.rs#L13335) | A locked layer keeps its timing. |
-| [`with_nothing_after_it_says_so_and_changes_nothing`](../../src/app.rs#L13345) | With nothing after it says so and changes nothing. |
-| [`insert_before_moves_only_the_selected_layers`](../../src/app.rs#L13355) | Insert before moves only the selected layers. |
-| [`add_duplicate_and_delete_follow_the_same_selection`](../../src/app.rs#L13375) | Add duplicate and delete follow the same selection. |
-| [`a_frame_command_on_locked_layers_alone_does_nothing`](../../src/app.rs#L13401) | A frame command on locked layers alone does nothing. |
-| [`delete_with_every_layer_selected_shortens_the_scene`](../../src/app.rs#L13412) | Delete with every layer selected shortens the scene. |
-| [`insert_before_with_every_layer_selected_moves_the_whole_scene`](../../src/app.rs#L13428) | Insert before with every layer selected moves the whole scene. |
+| [`an_in_between_lands_on_every_picked_layer_in_one_undo`](../../src/app.rs#L13408) | An in between lands on every picked layer in one undo. |
+| [`a_locked_layer_keeps_its_timing`](../../src/app.rs#L13425) | A locked layer keeps its timing. |
+| [`with_nothing_after_it_says_so_and_changes_nothing`](../../src/app.rs#L13435) | With nothing after it says so and changes nothing. |
+| [`insert_before_moves_only_the_selected_layers`](../../src/app.rs#L13445) | Insert before moves only the selected layers. |
+| [`add_duplicate_and_delete_follow_the_same_selection`](../../src/app.rs#L13465) | Add duplicate and delete follow the same selection. |
+| [`a_frame_command_on_locked_layers_alone_does_nothing`](../../src/app.rs#L13491) | A frame command on locked layers alone does nothing. |
+| [`delete_with_every_layer_selected_shortens_the_scene`](../../src/app.rs#L13502) | Delete with every layer selected shortens the scene. |
+| [`insert_before_with_every_layer_selected_moves_the_whole_scene`](../../src/app.rs#L13518) | Insert before with every layer selected moves the whole scene. |
 
 **Test helpers** (used only by the tests above):
 
-- [`three_layers`](../../src/app.rs#L13288) — Three layers over 8 frames, each with drawings on 0 and 4, loaded into a test state with the playhead on 0 and layer 2 active.
-- [`keys`](../../src/app.rs#L13308) — Keys.
-- [`pick`](../../src/app.rs#L13312) — Pick.
+- [`three_layers`](../../src/app.rs#L13378) — Three layers over 8 frames, each with drawings on 0 and 4, loaded into a test state with the playhead on 0 and layer 2 active.
+- [`keys`](../../src/app.rs#L13398) — Keys.
+- [`pick`](../../src/app.rs#L13402) — Pick.
