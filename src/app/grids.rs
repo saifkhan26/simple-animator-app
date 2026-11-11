@@ -586,8 +586,10 @@ impl AppState {
         // A ruler's end and a helper line's end turn in 15° steps about the
         // other end instead (see `guides::dragged`).
         let turns = matches!(kind, GridKind::Ruler | GridKind::Parallel | GridKind::Point);
+        // A curved guide's side point only stretches it along its axis.
         let slides = match d.grab {
-            GridGrab::Move | GridGrab::Vp(_) | GridGrab::Extra(_) => true,
+            GridGrab::Move | GridGrab::Extra(_) => true,
+            GridGrab::Vp(_) => !kind.is_curved(),
             GridGrab::Corner(_) => !rigid && !turns,
             _ => false,
         };

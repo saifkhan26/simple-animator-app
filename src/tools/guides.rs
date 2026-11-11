@@ -178,6 +178,7 @@ pub fn candidates(g: &PerspectiveGrid, s: &Space, start: P, vertical: bool, grid
             out
         }
         GridKind::Perspective | GridKind::Flat | GridKind::Isometric => plane_candidates(g, s, start, vertical, grid),
+        GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye => Vec::new(),
     }
 }
 
@@ -273,6 +274,7 @@ pub fn grab_at(kind: GridKind, c: &[P; 4], p: P, tol: f32) -> Option<GridGrab> {
             .or_else(|| inside(c, p).then_some(GridGrab::Move))
             .or_else(|| corner(4, 4.0).map(|_| GridGrab::Rotate)),
         GridKind::Perspective | GridKind::Flat | GridKind::Isometric => None,
+        GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye => None,
     }
 }
 

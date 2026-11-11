@@ -7916,6 +7916,7 @@ fn draw_guide(
             }
             knobs = c.iter().map(|&p| to_screen(p)).collect();
         }
+        GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye => {}
         GridKind::Perspective | GridKind::Flat | GridKind::Isometric => {}
     }
     if !handles {
