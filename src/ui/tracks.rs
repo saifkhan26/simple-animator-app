@@ -1411,6 +1411,59 @@ fn context_menu(state: &mut AppState, ui: &mut egui::Ui) {
         })
         .response
         .on_hover_text("Give every selected drawing the same hold; the ones after slide");
+        ui.menu_button("Range", |ui| {
+            let reverse = combo_text(state, Action::TrackReverse);
+            if ui
+                .add(egui::Button::new("Reverse").shortcut_text(reverse))
+                .on_hover_text("Play them backwards, each drawing keeping its length")
+                .clicked()
+            {
+                state.reverse_track_selection();
+                ui.close_menu();
+            }
+            let swing = combo_text(state, Action::TrackSwing);
+            if ui
+                .add(egui::Button::new("Swing").shortcut_text(swing))
+                .on_hover_text(
+                    "Forward, then back: A B C D C B. Stops before the first drawing, so a \
+                     loop doesn't play it twice. The way back is copies.",
+                )
+                .clicked()
+            {
+                state.swing_track_selection();
+                ui.close_menu();
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut state.track_repeat_n).range(2..=99).prefix("Repeat ×"))
+                    .on_hover_text("Times over in all, back to back; the repeats are copies");
+                if ui.button("Apply").clicked() {
+                    let n = state.track_repeat_n;
+                    state.repeat_track_selection(n);
+                    ui.close_menu();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Stretch to");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut state.track_stretch)
+                        .hint_text("18 or *1.5")
+                        .desired_width(64.0),
+                );
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                field.on_hover_text(
+                    "Frames for the whole run, or a change to its length: *1.5 makes \
+                     twos into threes, /2 halves it. Each drawing keeps its share.",
+                );
+                if ui.button("Apply").clicked() || entered {
+                    let text = state.track_stretch.clone();
+                    state.stretch_track_selection(&text);
+                    ui.close_menu();
+                }
+            });
+        })
+        .response
+        .on_hover_text("Reverse, swing, repeat or stretch each run of selected drawings");
         if ui
             .add(egui::Button::new("Delete").shortcut_text(del))
             .on_hover_text("Leave the frames blank — nothing else moves")

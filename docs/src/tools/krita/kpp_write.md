@@ -1,6 +1,6 @@
 # `src/tools/krita/kpp_write.rs` — writing Krita brush presets (.kpp)
 
-> **Source:** [src/tools/krita/kpp_write.rs](../../../../src/tools/krita/kpp_write.rs) · **Module:** `crate::tools::krita::kpp_write` · **Size:** 136 lines · Line links as of commit `c224d51`
+> **Source:** [src/tools/krita/kpp_write.rs](../../../../src/tools/krita/kpp_write.rs) · **Module:** `crate::tools::krita::kpp_write` · **Size:** 136 lines · Line links as of commit `a1aa764`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/app/button_drag.rs` — what middle/right-button drags do on the canvas
 
-> **Source:** [src/app/button_drag.rs](../../../src/app/button_drag.rs) · **Module:** `crate::app::button_drag` · **Size:** 519 lines · Line links as of commit `c224d51`
+> **Source:** [src/app/button_drag.rs](../../../src/app/button_drag.rs) · **Module:** `crate::app::button_drag` · **Size:** 519 lines · Line links as of commit `a1aa764`
 
 ## What this file is for
 

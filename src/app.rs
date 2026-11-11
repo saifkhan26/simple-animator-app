@@ -1286,6 +1286,11 @@ pub struct AppState {
     pub track_frame_w: f32,
     /// The N in the tracks' "On N" timing menu.
     pub track_timing_n: usize,
+    /// The tracks' Range ▸ Repeat count: times over in all.
+    pub track_repeat_n: usize,
+    /// The tracks' Range ▸ Stretch length, as typed: frames (`18`) or a
+    /// change to each run's length (`*1.5`, `+4`), read by `ui::expr`.
+    pub track_stretch: String,
     /// What the cell collector last ran against: the history's revision and
     /// the pool's length. `None` makes it run. See `collect_cells`.
     gc_key: Option<(u64, usize)>,
@@ -1881,6 +1886,8 @@ impl AppState {
             track_scroll: egui::Vec2::ZERO,
             track_frame_w: prefs.track_frame_w,
             track_timing_n: 2,
+            track_repeat_n: 2,
+            track_stretch: String::new(),
             gc_key: None,
             blank_cache: HashMap::new(),
             blank_scans_left: 0,
@@ -6016,6 +6023,50 @@ impl AppState {
         });
     }
 
+    /// Run a Range edit on the drawings selected in the timeline: one undo
+    /// step, the result selected. Nothing on a locked or reference layer.
+    fn range_edit(&mut self, edit: impl FnOnce(&mut Project, &[(usize, usize)]) -> Vec<(usize, usize)>) {
+        let starts = self.track_selection();
+        if starts.is_empty() || !self.layers_editable(starts.iter().map(|s| s.0)) {
+            return;
+        }
+        self.track_edit(|p| edit(p, &starts));
+    }
+
+    /// Range ▸ Reverse: see [`Project::reverse_runs`].
+    pub fn reverse_track_selection(&mut self) {
+        self.range_edit(|p, s| p.reverse_runs(s));
+    }
+
+    /// Range ▸ Swing: see [`Project::swing_runs`].
+    pub fn swing_track_selection(&mut self) {
+        self.range_edit(|p, s| p.swing_runs(s));
+    }
+
+    /// Range ▸ Repeat ×`times`: see [`Project::repeat_runs`].
+    pub fn repeat_track_selection(&mut self, times: usize) {
+        self.range_edit(|p, s| p.repeat_runs(s, times));
+    }
+
+    /// Range ▸ Stretch to `length`: frames (`18`), or a change to each run's
+    /// own length (`*1.5`, `/2`, `+4`) — the frame box's arithmetic. Says so
+    /// and changes nothing when it doesn't read. See [`Project::stretch_runs`].
+    pub fn stretch_track_selection(&mut self, length: &str) {
+        if crate::ui::expr::eval(length, 1.0).is_none() {
+            self.save_toast = Some((
+                "Stretch: type a length like 18, or *1.5 for half as long again".to_string(),
+                Instant::now() + Self::TOAST_TTL * 2,
+            ));
+            return;
+        }
+        let length = length.to_string();
+        self.range_edit(|p, s| {
+            p.stretch_runs(s, |now| {
+                crate::ui::expr::eval(&length, now as f64).map_or(now, |v| v.round().max(1.0) as usize)
+            })
+        });
+    }
+
     /// Put every selected drawing on `n`s.
     pub fn set_track_timing(&mut self, n: usize) {
         let starts = self.track_selection();
@@ -7128,6 +7179,8 @@ impl AppState {
             Action::SelectionDelete => self.delete_selection(),
             Action::TrackClear => self.clear_track_selection(),
             Action::TrackCloseGap => self.close_track_selection(),
+            Action::TrackReverse => self.reverse_track_selection(),
+            Action::TrackSwing => self.swing_track_selection(),
             Action::SelectionDeselect => self.deselect(),
             Action::SelectAll => self.select_all(),
             Action::SelectInvert => self.select_invert(),
@@ -13183,5 +13236,85 @@ mod inbetween_tests {
         }
         assert_eq!(st.project.camera_keys[0].frame, 5, "the camera kept to its drawing");
         assert_eq!(st.project.frame_count, 9, "a whole-scene insert lengthens the timeline");
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    /// One layer over 8 frames with drawings on 0, 2 and 4, the first two
+    /// selected in the timeline.
+    fn picked() -> AppState {
+        let mut p = Project::new(16, 16, 24.0);
+        p.ensure_frame_count(8);
+        p.layers[0].exposures.iter_mut().for_each(|e| *e = None);
+        for f in [0, 2, 4] {
+            let id = p.alloc_cell_for(0);
+            p.layers[0].set_key(f, id);
+        }
+        let mut st = AppState::for_test();
+        st.load_project(p, None);
+        st.track_sel = [(0, 0), (0, 2)].into_iter().collect();
+        st
+    }
+
+    fn keys(st: &AppState) -> Vec<usize> {
+        (0..st.project.frame_count).filter(|&f| st.project.layers[0].is_key(f)).collect()
+    }
+
+    #[test]
+    fn a_range_edit_is_one_undo_step_and_leaves_the_result_selected() {
+        let mut st = picked();
+        let steps = st.history.undo_len();
+        st.repeat_track_selection(2);
+        assert_eq!(keys(&st), [0, 2, 4, 6, 8]);
+        assert_eq!(st.track_sel, [(0, 0), (0, 2), (0, 4), (0, 6)].into_iter().collect());
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        assert_eq!(keys(&st), [0, 2, 4]);
+        assert_eq!(st.project.frame_count, 8);
+    }
+
+    #[test]
+    fn stretch_reads_the_frame_box_arithmetic() {
+        let mut st = picked();
+        st.stretch_track_selection("*1.5");
+        assert_eq!(keys(&st), [0, 3, 6], "twos onto threes");
+        let mut st = picked();
+        st.stretch_track_selection("8");
+        assert_eq!(keys(&st), [0, 4, 8]);
+    }
+
+    #[test]
+    fn a_stretch_that_does_not_read_says_so_and_changes_nothing() {
+        let mut st = picked();
+        let steps = st.history.undo_len();
+        st.stretch_track_selection("longer");
+        assert_eq!(st.history.undo_len(), steps);
+        assert_eq!(keys(&st), [0, 2, 4]);
+        assert!(st.save_toast.as_ref().is_some_and(|(t, _)| t.starts_with("Stretch")));
+    }
+
+    #[test]
+    fn the_range_shortcuts_reverse_and_swing() {
+        let mut st = picked();
+        let (a, b) = (st.project.layers[0].exposures[0], st.project.layers[0].exposures[2]);
+        st.dispatch(Action::TrackReverse);
+        assert_eq!((st.project.layers[0].exposures[0], st.project.layers[0].exposures[2]), (b, a));
+        st.track_sel = [(0, 0), (0, 2), (0, 4)].into_iter().collect();
+        st.dispatch(Action::TrackSwing);
+        // B A C, then A again after C's four frames.
+        assert_eq!(keys(&st), [0, 2, 4, 8]);
+        assert_eq!(st.project.frame_count, 10);
+    }
+
+    #[test]
+    fn a_locked_layer_is_left_alone() {
+        let mut st = picked();
+        st.project.layers[0].locked = true;
+        st.reverse_track_selection();
+        st.repeat_track_selection(3);
+        assert_eq!(keys(&st), [0, 2, 4]);
     }
 }

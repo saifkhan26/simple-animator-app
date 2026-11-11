@@ -1,6 +1,6 @@
 # `src/tools/krita/speed.rs` — the speed sensor's input
 
-> **Source:** [src/tools/krita/speed.rs](../../../../src/tools/krita/speed.rs) · **Module:** `crate::tools::krita::speed` · **Size:** 176 lines · Line links as of commit `c224d51`
+> **Source:** [src/tools/krita/speed.rs](../../../../src/tools/krita/speed.rs) · **Module:** `crate::tools::krita::speed` · **Size:** 176 lines · Line links as of commit `a1aa764`
 
 ## What this file is for
 
