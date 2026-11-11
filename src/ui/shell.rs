@@ -5681,16 +5681,9 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
                     };
                     let keyed = if g.keys.is_empty() { "" } else { " ◆" };
                     let label = format!("{} {}{kind}{keyed}", g.kind.row_name(), i + 1);
-                    let name = ui
-                        .selectable_label(selected, label)
-                        .on_hover_text("Double-click for its settings");
-                    if name.clicked() {
-                        cfg.active = i;
-                    }
-                    if name.double_clicked() {
-                        cfg.active = i;
-                        open_settings = true;
-                    }
+                    // The buttons on the right first, then the name in what is
+                    // left between: cut short with an ellipsis rather than run
+                    // under them, and whole in its tooltip.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::icon_button(ui, ic::TRASH, "Delete grid").clicked() {
                             remove = Some(i);
@@ -5709,6 +5702,22 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
                             3.0,
                             Stroke::new(1.0, Color32::from_black_alpha(120)),
                         );
+                        // A plain label, not a framed one: the row itself
+                        // shows which is active, and the name gets the room.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let text = egui::RichText::new(label.as_str()).color(theme::text());
+                            let name = ui
+                                .add(egui::Label::new(text).truncate().sense(Sense::click()))
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(format!("{label}\nDouble-click for its settings"));
+                            if name.clicked() {
+                                cfg.active = i;
+                            }
+                            if name.double_clicked() {
+                                cfg.active = i;
+                                open_settings = true;
+                            }
+                        });
                     });
                 });
             });
@@ -11087,6 +11096,64 @@ mod perspective_tests {
             assert!(y > heading, "{item} under the heading");
         }
         assert!(at("Ellipse").unwrap() < heading, "after the rulers and curves");
+    }
+
+    #[test]
+    fn a_long_guide_name_is_cut_short_before_its_rows_buttons() {
+        use crate::tools::perspective::{GridKind, PerspectiveGrid};
+        let mut state = state();
+        state.show_panels = true;
+        state.dispatch(Action::ToolPerspective);
+        for kind in [GridKind::Isometric, GridKind::PanVertical, GridKind::PanHorizontal] {
+            state.perspective.push(PerspectiveGrid::fresh(kind));
+        }
+        for i in 0..state.perspective.grids.len() {
+            state.perspective.grids[i].keys.push(Default::default());
+        }
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(SCREEN),
+                ..Default::default()
+            };
+            shapes = ctx.run(raw, |ctx| draw(&mut state, ctx)).shapes;
+        }
+        let tools = egui::AreaState::load(&ctx, egui::Id::new(panel_key(PanelId::Tools)))
+            .expect("Tools panel laid out")
+            .rect();
+        let gears: Vec<Rect> = texts(&shapes, &|t| t == ic::GEAR)
+            .into_iter()
+            .map(|(_, r)| r)
+            .filter(|r| tools.contains_rect(*r))
+            .collect();
+        let names = texts(&shapes, &|t| t.starts_with("Grid ") || t.starts_with("Pan "));
+        assert_eq!(names.len(), 4);
+        for (text, r) in &names {
+            let gear = gears
+                .iter()
+                .find(|g| (g.center().y - r.center().y).abs() < 6.0)
+                .expect("a gear on the row");
+            // Clear of the colour swatch, which sits just left of the gear.
+            assert!(r.max.x <= gear.min.x - 14.0, "{text:?} at {r:?} runs under the buttons at {gear:?}");
+        }
+        // The long ones end in an ellipsis where they are cut.
+        fn last_glyphs(shape: &egui::Shape, out: &mut Vec<(String, char)>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| last_glyphs(s, out)),
+                egui::Shape::Text(t) => {
+                    if let Some(g) = t.galley.rows.iter().flat_map(|r| r.glyphs.iter()).last() {
+                        out.push((t.galley.text().to_string(), g.chr));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut ends = Vec::new();
+        shapes.iter().for_each(|s| last_glyphs(&s.shape, &mut ends));
+        let long = ends.iter().find(|(t, _)| t.starts_with("Pan 4 · horizontal")).expect("drawn");
+        assert_eq!(long.1, '…', "{long:?}");
     }
 
     #[test]

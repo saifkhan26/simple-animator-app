@@ -909,8 +909,10 @@ fn snapshots() {
     snapshot(&mut rig, 2.0).save(dir.join("unsaved.png")).unwrap();
     let mut rig = Rig::new(Win::Recovery);
     snapshot(&mut rig, 2.0).save(dir.join("recovery.png")).unwrap();
-    // A grid's settings, with Fill canvas's rows showing.
+    // A grid's settings, with Fill canvas's rows showing, pulled tall
+    // enough to show the whole of it.
     let mut rig = Rig::new(Win::GridSettings);
+    rig.drag_bottom_edge(600.0);
     snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();
     // Each other guide kind's settings, the Grid tool's list of them all,
     // and how they paint on the canvas.
@@ -920,6 +922,8 @@ fn snapshots() {
         rig.state.perspective.grids = guides.clone();
         rig.state.perspective.ensure_ids();
         rig.state.perspective.active = i;
+        rig.settle();
+        rig.drag_bottom_edge(600.0);
         let name = g.kind.row_name().to_lowercase();
         snapshot(&mut rig, 2.0).save(dir.join(format!("guide_settings_{name}_{i}.png"))).unwrap();
     }
@@ -927,6 +931,8 @@ fn snapshots() {
     rig.state.perspective.grids = guides.clone();
     rig.state.perspective.ensure_ids();
     rig.state.perspective.grids[2].magnet = false;
+    rig.settle();
+    rig.drag_bottom_edge(600.0);
     snapshot(&mut rig, 2.0).save(dir.join("guide_list.png")).unwrap();
     let (straight, curved): (Vec<_>, Vec<_>) = guides.iter().cloned().partition(|g| !g.kind.is_curved());
     for tool in [ActiveTool::Perspective, ActiveTool::Pen(0)] {
