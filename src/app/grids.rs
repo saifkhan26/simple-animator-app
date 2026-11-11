@@ -752,15 +752,22 @@ mod tests {
     fn file() -> GridFile {
         let kinds = [
             GridKind::Perspective,
+            GridKind::PanHorizontal,
             GridKind::Ruler,
             GridKind::Flat,
             GridKind::Ellipse,
             GridKind::Point,
+            GridKind::Fisheye,
+            GridKind::PanVertical,
+            GridKind::PanLoop,
         ];
+        let mut grids = kinds.map(PerspectiveGrid::fresh).to_vec();
+        grids[1].bend = 0.4;
+        grids[8].bend = -0.25;
         GridFile {
             path: PathBuf::from("shot.anim"),
-            grids: kinds.map(PerspectiveGrid::fresh).to_vec(),
-            active: 3,
+            grids,
+            active: 4,
             used: 7,
         }
     }
@@ -860,6 +867,27 @@ mod tests {
         // The ellipse was active: the plane before it stands in.
         assert_eq!(old[0].active, 1);
         assert_eq!(old[0].used, 7);
+    }
+
+    #[test]
+    fn curved_guides_go_where_an_older_build_does_not_look() {
+        let repr = GridFileRepr::from(file());
+        let kinds = |gs: Vec<GridKind>| gs.iter().filter(|k| k.is_curved()).count();
+        assert_eq!(kinds(repr.grids.iter().map(|g| g.kind).collect()), 0, "planes only where it looks");
+        assert_eq!(kinds(repr.guides.iter().map(|(_, g)| g.kind).collect()), 4);
+        // Each keeps its place in the whole list, and a pan its shape.
+        assert!(repr.guides.iter().any(|(i, g)| *i == 1 && g.kind == GridKind::PanHorizontal && g.bend == 0.4));
+        assert!(repr.guides.iter().any(|(i, g)| *i == 8 && g.kind == GridKind::PanLoop));
+    }
+
+    #[test]
+    fn curved_guides_export_and_come_back_with_their_shape() {
+        let guides = file().grids;
+        let path = std::env::temp_dir().join(format!("animator_curved_{}.guides", std::process::id()));
+        write_guides(&path, &guides).unwrap();
+        let read = read_guides(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read, guides);
     }
 
     #[test]
