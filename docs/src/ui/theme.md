@@ -1,6 +1,6 @@
 # `src/ui/theme.rs` — colour schemes, fonts and icon buttons
 
-> **Source:** [src/ui/theme.rs](../../../src/ui/theme.rs) · **Module:** `crate::ui::theme` · **Size:** 601 lines · Line links as of commit `bdc0f67`
+> **Source:** [src/ui/theme.rs](../../../src/ui/theme.rs) · **Module:** `crate::ui::theme` · **Size:** 620 lines · Line links as of commit `0aaa97a`
 
 ## What this file is for
 
@@ -332,8 +332,17 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Respon
 
 Tooltip-decorated icon-only button. 26×22 minimum.
 
+### `quiet_icon_button`
+[src/ui/theme.rs:476](../../../src/ui/theme.rs#L476)
+
+```rust
+pub fn quiet_icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response
+```
+
+A smaller icon button with no frame until the pointer is over it, for a row that carries several — a guide's eye, lock and magnet — so they don't crowd out the row's name.
+
 ### `icon_toggle`
-[src/ui/theme.rs:475](../../../src/ui/theme.rs#L475)
+[src/ui/theme.rs:494](../../../src/ui/theme.rs#L494)
 
 ```rust
 pub fn icon_toggle(ui: &mut egui::Ui, icon: &str, tooltip: &str, selected: bool) -> egui::Response
@@ -342,7 +351,7 @@ pub fn icon_toggle(ui: &mut egui::Ui, icon: &str, tooltip: &str, selected: bool)
 Selectable icon button used in the tool palette. When selected it shows the accent fill via the active widget visuals; an accent underline reinforces it.
 
 ### `icon_text`
-[src/ui/theme.rs:494](../../../src/ui/theme.rs#L494)
+[src/ui/theme.rs:513](../../../src/ui/theme.rs#L513)
 
 ```rust
 pub fn icon_text(icon: &str, label: &str) -> String
@@ -351,7 +360,7 @@ pub fn icon_text(icon: &str, label: &str) -> String
 An icon glyph followed by a label, as one string.
 
 ### `section_header`
-[src/ui/theme.rs:498](../../../src/ui/theme.rs#L498)
+[src/ui/theme.rs:517](../../../src/ui/theme.rs#L517)
 
 ```rust
 pub fn section_header(ui: &mut egui::Ui, icon: &str, title: &str)
@@ -367,13 +376,13 @@ Run with `cargo test ui::theme::tests` · 5 tests
 
 | Test | What it checks |
 |---|---|
-| [`every_preset_reads`](../../../src/ui/theme.rs#L540) | Every preset reads. |
-| [`a_custom_scheme_made_from_a_preset_reads_too`](../../../src/ui/theme.rs#L547) | A custom scheme made from a preset reads too. |
-| [`a_custom_scheme_keeps_its_five_colours`](../../../src/ui/theme.rs#L556) | A custom scheme keeps its five colours. |
-| [`applying_a_scheme_restyles_both_slots`](../../../src/ui/theme.rs#L573) | The scheme lands in both of egui's style slots, and the accessors follow it. |
-| [`premultiplying_stays_in_gamma_space`](../../../src/ui/theme.rs#L589) | Premultiplying stays in gamma space. |
+| [`every_preset_reads`](../../../src/ui/theme.rs#L559) | Every preset reads. |
+| [`a_custom_scheme_made_from_a_preset_reads_too`](../../../src/ui/theme.rs#L566) | A custom scheme made from a preset reads too. |
+| [`a_custom_scheme_keeps_its_five_colours`](../../../src/ui/theme.rs#L575) | A custom scheme keeps its five colours. |
+| [`applying_a_scheme_restyles_both_slots`](../../../src/ui/theme.rs#L592) | The scheme lands in both of egui's style slots, and the accessors follow it. |
+| [`premultiplying_stays_in_gamma_space`](../../../src/ui/theme.rs#L608) | Premultiplying stays in gamma space. |
 
 **Test helpers** (used only by the tests above):
 
-- [`over`](../../../src/ui/theme.rs#L513) — Opaque colour a translucent panel fill shows as over `under`.
-- [`readable`](../../../src/ui/theme.rs#L521) — Body text, muted text and the accent read on the surfaces they sit on: WCAG AA for text (4.5), and 3 for muted labels and the accent.
+- [`over`](../../../src/ui/theme.rs#L532) — Opaque colour a translucent panel fill shows as over `under`.
+- [`readable`](../../../src/ui/theme.rs#L540) — Body text, muted text and the accent read on the surfaces they sit on: WCAG AA for text (4.5), and 3 for muted labels and the accent.

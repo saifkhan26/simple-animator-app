@@ -1,6 +1,6 @@
 # `src/ui/sweep_tests.rs` — headless layout sweep over every window (test-only)
 
-> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 1048 lines · Line links as of commit `b7f05fe`
+> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 1067 lines · Line links as of commit `0aaa97a`
 
 ## What this file is for
 
@@ -116,7 +116,7 @@ One window, drawn on its own in a fresh UI.
 | `state` | `AppState` | Its own app state. |
 
 ### `struct Text`
-[src/ui/sweep_tests.rs:354](../../../src/ui/sweep_tests.rs#L354)
+[src/ui/sweep_tests.rs:362](../../../src/ui/sweep_tests.rs#L362)
 
 A piece of text drawn: its string, its bounds and the clip it was drawn in.
 
@@ -260,8 +260,17 @@ fn drag_right_edge(&mut self, dx: f32)
 
 Drags the window's right edge by `dx`.
 
+### `Rig::drag_corner_down`
+[src/ui/sweep_tests.rs:322](../../../src/ui/sweep_tests.rs#L322)
+
+```rust
+fn drag_corner_down(&mut self, dy: f32)
+```
+
+Pull the window's bottom-right corner down by `dy`: taller, for a window whose body scrolls.
+
 ### `Rig::drag_bottom_edge`
-[src/ui/sweep_tests.rs:320](../../../src/ui/sweep_tests.rs#L320)
+[src/ui/sweep_tests.rs:328](../../../src/ui/sweep_tests.rs#L328)
 
 ```rust
 fn drag_bottom_edge(&mut self, dy: f32)
@@ -270,7 +279,7 @@ fn drag_bottom_edge(&mut self, dy: f32)
 Drags the window's bottom edge by `dy`.
 
 ### `Rig::open_sections`
-[src/ui/sweep_tests.rs:327](../../../src/ui/sweep_tests.rs#L327)
+[src/ui/sweep_tests.rs:335](../../../src/ui/sweep_tests.rs#L335)
 
 ```rust
 fn open_sections(&mut self)
@@ -281,7 +290,7 @@ Open every folded section, one click at a time, until none is left.
 ## Free functions
 
 ### `button`
-[src/ui/sweep_tests.rs:344](../../../src/ui/sweep_tests.rs#L344)
+[src/ui/sweep_tests.rs:352](../../../src/ui/sweep_tests.rs#L352)
 
 ```rust
 fn button(pos: Pos2, pressed: bool) -> egui::Event
@@ -290,7 +299,7 @@ fn button(pos: Pos2, pressed: bool) -> egui::Event
 A primary-button pointer event at `pos`.
 
 ### `texts`
-[src/ui/sweep_tests.rs:360](../../../src/ui/sweep_tests.rs#L360)
+[src/ui/sweep_tests.rs:368](../../../src/ui/sweep_tests.rs#L368)
 
 ```rust
 fn texts(shapes: &Shapes) -> Vec<Text>
@@ -299,7 +308,7 @@ fn texts(shapes: &Shapes) -> Vec<Text>
 Every text run in a frame's shapes.
 
 #### `texts::walk`
-[src/ui/sweep_tests.rs:361](../../../src/ui/sweep_tests.rs#L361)
+[src/ui/sweep_tests.rs:369](../../../src/ui/sweep_tests.rs#L369)
 
 ```rust
 fn walk(shape: &egui::Shape, clip: Rect, out: &mut Vec<Text>)
@@ -308,7 +317,7 @@ fn walk(shape: &egui::Shape, clip: Rect, out: &mut Vec<Text>)
 Recurses through nested shapes collecting text runs.
 
 ### `closed_headers`
-[src/ui/sweep_tests.rs:382](../../../src/ui/sweep_tests.rs#L382)
+[src/ui/sweep_tests.rs:390](../../../src/ui/sweep_tests.rs#L390)
 
 ```rust
 fn closed_headers(shapes: &Shapes) -> Vec<Pos2>
@@ -317,7 +326,7 @@ fn closed_headers(shapes: &Shapes) -> Vec<Pos2>
 Where a folded `CollapsingHeader` arrow is drawn: egui paints it as a small filled triangle pointing right. (Open, it points down, as does a combo box's.)
 
 #### `closed_headers::walk`
-[src/ui/sweep_tests.rs:383](../../../src/ui/sweep_tests.rs#L383)
+[src/ui/sweep_tests.rs:391](../../../src/ui/sweep_tests.rs#L391)
 
 ```rust
 fn walk(shape: &egui::Shape, clip: Rect, out: &mut Vec<Pos2>)
@@ -326,7 +335,7 @@ fn walk(shape: &egui::Shape, clip: Rect, out: &mut Vec<Pos2>)
 Recurses through shapes looking for right-pointing triangles.
 
 ### `down_arrows`
-[src/ui/sweep_tests.rs:409](../../../src/ui/sweep_tests.rs#L409)
+[src/ui/sweep_tests.rs:417](../../../src/ui/sweep_tests.rs#L417)
 
 ```rust
 fn down_arrows(shapes: &Shapes) -> Vec<Pos2>
@@ -335,7 +344,7 @@ fn down_arrows(shapes: &Shapes) -> Vec<Pos2>
 Where a combo box's arrow is drawn: a small filled triangle pointing down. (An open `CollapsingHeader`'s points down too; a click on it just folds the section.)
 
 #### `down_arrows::walk`
-[src/ui/sweep_tests.rs:410](../../../src/ui/sweep_tests.rs#L410)
+[src/ui/sweep_tests.rs:418](../../../src/ui/sweep_tests.rs#L418)
 
 ```rust
 fn walk(shape: &egui::Shape, clip: Rect, out: &mut Vec<Pos2>)
@@ -344,7 +353,7 @@ fn walk(shape: &egui::Shape, clip: Rect, out: &mut Vec<Pos2>)
 Recurses through shapes looking for down-pointing triangles.
 
 ### `faults`
-[src/ui/sweep_tests.rs:434](../../../src/ui/sweep_tests.rs#L434)
+[src/ui/sweep_tests.rs:442](../../../src/ui/sweep_tests.rs#L442)
 
 ```rust
 fn faults(rig: &Rig, shapes: &Shapes, when: &str) -> Vec<String>
@@ -353,7 +362,7 @@ fn faults(rig: &Rig, shapes: &Shapes, when: &str) -> Vec<String>
 Everything wrong with one frame of one window.
 
 ### `report`
-[src/ui/sweep_tests.rs:470](../../../src/ui/sweep_tests.rs#L470)
+[src/ui/sweep_tests.rs:478](../../../src/ui/sweep_tests.rs#L478)
 
 ```rust
 fn report(findings: Vec<String>)
@@ -362,7 +371,7 @@ fn report(findings: Vec<String>)
 Fails the test with every finding listed, if there are any.
 
 ### `snapshot`
-[src/ui/sweep_tests.rs:771](../../../src/ui/sweep_tests.rs#L771)
+[src/ui/sweep_tests.rs:779](../../../src/ui/sweep_tests.rs#L779)
 
 ```rust
 fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage
@@ -371,7 +380,7 @@ fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage
 What `rig` draws, painted on the CPU into an image cropped to its window: egui's meshes over the theme background, at `ppp` pixels a point. For looking at a layout without starting the app, which would share the real config folder.
 
 ### `snapshot_of`
-[src/ui/sweep_tests.rs:778](../../../src/ui/sweep_tests.rs#L778)
+[src/ui/sweep_tests.rs:786](../../../src/ui/sweep_tests.rs#L786)
 
 ```rust
 fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage
@@ -380,7 +389,7 @@ fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage
 `snapshot`, cropped to `crop` rather than to the window: for a window with a menu open beside it.
 
 ### `guide_set`
-[src/ui/sweep_tests.rs:853](../../../src/ui/sweep_tests.rs#L853)
+[src/ui/sweep_tests.rs:861](../../../src/ui/sweep_tests.rs#L861)
 
 ```rust
 fn guide_set() -> Vec<crate::tools::perspective::PerspectiveGrid>
@@ -396,12 +405,12 @@ Run with `cargo test ui::sweep_tests` · 9 tests
 
 | Test | What it checks |
 |---|---|
-| [`every_window_is_clean_and_steady_at_rest`](../../../src/ui/sweep_tests.rs#L477) | Shown, left alone: nothing overlaps, runs off or clashes, and the window holds its size frame after frame. |
-| [`every_window_resizes_on_one_axis_at_a_time`](../../../src/ui/sweep_tests.rs#L497) | Dragging one edge leaves the other dimension alone and lands where dragged; dragging back returns the window to its size. (Wider, a window sized by wrapped text may get shorter: it wraps onto fewer lines.) |
-| [`every_window_stays_clean_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L528) | Pulled as narrow as it goes: what is left still doesn't overlap or spill. |
-| [`every_window_is_clean_with_its_sections_open`](../../../src/ui/sweep_tests.rs#L543) | Every folded section opened: nothing overlaps or spills, the window holds steady, and it gets no wider than it opened at — a section is laid out to the window, not the other way round. |
-| [`a_busy_project_leaves_every_window_its_size`](../../../src/ui/sweep_tests.rs#L569) | A busier project — more layers, long names, cleanup chains, a group, faded layers, a long scene, camera keys, a brush with many sizes remembered, brush values a drag left unrounded — leaves every window the size it was, and still clean. |
-| [`every_combo_box_opens_on_screen`](../../../src/ui/sweep_tests.rs#L646) | Every combo box opened, one at a time, with every section open: its list lands on the screen, and the window under it keeps its width. |
-| [`the_whole_ui_fits_common_screens`](../../../src/ui/sweep_tests.rs#L700) | The whole UI at common screen sizes: every window on screen, and no ID clashes between windows. |
-| [`the_brush_panel_keeps_its_rows_apart_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L745) | However narrow the Brush panel goes, the H/S/L fields stay clear of the Paste button after them, and the backdrop row keeps its colour and opacity. (Their frames, not their text, would collide, which the overlap sweep doesn't see.) |
-| [`snapshots`](../../../src/ui/sweep_tests.rs#L889) | Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots` |
+| [`every_window_is_clean_and_steady_at_rest`](../../../src/ui/sweep_tests.rs#L485) | Shown, left alone: nothing overlaps, runs off or clashes, and the window holds its size frame after frame. |
+| [`every_window_resizes_on_one_axis_at_a_time`](../../../src/ui/sweep_tests.rs#L505) | Dragging one edge leaves the other dimension alone and lands where dragged; dragging back returns the window to its size. (Wider, a window sized by wrapped text may get shorter: it wraps onto fewer lines.) |
+| [`every_window_stays_clean_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L536) | Pulled as narrow as it goes: what is left still doesn't overlap or spill. |
+| [`every_window_is_clean_with_its_sections_open`](../../../src/ui/sweep_tests.rs#L551) | Every folded section opened: nothing overlaps or spills, the window holds steady, and it gets no wider than it opened at — a section is laid out to the window, not the other way round. |
+| [`a_busy_project_leaves_every_window_its_size`](../../../src/ui/sweep_tests.rs#L577) | A busier project — more layers, long names, cleanup chains, a group, faded layers, a long scene, camera keys, a brush with many sizes remembered, brush values a drag left unrounded — leaves every window the size it was, and still clean. |
+| [`every_combo_box_opens_on_screen`](../../../src/ui/sweep_tests.rs#L654) | Every combo box opened, one at a time, with every section open: its list lands on the screen, and the window under it keeps its width. |
+| [`the_whole_ui_fits_common_screens`](../../../src/ui/sweep_tests.rs#L708) | The whole UI at common screen sizes: every window on screen, and no ID clashes between windows. |
+| [`the_brush_panel_keeps_its_rows_apart_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L753) | However narrow the Brush panel goes, the H/S/L fields stay clear of the Paste button after them, and the backdrop row keeps its colour and opacity. (Their frames, not their text, would collide, which the overlap sweep doesn't see.) |
+| [`snapshots`](../../../src/ui/sweep_tests.rs#L897) | Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots` |

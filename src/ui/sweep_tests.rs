@@ -317,6 +317,14 @@ impl Rig {
         self.drag(from, from + egui::vec2(dx, 0.0));
     }
 
+    /// Pull the window's bottom-right corner down by `dy`: taller, for a
+    /// window whose body scrolls.
+    fn drag_corner_down(&mut self, dy: f32) {
+        let r = self.rect();
+        let from = r.max - egui::vec2(3.0, 3.0);
+        self.drag(from, from + egui::vec2(0.0, dy));
+    }
+
     fn drag_bottom_edge(&mut self, dy: f32) {
         let r = self.rect();
         let from = pos2(r.center().x, r.max.y - 1.0);
@@ -912,8 +920,19 @@ fn snapshots() {
     // A grid's settings, with Fill canvas's rows showing, pulled tall
     // enough to show the whole of it.
     let mut rig = Rig::new(Win::GridSettings);
-    rig.drag_bottom_edge(600.0);
+    rig.drag_corner_down(600.0);
     snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();
+    // …and scrolled to its end, its folded sections open.
+    let at = rig.rect().center();
+    let wheel = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -4000.0),
+        modifiers: egui::Modifiers::NONE,
+    };
+    rig.frame(vec![egui::Event::PointerMoved(at), wheel.clone()]);
+    rig.open_sections();
+    rig.frame(vec![egui::Event::PointerMoved(at), wheel]);
+    snapshot(&mut rig, 2.0).save(dir.join("grid_settings_end.png")).unwrap();
     // Each other guide kind's settings, the Grid tool's list of them all,
     // and how they paint on the canvas.
     let guides = guide_set();
@@ -923,7 +942,7 @@ fn snapshots() {
         rig.state.perspective.ensure_ids();
         rig.state.perspective.active = i;
         rig.settle();
-        rig.drag_bottom_edge(600.0);
+        rig.drag_corner_down(600.0);
         let name = g.kind.row_name().to_lowercase();
         snapshot(&mut rig, 2.0).save(dir.join(format!("guide_settings_{name}_{i}.png"))).unwrap();
     }
@@ -932,7 +951,7 @@ fn snapshots() {
     rig.state.perspective.ensure_ids();
     rig.state.perspective.grids[2].magnet = false;
     rig.settle();
-    rig.drag_bottom_edge(600.0);
+    rig.drag_corner_down(600.0);
     snapshot(&mut rig, 2.0).save(dir.join("guide_list.png")).unwrap();
     let (straight, curved): (Vec<_>, Vec<_>) = guides.iter().cloned().partition(|g| !g.kind.is_curved());
     for tool in [ActiveTool::Perspective, ActiveTool::Pen(0)] {
