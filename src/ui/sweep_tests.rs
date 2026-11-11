@@ -45,6 +45,7 @@ enum Win {
     SaveError,
     Unsaved,
     Recovery,
+    Recolor,
 }
 
 impl std::fmt::Debug for Win {
@@ -64,6 +65,7 @@ impl std::fmt::Debug for Win {
             Win::SaveError => write!(f, "SaveError"),
             Win::Unsaved => write!(f, "Unsaved"),
             Win::Recovery => write!(f, "Recovery"),
+            Win::Recolor => write!(f, "Recolor"),
         }
     }
 }
@@ -89,6 +91,7 @@ fn all() -> Vec<Win> {
         Win::SaveError,
         Win::Unsaved,
         Win::Recovery,
+        Win::Recolor,
     ]);
     v
 }
@@ -187,6 +190,13 @@ impl Win {
                 state.autosave.error =
                     Some("Couldn't read the autosave of shot_04_cleanup_final_v12.anim: unexpected end of file".into());
             }
+            Win::Recolor => {
+                // A selection and a range: the widest scope line.
+                state.recolor.span = RecolorSpan::Range;
+                state.sel_mask = Some(crate::tools::select_mask::SelectionMask { x: 0, y: 0, w: 4, h: 4, cov: vec![255; 16], outside: 0 });
+                state.project.layers[0].name = "Shirt colour, cleanup pass two".into();
+                state.open_recolor();
+            }
         }
     }
 
@@ -209,6 +219,7 @@ impl Win {
             Win::SaveError => save_error_dialog(state, ctx),
             Win::Unsaved => unsaved_dialog(state, ctx),
             Win::Recovery => recovery_dialog(state, ctx),
+            Win::Recolor => recolor_window(state, ctx),
         }
     }
 
@@ -865,6 +876,11 @@ fn snapshots() {
     snapshot(&mut rig, 2.0).save(dir.join("unsaved.png")).unwrap();
     let mut rig = Rig::new(Win::Recovery);
     snapshot(&mut rig, 2.0).save(dir.join("recovery.png")).unwrap();
+    // Replace color, with a range and a selection.
+    let mut rig = Rig::new(Win::Recolor);
+    (rig.state.recolor.from, rig.state.recolor.to) = ([200, 40, 40], [40, 80, 220]);
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("recolor.png")).unwrap();
     // A grid's settings, with Fill canvas's rows showing.
     let mut rig = Rig::new(Win::GridSettings);
     snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();

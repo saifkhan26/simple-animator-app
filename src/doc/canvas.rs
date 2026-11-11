@@ -30,13 +30,20 @@ const PAR_MIN: usize = 2 << 20;
 /// fast one core moves memory, which is a fraction of what the memory can
 /// take: an 8K cell clears and fills about 2× faster on several.
 pub fn par_rows<T: Send>(buf: &mut [T], row: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    par_rows_as(buf, row, std::mem::size_of::<T>(), f);
+}
+
+/// [`par_rows`] for work that costs about as much per item as moving `cost`
+/// bytes — a flag per pixel worked out from that pixel's four bytes, say —
+/// so it goes on several threads as soon as the pixels would.
+pub fn par_rows_as<T: Send>(buf: &mut [T], row: usize, cost: usize, f: impl Fn(usize, &mut [T]) + Sync) {
     // No rows, or rows of nothing — a freed 0×0 canvas: nothing to do, and
     // `f` can't split a band into 0-wide rows.
     if row == 0 || buf.is_empty() {
         return;
     }
     let rows = buf.len() / row;
-    let threads = match std::mem::size_of_val(buf) {
+    let threads = match buf.len() * cost {
         n if n < PAR_MIN || rows < 2 => 1,
         _ => std::thread::available_parallelism().map_or(1, |n| n.get().min(8)),
     };
@@ -424,6 +431,47 @@ impl Canvas {
                 max_y: self.height,
             }),
             Store::Packed { rect, .. } => (!rect.is_empty()).then_some(*rect),
+        }
+    }
+
+    /// The pixels this canvas holds and the rect they cover: the packed
+    /// rect's, or the whole canvas when full. `None` when it holds none.
+    /// Every pixel outside the rect is zero.
+    pub fn held(&self) -> Option<(DirtyRect, &[u8])> {
+        match &self.store {
+            Store::Full(p) => Some((
+                DirtyRect {
+                    min_x: 0,
+                    min_y: 0,
+                    max_x: self.width,
+                    max_y: self.height,
+                },
+                p.as_slice(),
+            )),
+            Store::Packed { rect, pixels } => (!rect.is_empty()).then_some((*rect, pixels.as_slice())),
+        }
+    }
+
+    /// This canvas with `pixels` in place of the ones [`Canvas::held`]
+    /// gives, over the same rect — a packed canvas stays packed — as new
+    /// pixels: a new rev, dirty over the rect. A packed rect is the bounds
+    /// of every byte that isn't zero, so a pixel that was all zeros must
+    /// stay so, and one that wasn't mustn't become so.
+    pub fn with_held(&self, pixels: Vec<u8>) -> Canvas {
+        let rect = self.held().map_or(EMPTY, |(r, _)| r);
+        let n = (rect.max_x - rect.min_x) as usize * (rect.max_y - rect.min_y) as usize * 4;
+        assert_eq!(pixels.len(), n, "the held rect's pixels");
+        let store = match &self.store {
+            Store::Full(_) => Store::Full(pixels),
+            Store::Packed { .. } => Store::Packed { rect, pixels },
+        };
+        Canvas {
+            width: self.width,
+            height: self.height,
+            store,
+            dirty: (!rect.is_empty()).then_some(rect),
+            rev: next_rev(),
+            unwritten: None,
         }
     }
 

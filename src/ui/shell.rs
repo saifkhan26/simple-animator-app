@@ -5,7 +5,8 @@ use egui::{Align, Color32, Frame, Margin, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as ic;
 
 use crate::app::{
-    AppState, CameraFraming, ExportKind, FillMode, LassoHeld, NavKind, PanelId, SelGesture, MP4_PRESETS,
+    AppState, CameraFraming, ExportKind, FillMode, LassoHeld, NavKind, PanelId, RecolorSpan, SelGesture, Well,
+    MP4_PRESETS,
 };
 use crate::app::autosave::{Pending, Unsaved};
 use crate::app::brush_sizes::{same_size, size_label};
@@ -159,6 +160,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     new_project_dialog(state, ctx);
     export_dialog(state, ctx);
     import_range_dialog(state, ctx);
+    recolor_window(state, ctx);
     if let Some(label) = state.bg_label {
         busy_overlay(ctx, label);
     }
@@ -8715,6 +8717,15 @@ fn title_menu(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
                 }
             }
         });
+        let recolor = format!("Replace color…    {}", combo_text(state, Action::ReplaceColor));
+        if ui
+            .button(theme::icon_text(ic::PALETTE, recolor.trim_end()))
+            .on_hover_text("Swap one colour for another across drawings")
+            .clicked()
+        {
+            state.open_recolor();
+            ui.close_menu();
+        }
         ui.separator();
         let shortcuts = if n_conflicts > 0 {
             ui.button(
@@ -9787,6 +9798,130 @@ fn krita_toast(state: &mut AppState, ctx: &egui::Context) {
 
 /// "Save changes before …?" — held up by a close, an Open, a New or a
 /// recovery that would drop unsaved work (see `app::autosave`).
+/// What a colour replace would go over, in words: how many drawings, on
+/// which layers.
+fn recolor_scope(state: &AppState) -> String {
+    let drawings = match state.recolor_targets().len() {
+        0 => "No drawings".to_string(),
+        1 => "1 drawing".to_string(),
+        n => format!("{n} drawings"),
+    };
+    if state.recolor.span == RecolorSpan::Picked {
+        return format!("{drawings}, as picked in the timeline");
+    }
+    let layers = state.recolor_layers();
+    let on = match layers.as_slice() {
+        [] => "no layer that shows and can be edited".to_string(),
+        [li] => format!("“{}”", state.project.layers[*li].name),
+        many => format!("{} layers", many.len()),
+    };
+    format!("{drawings} on {on}")
+}
+
+/// Replace color: one colour swapped for another across drawings — this
+/// frame, the drawings picked in the timeline, a range of frames, or all of
+/// them, on the selected layers. See `app/recolor.rs`.
+fn recolor_window(state: &mut AppState, ctx: &egui::Context) {
+    if !state.recolor.show {
+        return;
+    }
+    let last = state.project.frame_count.saturating_sub(1);
+    let has_picked = !state.track_sel.is_empty();
+    let bounded = state.sel_mask.as_ref().is_some_and(|m| !m.is_all());
+    let scope = recolor_scope(state);
+    let any = !state.recolor_targets().is_empty();
+    let mut open = true;
+    let mut apply = false;
+    let mut pick = None;
+    egui::Window::new(theme::icon_text(ic::PALETTE, "Replace color"))
+        .id(egui::Id::new("window_recolor"))
+        .open(&mut open)
+        .default_pos([360.0, 140.0])
+        .resizable(false)
+        .collapsible(false)
+        .frame(floating_frame())
+        .show(ctx, |ui| {
+            let c = &mut state.recolor;
+            egui::Grid::new("recolor_wells").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("Replace");
+                crate::ui::color_wheel::hsl_edit_button(ui, &mut c.from);
+                if theme::icon_button(ui, ic::EYEDROPPER, "Pick the colour to replace from the screen").clicked() {
+                    pick = Some(Well::From);
+                }
+                ui.end_row();
+                ui.label("With");
+                crate::ui::color_wheel::hsl_edit_button(ui, &mut c.to);
+                if theme::icon_button(ui, ic::EYEDROPPER, "Pick the new colour from the screen").clicked() {
+                    pick = Some(Well::To);
+                }
+                ui.end_row();
+            });
+            ui.add_space(4.0);
+            ui.add(egui::Slider::new(&mut c.tolerance, 0..=crate::tools::recolor::MAX_TOLERANCE).text("Tolerance"))
+                .on_hover_text(
+                    "How far a pixel's red, green and blue may each be from the colour to replace \
+                     and still count as it. Grain and noise inside the tolerance are kept.",
+                );
+            ui.add_space(6.0);
+            ui.separator();
+            ui.radio_value(&mut c.span, RecolorSpan::Here, "This frame");
+            ui.add_enabled_ui(has_picked, |ui| {
+                ui.radio_value(&mut c.span, RecolorSpan::Picked, "Drawings selected in the timeline")
+            })
+            .response
+            .on_disabled_hover_text("Select drawings in the timeline first");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut c.span, RecolorSpan::Range, "Frames");
+                // Numbered from 1, as the frame counter is.
+                let (mut a, mut b) = (c.start.min(last) + 1, c.end.min(last) + 1);
+                let ra = ui.add(egui::DragValue::new(&mut a).range(1..=last + 1).speed(0.2));
+                ui.label("to");
+                let rb = ui.add(egui::DragValue::new(&mut b).range(1..=last + 1).speed(0.2));
+                if ra.changed() || rb.changed() {
+                    c.span = RecolorSpan::Range;
+                }
+                if ra.changed() && a > b {
+                    b = a;
+                } else if b < a {
+                    a = b;
+                }
+                (c.start, c.end) = (a - 1, b - 1);
+            });
+            ui.radio_value(&mut c.span, RecolorSpan::All, "All frames");
+            ui.add_space(4.0);
+            // One line, whatever the layer is called: a name that wrapped
+            // would grow the window.
+            let note = if bounded { format!("{scope}, inside the selection") } else { scope };
+            ui.add(egui::Label::new(egui::RichText::new(&note).color(theme::text_muted()).size(11.0)).truncate())
+                .on_hover_text(note);
+            ui.add_space(6.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                let ready = any && c.from != c.to;
+                let replace = ui
+                    .add_enabled(ready, egui::Button::new(theme::icon_text(ic::CHECK, "Replace")))
+                    .on_hover_text("One undo step")
+                    .on_disabled_hover_text(if any {
+                        "The two colours are the same"
+                    } else {
+                        "Nothing to change: select a layer that shows and can be edited"
+                    });
+                if replace.clicked() {
+                    apply = true;
+                }
+            });
+        });
+    if let Some(well) = pick {
+        state.pick_recolor_well(well);
+    }
+    if apply {
+        state.replace_color();
+    }
+    if !open {
+        state.recolor.show = false;
+    }
+}
+
 fn unsaved_dialog(state: &mut AppState, ctx: &egui::Context) {
     let Some(pending) = state.unsaved_prompt.clone() else {
         return;
