@@ -5529,11 +5529,35 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
         egui::Checkbox::new(&mut state.perspective.snap, format!("Snap strokes ({snap})")),
     )
     .on_hover_text(
-        "Pencil, ink, eraser and shape lines lock to the active grid, toward whichever \
-         vanishing point the stroke starts out heading for. Rectangles and ellipses lie \
-         on it; hold Shift once dragging for a square or circle.",
+        "Pencil, ink, eraser and shape lines lock to the guides: toward whichever \
+         vanishing point the stroke starts out heading for, on any visible guide whose \
+         magnet is on. Rectangles and ellipses lie on the active grid; hold Shift once \
+         dragging for a square or circle.",
     );
     let snapping = state.perspective.show && state.perspective.snap;
+    ui.add_enabled_ui(snapping, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Strength");
+            let mut pct = (state.perspective.snap_strength * 100.0).round();
+            let r = ui.add(
+                egui::Slider::new(&mut pct, 0.0..=100.0)
+                    .suffix("%")
+                    .integer(),
+            );
+            if r.changed() {
+                state.perspective.snap_strength = pct / 100.0;
+            }
+            r.on_hover_text(
+                "How hard a stroke is pulled onto its line. Below 100% some of the \
+                 hand's wobble stays in it.",
+            );
+        });
+    });
+    ui.add_enabled(
+        snapping,
+        egui::Checkbox::new(&mut state.perspective.snap_eraser, "Eraser snaps too"),
+    )
+    .on_hover_text("Off, the eraser always goes where the pen goes");
     ui.add_enabled(
         snapping,
         egui::Checkbox::new(&mut state.perspective.snap_vertical, "Vertical lines too"),
@@ -5543,10 +5567,14 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
          Near the middle of a one-point grid it competes with the columns.",
     );
     ui.add_enabled(
-        snapping,
+        state.perspective.show,
         egui::Checkbox::new(&mut state.perspective.cursor_guides, "Cursor guides"),
     )
-    .on_hover_text("Faint lines from the cursor along every way a stroke could snap");
+    .on_hover_text(
+        "Faint lines from the cursor along every way a stroke could go, and the one it \
+         took while you draw. With Snap off this is freehand perspective: the line \
+         shows, the stroke stays yours.",
+    );
 
     ui.checkbox(&mut state.perspective.auto_key, "Auto-key").on_hover_text(
         "Once a grid has keys, moving it — on the canvas or in its settings — keys \
@@ -5579,6 +5607,23 @@ fn perspective_options(state: &mut AppState, ui: &mut egui::Ui) {
                     let lock = if g.locked { ic::LOCK_SIMPLE } else { ic::LOCK_SIMPLE_OPEN };
                     if theme::icon_button(ui, lock, "Toggle lock").clicked() {
                         g.locked = !g.locked;
+                    }
+                    let tip = if g.magnet {
+                        "Strokes snap to this guide — click to leave it out"
+                    } else {
+                        "Strokes ignore this guide — click to let them snap to it"
+                    };
+                    let magnet = theme::icon_button(ui, ic::MAGNET, tip);
+                    if !g.magnet {
+                        // Struck through, so an off magnet reads at a glance.
+                        let r = magnet.rect.shrink(3.0);
+                        ui.painter().line_segment(
+                            [r.left_bottom(), r.right_top()],
+                            Stroke::new(1.5, theme::text_muted()),
+                        );
+                    }
+                    if magnet.clicked() {
+                        g.magnet = !g.magnet;
                     }
                     let [r, gr, b] = g.color;
                     let kind = match (g.kind, parent_no) {
@@ -7262,9 +7307,10 @@ fn draw_perspective_grids(state: &AppState, painter: &egui::Painter, xf: &Xform,
         let Some(plane) = Plane::new(corners) else {
             continue;
         };
-        // Inactive grids recede while one is being edited, and while strokes
-        // snap — so the grid they snap to is the one that stands out.
-        let fade = if (editing || state.perspective.snap) && !active {
+        // Inactive grids recede while one is being edited, and — while strokes
+        // snap — so do the ones whose magnet is off, so the guides they snap
+        // to are the ones that stand out.
+        let fade = if (editing && !active) || (!editing && state.perspective.snap && !g.magnet) {
             0.45
         } else {
             1.0
@@ -7550,34 +7596,71 @@ fn draw_cursor_guides(
     clip: Rect,
     cursor: egui::Pos2,
 ) {
-    use crate::tools::perspective::{clip_line, Vp};
+    use crate::tools::guides;
 
-    let Some(g) = state.perspective.active_grid() else {
-        return;
-    };
-    let s = state.grid_space(g, state.project.current_frame);
     let (x, y) = xf.screen_to_doc(cursor);
-    let stroke = Stroke::new(1.0, theme::premul(g.color[0], g.color[1], g.color[2], 150));
+    let cands = state.snap_candidates([x, y]);
+    for c in cands.iter().filter(|c| !c.fixed) {
+        draw_snap_curve(state, painter, xf, clip, c, 150, 1.0);
+    }
+    // A ruler or an ellipse the pen is close enough to take: brighter, so
+    // the press is no surprise.
+    let tol = crate::app::SNAP_CAPTURE_PX / state.view_scale.max(1e-6);
+    if let Some(c) = guides::nearest_fixed(&cands, [x, y], tol) {
+        draw_snap_curve(state, painter, xf, clip, &c, 230, 2.0);
+    }
+}
+
+/// One of the curves a stroke can keep to, dashed in its guide's colour: a
+/// line across the canvas (stopping at its vanishing point), a ruler's
+/// segment, or an ellipse's ring.
+fn draw_snap_curve(
+    state: &AppState,
+    painter: &egui::Painter,
+    xf: &Xform,
+    clip: Rect,
+    c: &crate::tools::guides::Candidate,
+    alpha: u8,
+    width: f32,
+) {
+    use crate::tools::guides::SnapCurve;
+    use crate::tools::perspective::clip_line;
+
+    let rgb = state.perspective.grids.get(c.grid).map_or([255, 255, 255], |g| g.color);
+    let stroke = Stroke::new(width, theme::premul(rgb[0], rgb[1], rgb[2], alpha));
+    let to_screen = |p: [f32; 2]| xf.doc_to_screen(p[0], p[1]);
     let (lo, hi) = ([clip.min.x, clip.min.y], [clip.max.x, clip.max.y]);
-    for target in g.snap_targets(&s, state.perspective.snap_vertical) {
-        let (b, to_vp) = match target {
-            Vp::Point(v) => (xf.doc_to_screen(v[0], v[1]), true),
-            Vp::Dir(d) => (xf.doc_to_screen(x + d[0] * 100.0, y + d[1] * 100.0), false),
-        };
-        let a = cursor;
-        if (b - a).length() < 1.0 {
-            continue;
+    match c.curve {
+        SnapCurve::Line { origin, dir, vp } => {
+            let a = to_screen(origin);
+            let b = match vp {
+                Some(v) => to_screen(v),
+                None => to_screen([origin[0] + dir[0] * 100.0, origin[1] + dir[1] * 100.0]),
+            };
+            if (b - a).length() < 1.0 {
+                return;
+            }
+            let Some((t0, mut t1)) = clip_line([a.x, a.y], [b.x, b.y], lo, hi) else {
+                return;
+            };
+            // Past its vanishing point a line means nothing.
+            if vp.is_some() {
+                t1 = t1.min(1.0);
+            }
+            if t1 > t0 {
+                let ends = [a + (b - a) * t0, a + (b - a) * t1];
+                painter.extend(egui::Shape::dashed_line(&ends, stroke, 6.0, 4.0));
+            }
         }
-        let Some((t0, mut t1)) = clip_line([a.x, a.y], [b.x, b.y], lo, hi) else {
-            continue;
-        };
-        // Past its vanishing point a line means nothing.
-        if to_vp {
-            t1 = t1.min(1.0);
+        SnapCurve::Segment { a, b } => {
+            painter.extend(egui::Shape::dashed_line(&[to_screen(a), to_screen(b)], stroke, 6.0, 4.0));
         }
-        if t1 > t0 {
-            let ends = [a + (b - a) * t0, a + (b - a) * t1];
-            painter.extend(egui::Shape::dashed_line(&ends, stroke, 6.0, 4.0));
+        SnapCurve::Conic { .. } => {
+            let mut pts: Vec<egui::Pos2> = c.curve.conic_points().into_iter().map(to_screen).collect();
+            if let Some(&first) = pts.first() {
+                pts.push(first);
+                painter.extend(egui::Shape::dashed_line(&pts, stroke, 6.0, 4.0));
+            }
         }
     }
 }
@@ -8155,8 +8238,14 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
     let scale = xf.scale;
     // Before a stroke picks its way, show the ways it could pick.
     let idle = state.stroke.is_none() && state.shape_drag.is_none();
-    if idle && state.perspective.cursor_guides && state.snapping() {
-        draw_cursor_guides(state, &painter, &xf, canvas_rect, pos);
+    if state.perspective.cursor_guides && state.guiding() {
+        if idle {
+            draw_cursor_guides(state, &painter, &xf, canvas_rect, pos);
+        } else if let Some(c) = state.snap_curve() {
+            // The way the stroke took, held still while it is drawn — what
+            // a freehand stroke follows by eye.
+            draw_snap_curve(state, &painter, &xf, canvas_rect, &c, 170, 1.0);
+        }
     }
 
     let white = theme::white_alpha(220);

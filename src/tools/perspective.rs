@@ -44,7 +44,7 @@ fn cross(a: P, b: P) -> f32 {
 fn len(a: P) -> f32 {
     a[0].hypot(a[1])
 }
-fn normalize(a: P) -> Option<P> {
+pub(crate) fn normalize(a: P) -> Option<P> {
     let l = len(a);
     (l > 1e-9).then(|| [a[0] / l, a[1] / l])
 }
@@ -56,7 +56,7 @@ const FRONT_EPS: f64 = 1e-6;
 
 /// Projective map from the unit square onto a quad: `(u, v)` → document
 /// point. Row-major 3×3, applied to `(u, v, 1)`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Homography {
     m: [f64; 9],
 }
@@ -487,6 +487,9 @@ pub struct PerspectiveGrid {
     pub snap_rows: bool,
     pub snap_cols: bool,
     pub snap_third: bool,
+    /// Strokes may snap to this guide at all — the magnet on its row. Every
+    /// visible guide with it on is a snap source, not just the active one.
+    pub magnet: bool,
     pub follow: Follow,
     /// Sorted by frame. None: the grid holds still in its space.
     pub keys: Vec<GridKey>,
@@ -562,6 +565,7 @@ impl Default for PerspectiveGrid {
             snap_rows: true,
             snap_cols: true,
             snap_third: true,
+            magnet: true,
             follow: Follow::Document,
             keys: Vec::new(),
             wall: None,
@@ -1054,8 +1058,14 @@ pub struct PerspectiveConfig {
     /// Draw the grids while other tools are active. The perspective tool
     /// always shows them.
     pub show: bool,
-    /// Lock brush strokes to the active grid's lines.
+    /// Lock brush strokes to the guides' lines. Off, the guides are only
+    /// something to draw by — see `cursor_guides`.
     pub snap: bool,
+    /// How hard a snapped stroke is pulled onto its line: 1 all the way, 0
+    /// not at all — a lighter pull keeps some of the hand in the line.
+    pub snap_strength: f32,
+    /// The eraser snaps as well as the pens.
+    pub snap_eraser: bool,
     /// Also offer the vertical as a snap direction. Off by default: near the
     /// middle of a one-point grid the columns are nearly vertical too, and a
     /// stroke meant to run to the vanishing point would lock straight up.
@@ -1064,8 +1074,10 @@ pub struct PerspectiveConfig {
     pub auto_key: bool,
     /// Faint outlines of the active grid at its keys either side.
     pub ghosts: bool,
-    /// While a stroke would snap, faint lines from the cursor along every way
-    /// it could go.
+    /// Faint lines from the cursor along every way a stroke could go, and
+    /// the one it went, held for the stroke. With snap off this is the
+    /// freehand way of drawing by the guides: the line shows, the stroke
+    /// stays the hand's.
     pub cursor_guides: bool,
 }
 
@@ -1076,6 +1088,8 @@ impl Default for PerspectiveConfig {
             active: 0,
             show: false,
             snap: false,
+            snap_strength: 1.0,
+            snap_eraser: true,
             snap_vertical: false,
             auto_key: true,
             ghosts: true,
