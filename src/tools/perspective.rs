@@ -575,6 +575,12 @@ pub struct PerspectiveGrid {
     pub magnet: bool,
     /// A ruler runs on past its ends, across the whole canvas.
     pub infinite_ruler: bool,
+    /// A ruler's ticks: it is split into this many equal parts, 0 for none.
+    /// An infinite ruler carries them on past its ends.
+    pub divisions: u32,
+    /// Smaller ticks splitting each of a ruler's divisions into this many
+    /// parts; 1 or less for none.
+    pub subdivisions: u32,
     /// An ellipse also takes strokes that start inside it round its centre,
     /// on the ring through where they start.
     pub rings: bool,
@@ -660,6 +666,8 @@ impl Default for PerspectiveGrid {
             snap_third: true,
             magnet: true,
             infinite_ruler: false,
+            divisions: 0,
+            subdivisions: 1,
             rings: false,
             bend: 0.0,
             follow: Follow::Document,
@@ -741,9 +749,12 @@ impl PerspectiveGrid {
             }
             GridKind::Ruler | GridKind::Parallel => {
                 let (a, b) = ([-0.25, 0.0], [0.25, 0.0]);
+                let ruler = kind == GridKind::Ruler;
                 Self {
                     corners: line_quad(a, b),
                     rows: 8,
+                    divisions: if ruler { 8 } else { 0 },
+                    subdivisions: if ruler { 2 } else { 1 },
                     horizon: false,
                     color: if kind == GridKind::Ruler { [255, 170, 60] } else { [190, 150, 255] },
                     ..base

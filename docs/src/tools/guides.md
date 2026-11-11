@@ -1,6 +1,6 @@
 # `src/tools/guides.rs` — snapping strokes to guides
 
-> **Source:** [src/tools/guides.rs](../../../src/tools/guides.rs) · **Module:** `crate::tools::guides` · **Size:** 1313 lines · Line links as of commit `42a83e1`
+> **Source:** [src/tools/guides.rs](../../../src/tools/guides.rs) · **Module:** `crate::tools::guides` · **Size:** 1358 lines · Line links as of commit `8c85870`
 
 ## What this file is for
 
@@ -436,8 +436,17 @@ pub fn dragged(kind: GridKind, c0: &[P; 4], grab: GridGrab, start: P, now: P, sn
 
 A non-plane guide's corners after dragging `grab` from `start` to `now`, solved against the corners at the press. `snap` (Shift, once dragging) turns a ruler or a helper line in 15° steps about its other end. `None` for a drag that would leave the guide meaningless — a ruler of no length, helper lines that never meet.
 
+### `ruler_ticks`
+[src/tools/guides.rs:784](../../../src/tools/guides.rs#L784)
+
+```rust
+pub fn ruler_ticks(divisions: u32, subdivisions: u32, t0: f32, t1: f32, max: usize) -> Vec<(f32, bool)>
+```
+
+A ruler's ticks between `t0` and `t1`, along it from one end (0) to the other (1): `(t, major)` for each, the major ones splitting it into `divisions` equal parts and the minor ones each part into `subdivisions`. The ends themselves are left out — the ruler marks those its own way — and an infinite ruler, asking past them, gets the same spacing on and on. At most `max` ticks; none if that would be more.
+
 ### `turn_in_steps`
-[src/tools/guides.rs:779](../../../src/tools/guides.rs#L779)
+[src/tools/guides.rs:802](../../../src/tools/guides.rs#L802)
 
 ```rust
 fn turn_in_steps(o: P, p: P) -> P
@@ -446,7 +455,7 @@ fn turn_in_steps(o: P, p: P) -> P
 `p` turned about `o` to the nearest 15° step, at the same distance.
 
 ### `parallel`
-[src/tools/guides.rs:789](../../../src/tools/guides.rs#L789)
+[src/tools/guides.rs:812](../../../src/tools/guides.rs#L812)
 
 ```rust
 fn parallel(a: P, b: P) -> bool
@@ -455,7 +464,7 @@ fn parallel(a: P, b: P) -> bool
 Whether two vectors run the same way or opposite, near enough.
 
 ### `angle_of`
-[src/tools/guides.rs:794](../../../src/tools/guides.rs#L794)
+[src/tools/guides.rs:817](../../../src/tools/guides.rs#L817)
 
 ```rust
 fn angle_of(uv: P) -> f32
@@ -464,7 +473,7 @@ fn angle_of(uv: P) -> f32
 Angle of `uv` about the square's middle.
 
 ### `on_circle`
-[src/tools/guides.rs:799](../../../src/tools/guides.rs#L799)
+[src/tools/guides.rs:822](../../../src/tools/guides.rs#L822)
 
 ```rust
 fn on_circle(h: &Homography, r: f32, a: f32) -> Option<P>
@@ -473,7 +482,7 @@ fn on_circle(h: &Homography, r: f32, a: f32) -> Option<P>
 The point at angle `a` round the circle, mapped onto the canvas.
 
 ### `nearest_sample`
-[src/tools/guides.rs:804](../../../src/tools/guides.rs#L804)
+[src/tools/guides.rs:827](../../../src/tools/guides.rs#L827)
 
 ```rust
 fn nearest_sample(h: &Homography, r: f32, p: P) -> Option<P>
@@ -487,40 +496,41 @@ sample falls behind the viewer.
 
 ### `mod tests`
 
-Run with `cargo test tools::guides::tests` · 25 tests
+Run with `cargo test tools::guides::tests` · 26 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_line_projects_square_onto_itself`](../../../src/tools/guides.rs#L831) | A line projects square onto itself. |
-| [`a_segment_holds_points_past_its_ends_on_the_ends`](../../../src/tools/guides.rs#L837) | A segment holds points past its ends on the ends. |
-| [`a_conic_in_a_square_is_its_inscribed_circle`](../../../src/tools/guides.rs#L845) | A conic in a square is its inscribed circle. |
-| [`a_conic_in_perspective_touches_each_edge_at_its_middle_in_depth`](../../../src/tools/guides.rs#L858) | A conic in perspective touches each edge at its middle in depth. |
-| [`the_pick_follows_the_motion_and_skips_fixed_curves`](../../../src/tools/guides.rs#L879) | The pick follows the motion and skips fixed curves. |
-| [`a_press_takes_the_nearest_fixed_curve_in_reach`](../../../src/tools/guides.rs#L898) | A press takes the nearest fixed curve in reach. |
-| [`a_ruler_is_fixed_and_an_infinite_one_runs_on`](../../../src/tools/guides.rs#L914) | A ruler is fixed and an infinite one runs on. |
-| [`parallel_lines_and_a_point_run_through_the_start`](../../../src/tools/guides.rs#L928) | Parallel lines and a point run through the start. |
-| [`an_ellipse_offers_rings_only_from_inside_it`](../../../src/tools/guides.rs#L942) | An ellipse offers rings only from inside it. |
-| [`a_ruler_end_drags_alone_and_shift_turns_it_in_steps`](../../../src/tools/guides.rs#L958) | A ruler end drags alone and shift turns it in steps. |
-| [`dragging_a_vanishing_point_swings_its_helpers_round_their_far_ends`](../../../src/tools/guides.rs#L972) | Dragging a vanishing point swings its helpers round their far ends. |
-| [`a_pan_wave_crosses_at_its_points_and_runs_on_for_ever`](../../../src/tools/guides.rs#L991) | A pan wave crosses at its points and runs on for ever. |
-| [`a_wave_holds_points_on_its_graph_at_the_nearest_spot`](../../../src/tools/guides.rs#L1030) | A wave holds points on its graph at the nearest spot. |
-| [`a_wave_on_the_horizon_is_the_horizon_and_none_stands_over_a_point`](../../../src/tools/guides.rs#L1057) | A wave on the horizon is the horizon and none stands over a point. |
-| [`an_arc_in_a_square_box_is_a_circle_through_both_side_points`](../../../src/tools/guides.rs#L1070) | An arc in a square box is a circle through both side points. |
-| [`a_fisheye_arc_in_a_long_box_passes_its_points_and_the_widest_is_the_rim`](../../../src/tools/guides.rs#L1096) | A fisheye arc in a long box passes its points and the widest is the rim. |
-| [`a_horizontal_pan_bends_its_level_lines_through_the_side_points`](../../../src/tools/guides.rs#L1120) | A horizontal pan bends its level lines through the side points. |
-| [`a_vertical_pan_bends_its_verticals_through_points_above_and_below`](../../../src/tools/guides.rs#L1149) | A vertical pan bends its verticals through points above and below. |
-| [`a_360_pan_puts_four_points_to_its_box_and_runs_on_past_it`](../../../src/tools/guides.rs#L1160) | A 360 pan puts four points to its box and runs on past it. |
-| [`a_fisheye_arcs_both_ways_and_runs_depth_lines_to_its_centre`](../../../src/tools/guides.rs#L1180) | A fisheye arcs both ways and runs depth lines to its centre. |
-| [`a_wave_draws_inside_its_span_and_stays_on_the_canvas`](../../../src/tools/guides.rs#L1200) | A wave draws inside its span and stays on the canvas. |
-| [`a_curved_guide_moves_by_its_centre_stretches_by_its_points_and_turns_by_its_horizon`](../../../src/tools/guides.rs#L1214) | A curved guide moves by its centre stretches by its points and turns by its horizon. |
-| [`each_curved_kind_has_its_own_side_points`](../../../src/tools/guides.rs#L1253) | Each curved kind has its own side points. |
-| [`a_pans_shape_handle_sets_its_bend_from_how_far_out_it_is`](../../../src/tools/guides.rs#L1283) | A pans shape handle sets its bend from how far out it is. |
-| [`pull_goes_part_way`](../../../src/tools/guides.rs#L1307) | Pull goes part way. |
+| [`a_line_projects_square_onto_itself`](../../../src/tools/guides.rs#L854) | A line projects square onto itself. |
+| [`a_segment_holds_points_past_its_ends_on_the_ends`](../../../src/tools/guides.rs#L860) | A segment holds points past its ends on the ends. |
+| [`a_conic_in_a_square_is_its_inscribed_circle`](../../../src/tools/guides.rs#L868) | A conic in a square is its inscribed circle. |
+| [`a_conic_in_perspective_touches_each_edge_at_its_middle_in_depth`](../../../src/tools/guides.rs#L881) | A conic in perspective touches each edge at its middle in depth. |
+| [`the_pick_follows_the_motion_and_skips_fixed_curves`](../../../src/tools/guides.rs#L902) | The pick follows the motion and skips fixed curves. |
+| [`a_press_takes_the_nearest_fixed_curve_in_reach`](../../../src/tools/guides.rs#L921) | A press takes the nearest fixed curve in reach. |
+| [`a_ruler_is_fixed_and_an_infinite_one_runs_on`](../../../src/tools/guides.rs#L937) | A ruler is fixed and an infinite one runs on. |
+| [`parallel_lines_and_a_point_run_through_the_start`](../../../src/tools/guides.rs#L951) | Parallel lines and a point run through the start. |
+| [`an_ellipse_offers_rings_only_from_inside_it`](../../../src/tools/guides.rs#L965) | An ellipse offers rings only from inside it. |
+| [`a_ruler_end_drags_alone_and_shift_turns_it_in_steps`](../../../src/tools/guides.rs#L981) | A ruler end drags alone and shift turns it in steps. |
+| [`dragging_a_vanishing_point_swings_its_helpers_round_their_far_ends`](../../../src/tools/guides.rs#L995) | Dragging a vanishing point swings its helpers round their far ends. |
+| [`a_pan_wave_crosses_at_its_points_and_runs_on_for_ever`](../../../src/tools/guides.rs#L1014) | A pan wave crosses at its points and runs on for ever. |
+| [`a_wave_holds_points_on_its_graph_at_the_nearest_spot`](../../../src/tools/guides.rs#L1053) | A wave holds points on its graph at the nearest spot. |
+| [`a_wave_on_the_horizon_is_the_horizon_and_none_stands_over_a_point`](../../../src/tools/guides.rs#L1080) | A wave on the horizon is the horizon and none stands over a point. |
+| [`an_arc_in_a_square_box_is_a_circle_through_both_side_points`](../../../src/tools/guides.rs#L1093) | An arc in a square box is a circle through both side points. |
+| [`a_fisheye_arc_in_a_long_box_passes_its_points_and_the_widest_is_the_rim`](../../../src/tools/guides.rs#L1119) | A fisheye arc in a long box passes its points and the widest is the rim. |
+| [`a_horizontal_pan_bends_its_level_lines_through_the_side_points`](../../../src/tools/guides.rs#L1143) | A horizontal pan bends its level lines through the side points. |
+| [`a_vertical_pan_bends_its_verticals_through_points_above_and_below`](../../../src/tools/guides.rs#L1172) | A vertical pan bends its verticals through points above and below. |
+| [`a_360_pan_puts_four_points_to_its_box_and_runs_on_past_it`](../../../src/tools/guides.rs#L1183) | A 360 pan puts four points to its box and runs on past it. |
+| [`a_fisheye_arcs_both_ways_and_runs_depth_lines_to_its_centre`](../../../src/tools/guides.rs#L1203) | A fisheye arcs both ways and runs depth lines to its centre. |
+| [`a_wave_draws_inside_its_span_and_stays_on_the_canvas`](../../../src/tools/guides.rs#L1223) | A wave draws inside its span and stays on the canvas. |
+| [`a_curved_guide_moves_by_its_centre_stretches_by_its_points_and_turns_by_its_horizon`](../../../src/tools/guides.rs#L1237) | A curved guide moves by its centre stretches by its points and turns by its horizon. |
+| [`each_curved_kind_has_its_own_side_points`](../../../src/tools/guides.rs#L1276) | Each curved kind has its own side points. |
+| [`a_pans_shape_handle_sets_its_bend_from_how_far_out_it_is`](../../../src/tools/guides.rs#L1306) | A pans shape handle sets its bend from how far out it is. |
+| [`a_ruler_ticks_its_divisions_and_their_parts`](../../../src/tools/guides.rs#L1330) | A ruler ticks its divisions and their parts. |
+| [`pull_goes_part_way`](../../../src/tools/guides.rs#L1352) | Pull goes part way. |
 
 **Test helpers** (used only by the tests above):
 
-- [`near`](../../../src/tools/guides.rs#L818) — Near.
-- [`line`](../../../src/tools/guides.rs#L822) — Line.
-- [`fresh_doc`](../../../src/tools/guides.rs#L909) — Fresh doc.
-- [`tilted_wave`](../../../src/tools/guides.rs#L1023) — A pan's arch family on a frame turned 30°, `a` = 100, through `p`.
-- [`doc_frame`](../../../src/tools/guides.rs#L1115) — Doc frame.
+- [`near`](../../../src/tools/guides.rs#L841) — Near.
+- [`line`](../../../src/tools/guides.rs#L845) — Line.
+- [`fresh_doc`](../../../src/tools/guides.rs#L932) — Fresh doc.
+- [`tilted_wave`](../../../src/tools/guides.rs#L1046) — A pan's arch family on a frame turned 30°, `a` = 100, through `p`.
+- [`doc_frame`](../../../src/tools/guides.rs#L1138) — Doc frame.

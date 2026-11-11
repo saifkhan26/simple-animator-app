@@ -5994,9 +5994,20 @@ fn grid_settings(state: &mut AppState, ui: &mut egui::Ui) {
     theme::section_header(ui, icon, &what);
     match g.kind {
         GridKind::Ruler => {
+            ui.horizontal(|ui| {
+                ui.label("Divisions");
+                ui.add(egui::DragValue::new(&mut g.divisions).range(0..=MAX_DIVISIONS))
+                    .on_hover_text("Ticks splitting the ruler into equal parts. 0: none.");
+                ui.label("Subdivisions");
+                ui.add_enabled(
+                    g.divisions > 0,
+                    egui::DragValue::new(&mut g.subdivisions).range(1..=MAX_DIVISIONS),
+                )
+                .on_hover_text("Smaller ticks splitting each division into this many parts. 1: none.");
+            });
             ui.checkbox(&mut g.infinite_ruler, "Infinite").on_hover_text(
                 "Carry the line on past its ends, across the canvas: a press anywhere \
-                 along it draws along it",
+                 along it draws along it, and its ticks run on at the same spacing",
             );
         }
         GridKind::Parallel => {
@@ -7928,6 +7939,24 @@ fn draw_guide(
             let n = (b - a).normalized().rot90() * 5.0;
             for e in [a, b] {
                 painter.line_segment([e - n, e + n], main);
+            }
+            // Its divisions, and their parts smaller — along the whole line
+            // when it is infinite. Too close together to tell apart, the
+            // parts go, then the divisions.
+            let span = if g.infinite_ruler {
+                clip_line([a.x, a.y], [b.x, b.y], lo, hi)
+            } else {
+                Some((0.0, 1.0))
+            };
+            let px = (b - a).length();
+            let parts = g.subdivisions.max(1);
+            let parts = if px / (g.divisions.max(1) * parts) as f32 >= 4.0 { parts } else { 1 };
+            if let Some((t0, t1)) = span.filter(|_| px / g.divisions.max(1) as f32 >= 4.0) {
+                for (t, major) in guides::ruler_ticks(g.divisions, parts, t0, t1, 2000) {
+                    let e = a + (b - a) * t;
+                    let (k, s) = if major { (0.7, main) } else { (0.4, thin) };
+                    painter.line_segment([e - n * k, e + n * k], s);
+                }
             }
             knobs = vec![a, b];
         }
@@ -10980,6 +11009,44 @@ mod perspective_tests {
             assert!(shown("centre point to move it"), "{kind:?}");
             assert_eq!(shown("diamond"), pan, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn a_ruler_ticks_its_divisions_and_runs_them_on_when_infinite() {
+        use crate::tools::perspective::{GridKind, PerspectiveGrid};
+        let mut state = state();
+        state.perspective.show = true;
+        let segments = |state: &AppState| {
+            grid_shapes(state).iter().filter(|s| matches!(s, egui::Shape::LineSegment { .. })).count()
+        };
+        let mut ruler = PerspectiveGrid::fresh(GridKind::Ruler);
+        ruler.divisions = 0;
+        state.perspective.grids = vec![ruler];
+        state.perspective.ensure_ids();
+        let bare = segments(&state);
+        // Four divisions of three parts: 3 big ticks and 8 small ones.
+        state.perspective.grids[0].divisions = 4;
+        state.perspective.grids[0].subdivisions = 3;
+        assert_eq!(segments(&state), bare + 11);
+        // Infinite, the ticks run on along the line past the ends.
+        state.perspective.grids[0].infinite_ruler = true;
+        assert!(segments(&state) > bare + 11 + 10);
+        // Its settings offer both counts.
+        state.show_panels = true;
+        state.dispatch(Action::ToolPerspective);
+        state.show_grid_settings = true;
+        let ctx = egui::Context::default();
+        crate::ui::theme::install(&ctx);
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(SCREEN),
+                ..Default::default()
+            };
+            shapes = ctx.run(raw, |ctx| draw(&mut state, ctx)).shapes;
+        }
+        let shown = |text: &str| !texts(&shapes, &|t| t == text).is_empty();
+        assert!(shown("Divisions") && shown("Subdivisions") && shown("Infinite"));
     }
 
     #[test]

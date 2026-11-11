@@ -775,6 +775,29 @@ pub fn dragged(kind: GridKind, c0: &[P; 4], grab: GridGrab, start: P, now: P, sn
     }
 }
 
+/// A ruler's ticks between `t0` and `t1`, along it from one end (0) to the
+/// other (1): `(t, major)` for each, the major ones splitting it into
+/// `divisions` equal parts and the minor ones each part into `subdivisions`.
+/// The ends themselves are left out — the ruler marks those its own way —
+/// and an infinite ruler, asking past them, gets the same spacing on and
+/// on. At most `max` ticks; none if that would be more.
+pub fn ruler_ticks(divisions: u32, subdivisions: u32, t0: f32, t1: f32, max: usize) -> Vec<(f32, bool)> {
+    if divisions == 0 || t0.is_nan() || t1.is_nan() || t1 <= t0 {
+        return Vec::new();
+    }
+    let parts = subdivisions.max(1) as i64;
+    let step = 1.0 / (divisions as f64 * parts as f64);
+    let (i0, i1) = ((t0 as f64 / step).ceil() as i64, (t1 as f64 / step).floor() as i64);
+    if i1 < i0 || (i1 - i0) as usize >= max {
+        return Vec::new();
+    }
+    let end = divisions as i64 * parts;
+    (i0..=i1)
+        .filter(|&i| i != 0 && i != end)
+        .map(|i| ((i as f64 * step) as f32, i.rem_euclid(parts) == 0))
+        .collect()
+}
+
 /// `p` turned about `o` to the nearest 15° step, at the same distance.
 fn turn_in_steps(o: P, p: P) -> P {
     let v = sub(p, o);
@@ -1301,6 +1324,28 @@ mod tests {
         let (g, s) = fresh_doc(GridKind::PanVertical);
         let h = bend_handle(GridKind::PanVertical, 0.0, &g.doc_corners(&s)).unwrap();
         assert!(h[0] > 500.0 && h[1] > 500.0, "{h:?}");
+    }
+
+    #[test]
+    fn a_ruler_ticks_its_divisions_and_their_parts() {
+        let t = ruler_ticks(4, 2, 0.0, 1.0, 100);
+        let majors: Vec<f32> = t.iter().filter(|x| x.1).map(|x| x.0).collect();
+        let minors: Vec<f32> = t.iter().filter(|x| !x.1).map(|x| x.0).collect();
+        assert_eq!(majors, [0.25, 0.5, 0.75], "the ends are the ruler's own");
+        assert_eq!(minors, [0.125, 0.375, 0.625, 0.875]);
+        // Three parts to a division: two small ticks between the big ones.
+        let t = ruler_ticks(1, 3, 0.0, 1.0, 100);
+        assert_eq!(t.len(), 2);
+        assert!((t[0].0 - 1.0 / 3.0).abs() < 1e-6 && !t[0].1);
+        assert!(ruler_ticks(0, 4, 0.0, 1.0, 100).is_empty(), "no divisions, no ticks");
+        assert!(ruler_ticks(5, 1, 0.0, 1.0, 100).iter().all(|x| x.1), "no parts, big ticks only");
+        // An infinite ruler carries them on past its ends, ends ticked as
+        // divisions there.
+        let t = ruler_ticks(2, 1, -1.0, 2.0, 100);
+        let at: Vec<f32> = t.iter().map(|x| x.0).collect();
+        assert_eq!(at, [-1.0, -0.5, 0.5, 1.5, 2.0]);
+        // Crowded past the cap: none at all, not a stretch of them.
+        assert!(ruler_ticks(64, 64, -50.0, 50.0, 2000).is_empty());
     }
 
     #[test]
