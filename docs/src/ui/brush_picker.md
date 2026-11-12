@@ -1,6 +1,6 @@
 # `src/ui/brush_picker.rs` — the brush picker grid
 
-> **Source:** [src/ui/brush_picker.rs](../../../src/ui/brush_picker.rs) · **Module:** `crate::ui::brush_picker` · **Size:** 263 lines · Line links as of commit `7901e50`
+> **Source:** [src/ui/brush_picker.rs](../../../src/ui/brush_picker.rs) · **Module:** `crate::ui::brush_picker` · **Size:** 263 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 

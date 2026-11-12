@@ -9,6 +9,7 @@ mod lasso_fill;
 mod liquify;
 mod orient;
 pub mod recolor;
+mod substitute;
 pub mod pen_slots;
 mod select;
 
@@ -1295,6 +1296,8 @@ pub struct AppState {
     pub track_stretch: String,
     /// The Replace color window: its colours, tolerance and span.
     pub recolor: RecolorCfg,
+    /// The Drawing picker's thumbnails. See `app/substitute.rs`.
+    drawing_thumbs: substitute::Thumbs,
     /// What the cell collector last ran against: the history's revision and
     /// the pool's length. `None` makes it run. See `collect_cells`.
     gc_key: Option<(u64, usize)>,
@@ -1893,6 +1896,7 @@ impl AppState {
             track_repeat_n: 2,
             track_stretch: String::new(),
             recolor: RecolorCfg::default(),
+            drawing_thumbs: Default::default(),
             gc_key: None,
             blank_cache: HashMap::new(),
             blank_scans_left: 0,
@@ -2100,6 +2104,7 @@ impl AppState {
         self.save_error = None;
         self.retire_cell_textures();
         self.retire_all_ghosts();
+        self.retire_drawing_thumbs();
         self.cell_dirty.clear();
         self.clear_track_state();
         for id in 0..self.project.cells.len() {
@@ -7199,6 +7204,7 @@ impl AppState {
             Action::TrackReverse => self.reverse_track_selection(),
             Action::TrackSwing => self.swing_track_selection(),
             Action::ReplaceColor => self.open_recolor(),
+            Action::TrackUnlink => self.unlink_track_selection(),
             Action::SelectionDeselect => self.deselect(),
             Action::SelectAll => self.select_all(),
             Action::SelectInvert => self.select_invert(),
@@ -7395,6 +7401,7 @@ impl AppState {
         }
         self.retire_cell_textures();
         self.retire_all_ghosts();
+        self.retire_drawing_thumbs();
         self.cell_dirty.clear();
         self.clear_track_state();
         for id in 0..self.project.cells.len() {
@@ -7749,6 +7756,7 @@ impl eframe::App for AppState {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         self.blank_scans_left = Self::BLANK_SCANS_PER_FRAME;
+        self.refill_thumbs();
 
         // Resolve any deferred preview-texture free now, before drawing, so the
         // freed textures are never referenced by this frame's paint list.

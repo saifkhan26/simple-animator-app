@@ -1,6 +1,6 @@
 # `src/krita_link.rs` — the two-way live link with Krita
 
-> **Source:** [src/krita_link.rs](../../src/krita_link.rs) · **Module:** `crate::krita_link` · **Size:** 1879 lines · Line links as of commit `7901e50`
+> **Source:** [src/krita_link.rs](../../src/krita_link.rs) · **Module:** `crate::krita_link` · **Size:** 1879 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 

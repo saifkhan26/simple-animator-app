@@ -1,6 +1,6 @@
 # `src/tools/fill.rs` — flood fill, gap closing and fill painting
 
-> **Source:** [src/tools/fill.rs](../../../src/tools/fill.rs) · **Module:** `crate::tools::fill` · **Size:** 3253 lines · Line links as of commit `7901e50`
+> **Source:** [src/tools/fill.rs](../../../src/tools/fill.rs) · **Module:** `crate::tools::fill` · **Size:** 3253 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/ui/tracks.rs` — the timeline's layer tracks
 
-> **Source:** [src/ui/tracks.rs](../../../src/ui/tracks.rs) · **Module:** `crate::ui::tracks` · **Size:** 1957 lines · Line links as of commit `7901e50`
+> **Source:** [src/ui/tracks.rs](../../../src/ui/tracks.rs) · **Module:** `crate::ui::tracks` · **Size:** 2129 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 
@@ -265,6 +265,24 @@ One bar ready to paint.
 | `cell` | `CellId` | The drawing. |
 | `preview` | `bool` | Drawn from a previewed retime rather than the real sheet. |
 
+### `const PICK_THUMB`
+[src/ui/tracks.rs:1629](../../../src/ui/tracks.rs#L1629)
+
+```rust
+const PICK_THUMB: f32 = 64.0;
+```
+
+Displayed size of a thumbnail's longer side in the Drawing picker.
+
+### `const PICK_COLUMNS`
+[src/ui/tracks.rs:1632](../../../src/ui/tracks.rs#L1632)
+
+```rust
+const PICK_COLUMNS: usize = 4;
+```
+
+Thumbnails to a row in the Drawing picker.
+
 ## Free functions
 
 ### `active_tint`
@@ -515,7 +533,7 @@ Paints the tracks: row backgrounds, every bar (from the real sheet or a previewe
 highlight, hover, drop target, the playhead line, and onion/grid key marks.
 
 ### `drag_label`
-[src/ui/tracks.rs:1317](../../../src/ui/tracks.rs#L1317)
+[src/ui/tracks.rs:1353](../../../src/ui/tracks.rs#L1353)
 
 ```rust
 fn drag_label(state: &AppState, t: Target, copy: bool) -> Option<String>
@@ -525,7 +543,7 @@ The text shown beside the pointer during a drag ("Move 2 drawings +3 frames", "H
 locked layer"…).
 
 ### `pointer_label`
-[src/ui/tracks.rs:1351](../../../src/ui/tracks.rs#L1351)
+[src/ui/tracks.rs:1387](../../../src/ui/tracks.rs#L1387)
 
 ```rust
 fn pointer_label(ctx: &egui::Context, id: Id, p: Pos2, text: String)
@@ -534,7 +552,7 @@ fn pointer_label(ctx: &egui::Context, id: Id, p: Pos2, text: String)
 A small label beside the pointer. Painted straight onto a tooltip layer rather than laid out as widgets: widgets are hit-tested, and one sitting under the pointer for even a frame would take the press meant for a bar.
 
 ### `hover_text`
-[src/ui/tracks.rs:1369](../../../src/ui/tracks.rs#L1369)
+[src/ui/tracks.rs:1405](../../../src/ui/tracks.rs#L1405)
 
 ```rust
 fn hover_text(state: &AppState, b: Block) -> String
@@ -543,7 +561,7 @@ fn hover_text(state: &AppState, b: Block) -> String
 The tooltip for a bar: which drawing, its frames and hold length.
 
 ### `context_menu`
-[src/ui/tracks.rs:1385](../../../src/ui/tracks.rs#L1385)
+[src/ui/tracks.rs:1435](../../../src/ui/tracks.rs#L1435)
 
 ```rust
 fn context_menu(state: &mut AppState, ui: &mut egui::Ui)
@@ -552,31 +570,43 @@ fn context_menu(state: &mut AppState, ui: &mut egui::Ui)
 The right-click menu on the tracks: delete drawings (leave blank / close gap), set timing "on N", select and similar
 actions. Its **Range** submenu reworks each run of selected drawings — Reverse, Swing, Repeat ×N and Stretch to a
 length typed as frames or as the frame box's arithmetic (`*1.5`) — through the `AppState::*_track_selection` commands
-in [app.rs](../app.md) and `Project::rework_runs` in [doc/project.rs](../doc/project.md).
+in [app.rs](../app.md) and `Project::rework_runs` in [doc/project.rs](../doc/project.md). Its **Drawing** submenu
+([`drawing_picker`](#drawing_picker)) shows another of the layer's drawings on the picked keys, shared, and
+**Make independent** gives a shared one a copy of its own; both are in [app/substitute.rs](../app/substitute.md).
+
+### `drawing_picker`
+[src/ui/tracks.rs:1639](../../../src/ui/tracks.rs#L1639)
+
+```rust
+fn drawing_picker(state: &mut AppState, ui: &mut egui::Ui)
+```
+
+The Drawing submenu: the active layer's drawings as numbered thumbnails. A click shows that drawing on the layer's picked keys — or from the playhead when none are — shared, not copied. The ones those keys show now are outlined.
 
 ## Tests
 
 ### `mod tests`
 
-Run with `cargo test ui::tracks::tests` · 6 tests
+Run with `cargo test ui::tracks::tests` · 7 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_plain_drag_moves_the_drawing`](../../../src/ui/tracks.rs#L1629) | A plain drag moves the drawing. |
-| [`a_group_row_takes_no_drawings_and_folding_hides_its_layers`](../../../src/ui/tracks.rs#L1639) | A group's row takes no drawings, and a folded group's layers have no rows at all. |
-| [`shift_partway_keeps_a_drag_on_its_layer`](../../../src/ui/tracks.rs#L1660) | Shift pressed partway through a drag that has gone further along than across keeps the drawing on its own layer. |
-| [`a_ctrl_drag_copies_the_drawing`](../../../src/ui/tracks.rs#L1698) | A ctrl drag copies the drawing. |
-| [`no_plain_drag_ever_duplicates`](../../../src/ui/tracks.rs#L1714) | Every plain drag of every drawing, grabbed at every one of its frames, to every frame of both layers: a move never leaves the drawing showing on more frames than it had. |
-| [`a_drag_after_resting_on_a_bar_still_moves_it`](../../../src/ui/tracks.rs#L1769) | Resting on a bar until its details show, then dragging it, still drags. egui's at-pointer tooltip used to appear over the pointer and take the press. |
+| [`a_drawing_picked_on_a_held_frame_starts_there`](../../../src/ui/tracks.rs#L1781) | A right-click partway through a hold, then a drawing picked from the menu: it starts on the frame clicked, and the drawing held there keeps the frames before it. |
+| [`a_plain_drag_moves_the_drawing`](../../../src/ui/tracks.rs#L1801) | A plain drag moves the drawing. |
+| [`a_group_row_takes_no_drawings_and_folding_hides_its_layers`](../../../src/ui/tracks.rs#L1811) | A group's row takes no drawings, and a folded group's layers have no rows at all. |
+| [`shift_partway_keeps_a_drag_on_its_layer`](../../../src/ui/tracks.rs#L1832) | Shift pressed partway through a drag that has gone further along than across keeps the drawing on its own layer. |
+| [`a_ctrl_drag_copies_the_drawing`](../../../src/ui/tracks.rs#L1870) | A ctrl drag copies the drawing. |
+| [`no_plain_drag_ever_duplicates`](../../../src/ui/tracks.rs#L1886) | Every plain drag of every drawing, grabbed at every one of its frames, to every frame of both layers: a move never leaves the drawing showing on more frames than it had. |
+| [`a_drag_after_resting_on_a_bar_still_moves_it`](../../../src/ui/tracks.rs#L1941) | Resting on a bar until its details show, then dragging it, still drags. egui's at-pointer tooltip used to appear over the pointer and take the press. |
 
 **Test helpers** (used only by the tests above):
 
-- [`sheet`](../../../src/ui/tracks.rs#L1565) — One layer, a distinct drawing keyed on each of `keys`, marked with its key frame + 1 in its first byte (alpha set, so it is not blank).
-- [`row`](../../../src/ui/tracks.rs#L1579) — The mark of the drawing showing on every frame of `layer`.
-- [`frame`](../../../src/ui/tracks.rs#L1586) — Run one frame of the tracks, laid out from the top-left corner.
-- [`at`](../../../src/ui/tracks.rs#L1601) — Centre of `frame` on the top row, at the default zoom with no scroll.
-- [`drag`](../../../src/ui/tracks.rs#L1610) — Press at `from`, drag through to `to`, release — each step its own frame, as a real drag arrives.
-- [`frames_showing`](../../../src/ui/tracks.rs#L1706) — How many frames of `layer` show the drawing marked `mark`.
+- [`sheet`](../../../src/ui/tracks.rs#L1714) — One layer, a distinct drawing keyed on each of `keys`, marked with its key frame + 1 in its first byte (alpha set, so it is not blank).
+- [`row`](../../../src/ui/tracks.rs#L1728) — The mark of the drawing showing on every frame of `layer`.
+- [`frame`](../../../src/ui/tracks.rs#L1735) — Run one frame of the tracks, laid out from the top-left corner.
+- [`at`](../../../src/ui/tracks.rs#L1750) — Centre of `frame` on the top row, at the default zoom with no scroll.
+- [`drag`](../../../src/ui/tracks.rs#L1759) — Press at `from`, drag through to `to`, release — each step its own frame, as a real drag arrives.
+- [`frames_showing`](../../../src/ui/tracks.rs#L1878) — How many frames of `layer` show the drawing marked `mark`.
 
 ### `mod camera_key_drag_tests`
 
@@ -584,19 +614,19 @@ Run with `cargo test ui::tracks::camera_key_drag_tests` · 6 tests
 
 | Test | What it checks |
 |---|---|
-| [`dragging_a_key_s_dot_retimes_the_key_and_leaves_the_playhead`](../../../src/ui/tracks.rs#L1882) | Dragging a key s dot retimes the key and leaves the playhead. |
-| [`alt_dragging_leaves_a_copy_behind`](../../../src/ui/tracks.rs#L1895) | Alt dragging leaves a copy behind. |
-| [`a_key_dropped_on_another_takes_its_place`](../../../src/ui/tracks.rs#L1902) | A key dropped on another takes its place. |
-| [`a_drag_from_anywhere_else_on_the_ruler_still_scrubs`](../../../src/ui/tracks.rs#L1911) | The pins for the ruler as it was: everything that isn't a drag from a dot still scrubs, and moves no key. |
-| [`a_click_on_a_dot_still_goes_to_its_frame`](../../../src/ui/tracks.rs#L1927) | A click on a dot still goes to its frame. |
-| [`a_key_dragged_back_to_where_it_was_changes_nothing`](../../../src/ui/tracks.rs#L1941) | A key dragged back to where it was changes nothing. |
+| [`dragging_a_key_s_dot_retimes_the_key_and_leaves_the_playhead`](../../../src/ui/tracks.rs#L2054) | Dragging a key s dot retimes the key and leaves the playhead. |
+| [`alt_dragging_leaves_a_copy_behind`](../../../src/ui/tracks.rs#L2067) | Alt dragging leaves a copy behind. |
+| [`a_key_dropped_on_another_takes_its_place`](../../../src/ui/tracks.rs#L2074) | A key dropped on another takes its place. |
+| [`a_drag_from_anywhere_else_on_the_ruler_still_scrubs`](../../../src/ui/tracks.rs#L2083) | The pins for the ruler as it was: everything that isn't a drag from a dot still scrubs, and moves no key. |
+| [`a_click_on_a_dot_still_goes_to_its_frame`](../../../src/ui/tracks.rs#L2099) | A click on a dot still goes to its frame. |
+| [`a_key_dragged_back_to_where_it_was_changes_nothing`](../../../src/ui/tracks.rs#L2113) | A key dragged back to where it was changes nothing. |
 
 **Test helpers** (used only by the tests above):
 
-- [`keyed`](../../../src/ui/tracks.rs#L1815) — Twelve frames, camera keys on 2 (ease in) and 8.
-- [`keys`](../../../src/ui/tracks.rs#L1832) — Keys.
-- [`frame`](../../../src/ui/tracks.rs#L1836) — Frame.
-- [`dot`](../../../src/ui/tracks.rs#L1851) — The dot of a key on `frame`, at the default zoom with no scroll.
-- [`number`](../../../src/ui/tracks.rs#L1856) — The same frame's number, up in the ruler clear of the dots.
-- [`button`](../../../src/ui/tracks.rs#L1860) — Button.
-- [`drag`](../../../src/ui/tracks.rs#L1869) — Drag.
+- [`keyed`](../../../src/ui/tracks.rs#L1987) — Twelve frames, camera keys on 2 (ease in) and 8.
+- [`keys`](../../../src/ui/tracks.rs#L2004) — Keys.
+- [`frame`](../../../src/ui/tracks.rs#L2008) — Frame.
+- [`dot`](../../../src/ui/tracks.rs#L2023) — The dot of a key on `frame`, at the default zoom with no scroll.
+- [`number`](../../../src/ui/tracks.rs#L2028) — The same frame's number, up in the ruler clear of the dots.
+- [`button`](../../../src/ui/tracks.rs#L2032) — Button.
+- [`drag`](../../../src/ui/tracks.rs#L2041) — Drag.

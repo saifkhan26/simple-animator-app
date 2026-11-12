@@ -881,6 +881,52 @@ fn snapshots() {
     (rig.state.recolor.from, rig.state.recolor.to) = ([200, 40, 40], [40, 80, 220]);
     rig.settle();
     snapshot(&mut rig, 2.0).save(dir.join("recolor.png")).unwrap();
+    // A layer reusing drawings: numbered bars, then the Drawing picker open
+    // on one. Thumbnails come out as blank cards here: this draws text and
+    // shapes, not images.
+    let mut rig = Rig::new(Win::Panel(PanelId::Timeline));
+    {
+        let p = &mut rig.state.project;
+        p.ensure_frame_count(24);
+        p.layers[0].exposures.iter_mut().for_each(|e| *e = None);
+        let mut ids = Vec::new();
+        for f in [0, 4, 8] {
+            let id = p.alloc_cell_for(0);
+            p.cell_mut(id).unwrap().pixels_mut()[3] = 255;
+            p.layers[0].set_key(f, id);
+            ids.push(id);
+        }
+        p.layers[0].set_key(12, ids[0]);
+        p.layers[0].set_key(16, ids[1]);
+        p.layers[0].set_key(20, ids[0]);
+    }
+    rig.state.track_frame_w = 14.0;
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("timeline_reuse.png")).unwrap();
+    let shapes = rig.settle();
+    let bar = texts(&shapes).into_iter().find(|t| t.text == "3").expect("drawing 3's bar").rect.center();
+    let right = |pressed| egui::Event::PointerButton {
+        pos: bar,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    rig.frame(vec![egui::Event::PointerMoved(bar), right(true)]);
+    rig.frame(vec![right(false)]);
+    let shapes = rig.settle();
+    let item = texts(&shapes).into_iter().find(|t| t.text == "Drawing").expect("the Drawing item").rect.center();
+    rig.frame(vec![egui::Event::PointerMoved(item)]);
+    rig.settle();
+    let menu = rig.ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| l.order == egui::Order::Foreground)
+            .filter_map(|l| egui::AreaState::load(&rig.ctx, l.id).map(|s| s.rect()))
+            .fold(rig.rect(), |a, b| a.union(b))
+    });
+    snapshot_of(&mut rig, 2.0, menu.expand(4.0)).save(dir.join("drawing_picker.png")).unwrap();
+
     // A grid's settings, with Fill canvas's rows showing.
     let mut rig = Rig::new(Win::GridSettings);
     snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();

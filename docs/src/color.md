@@ -1,6 +1,6 @@
 # `src/color.rs` — HSL colours and colour harmonies
 
-> **Source:** [src/color.rs](../../src/color.rs) · **Module:** `crate::color` · **Size:** 535 lines · Line links as of commit `7901e50`
+> **Source:** [src/color.rs](../../src/color.rs) · **Module:** `crate::color` · **Size:** 535 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 

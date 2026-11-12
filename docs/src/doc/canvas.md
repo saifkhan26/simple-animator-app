@@ -1,6 +1,6 @@
 # `src/doc/canvas.rs` — Pixel storage for one drawing (a cell)
 
-> **Source:** [src/doc/canvas.rs](../../../src/doc/canvas.rs) · **Module:** `crate::doc::canvas` · **Size:** 879 lines · Line links as of commit `7901e50`
+> **Source:** [src/doc/canvas.rs](../../../src/doc/canvas.rs) · **Module:** `crate::doc::canvas` · **Size:** 879 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 
@@ -1097,22 +1097,22 @@ Run with `cargo test doc::canvas`.
 
 | Test | What it checks |
 |---|---|
-| [`orienting_a_packed_cell_matches_the_unpacked_one`](../../../src/doc/canvas.rs#L664) | For all 8 orientations, `oriented` on a full and on a packed canvas gives the same size and pixels as permuting the whole buffer, with a new rev; a blank canvas stays blank. |
-| [`writes_the_bytes_the_derive_wrote`](../../../src/doc/canvas.rs#L701) | The hand-written `serialize` produces the same postcard bytes as the old `#[derive]`d struct, also through an `Arc`, and a packed canvas writes the same bytes as its full form. |
-| [`reads_what_the_derive_wrote_packed`](../../../src/doc/canvas.rs#L720) | Loading old-format bytes gives a packed canvas with the same pixels, holding only the 21×16 bounding rect, and clean (`dirty` is `None`). |
-| [`packing_loses_nothing_and_reads_the_same`](../../../src/doc/canvas.rs#L737) | A packed copy matches the full one for `pixels`, `content_bounds`, `px`, `read_rect` and `row_span`; packing twice returns `false`; writing unpacks and keeps the drawing. |
-| [`unpacking_ahead_of_a_write_packs_back_for_free`](../../../src/doc/canvas.rs#L765) | `unpack` keeps the rev and held rect and repacks to just the drawing; after a write, `held_rect` is the whole canvas and packing still keeps everything. |
-| [`a_blank_canvas_holds_nothing`](../../../src/doc/canvas.rs#L789) | A new 2160×2880 canvas uses 0 heap bytes, is blank, reads zeros; `clear` frees the buffer. |
-| [`pixels_that_dont_fit_the_size_are_an_error`](../../../src/doc/canvas.rs#L800) | Loading a 4×4 canvas with 10 pixel bytes fails instead of producing a bad canvas. |
-| [`content_bounds_wraps_every_inked_pixel`](../../../src/doc/canvas.rs#L810) | `content_bounds` ignores colour with zero alpha, wraps every pixel with alpha ≥ 1, and gives the same answer after packing. |
+| [`orienting_a_packed_cell_matches_the_unpacked_one`](../../../src/doc/canvas.rs#L712) | For all 8 orientations, `oriented` on a full and on a packed canvas gives the same size and pixels as permuting the whole buffer, with a new rev; a blank canvas stays blank. |
+| [`writes_the_bytes_the_derive_wrote`](../../../src/doc/canvas.rs#L749) | The hand-written `serialize` produces the same postcard bytes as the old `#[derive]`d struct, also through an `Arc`, and a packed canvas writes the same bytes as its full form. |
+| [`reads_what_the_derive_wrote_packed`](../../../src/doc/canvas.rs#L768) | Loading old-format bytes gives a packed canvas with the same pixels, holding only the 21×16 bounding rect, and clean (`dirty` is `None`). |
+| [`packing_loses_nothing_and_reads_the_same`](../../../src/doc/canvas.rs#L785) | A packed copy matches the full one for `pixels`, `content_bounds`, `px`, `read_rect` and `row_span`; packing twice returns `false`; writing unpacks and keeps the drawing. |
+| [`unpacking_ahead_of_a_write_packs_back_for_free`](../../../src/doc/canvas.rs#L813) | `unpack` keeps the rev and held rect and repacks to just the drawing; after a write, `held_rect` is the whole canvas and packing still keeps everything. |
+| [`a_blank_canvas_holds_nothing`](../../../src/doc/canvas.rs#L837) | A new 2160×2880 canvas uses 0 heap bytes, is blank, reads zeros; `clear` frees the buffer. |
+| [`pixels_that_dont_fit_the_size_are_an_error`](../../../src/doc/canvas.rs#L848) | Loading a 4×4 canvas with 10 pixel bytes fails instead of producing a bad canvas. |
+| [`content_bounds_wraps_every_inked_pixel`](../../../src/doc/canvas.rs#L858) | `content_bounds` ignores colour with zero alpha, wraps every pixel with alpha ≥ 1, and gives the same answer after packing. |
 
 **Test helpers:**
-- `Derived` ([line 647](../../../src/doc/canvas.rs#L647)) — a struct with `width`, `height`,
+- `Derived` ([line 695](../../../src/doc/canvas.rs#L695)) — a struct with `width`, `height`,
   `pixels: Vec<u8>` and `#[derive(Serialize, Deserialize)]`: the exact old on-disk shape of a
   canvas, used to prove the format did not change.
-- `inked` ([line 653](../../../src/doc/canvas.rs#L653)) — a `w`×`h` canvas with every byte set to
+- `inked` ([line 701](../../../src/doc/canvas.rs#L701)) — a `w`×`h` canvas with every byte set to
   a varying non-zero-ish pattern (`i * 7 % 251`).
-- `sparse` ([line 687](../../../src/doc/canvas.rs#L687)) — a 40×30 canvas with a 4×4 opaque square
+- `sparse` ([line 735](../../../src/doc/canvas.rs#L735)) — a 40×30 canvas with a 4×4 opaque square
   at (10..14, 5..9) and one "red but transparent" pixel at (30, 20), so packed bounds
   (by any byte) and content bounds (by alpha) differ.
 

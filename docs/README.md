@@ -42,6 +42,7 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/app/pen_slots.rs`](src/app/pen_slots.md) | the pen slots (the row of pens in the Tools panel) |
 | [`src/app/recolor.rs`](src/app/recolor.md) | the Replace color command |
 | [`src/app/select.rs`](src/app/select.md) | the selection: mask, gestures and floating pixels |
+| [`src/app/substitute.rs`](src/app/substitute.md) | reusing drawings across keys |
 | [`src/main.rs`](src/main.md) | where the program starts |
 
 ### Document model (`src/doc/`)
@@ -201,4 +202,4 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/platform.rs`](src/platform.md) | rounded corners and a border for the frameless window (Windows) |
 | [`src/undo.rs`](src/undo.md) | undo and redo history |
 
-_120 pages._
+_121 pages._

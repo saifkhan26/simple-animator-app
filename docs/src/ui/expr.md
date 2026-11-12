@@ -1,6 +1,6 @@
 # `src/ui/expr.rs` — arithmetic in number fields
 
-> **Source:** [src/ui/expr.rs](../../../src/ui/expr.rs) · **Module:** `crate::ui::expr` · **Size:** 221 lines · Line links as of commit `7901e50`
+> **Source:** [src/ui/expr.rs](../../../src/ui/expr.rs) · **Module:** `crate::ui::expr` · **Size:** 221 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 
