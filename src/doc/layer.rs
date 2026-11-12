@@ -17,6 +17,7 @@ pub fn next_uid() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+use crate::doc::blend::BlendMode;
 use crate::doc::transform::{Ease, Transform, TransformKey};
 use crate::timeline::onion::OnionPin;
 
@@ -111,6 +112,11 @@ pub struct Layer {
     /// the tracks.
     #[serde(default)]
     pub collapsed: bool,
+    /// How this layer's colours mix with what is under it. Always Normal on
+    /// a group. v9 appended it, and must stay the LAST field; a file whose
+    /// layers are all Normal is still written as v8 (see `io::project_file`).
+    #[serde(default)]
+    pub blend: BlendMode,
 }
 
 /// What a row of the layer stack is.
@@ -148,6 +154,7 @@ impl Layer {
             kind: LayerKind::Paint,
             in_group: false,
             collapsed: false,
+            blend: BlendMode::Normal,
         }
     }
 

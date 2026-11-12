@@ -18,6 +18,7 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 
+use crate::doc::blend::BlendMode;
 use crate::doc::project::Project;
 use crate::doc::transform::Transform;
 
@@ -33,7 +34,13 @@ const MAGIC: &[u8; 4] = b"ANIM";
 // only the inflate step differs.
 // v7 appends `clip` and `alpha_lock` to each layer. Still deflated.
 // v8 appends `kind`, `in_group` and `collapsed` to each layer: layer groups.
-const VERSION: u32 = 8;
+// v9 appends `blend` to each layer: blend modes. Only a project that uses
+// one is written as v9; one whose layers are all Normal is written as v8,
+// byte for byte as builds before blend modes wrote it, so they still
+// open it.
+const VERSION: u32 = 9;
+/// What a project with no blend mode is written as: see `VERSION`.
+const PLAIN_VERSION: u32 = 8;
 const EXT: &str = "anim";
 
 /// Compression level. Deliberately [`Compression::fast`] (level 1) rather than
@@ -58,9 +65,10 @@ const BUF: usize = 256 * 1024;
 fn encode(project: &Project) -> Result<(Vec<u8>, u64)> {
     // The header is written into the buffer *first* and the encoder appends
     // after it, so the compressed body lands in place with no second copy.
+    let plain = project.layers.iter().all(|l| l.blend == BlendMode::Normal);
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&(if plain { PLAIN_VERSION } else { VERSION }).to_le_bytes());
 
     // `to_io` rather than `to_stdvec`: serialising to a `Vec` first would
     // materialise the whole uncompressed project — hundreds of MB on exactly
@@ -72,8 +80,13 @@ fn encode(project: &Project) -> Result<(Vec<u8>, u64)> {
     // it every pixel byte makes its own trip through the deflate state machine
     // — measured at 3 MiB/s, about thirty times slower than with it.
     let enc = ZlibEncoder::new(out, level());
-    let w = postcard::to_io(project, BufWriter::with_capacity(BUF, enc))
-        .context("serialising project")?;
+    let buf = BufWriter::with_capacity(BUF, enc);
+    let w = if plain {
+        postcard::to_io(&crate::io::legacy::ProjectV8Ref::of(project), buf)
+    } else {
+        postcard::to_io(project, buf)
+    }
+    .context("serialising project")?;
     // `into_inner` flushes on the way out, so the tail of the buffer reaches
     // the compressor; a write error surfaces here rather than being swallowed
     // by a `Drop`.
@@ -102,7 +115,10 @@ fn decode_from(mut input: impl Read) -> Result<Project> {
     }
     let version = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
     let mut project: Project = match version {
-        8 => stream(input).context("parsing project body")?,
+        9 => stream(input).context("parsing project body")?,
+        8 => stream::<crate::io::legacy::ProjectV8>(input)
+            .context("parsing v8 project body")?
+            .into(),
         7 => stream::<crate::io::legacy::ProjectV7>(input)
             .context("parsing v7 project body")?
             .into(),
@@ -379,6 +395,67 @@ mod tests {
         assert_eq!(back.cells[2].px(6, 5)[3], 255);
     }
 
+    fn version_of(bytes: &[u8]) -> u32 {
+        u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+    }
+
+    /// A project with no blend mode is written as v8 — the bytes builds from
+    /// before blend modes wrote — so those builds still open it.
+    #[test]
+    fn without_blend_modes_a_project_saves_as_v8_for_older_builds() {
+        let mut p = Project::new(6, 4, 24.0);
+        p.add_layer();
+        p.layers[1].clip = true;
+        let (bytes, _) = encode(&p).unwrap();
+        assert_eq!(version_of(&bytes), PLAIN_VERSION);
+        // What an older build does with it: read the v8 layout, all of it.
+        let mut body = Vec::new();
+        ZlibDecoder::new(&bytes[8..]).read_to_end(&mut body).unwrap();
+        let (_, rest) = postcard::take_from_bytes::<crate::io::legacy::ProjectV8>(&body).unwrap();
+        assert!(rest.is_empty(), "nothing a v8 reader would trip over");
+        let q = decode(&bytes).unwrap();
+        assert!(q.layers[1].clip);
+        assert!(q.layers.iter().all(|l| l.blend == BlendMode::Normal));
+    }
+
+    /// One blend mode anywhere makes the file v9, and every mode comes back.
+    #[test]
+    fn blend_modes_save_as_v9_and_come_back() {
+        let mut p = Project::new(6, 4, 24.0);
+        for _ in 1..BlendMode::ALL.len() {
+            p.add_layer();
+        }
+        for (l, m) in p.layers.iter_mut().zip(BlendMode::ALL) {
+            l.blend = m;
+        }
+        let (bytes, _) = encode(&p).unwrap();
+        assert_eq!(version_of(&bytes), VERSION);
+        let q = decode(&bytes).unwrap();
+        let modes: Vec<BlendMode> = q.layers.iter().map(|l| l.blend).collect();
+        assert_eq!(modes, BlendMode::ALL);
+        // Back to all Normal: back to v8.
+        let mut p = q;
+        p.layers.iter_mut().for_each(|l| l.blend = BlendMode::Normal);
+        assert_eq!(version_of(&encode(&p).unwrap().0), PLAIN_VERSION);
+    }
+
+    /// The v8 written for a plain project and the v8 an older build wrote are
+    /// one layout: what the owned mirror reads, the borrowed one writes.
+    #[test]
+    fn the_v8_writer_and_reader_agree() {
+        let mut p = Project::new(5, 3, 12.0);
+        p.layers.push(crate::doc::layer::Layer::group("G", p.frame_count));
+        p.layers[0].opacity = 0.5;
+        p.layers[1].set_transform_key(1, Default::default());
+        let raw = postcard::to_stdvec(&crate::io::legacy::ProjectV8Ref::of(&p)).unwrap();
+        let back: crate::io::legacy::ProjectV8 = postcard::from_bytes(&raw).unwrap();
+        assert_eq!(postcard::to_stdvec(&back).unwrap(), raw);
+        let q: Project = back.into();
+        assert_eq!(q.layers.len(), p.layers.len());
+        assert_eq!(q.layers[0].opacity, 0.5);
+        assert_eq!(q.layers.iter().map(|l| l.kind).collect::<Vec<_>>(), p.layers.iter().map(|l| l.kind).collect::<Vec<_>>());
+    }
+
     /// Current-version round trip through encode/decode.
     #[test]
     fn round_trips_current_project() {
@@ -402,6 +479,7 @@ mod tests {
         }];
         p.layers[0].set_transform_key(2, Default::default());
         p.layers[0].set_transform_key_ease(2, crate::doc::transform::Ease::Out);
+        p.layers[0].blend = BlendMode::Screen;
         let (bytes, _) = encode(&p).unwrap();
         assert_eq!(
             u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
@@ -419,6 +497,7 @@ mod tests {
             q.layers[0].transform_keys[0].ease,
             crate::doc::transform::Ease::Out
         );
+        assert_eq!(q.layers[0].blend, BlendMode::Screen);
     }
 
     /// Fill a cell with a pattern no compressor can fake its way through, and
@@ -538,7 +617,7 @@ mod tests {
         p.layers[1].clip = true;
         p.layers[2].alpha_lock = true;
         let (bytes, _) = encode(&p).unwrap();
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), VERSION);
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), PLAIN_VERSION, "v7's fields, written as v8");
         let q = decode(&bytes).unwrap();
         let flags: Vec<(bool, bool)> = q.layers.iter().map(|l| (l.clip, l.alpha_lock)).collect();
         assert_eq!(flags, [(false, false), (true, false), (false, true)]);
@@ -620,7 +699,7 @@ mod tests {
         for _ in 0..4 {
             p.cells.push(crate::doc::canvas::Canvas::new(256, 256).into());
         }
-        let raw = postcard::to_stdvec(&p).unwrap().len();
+        let raw = postcard::to_stdvec(&crate::io::legacy::ProjectV8Ref::of(&p)).unwrap().len();
         let (packed, reported_raw) = encode(&p).unwrap();
 
         assert_eq!(
@@ -672,7 +751,7 @@ mod tests {
             p.cells.push(canvas.into());
         }
         let t0 = Instant::now();
-        let raw = postcard::to_stdvec(&p).unwrap();
+        let raw = postcard::to_stdvec(&crate::io::legacy::ProjectV8Ref::of(&p)).unwrap();
         let t_raw = t0.elapsed();
 
         let t1 = Instant::now();
@@ -718,7 +797,7 @@ mod tests {
         save_to(&p, &path).expect("save");
 
         let on_disk = std::fs::metadata(&path).expect("stat").len();
-        let raw = postcard::to_stdvec(&p).unwrap().len() as u64;
+        let raw = postcard::to_stdvec(&crate::io::legacy::ProjectV8Ref::of(&p)).unwrap().len() as u64;
 
         let q = load_from(&path).expect("load");
         let _ = std::fs::remove_file(&path);
@@ -926,13 +1005,15 @@ mod pins {
 
     #[test]
     fn a_saved_project_is_byte_for_byte_what_it_was() {
-        let body = postcard::to_stdvec(&scene()).unwrap();
+        // No blend mode: written as v8, exactly as before blend modes.
+        let body = postcard::to_stdvec(&crate::io::legacy::ProjectV8Ref::of(&scene())).unwrap();
         assert_eq!((body.len(), fnv(&body)), (12802, 0x09599d3972776d94_u64), "{:#x}", fnv(&body));
     }
 
     #[test]
     fn the_format_version_has_not_moved() {
-        assert_eq!(super::VERSION, 8);
+        assert_eq!(super::VERSION, 9);
+        assert_eq!(super::PLAIN_VERSION, 8, "what builds before blend modes read");
     }
 
     #[test]

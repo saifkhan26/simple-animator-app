@@ -1,6 +1,6 @@
 # `src/app/groups.rs` — drawing layer groups on screen
 
-> **Source:** [src/app/groups.rs](../../../src/app/groups.rs) · **Module:** `crate::app::groups` · **Size:** 535 lines · Line links as of commit `f210c6f`
+> **Source:** [src/app/groups.rs](../../../src/app/groups.rs) · **Module:** `crate::app::groups` · **Size:** 553 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 
@@ -101,8 +101,17 @@ pub(crate) fn group_drawn_whole(&self, g: usize) -> bool
 Whether group `g` draws as one merged image: visible and below full opacity — except while "fade other
 layers" is fading around one of its layers (then layers draw individually so the active one stands out).
 
+### `AppState::art_blends`
+[src/app/groups.rs:93](../../../src/app/groups.rs#L93)
+
+```rust
+pub(crate) fn art_blends(&self) -> bool
+```
+
+Whether a layer the canvas draws by itself has a blend mode: then the art goes through the GPU's art stack (`ui::canvas_gpu::Stack`). A layer inside a merged group image is blended there, on the CPU.
+
 ### `AppState::in_group_image`
-[src/app/groups.rs:88](../../../src/app/groups.rs#L88)
+[src/app/groups.rs:106](../../../src/app/groups.rs#L106)
 
 ```rust
 pub(crate) fn in_group_image(&self, li: usize) -> bool
@@ -111,7 +120,7 @@ pub(crate) fn in_group_image(&self, li: usize) -> bool
 Whether layer `li` only appears as part of its group's merged image.
 
 ### `AppState::feeds_group_image`
-[src/app/groups.rs:95](../../../src/app/groups.rs#L95)
+[src/app/groups.rs:113](../../../src/app/groups.rs#L113)
 
 ```rust
 pub(crate) fn feeds_group_image(&self, li: usize) -> bool
@@ -121,7 +130,7 @@ Whether what shows of layer `li` comes from a group image (its group is merged, 
 its group). Strokes on such a layer can't use the fast "stream into its own texture" path.
 
 ### `AppState::group_texture`
-[src/app/groups.rs:104](../../../src/app/groups.rs#L104)
+[src/app/groups.rs:122](../../../src/app/groups.rs#L122)
 
 ```rust
 pub(crate) fn group_texture(&self, g: usize) -> Option<(&TextureHandle, (u32, u32))>
@@ -130,7 +139,7 @@ pub(crate) fn group_texture(&self, g: usize) -> Option<(&TextureHandle, (u32, u3
 Group `g`'s merged GPU texture on the current frame and its size, if built.
 
 ### `AppState::sync_group_images`
-[src/app/groups.rs:111](../../../src/app/groups.rs#L111)
+[src/app/groups.rs:129](../../../src/app/groups.rs#L129)
 
 ```rust
 pub(super) fn sync_group_images(&mut self, ctx: &egui::Context, now: u64, merged: &[usize], clipped: &[ClipPair])
@@ -141,7 +150,7 @@ Called during texture sync: builds or updates the group images this frame needs 
 pending dirty rectangles when possible.
 
 ### `AppState::mark_group_region`
-[src/app/groups.rs:164](../../../src/app/groups.rs#L164)
+[src/app/groups.rs:182](../../../src/app/groups.rs#L182)
 
 ```rust
 pub(super) fn mark_group_region(&mut self, id: CellId, region: Dirty)
@@ -151,7 +160,7 @@ Records that `region` of cell `id` changed, so group images drawn from it (and c
 those) update that area next sync.
 
 ### `AppState::retire_group_images`
-[src/app/groups.rs:197](../../../src/app/groups.rs#L197)
+[src/app/groups.rs:215](../../../src/app/groups.rs#L215)
 
 ```rust
 pub(super) fn retire_group_images(&mut self, gone_cell: Option<CellId>)
@@ -160,7 +169,7 @@ pub(super) fn retire_group_images(&mut self, gone_cell: Option<CellId>)
 Drops group images that no longer belong to any group or whose cells went away (`gone_cell`).
 
 ### `AppState::drop_group_image`
-[src/app/groups.rs:210](../../../src/app/groups.rs#L210)
+[src/app/groups.rs:228](../../../src/app/groups.rs#L228)
 
 ```rust
 pub(super) fn drop_group_image(&mut self, k: GroupKey)
@@ -172,7 +181,7 @@ Removes one group image and every clip texture cut by it, parking their GPU text
 ## Free functions
 
 ### `full`
-[src/app/groups.rs:225](../../../src/app/groups.rs#L225)
+[src/app/groups.rs:243](../../../src/app/groups.rs#L243)
 
 ```rust
 fn full(c: &Canvas) -> DirtyRect
@@ -188,26 +197,26 @@ Run with `cargo test app::groups::tests` · 15 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_half_opaque_group_draws_one_merged_texture`](../../../src/app/groups.rs#L295) | A half opaque group draws one merged texture. |
-| [`an_opaque_group_draws_its_layers_directly`](../../../src/app/groups.rs#L308) | An opaque group draws its layers directly. |
-| [`painting_a_layer_of_the_group_patches_just_that_rect`](../../../src/app/groups.rs#L320) | Painting a layer of the group patches just that rect. |
-| [`a_layer_above_a_group_is_cut_to_it_on_screen`](../../../src/app/groups.rs#L345) | A layer above a group is cut to it on screen. |
-| [`merge_group_matches_the_group_at_its_opacity`](../../../src/app/groups.rs#L364) | Merging a half-opaque group gives one layer that exports the same. |
-| [`merge_group_keeps_its_hidden_layers`](../../../src/app/groups.rs#L388) | Merge group keeps its hidden layers. |
-| [`grouping_the_picked_layers_is_one_undo`](../../../src/app/groups.rs#L397) | Grouping the picked layers is one undo. |
-| [`a_header_refuses_drawing_and_key_edits`](../../../src/app/groups.rs#L413) | A header refuses drawing and key edits. |
-| [`the_layer_keys_walk_the_rows_the_panel_shows`](../../../src/app/groups.rs#L432) | The layer keys walk the rows the panel shows. |
-| [`dragging_a_group_moves_every_layer_in_one_undo`](../../../src/app/groups.rs#L457) | Dragging a group moves every layer in one undo. |
-| [`with_auto_key_each_layer_gets_a_key_here`](../../../src/app/groups.rs#L475) | With auto key each layer gets a key here. |
-| [`a_keyed_layer_has_every_key_moved`](../../../src/app/groups.rs#L485) | A keyed layer has every key moved. |
-| [`rotating_a_group_turns_its_layers_about_their_middle`](../../../src/app/groups.rs#L498) | Rotating a group turns its layers about their middle. |
-| [`a_locked_group_stays_put`](../../../src/app/groups.rs#L514) | A locked group stays put. |
-| [`group_images_go_with_their_group`](../../../src/app/groups.rs#L524) | Group images go with their group. |
+| [`a_half_opaque_group_draws_one_merged_texture`](../../../src/app/groups.rs#L313) | A half opaque group draws one merged texture. |
+| [`an_opaque_group_draws_its_layers_directly`](../../../src/app/groups.rs#L326) | An opaque group draws its layers directly. |
+| [`painting_a_layer_of_the_group_patches_just_that_rect`](../../../src/app/groups.rs#L338) | Painting a layer of the group patches just that rect. |
+| [`a_layer_above_a_group_is_cut_to_it_on_screen`](../../../src/app/groups.rs#L363) | A layer above a group is cut to it on screen. |
+| [`merge_group_matches_the_group_at_its_opacity`](../../../src/app/groups.rs#L382) | Merging a half-opaque group gives one layer that exports the same. |
+| [`merge_group_keeps_its_hidden_layers`](../../../src/app/groups.rs#L406) | Merge group keeps its hidden layers. |
+| [`grouping_the_picked_layers_is_one_undo`](../../../src/app/groups.rs#L415) | Grouping the picked layers is one undo. |
+| [`a_header_refuses_drawing_and_key_edits`](../../../src/app/groups.rs#L431) | A header refuses drawing and key edits. |
+| [`the_layer_keys_walk_the_rows_the_panel_shows`](../../../src/app/groups.rs#L450) | The layer keys walk the rows the panel shows. |
+| [`dragging_a_group_moves_every_layer_in_one_undo`](../../../src/app/groups.rs#L475) | Dragging a group moves every layer in one undo. |
+| [`with_auto_key_each_layer_gets_a_key_here`](../../../src/app/groups.rs#L493) | With auto key each layer gets a key here. |
+| [`a_keyed_layer_has_every_key_moved`](../../../src/app/groups.rs#L503) | A keyed layer has every key moved. |
+| [`rotating_a_group_turns_its_layers_about_their_middle`](../../../src/app/groups.rs#L516) | Rotating a group turns its layers about their middle. |
+| [`a_locked_group_stays_put`](../../../src/app/groups.rs#L532) | A locked group stays put. |
+| [`group_images_go_with_their_group`](../../../src/app/groups.rs#L542) | Group images go with their group. |
 
 **Test helpers** (used only by the tests above):
 
-- [`sync`](../../../src/app/groups.rs#L241) — Run one texture sync and hand back what egui was asked to upload.
-- [`alpha`](../../../src/app/groups.rs#L249) — Alpha.
-- [`grouped`](../../../src/app/groups.rs#L259) — Two layers on the left half of the frame, red over blue, in a group; a third layer, green all over, above it.
-- [`ungroup_active_of`](../../../src/app/groups.rs#L288) — Ungroup active of.
-- [`pan_group`](../../../src/app/groups.rs#L449) — A pan of the group as transform mode drives it: begin, move, commit.
+- [`sync`](../../../src/app/groups.rs#L259) — Run one texture sync and hand back what egui was asked to upload.
+- [`alpha`](../../../src/app/groups.rs#L267) — Alpha.
+- [`grouped`](../../../src/app/groups.rs#L277) — Two layers on the left half of the frame, red over blue, in a group; a third layer, green all over, above it.
+- [`ungroup_active_of`](../../../src/app/groups.rs#L306) — Ungroup active of.
+- [`pan_group`](../../../src/app/groups.rs#L467) — A pan of the group as transform mode drives it: begin, move, commit.

@@ -1,6 +1,6 @@
 # `src/krita_stress.rs` — stress tests for the Krita link (test-only)
 
-> **Source:** [src/krita_stress.rs](../../src/krita_stress.rs) · **Module:** `crate::krita_stress` · **Size:** 960 lines · Line links as of commit `f210c6f`
+> **Source:** [src/krita_stress.rs](../../src/krita_stress.rs) · **Module:** `crate::krita_stress` · **Size:** 960 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 

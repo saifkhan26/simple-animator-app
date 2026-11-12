@@ -1,6 +1,6 @@
 # `src/doc/groups.rs` — layer groups in the flat layer list
 
-> **Source:** [src/doc/groups.rs](../../../src/doc/groups.rs) · **Module:** `crate::doc::groups` · **Size:** 647 lines · Line links as of commit `f210c6f`
+> **Source:** [src/doc/groups.rs](../../../src/doc/groups.rs) · **Module:** `crate::doc::groups` · **Size:** 655 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 
@@ -120,8 +120,17 @@ pub fn locked_eff(&self, li: usize) -> bool
 
 Whether layer `li` is locked, by itself or by its group ("effectively locked").
 
+### `Project::blends_inside`
+[src/doc/groups.rs:93](../../../src/doc/groups.rs#L93)
+
+```rust
+pub fn blends_inside(&self, g: usize) -> bool
+```
+
+Whether one of group `g`'s layers has a blend mode: then the group is merged before it is laid down at any opacity, so the blend mixes with the group's own layers only.
+
 ### `Project::paintable`
-[src/doc/groups.rs:92](../../../src/doc/groups.rs#L92)
+[src/doc/groups.rs:100](../../../src/doc/groups.rs#L100)
 
 ```rust
 pub fn paintable(&self, li: usize) -> bool
@@ -131,7 +140,7 @@ Whether layer `li`'s drawings may be edited: a drawing layer, not a reference la
 by its group).
 
 ### `Project::normalize_groups`
-[src/doc/groups.rs:102](../../../src/doc/groups.rs#L102)
+[src/doc/groups.rs:110](../../../src/doc/groups.rs#L110)
 
 ```rust
 pub fn normalize_groups(&mut self)
@@ -142,7 +151,7 @@ transform, clip or reference flag and aren't in a group; every `in_group` run ha
 it (otherwise its layers leave the group); no fill or key-jump link points at a header.
 
 ### `Project::apply_order`
-[src/doc/groups.rs:150](../../../src/doc/groups.rs#L150)
+[src/doc/groups.rs:158](../../../src/doc/groups.rs#L158)
 
 ```rust
 pub fn apply_order(&mut self, order: &[usize], in_group: &[bool])
@@ -153,7 +162,7 @@ Rearranges the whole stack in one go: `order[i]` is the old index of the layer t
 active layer are carried along.
 
 ### `Project::groups_ok`
-[src/doc/groups.rs:171](../../../src/doc/groups.rs#L171)
+[src/doc/groups.rs:179](../../../src/doc/groups.rs#L179)
 
 ```rust
 pub fn groups_ok(&self) -> bool
@@ -162,7 +171,7 @@ pub fn groups_ok(&self) -> bool
 Checks the group rules hold (by normalising a clone and comparing). For assertions and tests.
 
 ### `Project::group_layers`
-[src/doc/groups.rs:181](../../../src/doc/groups.rs#L181)
+[src/doc/groups.rs:189](../../../src/doc/groups.rs#L189)
 
 ```rust
 pub fn group_layers(&mut self, sel: &[usize]) -> Option<usize>
@@ -173,7 +182,7 @@ was. A selected group gives its layers to the new one and disappears (no nesting
 header's index, which becomes active.
 
 ### `Project::ungroup`
-[src/doc/groups.rs:246](../../../src/doc/groups.rs#L246)
+[src/doc/groups.rs:254](../../../src/doc/groups.rs#L254)
 
 ```rust
 pub fn ungroup(&mut self, g: usize)
@@ -182,7 +191,7 @@ pub fn ungroup(&mut self, g: usize)
 Dissolves group `g`: its members stay where they are, just no longer in a group.
 
 ### `Project::delete_block`
-[src/doc/groups.rs:264](../../../src/doc/groups.rs#L264)
+[src/doc/groups.rs:272](../../../src/doc/groups.rs#L272)
 
 ```rust
 pub fn delete_block(&mut self, li: usize)
@@ -191,7 +200,7 @@ pub fn delete_block(&mut self, li: usize)
 Deletes layer `li`, or a group together with all its layers — refused if it would leave no layers.
 
 ### `Project::move_item`
-[src/doc/groups.rs:288](../../../src/doc/groups.rs#L288)
+[src/doc/groups.rs:296](../../../src/doc/groups.rs#L296)
 
 ```rust
 pub fn move_item(&mut self, li: usize, up: bool) -> bool
@@ -202,7 +211,7 @@ into a group it meets, through it one place at a time, and out the other side. R
 can't move.
 
 ### `Project::drop_item`
-[src/doc/groups.rs:357](../../../src/doc/groups.rs#L357)
+[src/doc/groups.rs:365](../../../src/doc/groups.rs#L365)
 
 ```rust
 pub fn drop_item(&mut self, from: usize, target: usize, above: bool) -> bool
@@ -220,21 +229,21 @@ Run with `cargo test doc::groups::tests` · 12 tests
 
 | Test | What it checks |
 |---|---|
-| [`children_are_the_run_under_the_header`](../../../src/doc/groups.rs#L437) | Children are the run under the header. |
-| [`normalize_repairs_orphans_and_strips_header_cells`](../../../src/doc/groups.rs#L452) | Normalize repairs orphans and strips header cells. |
-| [`grouping_a_scattered_selection_keeps_its_order`](../../../src/doc/groups.rs#L479) | Grouping a scattered selection keeps its order. |
-| [`ungroup_and_delete_group`](../../../src/doc/groups.rs#L500) | Ungroup and delete group. |
-| [`moves_enter_and_leave_one_step_at_a_time`](../../../src/doc/groups.rs#L515) | Moves enter and leave one step at a time. |
-| [`a_header_moves_its_block`](../../../src/doc/groups.rs#L540) | A header moves its block. |
-| [`drops_follow_the_rows`](../../../src/doc/groups.rs#L559) | Drops follow the rows. |
-| [`a_group_dropped_into_a_group_lands_beside_it`](../../../src/doc/groups.rs#L584) | A group dropped into a group lands beside it. |
-| [`apply_order_relinks_lines_from_and_current`](../../../src/doc/groups.rs#L598) | Apply order relinks lines from and current. |
-| [`clip_base_stays_in_the_group`](../../../src/doc/groups.rs#L609) | Clip base stays in the group. |
-| [`a_layer_above_a_group_clips_to_it`](../../../src/doc/groups.rs#L622) | A layer above a group clips to it. |
-| [`hidden_or_locked_groups_cascade`](../../../src/doc/groups.rs#L633) | Hidden or locked groups cascade. |
+| [`children_are_the_run_under_the_header`](../../../src/doc/groups.rs#L445) | Children are the run under the header. |
+| [`normalize_repairs_orphans_and_strips_header_cells`](../../../src/doc/groups.rs#L460) | Normalize repairs orphans and strips header cells. |
+| [`grouping_a_scattered_selection_keeps_its_order`](../../../src/doc/groups.rs#L487) | Grouping a scattered selection keeps its order. |
+| [`ungroup_and_delete_group`](../../../src/doc/groups.rs#L508) | Ungroup and delete group. |
+| [`moves_enter_and_leave_one_step_at_a_time`](../../../src/doc/groups.rs#L523) | Moves enter and leave one step at a time. |
+| [`a_header_moves_its_block`](../../../src/doc/groups.rs#L548) | A header moves its block. |
+| [`drops_follow_the_rows`](../../../src/doc/groups.rs#L567) | Drops follow the rows. |
+| [`a_group_dropped_into_a_group_lands_beside_it`](../../../src/doc/groups.rs#L592) | A group dropped into a group lands beside it. |
+| [`apply_order_relinks_lines_from_and_current`](../../../src/doc/groups.rs#L606) | Apply order relinks lines from and current. |
+| [`clip_base_stays_in_the_group`](../../../src/doc/groups.rs#L617) | Clip base stays in the group. |
+| [`a_layer_above_a_group_clips_to_it`](../../../src/doc/groups.rs#L630) | A layer above a group clips to it. |
+| [`hidden_or_locked_groups_cascade`](../../../src/doc/groups.rs#L641) | Hidden or locked groups cascade. |
 
 **Test helpers** (used only by the tests above):
 
-- [`stack`](../../../src/doc/groups.rs#L408) — Layers named `names`, bottom first, none grouped; the top one active.
-- [`rows`](../../../src/doc/groups.rs#L421) — The stack bottom first: a header in brackets, a group's layer indented.
-- [`by_name`](../../../src/doc/groups.rs#L432) — By name.
+- [`stack`](../../../src/doc/groups.rs#L416) — Layers named `names`, bottom first, none grouped; the top one active.
+- [`rows`](../../../src/doc/groups.rs#L429) — The stack bottom first: a header in brackets, a group's layer indented.
+- [`by_name`](../../../src/doc/groups.rs#L440) — By name.

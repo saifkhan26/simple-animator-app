@@ -1,6 +1,6 @@
 # `src/app.rs` — the app's central state (`AppState`)
 
-> **Source:** [src/app.rs](../../src/app.rs) · **Module:** `crate::app` · **Size:** 13347 lines · Line links as of commit `f210c6f`
+> **Source:** [src/app.rs](../../src/app.rs) · **Module:** `crate::app` · **Size:** 13421 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 
@@ -14,7 +14,7 @@ the live link to Krita and every workspace preference. If you think of the app a
 
 The app uses **egui**, an *immediate-mode* GUI: there is no retained DOM. Every frame (up to
 ~60 times a second) eframe calls `AppState::update` (in the `impl eframe::App for AppState`
-block near [line 7646](../../src/app.rs#L7646)). `update` does the per-frame housekeeping —
+block near [line 7653](../../src/app.rs#L7653)). `update` does the per-frame housekeeping —
 polls the pen tablet, reads keys and runs shortcuts, advances playback, keeps the
 transform/camera/grid edit buffers in step with the current frame, polls background jobs
 (imports, exports, saves, the Krita link), frees unreachable drawings, packs idle cells,
@@ -633,7 +633,7 @@ The **workspace preferences** that outlive a run but that egui's own memory does
 (Panel positions, sizes and collapse state are saved by egui/eframe automatically; these are
 plain `AppState` fields, so they are saved by hand.) `AppState::new` reads it from eframe
 storage under `UI_PREFS_KEY`; `eframe::App::save` (near
-[line 7664](../../src/app.rs#L7664)) writes it back on exit and every 30 s.
+[line 7671](../../src/app.rs#L7671)) writes it back on exit and every 30 s.
 `#[serde(default)]` is what keeps a prefs blob from an older build loadable after a field is
 added: without it, one missing key would fail the whole struct and silently reset every other
 preference too. Most fields copy straight into the `AppState` field of the same name.
@@ -1310,7 +1310,7 @@ copied into [`UiPrefs`](#struct-uiprefs) by `save`.
 | `screen_pick_tex` | `Option<TextureHandle>` | Live zoom-loupe texture, refreshed each frame while picking. Held here so the handle outlives the frame's paint list. |
 
 ### `enum Act`
-[src/app.rs:4499](../../src/app.rs#L4499)
+[src/app.rs:4502](../../src/app.rs#L4502)
 
 A tiny enum declared *inside* `AppState::request_preview`. Rust lets you define a type inside a
 function body when only that function needs it. It records the decision ("already have an
@@ -1325,7 +1325,7 @@ a common way of keeping the borrow checker happy.
 | `Nothing` | A texture exists already, or a fetch is already running. |
 
 ### `const AppState::BLANK_SCANS_PER_FRAME`
-[src/app.rs:5964](../../src/app.rs#L5964)
+[src/app.rs:5967](../../src/app.rs#L5967)
 
 ```rust
 const BLANK_SCANS_PER_FRAME: u32 = 1;
@@ -1336,7 +1336,7 @@ a 3×-wide 4K layer one cell is about 100 MB. A `const` inside an `impl` block b
 (like a static class field in JS). More: [Constants and statics](../rust-primer.md#constants-and-statics)
 
 ### `const AppState::MAX_SWATCHES`
-[src/app.rs:6483](../../src/app.rs#L6483)
+[src/app.rs:6486](../../src/app.rs#L6486)
 
 ```rust
 pub const MAX_SWATCHES: usize = 32;
@@ -1347,7 +1347,7 @@ two rows. A `const` inside an `impl` is reached as `AppState::MAX_SWATCHES` (lik
 field in JS). Used by `pin_rgb` and `swatch_strip` in [ui/shell.rs](ui/shell.md).
 
 ### `const AppState::TOAST_TTL`
-[src/app.rs:7263](../../src/app.rs#L7263)
+[src/app.rs:7287](../../src/app.rs#L7287)
 
 ```rust
 const TOAST_TTL: Duration = Duration::from_millis(2200);
@@ -1356,7 +1356,7 @@ const TOAST_TTL: Duration = Duration::from_millis(2200);
 How long a "saved" toast stays up.
 
 ### `const AppState::KRITA_NOTE`
-[src/app.rs:7996](../../src/app.rs#L7996)
+[src/app.rs:8020](../../src/app.rs#L8020)
 
 ```rust
 const KRITA_NOTE: Duration = Duration::from_secs(4);
@@ -1365,7 +1365,7 @@ const KRITA_NOTE: Duration = Duration::from_secs(4);
 How long a Krita message stays up. Warnings name what was dropped, so they get long enough to read.
 
 ### `const AppState::KRITA_WARN`
-[src/app.rs:7997](../../src/app.rs#L7997)
+[src/app.rs:8021](../../src/app.rs#L8021)
 
 ```rust
 const KRITA_WARN: Duration = Duration::from_secs(9);
@@ -1376,7 +1376,7 @@ shorter `KRITA_NOTE`. `Duration` is Rust's time-span type (like a number of mill
 units attached).
 
 ### `struct Imported`
-[src/app.rs:8435](../../src/app.rs#L8435)
+[src/app.rs:8459](../../src/app.rs#L8459)
 
 A struct declared inside `on_kra_imported`: one Krita layer converted to this app's terms,
 waiting to be inserted as a layer. Collecting everything first and inserting afterwards means a
@@ -1393,6 +1393,7 @@ failure part-way leaves the project untouched.
 | `group` | `bool` | This entry is a group header rather than a paint layer. |
 | `in_group` | `bool` | This paint layer sits inside the group header before it. |
 | `collapsed` | `bool` | For a group: whether it was folded in Krita's layer panel. |
+| `blend` | `crate::doc::blend::BlendMode` | The layer's blend mode, as the Krita file had it. |
 
 ## `impl Default for ProjectPreset`
 
@@ -2447,7 +2448,7 @@ leaves the new cells unused, for `collect_cells` to free later).
 **Used by:** the Layers panel's Merge Down button in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::merge_group`
-[src/app.rs:2999](../../src/app.rs#L2999)
+[src/app.rs:3002](../../src/app.rs#L3002)
 
 ```rust
 pub fn merge_group(&mut self, g: usize)
@@ -2482,7 +2483,7 @@ below the merged one. One undo step.
 **Used by:** the Layers panel's row menu (`RowCmd::MergeGroup`) in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::fit_transform`
-[src/app.rs:3094](../../src/app.rs#L3094)
+[src/app.rs:3097](../../src/app.rs#L3097)
 
 ```rust
 fn fit_transform(&self, cw: f32, ch: f32) -> Transform
@@ -2495,7 +2496,7 @@ no offset, no rotation. The user can scale up from there to crop.
 **Used by:** `import_cells_as_layer`, `paste_image_as_background`.
 
 ### `AppState::import_image`
-[src/app.rs:3107](../../src/app.rs#L3107)
+[src/app.rs:3110](../../src/app.rs#L3110)
 
 ```rust
 pub fn import_image(&mut self)
@@ -2508,7 +2509,7 @@ does nothing; a decoding error is logged.
 **Used by:** the title-bar File menu in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::paste_image_as_background`
-[src/app.rs:3120](../../src/app.rs#L3120)
+[src/app.rs:3123](../../src/app.rs#L3123)
 
 ```rust
 pub fn paste_image_as_background(&mut self)
@@ -2524,7 +2525,7 @@ and fits it with `fit_transform`, in one undoable edit.
 [ui/shell.rs](ui/shell.md).
 
 ### `AppState::copy_frame`
-[src/app.rs:3147](../../src/app.rs#L3147)
+[src/app.rs:3150](../../src/app.rs#L3150)
 
 ```rust
 pub fn copy_frame(&mut self)
@@ -2540,7 +2541,7 @@ a warning message through `krita_notice`.
 [ui/shell.rs](ui/shell.md).
 
 ### `AppState::clipboard_frame`
-[src/app.rs:3165](../../src/app.rs#L3165)
+[src/app.rs:3168](../../src/app.rs#L3168)
 
 ```rust
 fn clipboard_frame(&self) -> Canvas
@@ -2556,7 +2557,7 @@ instead. Uses `io::composite::flatten_through`.
 **Used by:** `copy_frame` (and tests).
 
 ### `AppState::open_video_import`
-[src/app.rs:3173](../../src/app.rs#L3173)
+[src/app.rs:3176](../../src/app.rs#L3176)
 
 ```rust
 pub fn open_video_import(&mut self)
@@ -2571,7 +2572,7 @@ opens once `poll_bg_jobs` sees the probe result.
 **Used by:** the title-bar File menu in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::open_gif_import`
-[src/app.rs:3192](../../src/app.rs#L3192)
+[src/app.rs:3195](../../src/app.rs#L3195)
 
 ```rust
 pub fn open_gif_import(&mut self)
@@ -2584,7 +2585,7 @@ dialog opens.
 **Used by:** the title-bar File menu in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::open_webp_import`
-[src/app.rs:3198](../../src/app.rs#L3198)
+[src/app.rs:3201](../../src/app.rs#L3201)
 
 ```rust
 pub fn open_webp_import(&mut self)
@@ -2596,7 +2597,7 @@ pub fn open_webp_import(&mut self)
 **Used by:** the title-bar File menu in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::open_frames_import`
-[src/app.rs:3202](../../src/app.rs#L3202)
+[src/app.rs:3205](../../src/app.rs#L3205)
 
 ```rust
 fn open_frames_import(
@@ -2625,7 +2626,7 @@ job without copying. See [Lifetimes](../rust-primer.md#lifetimes).
 **Used by:** `open_gif_import`, `open_webp_import`.
 
 ### `AppState::start_export`
-[src/app.rs:3231](../../src/app.rs#L3231)
+[src/app.rs:3234](../../src/app.rs#L3234)
 
 ```rust
 pub fn start_export(&mut self)
@@ -2655,7 +2656,7 @@ one place where success and failure reach the user. Called when the export dialo
 **Used by:** the export dialog in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::confirm_import_range`
-[src/app.rs:3313](../../src/app.rs#L3313)
+[src/app.rs:3316](../../src/app.rs#L3316)
 
 ```rust
 pub fn confirm_import_range(&mut self)
@@ -2677,7 +2678,7 @@ frames with ffmpeg (`io::video_import::extract_frames`), stored as `BgJob::Video
 **Used by:** the import range dialog in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::cancel_import_range`
-[src/app.rs:3348](../../src/app.rs#L3348)
+[src/app.rs:3351](../../src/app.rs#L3351)
 
 ```rust
 pub fn cancel_import_range(&mut self)
@@ -2690,7 +2691,7 @@ to the next frame.
 **Used by:** the import range dialog in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::display_transform`
-[src/app.rs:3362](../../src/app.rs#L3362)
+[src/app.rs:3365](../../src/app.rs#L3365)
 
 ```rust
 pub fn display_transform(&self, layer_idx: usize, frame: usize) -> Transform
@@ -2701,7 +2702,7 @@ frame it returns the live edit buffer (so a drag shows immediately); everywhere 
 the value from the layer's transform keys.
 
 ### `AppState::sync_active_transform_buffer`
-[src/app.rs:3379](../../src/app.rs#L3379)
+[src/app.rs:3382](../../src/app.rs#L3382)
 
 ```rust
 fn sync_active_transform_buffer(&mut self)
@@ -2713,7 +2714,7 @@ actually changed — otherwise it would overwrite edits being made — and skips
 (their buffer *is* the value) and drags in progress.
 
 ### `AppState::reset_active_layer_transform`
-[src/app.rs:3397](../../src/app.rs#L3397)
+[src/app.rs:3400](../../src/app.rs#L3400)
 
 ```rust
 pub fn reset_active_layer_transform(&mut self)
@@ -2722,7 +2723,7 @@ pub fn reset_active_layer_transform(&mut self)
 Resets the active layer's transform to "no move, no scale, no rotation", as one undoable step.
 
 ### `AppState::begin_layer_xform`
-[src/app.rs:3410](../../src/app.rs#L3410)
+[src/app.rs:3413](../../src/app.rs#L3413)
 
 ```rust
 pub fn begin_layer_xform(&mut self)
@@ -2732,7 +2733,7 @@ Takes a snapshot of the timeline when a layer-transform drag starts, so the whol
 undone in one step (`commit_layer_xform` pushes it).
 
 ### `AppState::transform_group`
-[src/app.rs:3430](../../src/app.rs#L3430)
+[src/app.rs:3433](../../src/app.rs#L3433)
 
 ```rust
 fn transform_group(&mut self, f: impl Fn(Transform) -> Transform)
@@ -2744,7 +2745,7 @@ on their own stay put. `f: impl Fn(Transform) -> Transform` means "any function 
 a transform".
 
 ### `AppState::about_group_pivot`
-[src/app.rs:3459](../../src/app.rs#L3459)
+[src/app.rs:3462](../../src/app.rs#L3462)
 
 ```rust
 fn about_group_pivot(&self, k: f32, rot: f32) -> impl Fn(Transform) -> Transform
@@ -2756,7 +2757,7 @@ copies of its inputs (`move`), so it can be passed on freely — like returning 
 from a JS function.
 
 ### `AppState::commit_layer_xform`
-[src/app.rs:3476](../../src/app.rs#L3476)
+[src/app.rs:3479](../../src/app.rs#L3479)
 
 ```rust
 pub fn commit_layer_xform(&mut self)
@@ -2766,7 +2767,7 @@ Ends a layer-transform drag: compares the snapshot from `begin_layer_xform` with
 single undo entry.
 
 ### `AppState::active_layer_locked`
-[src/app.rs:3499](../../src/app.rs#L3499)
+[src/app.rs:3502](../../src/app.rs#L3502)
 
 ```rust
 fn active_layer_locked(&self) -> bool
@@ -2776,7 +2777,7 @@ True if the active layer can't be edited: locked itself, locked through its grou
 header (which has no drawings).
 
 ### `AppState::apply_layer_pan`
-[src/app.rs:3505](../../src/app.rs#L3505)
+[src/app.rs:3508](../../src/app.rs#L3508)
 
 ```rust
 pub fn apply_layer_pan(&mut self, dx: f32, dy: f32)
@@ -2786,7 +2787,7 @@ Moves the active layer (or its whole group) by `(dx, dy)` document pixels, unles
 auto-key on, writes a key.
 
 ### `AppState::apply_layer_scale`
-[src/app.rs:3524](../../src/app.rs#L3524)
+[src/app.rs:3527](../../src/app.rs#L3527)
 
 ```rust
 pub fn apply_layer_scale(&mut self, factor: f32)
@@ -2795,7 +2796,7 @@ pub fn apply_layer_scale(&mut self, factor: f32)
 Scales the active layer (or group) by `factor`, multiplicatively (1.1 = 10% bigger).
 
 ### `AppState::apply_layer_rotate`
-[src/app.rs:3539](../../src/app.rs#L3539)
+[src/app.rs:3542](../../src/app.rs#L3542)
 
 ```rust
 pub fn apply_layer_rotate(&mut self, d: f32)
@@ -2804,7 +2805,7 @@ pub fn apply_layer_rotate(&mut self, d: f32)
 Rotates the active layer (or group) by `d` radians.
 
 ### `AppState::add_transform_key`
-[src/app.rs:3555](../../src/app.rs#L3555)
+[src/app.rs:3558](../../src/app.rs#L3558)
 
 ```rust
 pub fn add_transform_key(&mut self)
@@ -2814,7 +2815,7 @@ Adds (or replaces) a transform key on the current frame from the active layer's 
 Undoable.
 
 ### `AppState::set_transform_key_ease`
-[src/app.rs:3571](../../src/app.rs#L3571)
+[src/app.rs:3574](../../src/app.rs#L3574)
 
 ```rust
 pub fn set_transform_key_ease(&mut self, ease: Ease)
@@ -2824,7 +2825,7 @@ Sets the easing (how motion speeds up/slows down into the key) of the active lay
 current frame. Undoable.
 
 ### `AppState::delete_transform_key`
-[src/app.rs:3584](../../src/app.rs#L3584)
+[src/app.rs:3587](../../src/app.rs#L3587)
 
 ```rust
 pub fn delete_transform_key(&mut self)
@@ -2833,7 +2834,7 @@ pub fn delete_transform_key(&mut self)
 Deletes the active layer's transform key on the current frame, if there is one. Undoable.
 
 ### `AppState::display_camera`
-[src/app.rs:3611](../../src/app.rs#L3611)
+[src/app.rs:3614](../../src/app.rs#L3614)
 
 ```rust
 pub fn display_camera(&self, frame: usize) -> Camera
@@ -2843,7 +2844,7 @@ The camera to draw for `frame`: the live edit buffer on the current frame, other
 the camera keys. Mirrors `display_transform`.
 
 ### `AppState::advance_playback`
-[src/app.rs:3624](../../src/app.rs#L3624)
+[src/app.rs:3627](../../src/app.rs#L3627)
 
 ```rust
 fn advance_playback(&mut self, now: f64) -> bool
@@ -2854,7 +2855,7 @@ the frame rate and returns whether the displayed frame changed (so the caller re
 A camera move "stretched over loops" keeps its own position meanwhile.
 
 ### `AppState::play_pause`
-[src/app.rs:3645](../../src/app.rs#L3645)
+[src/app.rs:3648](../../src/app.rs#L3648)
 
 ```rust
 pub fn play_pause(&mut self, now: Option<f64>)
@@ -2864,7 +2865,7 @@ The Play button / shortcut: starts playback, or stops it and returns to the fram
 on. `now` is the egui clock when a button supplies it; a shortcut passes `None`.
 
 ### `AppState::play_pause_here`
-[src/app.rs:3660](../../src/app.rs#L3660)
+[src/app.rs:3663](../../src/app.rs#L3663)
 
 ```rust
 pub fn play_pause_here(&mut self, now: Option<f64>)
@@ -2874,7 +2875,7 @@ Alternative play/pause: stopping leaves the playhead on the frame it reached, fo
 drawing to fix mid-playback.
 
 ### `AppState::return_to_play_start`
-[src/app.rs:3670](../../src/app.rs#L3670)
+[src/app.rs:3673](../../src/app.rs#L3673)
 
 ```rust
 fn return_to_play_start(&mut self) -> bool
@@ -2884,7 +2885,7 @@ Puts the playhead back on the frame playback started from. Returns whether the f
 `self.play_from.take()` moves the value out of the `Option` and leaves `None` behind.
 
 ### `AppState::follow_stretched_camera`
-[src/app.rs:3685](../../src/app.rs#L3685)
+[src/app.rs:3688](../../src/app.rs#L3688)
 
 ```rust
 fn follow_stretched_camera(&mut self, stretched: bool)
@@ -2894,7 +2895,7 @@ While a camera move that lasts several loops of the animation plays, records whe
 got to. When playback stops, moves the playhead to the frame the camera reached.
 
 ### `AppState::camera_stretched`
-[src/app.rs:3696](../../src/app.rs#L3696)
+[src/app.rs:3699](../../src/app.rs#L3699)
 
 ```rust
 fn camera_stretched(&self, kind: ExportKind) -> bool
@@ -2904,7 +2905,7 @@ Whether an export of this kind has a camera move that outlasts the drawings (the
 spans more than one loop). Sprite sheets never do.
 
 ### `AppState::export_info`
-[src/app.rs:3701](../../src/app.rs#L3701)
+[src/app.rs:3704](../../src/app.rs#L3704)
 
 ```rust
 pub fn export_info(&self, kind: ExportKind) -> crate::io::frame_order::OrderInfo
@@ -2914,7 +2915,7 @@ Summarises what the export dialog's current settings will produce for `kind` (fr
 whether the camera stretches) for the dialog to display. See [io/frame_order.rs](io/frame_order.md).
 
 ### `AppState::export_order`
-[src/app.rs:3717](../../src/app.rs#L3717)
+[src/app.rs:3720](../../src/app.rs#L3720)
 
 ```rust
 fn export_order(&self, kind: ExportKind, range: (usize, usize)) -> (Vec<usize>, Option<Vec<Camera>>)
@@ -2924,7 +2925,7 @@ Computes, for an export, which timeline frame each output frame shows and — wh
 stretched over loops — which camera each output frame is seen through.
 
 ### `AppState::sync_camera_buffer`
-[src/app.rs:3734](../../src/app.rs#L3734)
+[src/app.rs:3737](../../src/app.rs#L3737)
 
 ```rust
 fn sync_camera_buffer(&mut self)
@@ -2934,7 +2935,7 @@ Keeps the camera's live edit buffer in step with its keys when the frame changes
 `sync_active_transform_buffer`: only on real changes, never mid-drag, not when there are no keys).
 
 ### `AppState::begin_camera_drag`
-[src/app.rs:3756](../../src/app.rs#L3756)
+[src/app.rs:3759](../../src/app.rs#L3759)
 
 ```rust
 pub fn begin_camera_drag(&mut self)
@@ -2943,7 +2944,7 @@ pub fn begin_camera_drag(&mut self)
 Snapshots the timeline when a camera drag starts, for a one-step undo.
 
 ### `AppState::commit_camera_drag`
-[src/app.rs:3761](../../src/app.rs#L3761)
+[src/app.rs:3764](../../src/app.rs#L3764)
 
 ```rust
 pub fn commit_camera_drag(&mut self)
@@ -2952,7 +2953,7 @@ pub fn commit_camera_drag(&mut self)
 Ends a camera drag: pushes one `Structural` undo command holding the before/after timeline states.
 
 ### `AppState::look_through_camera`
-[src/app.rs:3776](../../src/app.rs#L3776)
+[src/app.rs:3779](../../src/app.rs#L3779)
 
 ```rust
 pub fn look_through_camera(&self) -> Camera
@@ -2963,7 +2964,7 @@ is being dragged — the camera as it was when the drag began, so the view holds
 running away from the cursor.
 
 ### `AppState::camera_frame_down`
-[src/app.rs:3787](../../src/app.rs#L3787)
+[src/app.rs:3790](../../src/app.rs#L3790)
 
 ```rust
 pub fn camera_frame_down(&mut self, p: (f32, f32)) -> bool
@@ -2974,7 +2975,7 @@ corner = zoom, just outside a corner = roll). Returns `false` and changes nothin
 or the press missed, letting the active tool have the press.
 
 ### `AppState::camera_frame_move`
-[src/app.rs:3807](../../src/app.rs#L3807)
+[src/app.rs:3810](../../src/app.rs#L3810)
 
 ```rust
 pub fn camera_frame_move(&mut self, p: (f32, f32))
@@ -2984,7 +2985,7 @@ Continues a camera-frame drag to point `p`. Shift pressed part-way locks a move 
 vertical.
 
 ### `AppState::camera_frame_up`
-[src/app.rs:3822](../../src/app.rs#L3822)
+[src/app.rs:3825](../../src/app.rs#L3825)
 
 ```rust
 pub fn camera_frame_up(&mut self)
@@ -2993,7 +2994,7 @@ pub fn camera_frame_up(&mut self)
 Releases the camera frame: one undo step for the whole drag, none if nothing moved.
 
 ### `AppState::set_camera_box`
-[src/app.rs:3835](../../src/app.rs#L3835)
+[src/app.rs:3838](../../src/app.rs#L3838)
 
 ```rust
 pub fn set_camera_box(&mut self, on: bool)
@@ -3003,7 +3004,7 @@ Turns Draw-camera mode on/off. Turning it on switches camera-edit mode off, beca
 plain drag gesture.
 
 ### `AppState::camera_box_down`
-[src/app.rs:3845](../../src/app.rs#L3845)
+[src/app.rs:3848](../../src/app.rs#L3848)
 
 ```rust
 pub fn camera_box_down(&mut self, p: (f32, f32)) -> bool
@@ -3013,7 +3014,7 @@ A press in Draw-camera mode: starts dragging out a new camera box at `p`. Return
 mode is off or playback is running (no still frame to key).
 
 ### `AppState::camera_box_move`
-[src/app.rs:3859](../../src/app.rs#L3859)
+[src/app.rs:3862](../../src/app.rs#L3862)
 
 ```rust
 pub fn camera_box_move(&mut self, p: (f32, f32))
@@ -3022,7 +3023,7 @@ pub fn camera_box_move(&mut self, p: (f32, f32))
 Continues dragging the camera box to `p`; the move key slides the whole box instead.
 
 ### `AppState::camera_box_camera`
-[src/app.rs:3875](../../src/app.rs#L3875)
+[src/app.rs:3878](../../src/app.rs#L3878)
 
 ```rust
 pub fn camera_box_camera(&self) -> Option<Camera>
@@ -3033,7 +3034,7 @@ while it is still just a tap. `?` and `.map` on `Option` are used to pass the "n
 through.
 
 ### `AppState::camera_box_frame`
-[src/app.rs:3883](../../src/app.rs#L3883)
+[src/app.rs:3886](../../src/app.rs#L3886)
 
 ```rust
 pub fn camera_box_frame(&self) -> Option<(Camera, (u32, u32))>
@@ -3044,7 +3045,7 @@ for a free-shaped box the box's size at zoom 1 (rounded to even pixels, at least
 `MIN_FREE_CAMERA_SIDE`). With the centre key held the press point is the box's middle.
 
 ### `AppState::camera_box_up`
-[src/app.rs:3935](../../src/app.rs#L3935)
+[src/app.rs:3938](../../src/app.rs#L3938)
 
 ```rust
 pub fn camera_box_up(&mut self)
@@ -3054,7 +3055,7 @@ Releases the camera box and keys its camera on this frame. A tap keys the camera
 where you tapped; a box dragged back to nothing keys nothing.
 
 ### `AppState::key_drawn_camera`
-[src/app.rs:3960](../../src/app.rs#L3960)
+[src/app.rs:3963](../../src/app.rs#L3963)
 
 ```rust
 fn key_drawn_camera(&mut self, cam: Camera)
@@ -3065,7 +3066,7 @@ camera had no keys at all, it first keys the old camera on frame 0, so there is 
 key. One undo step.
 
 ### `AppState::camera_ghost`
-[src/app.rs:3982](../../src/app.rs#L3982)
+[src/app.rs:3985](../../src/app.rs#L3985)
 
 ```rust
 pub fn camera_ghost(&self) -> Option<Camera>
@@ -3075,7 +3076,7 @@ For Draw-camera mode's faint "where it came from" frame: the camera at the last 
 frame, if any. The `?` after `prev_camera_key()` returns `None` early when there is no earlier key.
 
 ### `AppState::canvas_size`
-[src/app.rs:3987](../../src/app.rs#L3987)
+[src/app.rs:3990](../../src/app.rs#L3990)
 
 ```rust
 fn canvas_size(&self) -> (f32, f32)
@@ -3084,7 +3085,7 @@ fn canvas_size(&self) -> (f32, f32)
 The project's canvas width and height as floats.
 
 ### `AppState::camera_frame_size`
-[src/app.rs:3991](../../src/app.rs#L3991)
+[src/app.rs:3994](../../src/app.rs#L3994)
 
 ```rust
 fn camera_frame_size(&self) -> (f32, f32)
@@ -3093,7 +3094,7 @@ fn camera_frame_size(&self) -> (f32, f32)
 The camera frame's (output) size as floats — the size exports come out at.
 
 ### `AppState::apply_camera_pan`
-[src/app.rs:3998](../../src/app.rs#L3998)
+[src/app.rs:4001](../../src/app.rs#L4001)
 
 ```rust
 pub fn apply_camera_pan(&mut self, dx: f32, dy: f32)
@@ -3102,7 +3103,7 @@ pub fn apply_camera_pan(&mut self, dx: f32, dy: f32)
 Moves the camera by `(dx, dy)` document pixels and keeps it inside the canvas if that option is on.
 
 ### `AppState::apply_camera_zoom`
-[src/app.rs:4005](../../src/app.rs#L4005)
+[src/app.rs:4008](../../src/app.rs#L4008)
 
 ```rust
 pub fn apply_camera_zoom(&mut self, factor: f32)
@@ -3111,7 +3112,7 @@ pub fn apply_camera_zoom(&mut self, factor: f32)
 Zooms the camera by `factor` (multiplicative), clamped to the camera's zoom limits.
 
 ### `AppState::apply_camera_rotate`
-[src/app.rs:4012](../../src/app.rs#L4012)
+[src/app.rs:4015](../../src/app.rs#L4015)
 
 ```rust
 pub fn apply_camera_rotate(&mut self, d: f32)
@@ -3120,7 +3121,7 @@ pub fn apply_camera_rotate(&mut self, d: f32)
 Rolls the camera by `d` radians.
 
 ### `AppState::apply_scheme`
-[src/app.rs:4018](../../src/app.rs#L4018)
+[src/app.rs:4021](../../src/app.rs#L4021)
 
 ```rust
 pub fn apply_scheme(&self, ctx: &egui::Context)
@@ -3130,7 +3131,7 @@ Applies the chosen colour scheme (Graphite, Midnight, Paper or Custom) to egui; 
 from the next frame. See [ui/theme.rs](ui/theme.md).
 
 ### `AppState::panel_shown`
-[src/app.rs:4022](../../src/app.rs#L4022)
+[src/app.rs:4025](../../src/app.rs#L4025)
 
 ```rust
 pub fn panel_shown(&self, id: PanelId) -> bool
@@ -3143,7 +3144,7 @@ pub fn panel_shown(&self, id: PanelId) -> bool
 checkboxes, docking neighbours).
 
 ### `AppState::set_panel_shown`
-[src/app.rs:4026](../../src/app.rs#L4026)
+[src/app.rs:4029](../../src/app.rs#L4029)
 
 ```rust
 pub fn set_panel_shown(&mut self, id: PanelId, shown: bool)
@@ -3156,7 +3157,7 @@ back if `shown` is false.
 **Used by:** [ui/shell.rs](ui/shell.md) (the × in a panel's title bar and the Panels menu).
 
 ### `AppState::reset_panel_layout`
-[src/app.rs:4036](../../src/app.rs#L4036)
+[src/app.rs:4039](../../src/app.rs#L4039)
 
 ```rust
 pub fn reset_panel_layout(&mut self)
@@ -3171,7 +3172,7 @@ never lands on 0, which is reserved for the original ids.
 **Used by:** [ui/shell.rs](ui/shell.md) (Panels menu "Reset panel layout").
 
 ### `AppState::reset_camera`
-[src/app.rs:4043](../../src/app.rs#L4043)
+[src/app.rs:4046](../../src/app.rs#L4046)
 
 ```rust
 pub fn reset_camera(&mut self)
@@ -3185,7 +3186,7 @@ undone. The camera is the rectangle that decides what an export shows (see
 **Used by:** [ui/shell.rs](ui/shell.md) (camera panel Reset button).
 
 ### `AppState::set_camera_size`
-[src/app.rs:4054](../../src/app.rs#L4054)
+[src/app.rs:4057](../../src/app.rs#L4057)
 
 ```rust
 pub fn set_camera_size(&mut self, size: Option<(u32, u32)>)
@@ -3210,7 +3211,7 @@ a stroke never changes the export size.
 (camera size fields).
 
 ### `AppState::camera_opts_changed`
-[src/app.rs:4068](../../src/app.rs#L4068)
+[src/app.rs:4071](../../src/app.rs#L4071)
 
 ```rust
 pub fn camera_opts_changed(&mut self)
@@ -3223,7 +3224,7 @@ frame recomputes the live camera from the keys, exactly as a frame change would.
 **Used by:** [ui/shell.rs](ui/shell.md) (camera panel option toggles).
 
 ### `AppState::hold_camera_inside`
-[src/app.rs:4074](../../src/app.rs#L4074)
+[src/app.rs:4077](../../src/app.rs#L4077)
 
 ```rust
 pub fn hold_camera_inside(&mut self)
@@ -3237,7 +3238,7 @@ back inside; otherwise (or when it is already inside) nothing changes. The real 
 another camera path later in `AppState`.
 
 ### `AppState::frame_camera`
-[src/app.rs:4079](../../src/app.rs#L4079)
+[src/app.rs:4082](../../src/app.rs#L4082)
 
 ```rust
 pub fn frame_camera(&mut self, how: CameraFraming)
@@ -3260,7 +3261,7 @@ pub fn frame_camera(&mut self, how: CameraFraming)
 **Used by:** [ui/shell.rs](ui/shell.md) (camera panel framing buttons).
 
 ### `AppState::add_camera_key`
-[src/app.rs:4101](../../src/app.rs#L4101)
+[src/app.rs:4104](../../src/app.rs#L4104)
 
 ```rust
 pub fn add_camera_key(&mut self)
@@ -3273,7 +3274,7 @@ as an undo step. A *key* is a saved value on one frame; frames between keys are 
 (camera panel), tests.
 
 ### `AppState::delete_camera_key`
-[src/app.rs:4110](../../src/app.rs#L4110)
+[src/app.rs:4113](../../src/app.rs#L4113)
 
 ```rust
 pub fn delete_camera_key(&mut self)
@@ -3286,7 +3287,7 @@ remaining keys so the canvas shows the right value.
 **Used by:** the `CameraKeyDelete` shortcut action in `AppState`, [ui/shell.rs](ui/shell.md).
 
 ### `AppState::move_camera_key`
-[src/app.rs:4124](../../src/app.rs#L4124)
+[src/app.rs:4127](../../src/app.rs#L4127)
 
 ```rust
 pub fn move_camera_key(&mut self, from: usize, to: usize, copy: bool)
@@ -3300,7 +3301,7 @@ live camera is re-resolved afterwards. The key logic itself is `Project::move_ca
 **Used by:** [ui/tracks.rs](ui/tracks.md) (dragging a camera key along the timeline ruler).
 
 ### `AppState::set_camera_key_ease`
-[src/app.rs:4136](../../src/app.rs#L4136)
+[src/app.rs:4139](../../src/app.rs#L4139)
 
 ```rust
 pub fn set_camera_key_ease(&mut self, ease: Ease)
@@ -3313,7 +3314,7 @@ records no change.
 **Used by:** [ui/shell.rs](ui/shell.md) (camera panel ease picker), tests.
 
 ### `AppState::active_layer_cell_size`
-[src/app.rs:4147](../../src/app.rs#L4147)
+[src/app.rs:4150](../../src/app.rs#L4150)
 
 ```rust
 pub fn active_layer_cell_size(&self) -> (u32, u32)
@@ -3327,7 +3328,7 @@ project size if the layer index is out of range.
 canvas" fields).
 
 ### `AppState::active_layer_cell_count`
-[src/app.rs:4155](../../src/app.rs#L4155)
+[src/app.rs:4158](../../src/app.rs#L4158)
 
 ```rust
 pub fn active_layer_cell_count(&self) -> usize
@@ -3339,7 +3340,7 @@ next to the size so the memory cost of a resize is visible.
 **Used by:** [ui/shell.rs](ui/shell.md).
 
 ### `AppState::expand_active_layer_canvas`
-[src/app.rs:4161](../../src/app.rs#L4161)
+[src/app.rs:4164](../../src/app.rs#L4164)
 
 ```rust
 pub fn expand_active_layer_canvas(&mut self, w: u32, h: u32)
@@ -3365,7 +3366,7 @@ pub fn expand_active_layer_canvas(&mut self, w: u32, h: u32)
 **Used by:** [ui/shell.rs](ui/shell.md) (Layers panel "expand canvas").
 
 ### `AppState::tracker_click`
-[src/app.rs:4205](../../src/app.rs#L4205)
+[src/app.rs:4208](../../src/app.rs#L4208)
 
 ```rust
 pub fn tracker_click(&mut self, doc: (f32, f32))
@@ -3390,7 +3391,7 @@ frame to fix a miss.
 **Used by:** [ui/shell.rs](ui/shell.md) (canvas click while the tracker tool is on).
 
 ### `AppState::tracked_point_count`
-[src/app.rs:4239](../../src/app.rs#L4239)
+[src/app.rs:4242](../../src/app.rs#L4242)
 
 ```rust
 pub fn tracked_point_count(&self) -> usize
@@ -3402,7 +3403,7 @@ layer index.
 **Used by:** `clear_track_points`, [ui/shell.rs](ui/shell.md) (tracker panel readout).
 
 ### `AppState::clear_track_points`
-[src/app.rs:4248](../../src/app.rs#L4248)
+[src/app.rs:4251](../../src/app.rs#L4251)
 
 ```rust
 pub fn clear_track_points(&mut self)
@@ -3414,7 +3415,7 @@ forgets any pending second click. Returns early (no undo step) when there are no
 **Used by:** [ui/shell.rs](ui/shell.md) (tracker panel Clear button).
 
 ### `AppState::stabilize_active_layer`
-[src/app.rs:4265](../../src/app.rs#L4265)
+[src/app.rs:4268](../../src/app.rs#L4268)
 
 ```rust
 pub fn stabilize_active_layer(&mut self)
@@ -3451,7 +3452,7 @@ const key = { ...base, tx: base.tx + (ra[0] - pa[0]), ty: base.ty + (ra[1] - pa[
 **Used by:** [ui/shell.rs](ui/shell.md) (tracker panel Stabilize button).
 
 ### `AppState::poll_bg_jobs`
-[src/app.rs:4362](../../src/app.rs#L4362)
+[src/app.rs:4365](../../src/app.rs#L4365)
 
 ```rust
 fn poll_bg_jobs(&mut self)
@@ -3475,7 +3476,7 @@ hands the result to the right handler and clears the busy overlay label (`bg_lab
 **Used by:** `AppState::update` (the per-frame `eframe::App` method later in this file).
 
 ### `AppState::on_frames_decoded`
-[src/app.rs:4449](../../src/app.rs#L4449)
+[src/app.rs:4452](../../src/app.rs#L4452)
 
 ```rust
 fn on_frames_decoded(&mut self, res: Result<Vec<Canvas>>, format: &'static str)
@@ -3489,7 +3490,7 @@ messages (`&'static str` is a string literal baked into the program).
 **Used by:** `poll_bg_jobs`.
 
 ### `AppState::on_video_probed`
-[src/app.rs:4468](../../src/app.rs#L4468)
+[src/app.rs:4471](../../src/app.rs#L4471)
 
 ```rust
 fn on_video_probed(&mut self, res: Result<(usize, f64)>, path: PathBuf)
@@ -3502,7 +3503,7 @@ hints that ffmpeg may be missing).
 **Used by:** `poll_bg_jobs`.
 
 ### `AppState::on_video_extracted`
-[src/app.rs:4486](../../src/app.rs#L4486)
+[src/app.rs:4489](../../src/app.rs#L4489)
 
 ```rust
 fn on_video_extracted(&mut self, res: Result<Vec<Canvas>>, name: String)
@@ -3514,7 +3515,7 @@ fn on_video_extracted(&mut self, res: Result<Vec<Canvas>>, name: String)
 **Used by:** `poll_bg_jobs`.
 
 ### `AppState::request_preview`
-[src/app.rs:4496](../../src/app.rs#L4496)
+[src/app.rs:4499](../../src/app.rs#L4499)
 
 ```rust
 pub fn request_preview(&mut self, ctx: &egui::Context, idx: usize)
@@ -3540,7 +3541,7 @@ extracted on a worker thread, one at a time.
 **Used by:** [ui/shell.rs](ui/shell.md) (import range dialog, for the start and end frames).
 
 ### `AppState::poll_preview`
-[src/app.rs:4535](../../src/app.rs#L4535)
+[src/app.rs:4538](../../src/app.rs#L4538)
 
 ```rust
 fn poll_preview(&mut self, ctx: &egui::Context)
@@ -3553,7 +3554,7 @@ running the receiver is put back.
 **Used by:** `AppState::update`.
 
 ### `AppState::ensure_cell_tracking`
-[src/app.rs:4553](../../src/app.rs#L4553)
+[src/app.rs:4556](../../src/app.rs#L4556)
 
 ```rust
 fn ensure_cell_tracking(&mut self)
@@ -3566,7 +3567,7 @@ fn ensure_cell_tracking(&mut self)
 **Used by:** `sync_textures`, a test.
 
 ### `AppState::sync_textures`
-[src/app.rs:4567](../../src/app.rs#L4567)
+[src/app.rs:4570](../../src/app.rs#L4570)
 
 ```rust
 pub fn sync_textures(&mut self, ctx: &egui::Context)
@@ -3599,7 +3600,7 @@ once per frame just before the UI is drawn.
 `app.rs` and [app/groups.rs](app/groups.md).
 
 ### `AppState::stream_stroke`
-[src/app.rs:4686](../../src/app.rs#L4686)
+[src/app.rs:4689](../../src/app.rs#L4689)
 
 ```rust
 pub fn stream_stroke(&mut self, ctx: &egui::Context) -> bool
@@ -3612,7 +3613,7 @@ Returns `false` (leaving it to the normal `sync_textures`) when it can't stream:
 shown through a clip or group texture instead of its own, or the drawing has no texture yet.
 
 ### `AppState::paints_through_clip`
-[src/app.rs:4711](../../src/app.rs#L4711)
+[src/app.rs:4714](../../src/app.rs#L4714)
 
 ```rust
 fn paints_through_clip(&self) -> bool
@@ -3622,7 +3623,7 @@ Whether the active layer is displayed through some texture other than its own dr
 clipped, something is clipped to it, or it is inside a group drawn as one image.
 
 ### `AppState::whole_tex`
-[src/app.rs:4719](../../src/app.rs#L4719)
+[src/app.rs:4722](../../src/app.rs#L4722)
 
 ```rust
 fn whole_tex(&self, id: CellId) -> bool
@@ -3633,7 +3634,7 @@ which case it returns `true` so nobody waits for one). `is_some_and(|t| …)` is
 value and the value passes this test".
 
 ### `AppState::pen_tex_ready`
-[src/app.rs:4729](../../src/app.rs#L4729)
+[src/app.rs:4732](../../src/app.rs#L4732)
 
 ```rust
 fn pen_tex_ready(&self, want: PenTex) -> bool
@@ -3643,7 +3644,7 @@ Whether the texture `warm_pre` asked for (see `PenTex`) has been requested and a
 the GPU.
 
 ### `AppState::sync_pen_tex`
-[src/app.rs:4748](../../src/app.rs#L4748)
+[src/app.rs:4751](../../src/app.rs#L4751)
 
 ```rust
 fn sync_pen_tex(&mut self, ctx: &egui::Context)
@@ -3655,7 +3656,7 @@ create. Only one drawing is kept whole at a time — the previous one is cropped
 whole-cell texture for every drawing blew the texture budget during playback.
 
 ### `AppState::adopt_spare_tex`
-[src/app.rs:4807](../../src/app.rs#L4807)
+[src/app.rs:4810](../../src/app.rs#L4810)
 
 ```rust
 fn adopt_spare_tex(&mut self, target: CellId)
@@ -3666,7 +3667,7 @@ advance (`spare_tex`), so its very first stroke streams as patches instead of ou
 sized to its first dab.
 
 ### `AppState::clip_pair`
-[src/app.rs:4832](../../src/app.rs#L4832)
+[src/app.rs:4835](../../src/app.rs#L4835)
 
 ```rust
 fn clip_pair(&self, li: usize, b: usize) -> Option<ClipPair>
@@ -3688,7 +3689,7 @@ The `?` after an `Option` returns `None` early (see [Option and Result](../rust-
 **Used by:** `sync_textures`, `layer_texture`.
 
 ### `AppState::layer_texture`
-[src/app.rs:4877](../../src/app.rs#L4877)
+[src/app.rs:4880](../../src/app.rs#L4880)
 
 ```rust
 pub fn layer_texture(&self, li: usize) -> Option<(CellId, &TextureHandle, DirtyRect)>
@@ -3704,7 +3705,7 @@ cell the texture covers. `None` means draw nothing.
 [app/groups.rs](app/groups.md).
 
 ### `AppState::sync_clip_textures`
-[src/app.rs:4897](../../src/app.rs#L4897)
+[src/app.rs:4900](../../src/app.rs#L4900)
 
 ```rust
 fn sync_clip_textures(&mut self, ctx: &egui::Context, now: u64, pairs: &[ClipPair])
@@ -3731,7 +3732,7 @@ get here with any pairs.
 **Used by:** `sync_textures`.
 
 ### `AppState::upload_cell`
-[src/app.rs:4954](../../src/app.rs#L4954)
+[src/app.rs:4957](../../src/app.rs#L4957)
 
 ```rust
 fn upload_cell(&mut self, ctx: &egui::Context, id: CellId, dirty: Dirty)
@@ -3756,7 +3757,7 @@ fn upload_cell(&mut self, ctx: &egui::Context, id: CellId, dirty: Dirty)
 **Used by:** `sync_textures`.
 
 ### `AppState::sync_ghosts`
-[src/app.rs:5007](../../src/app.rs#L5007)
+[src/app.rs:5010](../../src/app.rs#L5010)
 
 ```rust
 fn sync_ghosts(&mut self, ctx: &egui::Context, now: u64)
@@ -3784,7 +3785,7 @@ not build a hundred ghosts.
 **Used by:** `sync_textures`.
 
 ### `AppState::enforce_texture_budget`
-[src/app.rs:5075](../../src/app.rs#L5075)
+[src/app.rs:5078](../../src/app.rs#L5078)
 
 ```rust
 fn enforce_texture_budget(&mut self)
@@ -3804,7 +3805,7 @@ cell re-uploads in full next time it shows.
 **Used by:** `sync_textures`.
 
 ### `AppState::onion_layers`
-[src/app.rs:5137](../../src/app.rs#L5137)
+[src/app.rs:5140](../../src/app.rs#L5140)
 
 ```rust
 pub fn onion_layers(&self) -> Vec<usize>
@@ -3818,7 +3819,7 @@ loop) or when onion skin is off.
 **Used by:** `sync_ghosts`, [ui/shell.rs](ui/shell.md) (canvas ghost drawing).
 
 ### `AppState::onion_steps`
-[src/app.rs:5155](../../src/app.rs#L5155)
+[src/app.rs:5158](../../src/app.rs#L5158)
 
 ```rust
 pub fn onion_steps(&self, li: usize, dir: OnionDirection) -> Vec<OnionStep>
@@ -3832,7 +3833,7 @@ cached tint.
 **Used by:** `sync_ghosts`, [ui/shell.rs](ui/shell.md).
 
 ### `AppState::onion_pin_ghosts`
-[src/app.rs:5178](../../src/app.rs#L5178)
+[src/app.rs:5181](../../src/app.rs#L5181)
 
 ```rust
 pub fn onion_pin_ghosts(&self, li: usize) -> Vec<(OnionPin, CellId)>
@@ -3845,7 +3846,7 @@ with its own tint), from `timeline::onion::pin_ghosts` in
 **Used by:** `sync_ghosts`, `onion_steps`, [ui/shell.rs](ui/shell.md).
 
 ### `AppState::layer_view_alpha`
-[src/app.rs:5201](../../src/app.rs#L5201)
+[src/app.rs:5204](../../src/app.rs#L5204)
 
 ```rust
 pub fn layer_view_alpha(&self, li: usize) -> f32
@@ -3861,7 +3862,7 @@ boundaries from, which must stay readable).
 **Used by:** [ui/shell.rs](ui/shell.md) (canvas drawing).
 
 ### `AppState::begin_edit_cell`
-[src/app.rs:5219](../../src/app.rs#L5219)
+[src/app.rs:5222](../../src/app.rs#L5222)
 
 ```rust
 fn begin_edit_cell(&mut self) -> Option<CellId>
@@ -3874,7 +3875,7 @@ reference). If auto-key had to add a key first, that key's undo step is pushed n
 **Used by:** `pointer_down`, [app/lasso_fill.rs](app/lasso_fill.md).
 
 ### `AppState::edit_cell_on`
-[src/app.rs:5229](../../src/app.rs#L5229)
+[src/app.rs:5232](../../src/app.rs#L5232)
 
 ```rust
 fn edit_cell_on(&mut self, li: usize) -> Option<(CellId, Option<undo::Command>)>
@@ -3898,7 +3899,7 @@ auto-added key is handed back instead of recorded, so the caller can fold it int
 layers).
 
 ### `AppState::pointer_down`
-[src/app.rs:5257](../../src/app.rs#L5257)
+[src/app.rs:5260](../../src/app.rs#L5260)
 
 ```rust
 pub fn pointer_down(&mut self, sample: PointerSample)
@@ -3936,7 +3937,7 @@ a shape, or a freehand stroke, depending on the active tool.
 [tools/golden_tests.rs](tools/golden_tests.md), `app/*` test modules).
 
 ### `AppState::flush_stroke`
-[src/app.rs:5378](../../src/app.rs#L5378)
+[src/app.rs:5381](../../src/app.rs#L5381)
 
 ```rust
 fn flush_stroke(&mut self, target: CellId)
@@ -3958,7 +3959,7 @@ everything already streamed).
 **Used by:** `pointer_down`, `pointer_move`, `tick_stroke` (earlier in `AppState`).
 
 ### `AppState::pointer_move`
-[src/app.rs:5397](../../src/app.rs#L5397)
+[src/app.rs:5400](../../src/app.rs#L5400)
 
 ```rust
 pub fn pointer_move(&mut self, sample: PointerSample)
@@ -3976,7 +3977,7 @@ pub fn pointer_move(&mut self, sample: PointerSample)
 **Used by:** [ui/shell.rs](ui/shell.md), tests.
 
 ### `AppState::pointer_up`
-[src/app.rs:5419](../../src/app.rs#L5419)
+[src/app.rs:5422](../../src/app.rs#L5422)
 
 ```rust
 pub fn pointer_up(&mut self)
@@ -4001,7 +4002,7 @@ pub fn pointer_up(&mut self)
 **Used by:** [ui/shell.rs](ui/shell.md), tests.
 
 ### `AppState::fill_anchor`
-[src/app.rs:5495](../../src/app.rs#L5495)
+[src/app.rs:5498](../../src/app.rs#L5498)
 
 ```rust
 pub fn fill_anchor(&mut self, at: egui::Pos2)
@@ -4013,7 +4014,7 @@ adjusts the fill (see `fill_drag_to`).
 **Used by:** [ui/shell.rs](ui/shell.md), tests.
 
 ### `AppState::fill_drag_to`
-[src/app.rs:5510](../../src/app.rs#L5510)
+[src/app.rs:5513](../../src/app.rs#L5513)
 
 ```rust
 pub fn fill_drag_to(&mut self, at: egui::Pos2)
@@ -4040,7 +4041,7 @@ canvas follows, and the new values stay in the sliders.
 **Used by:** [ui/shell.rs](ui/shell.md), tests.
 
 ### `AppState::active_alpha_lock`
-[src/app.rs:5543](../../src/app.rs#L5543)
+[src/app.rs:5546](../../src/app.rs#L5546)
 
 ```rust
 pub fn active_alpha_lock(&self) -> bool
@@ -4054,7 +4055,7 @@ and the test passes".
 [app/lasso_fill.rs](app/lasso_fill.md).
 
 ### `AppState::fill_dragging`
-[src/app.rs:5551](../../src/app.rs#L5551)
+[src/app.rs:5554](../../src/app.rs#L5554)
 
 ```rust
 pub fn fill_dragging(&self) -> bool
@@ -4065,7 +4066,7 @@ pub fn fill_dragging(&self) -> bool
 **Used by:** [ui/shell.rs](ui/shell.md) (routing drags to `fill_drag_to`), tests.
 
 ### `AppState::finish_fill`
-[src/app.rs:5557](../../src/app.rs#L5557)
+[src/app.rs:5560](../../src/app.rs#L5560)
 
 ```rust
 fn finish_fill(&mut self) -> bool
@@ -4080,7 +4081,7 @@ step changed anything.
 **Used by:** `pointer_up`.
 
 ### `AppState::cancel_fill`
-[src/app.rs:5577](../../src/app.rs#L5577)
+[src/app.rs:5580](../../src/app.rs#L5580)
 
 ```rust
 pub fn cancel_fill(&mut self) -> bool
@@ -4095,7 +4096,7 @@ back from the snapshot, and no undo step is left.
 press first), tests.
 
 ### `AppState::snapshot_pre`
-[src/app.rs:5603](../../src/app.rs#L5603)
+[src/app.rs:5606](../../src/app.rs#L5606)
 
 ```rust
 fn snapshot_pre(&mut self, cell: CellId)
@@ -4119,7 +4120,7 @@ stroke compositor and for undo, and marks it live (`stroke_pre_live`).
 [app/liquify.rs](app/liquify.md), [app/lasso_fill.rs](app/lasso_fill.md).
 
 ### `AppState::clear_pre`
-[src/app.rs:5637](../../src/app.rs#L5637)
+[src/app.rs:5640](../../src/app.rs#L5640)
 
 ```rust
 fn clear_pre(&mut self)
@@ -4132,7 +4133,7 @@ snapshot of a blank cell.
 **Used by:** `snapshot_pre`, `warm_pre`.
 
 ### `AppState::pen_cell`
-[src/app.rs:5654](../../src/app.rs#L5654)
+[src/app.rs:5657](../../src/app.rs#L5657)
 
 ```rust
 fn pen_cell(&self) -> Option<Option<CellId>>
@@ -4154,7 +4155,7 @@ fn pen_cell(&self) -> Option<Option<CellId>>
 **Used by:** `warm_pre`.
 
 ### `AppState::held_for_auto_key`
-[src/app.rs:5669](../../src/app.rs#L5669)
+[src/app.rs:5672](../../src/app.rs#L5672)
 
 ```rust
 fn held_for_auto_key(&self) -> Option<CellId>
@@ -4167,7 +4168,7 @@ starts a new one here. `None` otherwise.
 **Used by:** `pen_cell`, `ghost_ahead`.
 
 ### `AppState::ghost_ahead`
-[src/app.rs:5684](../../src/app.rs#L5684)
+[src/app.rs:5687](../../src/app.rs#L5687)
 
 ```rust
 fn ghost_ahead(&self) -> Option<(CellId, [u8; 3])>
@@ -4182,7 +4183,7 @@ first previous step is shown, and nothing is playing.
 **Used by:** `sync_ghosts`.
 
 ### `AppState::warm_pre`
-[src/app.rs:5700](../../src/app.rs#L5700)
+[src/app.rs:5703](../../src/app.rs#L5703)
 
 ```rust
 fn warm_pre(&mut self, ctx: &egui::Context)
@@ -4208,7 +4209,7 @@ coverage. For a new blank drawing it just clears the snapshot.
 **Used by:** `AppState::update` (each frame, before `sync_textures`), tests.
 
 ### `AppState::pre_replaced`
-[src/app.rs:5781](../../src/app.rs#L5781)
+[src/app.rs:5784](../../src/app.rs#L5784)
 
 ```rust
 pub(crate) fn pre_replaced(&mut self, cell: CellId)
@@ -4222,7 +4223,7 @@ visible anywhere in this crate (program) but not outside it.
 **Used by:** [app/select.rs](app/select.md).
 
 ### `AppState::commit_undo`
-[src/app.rs:5795](../../src/app.rs#L5795)
+[src/app.rs:5798](../../src/app.rs#L5798)
 
 ```rust
 fn commit_undo(&mut self, cell: CellId) -> bool
@@ -4235,7 +4236,7 @@ fn commit_undo(&mut self, cell: CellId) -> bool
 **Used by:** `pointer_up`, `finish_fill`, [app/lasso_fill.rs](app/lasso_fill.md).
 
 ### `AppState::take_patch`
-[src/app.rs:5807](../../src/app.rs#L5807)
+[src/app.rs:5810](../../src/app.rs#L5810)
 
 ```rust
 fn take_patch(&mut self, cell: CellId) -> Option<undo::Command>
@@ -4261,7 +4262,7 @@ live, the cell has no dirty rect, the rect is empty, or before equals after.
 **Used by:** `commit_undo`, [app/select.rs](app/select.md), [app/liquify.rs](app/liquify.md).
 
 ### `AppState::begin_screen_pick`
-[src/app.rs:5876](../../src/app.rs#L5876)
+[src/app.rs:5879](../../src/app.rs#L5879)
 
 ```rust
 pub fn begin_screen_pick(&mut self)
@@ -4281,7 +4282,7 @@ see-through window) and the next tap makes it the brush colour. It is a momentar
 **Used by:** `dispatch` (the shortcut action handler later in `AppState`), tests.
 
 ### `AppState::end_screen_pick`
-[src/app.rs:5899](../../src/app.rs#L5899)
+[src/app.rs:5902](../../src/app.rs#L5902)
 
 ```rust
 pub fn end_screen_pick(&mut self)
@@ -4295,7 +4296,7 @@ mid-frame, after the loupe already drew with it, would make wgpu use a destroyed
 [ui/shell.rs](ui/shell.md) (Esc while picking).
 
 ### `AppState::cut_cell`
-[src/app.rs:5915](../../src/app.rs#L5915)
+[src/app.rs:5918](../../src/app.rs#L5918)
 
 ```rust
 pub fn cut_cell(&mut self)
@@ -4310,7 +4311,7 @@ mutably for the edit.
 [ui/tracks.rs](ui/tracks.md) (context menus).
 
 ### `AppState::paste_cell`
-[src/app.rs:5931](../../src/app.rs#L5931)
+[src/app.rs:5934](../../src/app.rs#L5934)
 
 ```rust
 pub fn paste_cell(&mut self)
@@ -4324,7 +4325,7 @@ so the cheap timeline-only undo snapshot is enough.
 [ui/tracks.rs](ui/tracks.md).
 
 ### `AppState::clear_track_state`
-[src/app.rs:5950](../../src/app.rs#L5950)
+[src/app.rs:5953](../../src/app.rs#L5953)
 
 ```rust
 fn clear_track_state(&mut self)
@@ -4336,7 +4337,7 @@ anchor, drag in progress, and the blank-cell cache. Used when the project itself
 **Used by:** `reset_with` (New project) and `load_project` (Open), elsewhere in `AppState`.
 
 ### `AppState::track_selection`
-[src/app.rs:5958](../../src/app.rs#L5958)
+[src/app.rs:5961](../../src/app.rs#L5961)
 
 ```rust
 pub fn track_selection(&self) -> Vec<(usize, usize)>
@@ -4348,7 +4349,7 @@ pub fn track_selection(&self) -> Vec<(usize, usize)>
 **Used by:** the track edit methods below, [ui/tracks.rs](ui/tracks.md).
 
 ### `AppState::cell_is_blank`
-[src/app.rs:5971](../../src/app.rs#L5971)
+[src/app.rs:5974](../../src/app.rs#L5974)
 
 ```rust
 pub fn cell_is_blank(&mut self, id: CellId) -> Option<bool>
@@ -4365,7 +4366,7 @@ counts as blank.
 **Used by:** [ui/tracks.rs](ui/tracks.md) (drawing blank blocks differently).
 
 ### `AppState::painted`
-[src/app.rs:5988](../../src/app.rs#L5988)
+[src/app.rs:5991](../../src/app.rs#L5991)
 
 ```rust
 fn painted(&mut self, id: CellId)
@@ -4378,7 +4379,7 @@ erasing or deleting, which can empty a cell; those leave the answer to a scan.
 **Used by:** `flush_stroke`, `pointer_up`, `finish_fill`.
 
 ### `AppState::layers_editable`
-[src/app.rs:5995](../../src/app.rs#L5995)
+[src/app.rs:5998](../../src/app.rs#L5998)
 
 ```rust
 fn layers_editable(&self, layers: impl IntoIterator<Item = usize>) -> bool
@@ -4391,7 +4392,7 @@ array like `[b.layer]` or a `.map(...)` iterator. More: [Generics](../rust-prime
 **Used by:** the track edit methods below.
 
 ### `AppState::track_edit`
-[src/app.rs:6000](../../src/app.rs#L6000)
+[src/app.rs:6003](../../src/app.rs#L6003)
 
 ```rust
 fn track_edit(&mut self, edit: impl FnOnce(&mut Project) -> Vec<(usize, usize)>)
@@ -4407,7 +4408,7 @@ track selection), then selects the `(layer, frame)` blocks the edit returned.
 `clear_track_selection`, `close_track_selection`, `insert_inbetween_here`.
 
 ### `AppState::move_track_selection`
-[src/app.rs:6008](../../src/app.rs#L6008)
+[src/app.rs:6011](../../src/app.rs#L6011)
 
 ```rust
 pub fn move_track_selection(&mut self, dl: isize, df: isize, copy: bool, cursor: (usize, usize))
@@ -4427,7 +4428,7 @@ inside the edit, so undo puts the cursor back too. The landed blocks become the 
 **Used by:** [ui/tracks.rs](ui/tracks.md) (dropping a block drag).
 
 ### `AppState::retime_track_block`
-[src/app.rs:6023](../../src/app.rs#L6023)
+[src/app.rs:6026](../../src/app.rs#L6026)
 
 ```rust
 pub fn retime_track_block(&mut self, b: Block, new_len: usize)
@@ -4441,7 +4442,7 @@ re-finds the block at `b.start` inside the edit and selects it afterwards.
 **Used by:** [ui/tracks.rs](ui/tracks.md) (dragging a block's edge).
 
 ### `AppState::range_edit`
-[src/app.rs:6039](../../src/app.rs#L6039)
+[src/app.rs:6042](../../src/app.rs#L6042)
 
 ```rust
 fn range_edit(&mut self, edit: impl FnOnce(&mut Project, &[(usize, usize)]) -> Vec<(usize, usize)>)
@@ -4450,7 +4451,7 @@ fn range_edit(&mut self, edit: impl FnOnce(&mut Project, &[(usize, usize)]) -> V
 Run a Range edit on the drawings selected in the timeline: one undo step, the result selected. Nothing on a locked or reference layer.
 
 ### `AppState::reverse_track_selection`
-[src/app.rs:6048](../../src/app.rs#L6048)
+[src/app.rs:6051](../../src/app.rs#L6051)
 
 ```rust
 pub fn reverse_track_selection(&mut self)
@@ -4459,7 +4460,7 @@ pub fn reverse_track_selection(&mut self)
 Range ▸ Reverse: see `Project::reverse_runs`.
 
 ### `AppState::swing_track_selection`
-[src/app.rs:6053](../../src/app.rs#L6053)
+[src/app.rs:6056](../../src/app.rs#L6056)
 
 ```rust
 pub fn swing_track_selection(&mut self)
@@ -4468,7 +4469,7 @@ pub fn swing_track_selection(&mut self)
 Range ▸ Swing: see `Project::swing_runs`.
 
 ### `AppState::repeat_track_selection`
-[src/app.rs:6058](../../src/app.rs#L6058)
+[src/app.rs:6061](../../src/app.rs#L6061)
 
 ```rust
 pub fn repeat_track_selection(&mut self, times: usize)
@@ -4477,7 +4478,7 @@ pub fn repeat_track_selection(&mut self, times: usize)
 Range ▸ Repeat ×`times`: see `Project::repeat_runs`.
 
 ### `AppState::stretch_track_selection`
-[src/app.rs:6065](../../src/app.rs#L6065)
+[src/app.rs:6068](../../src/app.rs#L6068)
 
 ```rust
 pub fn stretch_track_selection(&mut self, length: &str)
@@ -4486,7 +4487,7 @@ pub fn stretch_track_selection(&mut self, length: &str)
 Range ▸ Stretch to `length`: frames (`18`), or a change to each run's own length (`*1.5`, `/2`, `+4`) — the frame box's arithmetic. Says so and changes nothing when it doesn't read. See `Project::stretch_runs`.
 
 ### `AppState::set_track_timing`
-[src/app.rs:6082](../../src/app.rs#L6082)
+[src/app.rs:6085](../../src/app.rs#L6085)
 
 ```rust
 pub fn set_track_timing(&mut self, n: usize)
@@ -4499,7 +4500,7 @@ layers.
 **Used by:** [ui/tracks.rs](ui/tracks.md) ("On N" timing menu).
 
 ### `AppState::clear_track_selection`
-[src/app.rs:6091](../../src/app.rs#L6091)
+[src/app.rs:6094](../../src/app.rs#L6094)
 
 ```rust
 pub fn clear_track_selection(&mut self)
@@ -4511,7 +4512,7 @@ timing of other drawings is unchanged).
 **Used by:** `dispatch` (`TrackClear` action), [ui/tracks.rs](ui/tracks.md).
 
 ### `AppState::close_track_selection`
-[src/app.rs:6100](../../src/app.rs#L6100)
+[src/app.rs:6103](../../src/app.rs#L6103)
 
 ```rust
 pub fn close_track_selection(&mut self)
@@ -4523,7 +4524,7 @@ drawings slide earlier. Nothing is selected afterwards.
 **Used by:** `dispatch` (`TrackCloseGap` action), [ui/tracks.rs](ui/tracks.md).
 
 ### `AppState::insert_inbetween_here`
-[src/app.rs:6119](../../src/app.rs#L6119)
+[src/app.rs:6122](../../src/app.rs#L6122)
 
 ```rust
 pub fn insert_inbetween_here(&mut self)
@@ -4532,7 +4533,7 @@ pub fn insert_inbetween_here(&mut self)
 Insert in-between: on every selected layer (a picked group stands for its layers; the active layer alone when none are picked), a new blank drawing in the middle of the gap between the drawing at the playhead and the next one — see `Project::insert_inbetweens`. Locked and reference layers are left alone. A drawing-by-drawing edit, so it stays on the layers even with every layer selected. One undo step; the playhead lands on the active layer's new drawing (or the first one made) and the new drawings are selected in the timeline.
 
 ### `AppState::active_layer_is_reference`
-[src/app.rs:6146](../../src/app.rs#L6146)
+[src/app.rs:6149](../../src/app.rs#L6149)
 
 ```rust
 fn active_layer_is_reference(&self) -> bool
@@ -4548,7 +4549,7 @@ More: [Option and Result](../rust-primer.md#option-and-result)
 [app/liquify.rs](app/liquify.md), `paste_selection` in [app/select.rs](app/select.md).
 
 ### `AppState::frame_size`
-[src/app.rs:6154](../../src/app.rs#L6154)
+[src/app.rs:6157](../../src/app.rs#L6157)
 
 ```rust
 fn frame_size(&self) -> (f32, f32)
@@ -4561,7 +4562,7 @@ silently. More: [Numbers and casts](../rust-primer.md#numbers-and-casts)
 **Used by:** `shape_plane` (this file), `grid_space` in [app/grids.rs](app/grids.md).
 
 ### `AppState::grid_snap_on`
-[src/app.rs:6160](../../src/app.rs#L6160)
+[src/app.rs:6163](../../src/app.rs#L6163)
 
 ```rust
 fn grid_snap_on(&self) -> bool
@@ -4574,7 +4575,7 @@ on, grids are shown, and the active grid exists and is not hidden itself.
 **Used by:** `snapping`, `shapes_on_grid`.
 
 ### `AppState::snapping`
-[src/app.rs:6169](../../src/app.rs#L6169)
+[src/app.rs:6172](../../src/app.rs#L6172)
 
 ```rust
 pub fn snapping(&self) -> bool
@@ -4588,7 +4589,7 @@ pub fn snapping(&self) -> bool
 panel, `draw_tool_cursor`).
 
 ### `AppState::shapes_on_grid`
-[src/app.rs:6180](../../src/app.rs#L6180)
+[src/app.rs:6183](../../src/app.rs#L6183)
 
 ```rust
 pub fn shapes_on_grid(&self) -> bool
@@ -4601,7 +4602,7 @@ show this.
 **Used by:** `shape_plane` (this file); `tools_content` in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::shape_plane`
-[src/app.rs:6190](../../src/app.rs#L6190)
+[src/app.rs:6193](../../src/app.rs#L6193)
 
 ```rust
 fn shape_plane(&self, target: CellId) -> Option<GridPlane>
@@ -4630,7 +4631,7 @@ on-cell quad; `None` when shapes aren't on a grid or the homography can't be bui
 **Used by:** `pointer_down` (this file) when a Shape drag starts.
 
 ### `AppState::shape_outline`
-[src/app.rs:6217](../../src/app.rs#L6217)
+[src/app.rs:6220](../../src/app.rs#L6220)
 
 ```rust
 pub fn shape_outline(&self, drag: &ShapeDrag) -> Vec<(f32, f32)>
@@ -4663,7 +4664,7 @@ More: [Enums and match](../rust-primer.md#enums-and-match)
 [ui/shell.rs](ui/shell.md) (the preview).
 
 ### `AppState::slide_shape`
-[src/app.rs:6257](../../src/app.rs#L6257)
+[src/app.rs:6260](../../src/app.rs#L6260)
 
 ```rust
 fn slide_shape(&mut self, p: [f32; 2])
@@ -4687,7 +4688,7 @@ from where it lands.
 **Used by:** `stroke_point_doc` when the tool is Shape.
 
 ### `AppState::snap_begin`
-[src/app.rs:6290](../../src/app.rs#L6290)
+[src/app.rs:6293](../../src/app.rs#L6293)
 
 ```rust
 pub fn snap_begin(&mut self, p: [f32; 2]) -> [f32; 2]
@@ -4701,7 +4702,7 @@ stroke's last point and the shape pointer. The first point itself is never moved
 **Used by:** `draw` in [ui/shell.rs](ui/shell.md), at pen-down.
 
 ### `AppState::axis_lock_on`
-[src/app.rs:6302](../../src/app.rs#L6302)
+[src/app.rs:6305](../../src/app.rs#L6305)
 
 ```rust
 pub fn axis_lock_on(&self) -> bool
@@ -4718,7 +4719,7 @@ file); `perspective_move` in [app/grids.rs](app/grids.md); `sel_drag_path` and
 [ui/tracks.rs](ui/tracks.md).
 
 ### `AppState::drag_began`
-[src/app.rs:6308](../../src/app.rs#L6308)
+[src/app.rs:6311](../../src/app.rs#L6311)
 
 ```rust
 pub fn drag_began(&mut self)
@@ -4731,7 +4732,7 @@ pressed again (`MidKey::began`).
 **Used by:** `draw` in [ui/shell.rs](ui/shell.md); `show` in [ui/tracks.rs](ui/tracks.md).
 
 ### `AppState::read_modifiers`
-[src/app.rs:6315](../../src/app.rs#L6315)
+[src/app.rs:6318](../../src/app.rs#L6318)
 
 ```rust
 pub(crate) fn read_modifiers(&mut self, m: egui::Modifiers)
@@ -4745,7 +4746,7 @@ More: [Modules and visibility](../rust-primer.md#modules-and-visibility)
 **Used by:** `read_input`.
 
 ### `AppState::read_input`
-[src/app.rs:6322](../../src/app.rs#L6322)
+[src/app.rs:6325](../../src/app.rs#L6325)
 
 ```rust
 pub(crate) fn read_input(&mut self, i: &egui::InputState)
@@ -4759,7 +4760,7 @@ why these are cached on `AppState`.
 **Used by:** `update` (inside `ctx.input(|i| self.read_input(i))`).
 
 ### `AppState::hold_mid_keys`
-[src/app.rs:6331](../../src/app.rs#L6331)
+[src/app.rs:6334](../../src/app.rs#L6334)
 
 ```rust
 pub(crate) fn hold_mid_keys(&mut self, slide: bool, centre: bool)
@@ -4772,7 +4773,7 @@ frame would read them, for tests that drive `AppState` without a real frame.
 **Used by:** tests.
 
 ### `AppState::move_on`
-[src/app.rs:6338](../../src/app.rs#L6338)
+[src/app.rs:6341](../../src/app.rs#L6341)
 
 ```rust
 pub fn move_on(&self) -> bool
@@ -4785,7 +4786,7 @@ selection box or camera box slides under the pointer instead of growing.
 [app/select.rs](app/select.md).
 
 ### `AppState::centre_on`
-[src/app.rs:6344](../../src/app.rs#L6344)
+[src/app.rs:6347](../../src/app.rs#L6347)
 
 ```rust
 pub fn centre_on(&self) -> bool
@@ -4798,7 +4799,7 @@ the shape or box grows outward from the press point as its middle.
 [app/select.rs](app/select.md).
 
 ### `AppState::mid_drag_under_way`
-[src/app.rs:6350](../../src/app.rs#L6350)
+[src/app.rs:6353](../../src/app.rs#L6353)
 
 ```rust
 fn mid_drag_under_way(&self) -> bool
@@ -4812,7 +4813,7 @@ More: [Macros](../rust-primer.md#macros)
 **Used by:** `handle_keys`, so that Space moving a shape doesn't also trigger Play.
 
 ### `AppState::lock_basis_doc`
-[src/app.rs:6359](../../src/app.rs#L6359)
+[src/app.rs:6362](../../src/app.rs#L6362)
 
 ```rust
 pub fn lock_basis_doc(&self) -> f32
@@ -4832,7 +4833,7 @@ applies them (mirror first, then turn).
 [app/select.rs](app/select.md).
 
 ### `AppState::lock_basis_cell`
-[src/app.rs:6376](../../src/app.rs#L6376)
+[src/app.rs:6379](../../src/app.rs#L6379)
 
 ```rust
 pub fn lock_basis_cell(&self) -> f32
@@ -4845,7 +4846,7 @@ pixels and takes the angle between them.
 **Used by:** `shape_outline`.
 
 ### `AppState::lock_screen_drag`
-[src/app.rs:6387](../../src/app.rs#L6387)
+[src/app.rs:6390](../../src/app.rs#L6390)
 
 ```rust
 pub fn lock_screen_drag(&self, anchor: egui::Pos2, at: egui::Pos2) -> egui::Pos2
@@ -4859,7 +4860,7 @@ through `anchor` while Shift locks; otherwise returns `at` unchanged.
 [app/button_drag.rs](app/button_drag.md); `wand_drag_to` in [app/select.rs](app/select.md).
 
 ### `AppState::stroke_point_doc`
-[src/app.rs:6406](../../src/app.rs#L6406)
+[src/app.rs:6409](../../src/app.rs#L6409)
 
 ```rust
 pub fn stroke_point_doc(&mut self, p: [f32; 2]) -> [f32; 2]
@@ -4903,7 +4904,7 @@ function lockPoint(state, p) {
 **Used by:** `snapped` in [ui/shell.rs](ui/shell.md), for every stroke point.
 
 ### `AppState::snap_doc`
-[src/app.rs:6447](../../src/app.rs#L6447)
+[src/app.rs:6450](../../src/app.rs#L6450)
 
 ```rust
 pub fn snap_doc(&mut self, p: [f32; 2]) -> [f32; 2]
@@ -4928,7 +4929,7 @@ otherwise `p` projected onto the line from the start along the chosen direction
 **Used by:** `stroke_point_doc`.
 
 ### `AppState::set_brush_color`
-[src/app.rs:6489](../../src/app.rs#L6489)
+[src/app.rs:6492](../../src/app.rs#L6492)
 
 ```rust
 pub fn set_brush_color(&mut self, rgb: [u8; 3])
@@ -4947,7 +4948,7 @@ the active tool's slot.
 `swatch_strip` in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::brush_of`
-[src/app.rs:6502](../../src/app.rs#L6502)
+[src/app.rs:6505](../../src/app.rs#L6505)
 
 ```rust
 pub fn brush_of(&self, t: ActiveTool) -> &BrushSettings
@@ -4956,7 +4957,7 @@ pub fn brush_of(&self, t: ActiveTool) -> &BrushSettings
 The brush `t` keeps between tool switches: its pen slot's, or its own.
 
 ### `AppState::brush_of_mut`
-[src/app.rs:6510](../../src/app.rs#L6510)
+[src/app.rs:6513](../../src/app.rs#L6513)
 
 ```rust
 pub fn brush_of_mut(&mut self, t: ActiveTool) -> &mut BrushSettings
@@ -4966,7 +4967,7 @@ pub fn brush_of_mut(&mut self, t: ActiveTool) -> &mut BrushSettings
 `self.brush_of_mut(ActiveTool::Fill).opacity = 0.5`.
 
 ### `AppState::every_brush_mut`
-[src/app.rs:6519](../../src/app.rs#L6519)
+[src/app.rs:6522](../../src/app.rs#L6522)
 
 ```rust
 fn every_brush_mut(&mut self) -> impl Iterator<Item = &mut BrushSettings>
@@ -4975,7 +4976,7 @@ fn every_brush_mut(&mut self) -> impl Iterator<Item = &mut BrushSettings>
 Every tool's kept brush, every pen slot's among them.
 
 ### `AppState::wheel_pinned`
-[src/app.rs:6524](../../src/app.rs#L6524)
+[src/app.rs:6527](../../src/app.rs#L6527)
 
 ```rust
 pub fn wheel_pinned(&self) -> bool
@@ -4987,7 +4988,7 @@ field is private, so the UI reads it through this method.
 **Used by:** `color_panel` in [ui/color_wheel.rs](ui/color_wheel.md).
 
 ### `AppState::set_wheel_pinned`
-[src/app.rs:6531](../../src/app.rs#L6531)
+[src/app.rs:6534](../../src/app.rs#L6534)
 
 ```rust
 pub fn set_wheel_pinned(&mut self, on: bool)
@@ -5001,7 +5002,7 @@ again.
 [ui/color_wheel.rs](ui/color_wheel.md).
 
 ### `AppState::pie_colors`
-[src/app.rs:6542](../../src/app.rs#L6542)
+[src/app.rs:6545](../../src/app.rs#L6545)
 
 ```rust
 pub fn pie_colors(&self) -> (Vec<[u8; 3]>, usize)
@@ -5018,7 +5019,7 @@ inner ring.
 `draw` in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::stash_brush`
-[src/app.rs:6555](../../src/app.rs#L6555)
+[src/app.rs:6558](../../src/app.rs#L6558)
 
 ```rust
 pub(crate) fn stash_brush(&mut self)
@@ -5034,7 +5035,7 @@ value. More: [Ownership and borrowing](../rust-primer.md#ownership-and-borrowing
 [app/select.rs](app/select.md).
 
 ### `AppState::smoothing_for`
-[src/app.rs:6564](../../src/app.rs#L6564)
+[src/app.rs:6567](../../src/app.rs#L6567)
 
 ```rust
 pub fn smoothing_for(&self, tool: ActiveTool) -> Option<&SmoothingOptions>
@@ -5047,7 +5048,7 @@ result is a *borrowed reference* (`&`), not a copy.
 **Used by:** `smoothing` (this file); `tool_toggle` in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::smoothing`
-[src/app.rs:6573](../../src/app.rs#L6573)
+[src/app.rs:6576](../../src/app.rs#L6576)
 
 ```rust
 pub fn smoothing(&self) -> Option<&SmoothingOptions>
@@ -5059,7 +5060,7 @@ pub fn smoothing(&self) -> Option<&SmoothingOptions>
 [ui/shell.rs](ui/shell.md).
 
 ### `AppState::smoothing_mut`
-[src/app.rs:6577](../../src/app.rs#L6577)
+[src/app.rs:6580](../../src/app.rs#L6580)
 
 ```rust
 pub fn smoothing_mut(&mut self) -> Option<&mut SmoothingOptions>
@@ -5071,7 +5072,7 @@ can change the active pen's smoothing in place.
 **Used by:** `brush_settings_window` in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::smoothing_and_before_mut`
-[src/app.rs:6583](../../src/app.rs#L6583)
+[src/app.rs:6586](../../src/app.rs#L6586)
 
 ```rust
 fn smoothing_and_before_mut(&mut self) -> Option<(&mut SmoothingOptions, &mut Smoothing)>
@@ -5080,7 +5081,7 @@ fn smoothing_and_before_mut(&mut self) -> Option<(&mut SmoothingOptions, &mut Sm
 The active tool's smoothing, and the kind it had before the Stabilizer key turned it on.
 
 ### `AppState::toggle_stabilizer`
-[src/app.rs:6593](../../src/app.rs#L6593)
+[src/app.rs:6596](../../src/app.rs#L6596)
 
 ```rust
 fn toggle_stabilizer(&mut self)
@@ -5094,7 +5095,7 @@ The next stroke picks up the change; a stroke under way keeps its own.
 **Used by:** `dispatch` (`Action::StabilizerToggle`).
 
 ### `AppState::cycle_smoothing`
-[src/app.rs:6605](../../src/app.rs#L6605)
+[src/app.rs:6608](../../src/app.rs#L6608)
 
 ```rust
 fn cycle_smoothing(&mut self)
@@ -5106,7 +5107,7 @@ None. Stepping onto Stabilizer records the previous kind, so `toggle_stabilizer`
 **Used by:** `dispatch` (`Action::SmoothingCycle`).
 
 ### `AppState::load_brush`
-[src/app.rs:6622](../../src/app.rs#L6622)
+[src/app.rs:6625](../../src/app.rs#L6625)
 
 ```rust
 pub(crate) fn load_brush(&mut self, t: ActiveTool)
@@ -5121,7 +5122,7 @@ rather than a size of its own.
 [app/select.rs](app/select.md).
 
 ### `AppState::pin_swatch`
-[src/app.rs:6643](../../src/app.rs#L6643)
+[src/app.rs:6646](../../src/app.rs#L6646)
 
 ```rust
 pub fn pin_swatch(&mut self)
@@ -5133,7 +5134,7 @@ already held does nothing.
 **Used by:** `swatch_strip` in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::pin_rgb`
-[src/app.rs:6649](../../src/app.rs#L6649)
+[src/app.rs:6652](../../src/app.rs#L6652)
 
 ```rust
 pub fn pin_rgb(&mut self, rgb: [u8; 3])
@@ -5145,7 +5146,7 @@ the list past `MAX_SWATCHES`, drops the oldest (index 0).
 **Used by:** `pin_swatch`, `pin_set`.
 
 ### `AppState::pin_set`
-[src/app.rs:6660](../../src/app.rs#L6660)
+[src/app.rs:6663](../../src/app.rs#L6663)
 
 ```rust
 pub fn pin_set(&mut self, colors: &[[u8; 3]])
@@ -5158,7 +5159,7 @@ argument in JS). More: [Strings and slices](../rust-primer.md#strings-and-slices
 **Used by:** `color_panel` in [ui/color_wheel.rs](ui/color_wheel.md).
 
 ### `AppState::commit_screen_pick`
-[src/app.rs:6668](../../src/app.rs#L6668)
+[src/app.rs:6671](../../src/app.rs#L6671)
 
 ```rust
 pub fn commit_screen_pick(&mut self, color: [u8; 4])
@@ -5176,7 +5177,7 @@ to the drawing tool that was active before picking, and leaves pick mode.
 **Used by:** `screen_pick_live` in [ui/shell.rs](ui/shell.md).
 
 ### `AppState::apply_picked_color`
-[src/app.rs:6696](../../src/app.rs#L6696)
+[src/app.rs:6699](../../src/app.rs#L6699)
 
 ```rust
 pub fn apply_picked_color(&mut self, color: [u8; 4])
@@ -5186,7 +5187,7 @@ pub fn apply_picked_color(&mut self, color: [u8; 4])
 present; `#[allow(dead_code)]` silences the compiler's "unused function" warning.
 
 ### `AppState::fill_source`
-[src/app.rs:6707](../../src/app.rs#L6707)
+[src/app.rs:6710](../../src/app.rs#L6710)
 
 ```rust
 fn fill_source(&self, layer_idx: usize, cell_w: u32, cell_h: u32) -> Option<Canvas>
@@ -5197,7 +5198,7 @@ Which pixels a Fill press on `layer_idx` treats as walls: every visible layer (w
 drawing's own pixels".
 
 ### `AppState::visible_lines`
-[src/app.rs:6719](../../src/app.rs#L6719)
+[src/app.rs:6722](../../src/app.rs#L6722)
 
 ```rust
 fn visible_lines(&self, layer_idx: usize, cell_w: u32, cell_h: u32) -> Option<Canvas>
@@ -5208,7 +5209,7 @@ view fades), then converts it into the pixel grid of `layer_idx`'s drawing. Buil
 press.
 
 ### `AppState::fill_boundary`
-[src/app.rs:6734](../../src/app.rs#L6734)
+[src/app.rs:6737](../../src/app.rs#L6737)
 
 ```rust
 fn fill_boundary(&self, layer_idx: usize, cell_w: u32, cell_h: u32) -> Option<Canvas>
@@ -5220,7 +5221,7 @@ Returns `None` when there is no link or it can't be resolved on this frame. The 
 even when hidden: the link is an explicit choice, visibility is just display.
 
 ### `AppState::track_layer_change`
-[src/app.rs:6774](../../src/app.rs#L6774)
+[src/app.rs:6777](../../src/app.rs#L6777)
 
 ```rust
 fn track_layer_change(&mut self)
@@ -5232,7 +5233,7 @@ here catches all of them without touching any. Layers are remembered by unique i
 adding or deleting other layers doesn't confuse it.
 
 ### `AppState::goto_last_layer`
-[src/app.rs:6793](../../src/app.rs#L6793)
+[src/app.rs:6796](../../src/app.rs#L6796)
 
 ```rust
 pub fn goto_last_layer(&mut self)
@@ -5241,7 +5242,7 @@ pub fn goto_last_layer(&mut self)
 Jumps back to the previously active layer, if it still exists.
 
 ### `AppState::select_layer`
-[src/app.rs:6802](../../src/app.rs#L6802)
+[src/app.rs:6805](../../src/app.rs#L6805)
 
 ```rust
 fn select_layer(&mut self, i: usize)
@@ -5250,7 +5251,7 @@ fn select_layer(&mut self, i: usize)
 Makes layer `i` active; an out-of-range `i` does nothing (which stops the step keys at the ends).
 
 ### `AppState::move_active_layer`
-[src/app.rs:6813](../../src/app.rs#L6813)
+[src/app.rs:6816](../../src/app.rs#L6816)
 
 ```rust
 pub fn move_active_layer(&mut self, up: bool)
@@ -5261,7 +5262,7 @@ group (a whole group moves together). One undo step; nothing at all at the end o
 holding the key doesn't fill the history with empty steps.
 
 ### `AppState::add_cleanup_layer`
-[src/app.rs:6828](../../src/app.rs#L6828)
+[src/app.rs:6831](../../src/app.rs#L6831)
 
 ```rust
 pub fn add_cleanup_layer(&mut self, of: usize)
@@ -5271,7 +5272,7 @@ Adds a new layer above layer `of` for redrawing it cleanly, with its key jumps l
 undo step.
 
 ### `AppState::step_layer_row`
-[src/app.rs:6844](../../src/app.rs#L6844)
+[src/app.rs:6847](../../src/app.rs#L6847)
 
 ```rust
 fn step_layer_row(&mut self, delta: isize)
@@ -5281,7 +5282,7 @@ Selects the row `delta` rows down the Layers panel (negative = up), stopping at 
 folded groups aren't rows and are skipped.
 
 ### `AppState::selected_layer_indices`
-[src/app.rs:6858](../../src/app.rs#L6858)
+[src/app.rs:6861](../../src/app.rs#L6861)
 
 ```rust
 pub fn selected_layer_indices(&self) -> Vec<usize>
@@ -5291,7 +5292,7 @@ Every selected layer index, bottom first: the active layer plus any Ctrl/Shift-p
 `(0..n).filter(…).collect()` builds a `Vec` of the indexes passing the test.
 
 ### `AppState::selected_drawing_layers`
-[src/app.rs:6867](../../src/app.rs#L6867)
+[src/app.rs:6870](../../src/app.rs#L6870)
 
 ```rust
 fn selected_drawing_layers(&self) -> Vec<usize>
@@ -5301,7 +5302,7 @@ The selected layers that hold drawings; a selected group stands for all its laye
 no duplicates.
 
 ### `AppState::orient_selected_layers`
-[src/app.rs:6884](../../src/app.rs#L6884)
+[src/app.rs:6887](../../src/app.rs#L6887)
 
 ```rust
 pub fn orient_selected_layers(&mut self, o: Orient)
@@ -5311,7 +5312,7 @@ Flips or rotates every drawing of every selected layer (groups include their lay
 step. Locked and reference layers are skipped.
 
 ### `AppState::set_selected_opacity`
-[src/app.rs:6892](../../src/app.rs#L6892)
+[src/app.rs:6895](../../src/app.rs#L6895)
 
 ```rust
 pub fn set_selected_opacity(&mut self, v: f32)
@@ -5320,8 +5321,17 @@ pub fn set_selected_opacity(&mut self, v: f32)
 Sets the opacity of every selected layer. The first change since the last `commit_layer_opacity`
 takes a timeline snapshot, so a whole slider drag undoes in one step.
 
+### `AppState::set_selected_blend`
+[src/app.rs:6907](../../src/app.rs#L6907)
+
+```rust
+pub fn set_selected_blend(&mut self, mode: crate::doc::blend::BlendMode)
+```
+
+Set every selected layer's blend mode — a group's own stays Normal. One undo step; nothing when none changes. Only the look changes: the timeline selection and any lifted pixels stay as they are.
+
 ### `AppState::set_layer_opacity`
-[src/app.rs:6903](../../src/app.rs#L6903)
+[src/app.rs:6927](../../src/app.rs#L6927)
 
 ```rust
 pub fn set_layer_opacity(&mut self, i: usize, v: f32)
@@ -5330,7 +5340,7 @@ pub fn set_layer_opacity(&mut self, i: usize, v: f32)
 Sets one layer's opacity from the % on its row; same one-undo-step-per-drag behaviour.
 
 ### `AppState::commit_layer_opacity`
-[src/app.rs:6914](../../src/app.rs#L6914)
+[src/app.rs:6938](../../src/app.rs#L6938)
 
 ```rust
 pub fn commit_layer_opacity(&mut self)
@@ -5340,7 +5350,7 @@ Finishes an opacity drag: pushes the undo step opened by the first change, or no
 changed.
 
 ### `AppState::toggle_selected_clip`
-[src/app.rs:6931](../../src/app.rs#L6931)
+[src/app.rs:6955](../../src/app.rs#L6955)
 
 ```rust
 pub fn toggle_selected_clip(&mut self)
@@ -5350,7 +5360,7 @@ Toggles "clip to layer below" on the selected layers. All of them go the opposit
 layer, so a mixed selection ends up consistent. Groups can't clip and are skipped.
 
 ### `AppState::toggle_selected_alpha_lock`
-[src/app.rs:6937](../../src/app.rs#L6937)
+[src/app.rs:6961](../../src/app.rs#L6961)
 
 ```rust
 pub fn toggle_selected_alpha_lock(&mut self)
@@ -5359,7 +5369,7 @@ pub fn toggle_selected_alpha_lock(&mut self)
 Toggles alpha lock (paint only where pixels already exist) on the selected layers, the same way.
 
 ### `AppState::toggle_selected_flag`
-[src/app.rs:6941](../../src/app.rs#L6941)
+[src/app.rs:6965](../../src/app.rs#L6965)
 
 ```rust
 fn toggle_selected_flag(&mut self, flag: impl Fn(&mut crate::doc::layer::Layer) -> &mut bool)
@@ -5371,7 +5381,7 @@ layer's flag, flips it, then writes that value into every selected layer through
 a neat way to reuse one toggle for several fields. `*flag(layer) = on` writes through the reference.
 
 ### `AppState::group_selected_layers`
-[src/app.rs:6956](../../src/app.rs#L6956)
+[src/app.rs:6980](../../src/app.rs#L6980)
 
 ```rust
 pub fn group_selected_layers(&mut self)
@@ -5380,7 +5390,7 @@ pub fn group_selected_layers(&mut self)
 Puts the selected layers into a new group. One undo step.
 
 ### `AppState::ungroup_active`
-[src/app.rs:6971](../../src/app.rs#L6971)
+[src/app.rs:6995](../../src/app.rs#L6995)
 
 ```rust
 pub fn ungroup_active(&mut self)
@@ -5390,7 +5400,7 @@ Dissolves the active layer's group (or the active group itself), leaving its lay
 One undo step.
 
 ### `AppState::delete_selected_layers`
-[src/app.rs:6983](../../src/app.rs#L6983)
+[src/app.rs:7007](../../src/app.rs#L7007)
 
 ```rust
 pub fn delete_selected_layers(&mut self)
@@ -5400,7 +5410,7 @@ Deletes the selected layers (a group together with its layers). One undo step; t
 layer is never deleted.
 
 ### `AppState::fill_boundary_name`
-[src/app.rs:7002](../../src/app.rs#L7002)
+[src/app.rs:7026](../../src/app.rs#L7026)
 
 ```rust
 pub fn fill_boundary_name(&self) -> Option<&str>
@@ -5410,7 +5420,7 @@ The name of the layer that bounds the active layer's fills (its `lines_from` lin
 The chain of `?` operators returns `None` as soon as any step is missing.
 
 ### `AppState::dispatch`
-[src/app.rs:7011](../../src/app.rs#L7011)
+[src/app.rs:7035](../../src/app.rs#L7035)
 
 ```rust
 pub fn dispatch(&mut self, action: Action)
@@ -5447,7 +5457,7 @@ function dispatch(state, action) {
 **Used by:** `handle_keys` (shortcuts), [ui/shell.rs](ui/shell.md) (menus, buttons), tests.
 
 ### `AppState::save_project`
-[src/app.rs:7267](../../src/app.rs#L7267)
+[src/app.rs:7291](../../src/app.rs#L7291)
 
 ```rust
 pub fn save_project(&mut self)
@@ -5457,7 +5467,7 @@ Save (Ctrl+S): writes to the file the project came from, or asks for a file (Sav
 never been saved.
 
 ### `AppState::save_project_as`
-[src/app.rs:7275](../../src/app.rs#L7275)
+[src/app.rs:7299](../../src/app.rs#L7299)
 
 ```rust
 pub fn save_project_as(&mut self)
@@ -5467,7 +5477,7 @@ Save As: always shows the save dialog (starting at the current path) and writes 
 chosen.
 
 ### `AppState::write_project`
-[src/app.rs:7284](../../src/app.rs#L7284)
+[src/app.rs:7308](../../src/app.rs#L7308)
 
 ```rust
 fn write_project(&mut self, path: PathBuf)
@@ -5488,7 +5498,7 @@ a large project is compressed and written.
 See [walkthroughs.md](../walkthroughs.md) for the whole save path.
 
 ### `AppState::poll_save_job`
-[src/app.rs:7310](../../src/app.rs#L7310)
+[src/app.rs:7334](../../src/app.rs#L7334)
 
 ```rust
 fn poll_save_job(&mut self)
@@ -5503,7 +5513,7 @@ Called every frame by `update`. Checks the save worker's channel without blockin
 `project_path` only changes on success, so retrying a failed save targets the same file.
 
 ### `AppState::finish_pending_save`
-[src/app.rs:7345](../../src/app.rs#L7345)
+[src/app.rs:7369](../../src/app.rs#L7369)
 
 ```rust
 fn finish_pending_save(&mut self)
@@ -5513,7 +5523,7 @@ Waits (blocking, `recv()`) for an in-flight save to finish. Called before the pr
 (New, Open) and when the app exits, so a background save is never cut short.
 
 ### `AppState::load_project`
-[src/app.rs:7380](../../src/app.rs#L7380)
+[src/app.rs:7404](../../src/app.rs#L7404)
 
 ```rust
 pub fn load_project(&mut self, project: Project, path: Option<PathBuf>)
@@ -5527,7 +5537,7 @@ brushes, shortcuts, pen) stay. If the loaded camera already goes past the canvas
 inside canvas" off and says so in a toast.
 
 ### `AppState::undo`
-[src/app.rs:7440](../../src/app.rs#L7440)
+[src/app.rs:7464](../../src/app.rs#L7464)
 
 ```rust
 pub fn undo(&mut self)
@@ -5540,7 +5550,7 @@ selected pixels go back where they came from. Only if none of those applied does
 (textures, selection…). See [undo.rs](undo.md).
 
 ### `AppState::redo`
-[src/app.rs:7457](../../src/app.rs#L7457)
+[src/app.rs:7481](../../src/app.rs#L7481)
 
 ```rust
 pub fn redo(&mut self)
@@ -5550,7 +5560,7 @@ Redo. Cancels any gesture in progress; if pixels are floating or a warp is open 
 instead (a new edit, which ends the redo chain anyway); otherwise redoes the next history step.
 
 ### `AppState::reload_shortcuts_file`
-[src/app.rs:7474](../../src/app.rs#L7474)
+[src/app.rs:7498](../../src/app.rs#L7498)
 
 ```rust
 pub(crate) fn reload_shortcuts_file(&mut self)
@@ -5561,7 +5571,7 @@ parse, the bindings in use are kept and the file is left alone (loading defaults
 rebind overwrite the user's file). The result is shown in Settings.
 
 ### `AppState::handle_keys`
-[src/app.rs:7493](../../src/app.rs#L7493)
+[src/app.rs:7517](../../src/app.rs#L7517)
 
 ```rust
 pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) -> bool
@@ -5573,7 +5583,7 @@ it captures the new key; otherwise it asks the shortcut map which actions fired 
 as "focus next widget", and `drop_stray_focus` undoes that after the frame is drawn.
 
 ### `AppState::drop_stray_focus`
-[src/app.rs:7642](../../src/app.rs#L7642)
+[src/app.rs:7666](../../src/app.rs#L7666)
 
 ```rust
 pub(crate) fn drop_stray_focus(&self, ctx: &egui::Context, tab_focus: bool)
@@ -5586,7 +5596,7 @@ would stop working after toggling the panels with Tab.
 ## `impl eframe::App for AppState`
 
 ### `AppState::on_exit`
-[src/app.rs:7660](../../src/app.rs#L7660)
+[src/app.rs:7684](../../src/app.rs#L7684)
 
 ```rust
 fn on_exit(&mut self)
@@ -5596,7 +5606,7 @@ Part of eframe's `App` trait: called just before the program ends. Waits for any
 to finish so closing the window can't lose work.
 
 ### `AppState::raw_input_hook`
-[src/app.rs:7667](../../src/app.rs#L7667)
+[src/app.rs:7691](../../src/app.rs#L7691)
 
 ```rust
 fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput)
@@ -5607,7 +5617,7 @@ converts Ctrl+C/X/V into clipboard events; this puts the key presses back so the
 shortcuts see them. See [input/clipboard_keys.rs](input/clipboard_keys.md).
 
 ### `AppState::save`
-[src/app.rs:7671](../../src/app.rs#L7671)
+[src/app.rs:7695](../../src/app.rs#L7695)
 
 ```rust
 fn save(&mut self, storage: &mut dyn eframe::Storage)
@@ -5620,7 +5630,7 @@ selection and fill options, colours…) and writes it into eframe's storage unde
 eframe serialises it to `ui.ron`. Panel positions are saved separately by egui itself.
 
 ### `AppState::clear_color`
-[src/app.rs:7734](../../src/app.rs#L7734)
+[src/app.rs:7758](../../src/app.rs#L7758)
 
 ```rust
 fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4]
@@ -5631,7 +5641,7 @@ background colour multiplied by `bg_opacity` (premultiplied RGBA), so lowering t
 makes the window see-through.
 
 ### `AppState::update`
-[src/app.rs:7744](../../src/app.rs#L7744)
+[src/app.rs:7768](../../src/app.rs#L7768)
 
 ```rust
 fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame)
@@ -5665,7 +5675,7 @@ See [architecture.md](../architecture.md#3-the-frame-loop) for the bigger pictur
 ## Free functions
 
 ### `sync_float_tex`
-[src/app.rs:7880](../../src/app.rs#L7880)
+[src/app.rs:7904](../../src/app.rs#L7904)
 
 ```rust
 fn sync_float_tex(
@@ -5683,7 +5693,7 @@ in place while the size is unchanged, otherwise a new texture is made and the ol
 safe way this frame.
 
 ### `premultiplied_image`
-[src/app.rs:7901](../../src/app.rs#L7901)
+[src/app.rs:7925](../../src/app.rs#L7925)
 
 ```rust
 pub(crate) fn premultiplied_image(size: [usize; 2], rgba: &[u8]) -> ColorImage
@@ -5695,7 +5705,7 @@ too bright (a white rim on light strokes) — so the project forbids it in `clip
 `rgba.chunks_exact(4)` walks the bytes four at a time (one pixel each).
 
 ### `premultiplied`
-[src/app.rs:7908](../../src/app.rs#L7908)
+[src/app.rs:7932](../../src/app.rs#L7932)
 
 ```rust
 fn premultiplied(p: &[u8]) -> Color32
@@ -5706,7 +5716,7 @@ each colour channel becomes `round(c × a / 255)`. Example: red 200 at alpha 128
 `(200×128 + 127)/255 = 100`. See [premultiplied alpha](../glossary.md).
 
 ### `ghost_step`
-[src/app.rs:7920](../../src/app.rs#L7920)
+[src/app.rs:7944](../../src/app.rs#L7944)
 
 ```rust
 fn ghost_step(w: u32, h: u32) -> usize
@@ -5716,7 +5726,7 @@ The downscale factor that makes an onion-skin ghost fit within `GHOST_MAX_SIDE` 
 side (a 4000-pixel cell with a 1024 max → step 4). `div_ceil` is integer division rounding up.
 
 ### `ghost_dims`
-[src/app.rs:7925](../../src/app.rs#L7925)
+[src/app.rs:7949](../../src/app.rs#L7949)
 
 ```rust
 pub(crate) fn ghost_dims(w: u32, h: u32) -> [usize; 2]
@@ -5725,7 +5735,7 @@ pub(crate) fn ghost_dims(w: u32, h: u32) -> [usize; 2]
 The ghost texture's size for a `w`×`h` cell: each side divided by `ghost_step`, rounded up.
 
 ### `ghost_image`
-[src/app.rs:7938](../../src/app.rs#L7938)
+[src/app.rs:7962](../../src/app.rs#L7962)
 
 ```rust
 pub(crate) fn ghost_image(c: &Canvas, tint: [u8; 3]) -> ColorImage
@@ -5737,7 +5747,7 @@ onion skins read as blue (past) and red (future) — tinting the normal texture 
 colours, and black line art times any tint stays black.
 
 ### `preview_color_image`
-[src/app.rs:7976](../../src/app.rs#L7976)
+[src/app.rs:8000](../../src/app.rs#L8000)
 
 ```rust
 fn preview_color_image(w: u32, h: u32, pixels: &[u8]) -> ColorImage
@@ -5749,7 +5759,7 @@ triangle filter) so previews stay cheap.
 ## `impl AppState`
 
 ### `AppState::krita_notice`
-[src/app.rs:7999](../../src/app.rs#L7999)
+[src/app.rs:8023](../../src/app.rs#L8023)
 
 ```rust
 fn krita_notice(&mut self, msg: impl Into<String>, warn: bool)
@@ -5760,7 +5770,7 @@ for warnings (shorter for notes) and at most 15 s. `msg: impl Into<String>` acce
 a `String`.
 
 ### `AppState::resolve_krita`
-[src/app.rs:8009](../../src/app.rs#L8009)
+[src/app.rs:8033](../../src/app.rs#L8033)
 
 ```rust
 fn resolve_krita(&mut self) -> Option<PathBuf>
@@ -5771,7 +5781,7 @@ with a file dialog. Whatever is found is remembered in `krita_path`. The `?` at 
 `None` if the user cancels.
 
 ### `AppState::edit_in_krita`
-[src/app.rs:8028](../../src/app.rs#L8028)
+[src/app.rs:8052](../../src/app.rs#L8052)
 
 ```rust
 pub fn edit_in_krita(&mut self, selected: usize, only: Option<usize>)
@@ -5784,7 +5794,7 @@ first, then the file is rewritten — and if the helper plugin is installed in K
 in place. See [krita_link.rs](krita_link.md) and the [Krita plugin](../krita-plugin/animator_link/extension.md).
 
 ### `AppState::begin_send`
-[src/app.rs:8056](../../src/app.rs#L8056)
+[src/app.rs:8080](../../src/app.rs#L8080)
 
 ```rust
 fn begin_send(&mut self, selected: usize, only: Option<u64>, launch: Option<PathBuf>)
@@ -5794,7 +5804,7 @@ The part of `edit_in_krita` after Krita's location is known (`only` given as a l
 this directly, so no real Krita is ever launched by `cargo test`.
 
 ### `AppState::start_send`
-[src/app.rs:8088](../../src/app.rs#L8088)
+[src/app.rs:8112](../../src/app.rs#L8112)
 
 ```rust
 fn start_send(&mut self, selected: usize, only: Option<u64>, launch: Option<PathBuf>)
@@ -5804,7 +5814,7 @@ Writes the project (or only layer `only`) as the linked `.kra` file on a worker 
 picks up the result and launches Krita if asked.
 
 ### `AppState::install_krita_helper`
-[src/app.rs:8150](../../src/app.rs#L8150)
+[src/app.rs:8174](../../src/app.rs#L8174)
 
 ```rust
 pub fn install_krita_helper(&mut self)
@@ -5814,7 +5824,7 @@ File → Install Krita helper: copies the small Python plugin into Krita's plugi
 success or the error.
 
 ### `AppState::stop_krita_link`
-[src/app.rs:8169](../../src/app.rs#L8169)
+[src/app.rs:8193](../../src/app.rs#L8193)
 
 ```rust
 pub fn stop_krita_link(&mut self)
@@ -5824,7 +5834,7 @@ Ends the Krita link. The temporary `.kra` stays on disk, so a later Krita save c
 in with Import .kra.
 
 ### `AppState::krita_linked`
-[src/app.rs:8175](../../src/app.rs#L8175)
+[src/app.rs:8199](../../src/app.rs#L8199)
 
 ```rust
 pub fn krita_linked(&self) -> bool
@@ -5833,7 +5843,7 @@ pub fn krita_linked(&self) -> bool
 Whether a Krita link is live (so Edit in Krita would re-send rather than start a new link).
 
 ### `AppState::poll_krita`
-[src/app.rs:8181](../../src/app.rs#L8181)
+[src/app.rs:8205](../../src/app.rs#L8205)
 
 ```rust
 fn poll_krita(&mut self, ctx: &egui::Context)
@@ -5844,7 +5854,7 @@ Called every frame from `update`. Moves the Krita link along without blocking: l
 starts reading it, and folds a finished read into the project.
 
 ### `AppState::drive_round`
-[src/app.rs:8291](../../src/app.rs#L8291)
+[src/app.rs:8315](../../src/app.rs#L8315)
 
 ```rust
 fn drive_round(&mut self)
@@ -5854,7 +5864,7 @@ Performs one step of a re-send round (see `krita_link::Round`): wait for Krita's
 apply it, write the file again, ask the helper plugin to reload.
 
 ### `AppState::apply_krita_pull`
-[src/app.rs:8361](../../src/app.rs#L8361)
+[src/app.rs:8385](../../src/app.rs#L8385)
 
 ```rust
 fn apply_krita_pull(&mut self, res: Result<Pulled>)
@@ -5864,7 +5874,7 @@ Merges a Krita save that has been read (`res`) into the project as **one undo st
 what Krita changed; shows a notice on errors.
 
 ### `AppState::import_kra`
-[src/app.rs:8402](../../src/app.rs#L8402)
+[src/app.rs:8426](../../src/app.rs#L8426)
 
 ```rust
 pub fn import_kra(&mut self)
@@ -5874,7 +5884,7 @@ File → Import .kra…: lets the user pick a Krita file and decodes it on a wor
 layers arrive via `on_kra_imported` as new layers under the active one, at the document's size.
 
 ### `AppState::on_kra_imported`
-[src/app.rs:8421](../../src/app.rs#L8421)
+[src/app.rs:8445](../../src/app.rs#L8445)
 
 ```rust
 fn on_kra_imported(&mut self, res: Result<KraDoc>)
@@ -5888,7 +5898,7 @@ layer (inside its group unless the import brings groups of its own). Finally it 
 the count, skipped Krita-only layers, a frame-rate mismatch, and shrunk images.
 
 ### `AppState::export_kra`
-[src/app.rs:8568](../../src/app.rs#L8568)
+[src/app.rs:8595](../../src/app.rs#L8595)
 
 ```rust
 pub fn export_kra(&mut self)
@@ -5900,7 +5910,7 @@ One-way: it starts no link.
 ## Free functions
 
 ### `cap_canvas`
-[src/app.rs:8605](../../src/app.rs#L8605)
+[src/app.rs:8632](../../src/app.rs#L8632)
 
 ```rust
 fn cap_canvas(c: Canvas, max: u32) -> Canvas
@@ -5910,7 +5920,7 @@ Shrinks a canvas (keeping its aspect ratio) so neither side exceeds `max`; retur
 already fits. Keeps imported images within the GPU's texture size limit.
 
 ### `doc_to_cell`
-[src/app.rs:8622](../../src/app.rs#L8622)
+[src/app.rs:8649](../../src/app.rs#L8649)
 
 ```rust
 fn doc_to_cell(
@@ -5935,190 +5945,190 @@ Run with `cargo test app::tests` · 135 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_clipped_layer_shows_only_over_its_base`](../../src/app.rs#L8706) | A layer clipped to the one below is uploaded opaque only where the base has ink and see-through elsewhere, and its plain (unclipped) texture is never made. |
-| [`painting_the_base_redoes_just_that_rect_of_the_clip`](../../src/app.rs#L8721) | Inking a small block on the base layer re-cuts only that 10×10 patch of the clipped layer's texture (a partial upload), not the whole image. |
-| [`a_flipped_or_turned_base_recuts_its_clipped_layer`](../../src/app.rs#L8749) | Flipping the base horizontally moves the visible part of the clipped layer to the other side; a quarter turn (which changes the base's size) still cuts cleanly, and undo brings the original back. |
-| [`hiding_the_base_hides_the_clipped_layer_and_unclipping_restores_it`](../../src/app.rs#L8772) | A hidden base makes its clipped layer disappear too, and turning clipping off draws the layer plain again from its own cell texture. |
-| [`a_stroke_on_a_clipped_layer_shows_while_it_is_drawn`](../../src/app.rs#L8788) | While a stroke is still in progress on a clipped layer, the clip texture is refreshed for just the stroke's rectangle, so the stroke is visible as you draw. |
-| [`merging_a_clipped_layer_down_keeps_only_what_showed`](../../src/app.rs#L8805) | Merging a clipped layer into its base keeps only the part that was visible (red over the base) and drops the clipped-away part. |
-| [`layer_keys_walk_the_stack_and_stop_at_the_ends`](../../src/app.rs#L8825) | The select above / below / top / bottom shortcuts move the active layer and stop at the ends without wrapping; "pick 1..4" counts rows from the top and ignores a row that does not exist. |
-| [`moving_a_layer_by_key_is_one_undo_step_and_free_at_the_ends`](../../src/app.rs#L8850) | Moving a layer up by shortcut takes the selection with it and is one undo step; trying to move the top layer further up adds no undo entry. |
-| [`the_layer_shortcuts_toggle_clip_and_alpha_lock`](../../src/app.rs#L8866) | The clip and alpha-lock shortcuts switch those flags on the current layer on and back off. |
-| [`a_stroke_on_an_alpha_locked_layer_only_recolours`](../../src/app.rs#L8878) | On an alpha-locked layer an Ink stroke recolours pixels that already have ink but leaves empty pixels empty. |
-| [`a_project_without_clipping_makes_no_clip_textures`](../../src/app.rs#L8902) | When no layer is clipped, a texture sync creates no clip textures at all (no cost for projects that do not use clipping). |
-| [`dragging_sideways_shuts_the_gap_live_and_lands_as_one_undo`](../../src/app.rs#L8957) | Dragging sideways after pressing the bucket raises the gap-closing setting step by step (8 px dead zone, then one step per 12 px), re-runs the fill live so the leak through the hole stops, and the whole press ends as one undo step; the new gap value stays for the next press. |
-| [`dragging_up_grows_the_expand_and_back_down_undoes_it`](../../src/app.rs#L8980) | Dragging up raises the fill's "expand" so the colour tucks under the line, and dragging back down lowers it again and gives the line back, still as one undo step. |
-| [`a_plain_tap_fills_once`](../../src/app.rs#L8997) | A tap with a few pixels of wobble stays inside the dead zone: the settings do not change and exactly one fill lands. |
-| [`cancelling_a_fill_press_leaves_nothing_behind`](../../src/app.rs#L9011) | Cancelling a fill press mid-drag removes the live fill entirely, and lifting the pen afterwards records no undo step. |
-| [`reading_all_visible_layers_walls_the_fill_with_another_layers_lines`](../../src/app.rs#L9026) | With "fill reads all visible layers" on, a fill on an empty layer is stopped by line art on another layer; with it off (or with the line layer hidden) the fill floods everywhere. |
-| [`tabbing_the_panels_back_leaves_the_shortcuts_live`](../../src/app.rs#L9053) | Pressing Tab to bring the panels back from mini-timeline mode must not leave a panel button focused (egui also reads Tab as "focus next"), otherwise the next shortcut (Q for Pencil) would be swallowed. |
-| [`capturing_a_bare_modifier_in_settings`](../../src/app.rs#L9097) | When rebinding a hold action in Settings, a bare Shift is captured once it is released; a press action ignores a bare Shift and waits for a real key (Shift+I). |
-| [`space_held_for_pan_does_not_click_a_focused_button`](../../src/app.rs#L9148) | When Space is bound to canvas pan, pressing it does not click a focused button; when it is not bound, Space clicks the button as normal. |
-| [`a_pinned_wheel_gives_every_tool_one_colour`](../../src/app.rs#L9198) | Unpinned, each tool keeps its own colour; pinning the colour wheel shares one colour across all tools, unpinning lets them drift apart again, and the shortcut toggles the pin. |
-| [`an_opacity_drag_sets_the_pick_in_one_undo_step`](../../src/app.rs#L9227) | Dragging the opacity slider with several layers picked sets every picked layer, and the whole drag (many frames, repeated commits) is one undo step. |
-| [`last_layer_survives_adding_and_deleting_layers`](../../src/app.rs#L9250) | "Go to last layer" leads back to the layer you were on before adding a new one, and still leads there after the layer you jumped to is deleted. |
-| [`tab_reaches_its_own_binding_from_a_focused_field`](../../src/app.rs#L9280) | With Tab bound to "last layer", pressing Tab while a text field has focus still runs that binding (and Shift+Tab does not), rather than a hard-wired panel toggle. |
-| [`krita_save_lands_as_one_undo_step`](../../src/app.rs#L9343) | End to end on a real temp file: send to Krita, a simulated Krita save, the watcher noticing it, and the pull landing as one undo step; a reference background layer is never sent and never touched, and seeing the same save again changes nothing. |
-| [`helper_round_reloads_in_place`](../../src/app.rs#L9473) | With the Krita helper plugin in use, a send asks the helper first, waits for "ready", writes the file, posts "sent", and on "reloaded" shows the "Updated in Krita" toast. |
-| [`helper_saves_krita_edits_first`](../../src/app.rs#L9501) | If Krita has unsaved edits, the helper saves them and they arrive here as an undo step before the file is rewritten, so the reloaded file has both sides' changes. |
-| [`silent_helper_falls_back_to_a_plain_send`](../../src/app.rs#L9524) | If the helper never answers, the send falls back to a plain file write and the toast says the helper didn't answer. |
-| [`unreadable_krita_save_changes_nothing_then_recovers`](../../src/app.rs#L9544) | A half-written `.kra` is reported ("Couldn't read") and changes nothing; the next good save still comes in. |
-| [`a_second_send_during_a_round_is_ignored`](../../src/app.rs#L9563) | Clicking Send again while a helper round is running sends no second request. |
-| [`resend_brings_in_an_unread_krita_save_first`](../../src/app.rs#L9577) | Without the helper, a re-send first pulls in a Krita save the watcher hasn't read yet, so it is not overwritten. |
-| [`layer_send_takes_only_that_layer`](../../src/app.rs#L9639) | Sending one layer from the layer menu writes only that layer to the `.kra`; Krita's later save changes that layer and leaves the unsent layer as it was. |
-| [`layer_resend_narrows_a_whole_link`](../../src/app.rs#L9661) | When the whole project is linked, re-sending a single layer narrows Krita's file to that layer; the other layer stays here, unlinked, and is not deleted by Krita's next save. |
-| [`layer_send_of_a_reference_layer_sends_nothing`](../../src/app.rs#L9686) | Sending a reference layer is refused before anything starts (no link is made) and the toast says it "stays here". |
-| [`layer_gone_before_the_send_ends_the_round`](../../src/app.rs#L9697) | If the layer a re-send was for no longer exists, the round ends with a "gone" note, the file is left untouched, and the link keeps going. |
-| [`dirty_regions_union_and_full_wins`](../../src/app.rs#L9723) | Combining dirty regions: clean plus a rect is that rect, two rects merge into their bounding box, and a "whole cell changed" mark swallows any rect. |
-| [`uploads_patch_inside_the_texture_and_recrop_past_it`](../../src/app.rs#L9749) | `plan_upload` keeps a texture when nothing changed, sends a patch for an edit inside the cropped texture (or only the overlapping part of an eraser pass), and rebuilds (re-crops) when the drawing spreads past it; under a live stroke a small cell grows to its whole size. |
-| [`a_stroke_texture_grows_with_room_to_spare`](../../src/app.rs#L9784) | On a huge (4320×7680) cell, a stroke's texture is the stroke's area grown by half again and at least `STROKE_ROOM`, never the whole cell at once; a brand-new blank drawing is not scanned, and going past the room rebuilds with room around the new extent. |
-| [`a_cell_texture_holds_just_its_drawing`](../../src/app.rs#L9815) | A blank cell gets a 1×1 texture; an inked cell gets a texture cropped to the drawing plus a 2-pixel clear rim; small edits are patched at texture (not cell) coordinates; ink elsewhere re-crops around all of it. |
-| [`a_stroke_past_the_drawing_takes_the_whole_cell_once`](../../src/app.rs#L9844) | On a normal-sized cell, a stroke that goes outside the existing drawing makes the texture cover the whole cell once, and the rest of the stroke is sent as small patches. |
-| [`resting_on_a_drawing_readies_its_stroke_snapshot`](../../src/app.rs#L9869) | Pausing on a drawing (not just passing through) pre-takes its "before" snapshot so pen-down has nothing to copy, and undo of the stroke restores it exactly; under auto-key it clears the snapshot instead, and during playback it does nothing. |
-| [`auto_key_ghosts_the_held_drawing_ahead_of_the_stroke`](../../src/app.rs#L9921) | With auto-key and onion skin on, resting on a frame builds the held drawing's onion "ghost" texture early, so when a stroke starts a new drawing the ghost is already there and not built again. |
-| [`a_cell_image_is_its_premultiplied_pixels`](../../src/app.rs#L9953) | `cell_image` (the fast, possibly threaded reader) gives exactly the same image as premultiplying a copy of the pixels, for several rectangles, on packed and unpacked cells. |
-| [`a_spreading_stroke_streams_and_pen_up_sends_only_the_rest`](../../src/app.rs#L10027) | On a 3000×4000 canvas, for both the ribbon and Krita brush engines, a long stroke's texture is re-made at most 6 times, always matches the cell pixel for pixel, and pen-up uploads only a small leftover (under 1/20 of the stroke's box). |
-| [`the_budget_drops_the_least_recently_shown_first`](../../src/app.rs#L10071) | Over the texture memory budget, the least recently shown textures are dropped first and only until it fits; under budget nothing is dropped. |
-| [`playback_drops_the_most_recently_shown_first`](../../src/app.rs#L10079) | During playback the order flips: the most recently shown texture goes first, because the loop comes back to the oldest one soonest. |
-| [`the_budget_never_drops_what_is_on_screen`](../../src/app.rs#L10086) | Textures used on the current frame are never evicted, even when they alone exceed the budget. |
-| [`ghosts_of_big_cells_are_small_and_keep_their_coverage`](../../src/app.rs#L10093) | Onion-skin ghosts of huge cells are shrunk (to at most `GHOST_MAX_SIDE`), small cells stay 1:1, a solid block stays solid and half coverage averages to half alpha. |
-| [`a_packed_cell_makes_the_same_ghost`](../../src/app.rs#L10118) | A packed (memory-compacted) cell produces exactly the same ghost as the unpacked one, including drawings that start partway through a ghost texel and edge texels. |
-| [`a_ghost_that_needs_no_shrinking_is_the_plain_silhouette`](../../src/app.rs#L10138) | When no shrinking is needed, the ghost's alpha is exactly each pixel's alpha (a tinted silhouette). |
-| [`blank_means_no_coverage_anywhere`](../../src/app.rs#L10146) | `no_alpha` treats colour with zero alpha as blank, notices a non-zero alpha in the very last pixel, and works on unaligned slices too. |
-| [`a_keyed_grid_tweens_as_the_frame_moves_and_undo_takes_a_key_back`](../../src/app.rs#L10187) | A grid keyed at frames 0 and 20 sits halfway (linear tween) at frame 10; undo removes the second key and the grid returns to the single key's pose, redo brings it back. |
-| [`inserting_frames_before_moves_grid_keys_in_one_undo`](../../src/app.rs#L10212) | Inserting frames before the playhead shifts grid keys along with camera keys and drawings in one undo step; deleting and adding frames shift them too, and a key on a deleted frame goes with it. |
-| [`dragging_a_keyed_grid_keys_the_frame_as_one_undo_step`](../../src/app.rs#L10251) | With auto-key on, dragging a keyed grid adds a key on the current frame (one undo step) so the move sticks; with auto-key off the drag only lasts until the frame changes, like the camera. |
-| [`a_grid_without_keys_just_moves`](../../src/app.rs#L10287) | Dragging a grid that has no keys moves it without creating any key, and the drag is still one undo step. |
-| [`a_grid_on_the_camera_rides_it_and_switching_keeps_it_in_place`](../../src/app.rs#L10299) | Switching a grid to follow the camera does not make it jump; it then moves with the camera and, when the camera zooms in, shrinks in document space so it keeps its size in the shot. |
-| [`a_grid_on_a_layer_finds_it_again_by_name_next_session`](../../src/app.rs#L10319) | A grid following a layer moves with that layer's transform, and when its stored layer id is lost (as after a restart) it finds the layer again by name. |
-| [`each_file_keeps_its_own_grids`](../../src/app.rs#L10339) | Grids are remembered per `.anim` path: switching files swaps grid sets, Save As copies them to the new path while the old file keeps its own, a new project starts with one default grid, and the store goes into the preferences. |
-| [`a_walls_top_corner_drags_its_height_and_nothing_else_moves_it`](../../src/app.rs#L10372) | Dragging a wall grid's top corner changes only its height while its base stays on the floor; pressing inside the wall selects it without starting a move; undo restores the height. |
-| [`dragging_a_grid_corner_moves_only_that_corner`](../../src/app.rs#L10400) | Dragging a corner handle moves just that corner (the other three stay put), and moves after release do nothing. |
-| [`a_locked_grid_is_selected_but_not_moved`](../../src/app.rs#L10418) | Pressing a locked grid makes it the active grid, but dragging does not move it. |
-| [`pressing_another_grid_makes_it_active`](../../src/app.rs#L10433) | Pressing inside a second grid makes it active and drags only it; pressing empty canvas grabs nothing and keeps the current selection. |
-| [`a_folding_corner_drag_is_refused`](../../src/app.rs#L10452) | A corner drag that would fold the grid's quad (cross the far diagonal) is ignored and the last valid shape is kept. |
-| [`an_extra_vp_slides_along_the_horizon_until_pulled_off_and_sticks_back`](../../src/app.rs#L10463) | An extra vanishing point stays on the horizon line while dragged near it, comes free when pulled well away, and snaps back onto the horizon when brought close again. |
-| [`moving_a_grid_takes_its_extra_vps_along`](../../src/app.rs#L10495) | Moving a whole grid moves its extra vanishing points by the same amount. |
-| [`a_stroke_heading_for_an_extra_vp_locks_onto_it`](../../src/app.rs#L10509) | With snap on, a stroke heading toward an extra vanishing point locks onto the line through it rather than the grid's rows or columns. |
-| [`snap_locks_a_stroke_to_one_grid_direction`](../../src/app.rs#L10530) | With snap on, a stroke is held at its start until its direction is clear, then locks to one grid direction and stays locked even if the hand drifts; with snap off points pass straight through. |
-| [`a_near_vertical_stroke_follows_the_vanishing_point_not_the_vertical`](../../src/app.rs#L10551) | On a one-point floor grid, a nearly vertical stroke leans toward the vanishing point along the grid's column; with "snap verticals" on, it stays truly vertical. |
-| [`a_rect_lies_on_the_grid_when_snap_is_on`](../../src/app.rs#L10604) | With snap on, a Shape-tool rectangle is drawn lying on the perspective floor (edges follow the grid's rows and leaning columns), not as a flat screen rectangle. |
-| [`with_snap_off_a_rect_stays_flat`](../../src/app.rs#L10616) | With snap off, the same drag draws a plain flat rectangle. |
-| [`a_rect_lies_on_the_grid_on_a_transformed_layer_too`](../../src/app.rs#L10625) | On a scaled, rotated and moved layer, the snapped rectangle still lands in the same place on screen as on an untransformed layer. |
-| [`shift_squares_a_rect_up_in_grid_cells`](../../src/app.rs#L10643) | Holding Shift while drawing a snapped rectangle makes it square in grid cells (equal number of columns and rows); letting go of Shift frees it again. |
-| [`a_shape_line_snaps_like_a_stroke`](../../src/app.rs#L10662) | A Shape-tool line snaps to one grid direction like a pen stroke (it does not lie on the plane), while a rectangle is not direction-locked but lies on the plane instead. |
-| [`shift_down_at_the_press_locks_only_once_pressed_again`](../../src/app.rs#L10703) | If Shift was already down when the drag began (it chose a pan or selection mode), it does not lock an axis until it is released and pressed again; if it goes down partway, it locks at once. |
-| [`shift_partway_turns_a_shape_line_to_a_fifteen_degree_step`](../../src/app.rs#L10721) | Pressing Shift mid-drag snaps a Shape line drawn at 50° to the nearest 15° step (45°), and the final line is drawn along that angle. |
-| [`a_held_line_is_level_on_the_canvas_or_the_screen`](../../src/app.rs#L10741) | The lock's "level" direction is the canvas horizontal, or the screen horizontal when the view is rotated and screen axes are chosen, and it is turned back by the layer's own rotation in cell pixels. |
-| [`shift_partway_squares_a_flat_rect`](../../src/app.rs#L10757) | Pressing Shift mid-drag turns a flat rectangle into a square as tall as it is wide. |
-| [`a_mid_key_down_at_the_press_counts_only_once_pressed_again`](../../src/app.rs#L10784) | Like Shift, the move and centre keys held when the drag began do not count until released and pressed again mid-drag. |
-| [`the_move_key_partway_slides_a_flat_rect`](../../src/app.rs#L10795) | Holding the move key (Space) mid-drag slides the rectangle without resizing it; releasing it resumes growing from where it was slid to, and the result is drawn there, not at the press. |
-| [`the_centre_key_partway_grows_a_rect_from_the_press`](../../src/app.rs#L10813) | Holding the centre key (Alt) makes the rectangle grow out from the press point in both directions, and with Shift as well it becomes a square centred on the press. |
-| [`a_centred_line_runs_both_ways_from_the_press`](../../src/app.rs#L10831) | A centred Shape line runs equally both ways from the press point, and with the move key too its middle follows the pointer. |
-| [`the_move_key_slides_a_rect_along_its_grid`](../../src/app.rs#L10846) | Sliding a perspective-snapped rectangle keeps it the same number of grid cells across while it gets smaller on screen as it moves up the floor toward the horizon. |
-| [`a_snapped_line_slid_stays_snapped_from_where_it_went`](../../src/app.rs#L10869) | Sliding a snapped line moves it to another grid row, and after the key is released it stays snapped to that new row. |
-| [`shift_partway_holds_a_stroke_to_an_axis_from_where_it_was`](../../src/app.rs#L10892) | Pressing Shift mid-stroke holds the stroke still until a direction shows, then keeps it on that axis from the point where Shift went down; releasing frees it, and a new press starts a new hold from the current point. |
-| [`shift_partway_holds_a_grid_move_to_an_axis`](../../src/app.rs#L10914) | Pressing Shift while moving a perspective grid restricts the move to horizontal or vertical, whichever the pointer is going along. |
-| [`next_grid_cycles_the_visible_grids_and_wraps`](../../src/app.rs#L10928) | The "next grid" shortcut cycles through visible grids, skipping hidden ones and wrapping around; with only one visible it stays put, and with no grids it does not crash. |
-| [`selecting_the_tool_brings_back_a_grid`](../../src/app.rs#L10951) | Choosing the Perspective tool when there are no grids creates one and makes it active. |
-| [`write_prefs_fixture`](../../src/app.rs#L11017) | Ignored by default (`#[ignore]`); run by hand with `cargo test write_prefs_fixture -- --ignored` to regenerate the old-format `src/testdata/ui_prefs_v1.ron` fixture. It checks nothing itself. |
-| [`prefs_written_before_the_brush_library_still_load`](../../src/app.rs#L11027) | A `ui.ron` from before the Krita brush library still loads with every saved value intact (one unreadable field would silently reset all preferences); newer fields get defaults, old onion sliders become the onion strip, and old fills stay grain-free. |
-| [`the_active_brush_is_saved_with_its_latest_changes`](../../src/app.rs#L11066) | Saving stores the active tool's brush as it is right now, not as it was at the last tool switch. |
-| [`each_pen_s_smoothing_outlasts_a_restart`](../../src/app.rs#L11081) | Turning the stabilizer on for Ink only is saved per pen: Pencil and Eraser stay on Basic smoothing after a reload. |
-| [`the_pen_slots_outlast_a_restart`](../../src/app.rs#L11096) | The pen slots outlast a restart: how many, and each one's name, icon, brush, smoothing and sizes. The app comes back on the first. |
-| [`the_first_two_slots_are_written_where_an_older_build_reads_them`](../../src/app.rs#L11123) | A build from before the slots finds the first two where the pencil and the ink always were, and the eraser where it was; and prefs from such a build come back the same. |
-| [`prefs_from_before_the_pen_slots_make_the_pencil_and_ink_slots`](../../src/app.rs#L11158) | A prefs file from before the pen slots gives its pencil and ink as the first two slots, and every other tool its own brush, as they were. |
-| [`hidden_panels_and_the_layout_reset_outlast_a_restart`](../../src/app.rs#L11177) | A panel layout reset shows every panel again; hidden panels and the reset counter are saved and come back after a reload. |
-| [`the_color_scheme_and_custom_colors_outlast_a_restart`](../../src/app.rs#L11195) | The default theme is Graphite; a Custom theme and its colours are saved and restored. |
-| [`a_screen_pick_keeps_the_brush`](../../src/app.rs#L11211) | Picking a colour from the screen changes only the brush colour, not its engine or size. |
-| [`a_new_project_keeps_the_brushes`](../../src/app.rs#L11224) | Starting a new project keeps every tool's brush settings and switches back to the Pencil. |
-| [`shape_shares_its_size_with_the_last_pen`](../../src/app.rs#L11238) | The Shape tool takes the size of the pen used last, and a size set on Shape goes back to that pen; the other pen keeps its own size, and Shape keeps its own hard edge (only size is shared). |
-| [`size_keys_keep_shape_and_the_pen_in_step`](../../src/app.rs#L11262) | With the full UI drawn, the `[` / `]` size keys change Ink's size and Shape picks it up, and a size change on Shape goes back to Ink. |
-| [`a_shape_thickness_is_saved_with_its_pen`](../../src/app.rs#L11313) | A thickness set on Shape is saved with the pen it follows, so after a restart both that pen and Shape have it. |
-| [`a_screen_pick_on_shape_keeps_the_pen_size`](../../src/app.rs#L11329) | Picking a colour from the screen while on Shape stays on Shape and does not change its size (or the pen's). |
-| [`a_stabilized_stroke_finishes_at_pen_up`](../../src/app.rs#L11345) | With the Stabilizer on, lifting the pen finishes the line to where the pen lifted, even if no UI frame ran between pen events to advance it. |
-| [`each_pen_keeps_its_own_smoothing`](../../src/app.rs#L11371) | Turning the stabilizer on for Ink does not affect Pencil or Eraser strokes, and Fill has no smoothing at all. |
-| [`the_smoothing_keys_change_the_pen_in_hand`](../../src/app.rs#L11396) | The Stabilizer key toggles the current pen to Stabilizer and back to what it had; the cycle key steps through Weighted, Stabilizer, None, Basic; neither changes other pens or does anything on a tool without smoothing. |
-| [`brushes_saved_before_the_perspective_tool_survive`](../../src/app.rs#L11424) | A saved brush list from before the Perspective tool existed (7 entries) is still restored, while a list of any other wrong length is thrown away. |
-| [`perspective_prefs_round_trip_and_default_when_missing`](../../src/app.rs#L11437) | Perspective settings survive a save/load round trip, and preferences from before grids existed load with the default grid. |
-| [`the_backdrop_is_kept_between_runs_and_across_new_projects`](../../src/app.rs#L11452) | The canvas backdrop colour and opacity are saved, kept across File > New, and default correctly in old preferences; an old "Polygon" selection shape opens as the freehand lasso, and an old checkerboard setting still loads. |
-| [`the_onion_strip_round_trips_and_old_ranges_carry_over`](../../src/app.rs#L11477) | Per-step onion show/hide and opacity survive a round trip, and an old "prev = 3" setting turns into three lit steps back (and one forward). |
-| [`the_magic_select_settings_round_trip_and_old_prefs_get_defaults`](../../src/app.rs#L11491) | Magic-wand selection settings survive a round trip and the app's own save; preferences without them, or with only some fields, fill in defaults. |
-| [`onion_layers_are_the_active_one_and_those_switched_on`](../../src/app.rs#L11524) | Onion skin shows on the active layer plus layers with their own onion switch on, but not on hidden layers, not during playback, and not when onion skin is off. |
-| [`saving_a_preset_needs_a_name_and_replaces_one_it_matches`](../../src/app.rs#L11551) | Saving a New Project preset needs a non-blank name (trimmed); saving under an existing name (any case) overwrites that preset in place and keeps its star. |
-| [`renaming_a_preset_rejects_blank_and_taken_names`](../../src/app.rs#L11571) | Renaming a preset refuses a blank name or one another preset already has, but allows changing the case of its own name. |
-| [`only_one_preset_is_starred`](../../src/app.rs#L11584) | Only one preset can be the starred default: starring another moves the star, starring the starred one clears it, and deleting it leaves none starred. |
-| [`new_project_opens_on_the_starred_preset_as_saved`](../../src/app.rs#L11602) | With no starred preset the New Project dialog starts at the current project's size; with one it starts at that preset, and applying a preset keeps its own orientation. |
-| [`presets_round_trip_and_default_to_none_when_missing`](../../src/app.rs#L11624) | Presets survive a save/load round trip, and preferences from before presets existed load with none. |
-| [`a_pinned_drawing_is_ghosted_once_in_the_pin_colour`](../../src/app.rs#L11643) | A drawing pinned in the onion skin is ghosted once in the pin's colour and not again as a normal onion step; switching onion skin off hides pins too. |
-| [`only_changed_pixels_are_marked_for_upload`](../../src/app.rs#L11675) | Timeline-structure edits (adding frames and keys) mark no texture for re-upload, and a one-pixel edit marks only that pixel's rectangle. |
-| [`undo_of_a_structural_edit_uploads_nothing`](../../src/app.rs#L11698) | Undoing a structural edit (adding a frame) marks no cell for re-upload. |
-| [`undo_of_a_stroke_uploads_its_rect`](../../src/app.rs#L11710) | Undoing a pixel patch marks only that patch's rectangle for re-upload, not the whole cell. |
-| [`fade_others_splits_above_and_below_the_active_layer`](../../src/app.rs#L11742) | With "fade others" on, layers below the active one are drawn at the "below" opacity, layers above at the "above" opacity, and the active layer at full strength. |
-| [`fade_others_spares_reference_and_lines_from_layers`](../../src/app.rs#L11749) | Reference layers, and the layer the active layer takes its lines from, are not faded; another layer's lines link does not count. |
-| [`the_key_link_toggle_links_the_layer_below`](../../src/app.rs#L11764) | The key-link shortcut links the current layer's keys to the nearest drawing layer below (skipping a group header), pressing it again unlinks, the bottom layer has nothing to link to, and linking is not an undo step. |
-| [`a_cleanup_layer_is_linked_and_one_undo`](../../src/app.rs#L11783) | "New cleanup layer" adds a layer directly above the rough, named "<rough> clean", key-linked to it and made active, and one undo takes it all back. |
-| [`fade_others_lifts_while_playing_or_switched_off`](../../src/app.rs#L11802) | During playback, or once the toggle is switched off, every layer shows at full opacity. |
-| [`a_dropped_drawing_lives_as_long_as_undo_can_reach_it`](../../src/app.rs#L11815) | A deleted layer's drawing is kept while undo can still restore it, and is freed (made a tombstone, texture dropped) once that undo step has fallen out of history, without renumbering other cells. |
-| [`packing_changes_nothing_on_screen_or_in_export`](../../src/app.rs#L11845) | Packing an idle cell to save memory leaves its uploaded texture and its flattened export pixels exactly the same. |
-| [`the_packer_leaves_the_drawing_being_drawn_alone`](../../src/app.rs#L11875) | The idle-cell packer never packs the cell a stroke is drawing into, even off the active slot, but does pack it once the stroke is done. |
-| [`play_shortcut_starts_from_the_current_frame`](../../src/app.rs#L11894) | Starting playback by shortcut steps from the frame the playhead is on: the first tick only starts the clock rather than jumping by however long it was paused. |
-| [`stopping_goes_back_to_the_start_frame_unless_paused_here`](../../src/app.rs#L11914) | Play/Pause returns to the frame playback started on when stopped, while the "pause here" action stops on the current frame. |
-| [`running_out_with_the_loop_off_goes_back_to_the_start_frame`](../../src/app.rs#L11939) | With looping off, playback that reaches the end of the range stops and returns to the start frame. |
-| [`fade_others_starts_off`](../../src/app.rs#L11955) | "Fade others" is session-only: a fresh state always starts with it off. |
-| [`perf_big_layer`](../../src/app.rs#L11964) | `#[ignore]` timing probe, not pass/fail: compares old and new ways of uploading, ghosting, blank-scanning and snapshotting one cell of a 3×-wide 4K frame. Run with `cargo test --release perf_big_layer -- --ignored --nocapture`. |
-| [`perf_liquify`](../../src/app.rs#L12142) | `#[ignore]` timing probe: Liquify pen-down, move, per-frame and apply times for several canvas and brush sizes. Run with `cargo test --release perf_liquify -- --ignored --nocapture`. |
-| [`perf_big_canvas_stroke`](../../src/app.rs#L12214) | `#[ignore]` timing probe: stage-by-stage stroke timings (pen-down, stroke frames, pen-up, upload and undo sizes) on a big 4320×7680 canvas for both brush engines, or on the `.anim` named by the `ANIM_PROBE` environment variable. |
-| [`perf_user_strokes`](../../src/app.rs#L12372) | The user's own pens (from a `ui_prefs` blob) on a real project, as wall-clock strokes. Not a pass/fail test — run it for the numbers: `PREFS_PROBE=<ui_prefs.ron> ANIM_PROBE=<x.anim> cargo test --release perf_user_strokes -- --ignored --nocapture` |
+| [`a_clipped_layer_shows_only_over_its_base`](../../src/app.rs#L8733) | A layer clipped to the one below is uploaded opaque only where the base has ink and see-through elsewhere, and its plain (unclipped) texture is never made. |
+| [`painting_the_base_redoes_just_that_rect_of_the_clip`](../../src/app.rs#L8748) | Inking a small block on the base layer re-cuts only that 10×10 patch of the clipped layer's texture (a partial upload), not the whole image. |
+| [`a_flipped_or_turned_base_recuts_its_clipped_layer`](../../src/app.rs#L8776) | Flipping the base horizontally moves the visible part of the clipped layer to the other side; a quarter turn (which changes the base's size) still cuts cleanly, and undo brings the original back. |
+| [`hiding_the_base_hides_the_clipped_layer_and_unclipping_restores_it`](../../src/app.rs#L8799) | A hidden base makes its clipped layer disappear too, and turning clipping off draws the layer plain again from its own cell texture. |
+| [`a_stroke_on_a_clipped_layer_shows_while_it_is_drawn`](../../src/app.rs#L8815) | While a stroke is still in progress on a clipped layer, the clip texture is refreshed for just the stroke's rectangle, so the stroke is visible as you draw. |
+| [`merging_a_clipped_layer_down_keeps_only_what_showed`](../../src/app.rs#L8832) | Merging a clipped layer into its base keeps only the part that was visible (red over the base) and drops the clipped-away part. |
+| [`layer_keys_walk_the_stack_and_stop_at_the_ends`](../../src/app.rs#L8852) | The select above / below / top / bottom shortcuts move the active layer and stop at the ends without wrapping; "pick 1..4" counts rows from the top and ignores a row that does not exist. |
+| [`moving_a_layer_by_key_is_one_undo_step_and_free_at_the_ends`](../../src/app.rs#L8877) | Moving a layer up by shortcut takes the selection with it and is one undo step; trying to move the top layer further up adds no undo entry. |
+| [`the_layer_shortcuts_toggle_clip_and_alpha_lock`](../../src/app.rs#L8893) | The clip and alpha-lock shortcuts switch those flags on the current layer on and back off. |
+| [`a_stroke_on_an_alpha_locked_layer_only_recolours`](../../src/app.rs#L8905) | On an alpha-locked layer an Ink stroke recolours pixels that already have ink but leaves empty pixels empty. |
+| [`a_project_without_clipping_makes_no_clip_textures`](../../src/app.rs#L8929) | When no layer is clipped, a texture sync creates no clip textures at all (no cost for projects that do not use clipping). |
+| [`dragging_sideways_shuts_the_gap_live_and_lands_as_one_undo`](../../src/app.rs#L8984) | Dragging sideways after pressing the bucket raises the gap-closing setting step by step (8 px dead zone, then one step per 12 px), re-runs the fill live so the leak through the hole stops, and the whole press ends as one undo step; the new gap value stays for the next press. |
+| [`dragging_up_grows_the_expand_and_back_down_undoes_it`](../../src/app.rs#L9007) | Dragging up raises the fill's "expand" so the colour tucks under the line, and dragging back down lowers it again and gives the line back, still as one undo step. |
+| [`a_plain_tap_fills_once`](../../src/app.rs#L9024) | A tap with a few pixels of wobble stays inside the dead zone: the settings do not change and exactly one fill lands. |
+| [`cancelling_a_fill_press_leaves_nothing_behind`](../../src/app.rs#L9038) | Cancelling a fill press mid-drag removes the live fill entirely, and lifting the pen afterwards records no undo step. |
+| [`reading_all_visible_layers_walls_the_fill_with_another_layers_lines`](../../src/app.rs#L9053) | With "fill reads all visible layers" on, a fill on an empty layer is stopped by line art on another layer; with it off (or with the line layer hidden) the fill floods everywhere. |
+| [`tabbing_the_panels_back_leaves_the_shortcuts_live`](../../src/app.rs#L9080) | Pressing Tab to bring the panels back from mini-timeline mode must not leave a panel button focused (egui also reads Tab as "focus next"), otherwise the next shortcut (Q for Pencil) would be swallowed. |
+| [`capturing_a_bare_modifier_in_settings`](../../src/app.rs#L9124) | When rebinding a hold action in Settings, a bare Shift is captured once it is released; a press action ignores a bare Shift and waits for a real key (Shift+I). |
+| [`space_held_for_pan_does_not_click_a_focused_button`](../../src/app.rs#L9175) | When Space is bound to canvas pan, pressing it does not click a focused button; when it is not bound, Space clicks the button as normal. |
+| [`a_pinned_wheel_gives_every_tool_one_colour`](../../src/app.rs#L9225) | Unpinned, each tool keeps its own colour; pinning the colour wheel shares one colour across all tools, unpinning lets them drift apart again, and the shortcut toggles the pin. |
+| [`an_opacity_drag_sets_the_pick_in_one_undo_step`](../../src/app.rs#L9254) | Dragging the opacity slider with several layers picked sets every picked layer, and the whole drag (many frames, repeated commits) is one undo step. |
+| [`last_layer_survives_adding_and_deleting_layers`](../../src/app.rs#L9277) | "Go to last layer" leads back to the layer you were on before adding a new one, and still leads there after the layer you jumped to is deleted. |
+| [`tab_reaches_its_own_binding_from_a_focused_field`](../../src/app.rs#L9307) | With Tab bound to "last layer", pressing Tab while a text field has focus still runs that binding (and Shift+Tab does not), rather than a hard-wired panel toggle. |
+| [`krita_save_lands_as_one_undo_step`](../../src/app.rs#L9370) | End to end on a real temp file: send to Krita, a simulated Krita save, the watcher noticing it, and the pull landing as one undo step; a reference background layer is never sent and never touched, and seeing the same save again changes nothing. |
+| [`helper_round_reloads_in_place`](../../src/app.rs#L9500) | With the Krita helper plugin in use, a send asks the helper first, waits for "ready", writes the file, posts "sent", and on "reloaded" shows the "Updated in Krita" toast. |
+| [`helper_saves_krita_edits_first`](../../src/app.rs#L9528) | If Krita has unsaved edits, the helper saves them and they arrive here as an undo step before the file is rewritten, so the reloaded file has both sides' changes. |
+| [`silent_helper_falls_back_to_a_plain_send`](../../src/app.rs#L9551) | If the helper never answers, the send falls back to a plain file write and the toast says the helper didn't answer. |
+| [`unreadable_krita_save_changes_nothing_then_recovers`](../../src/app.rs#L9571) | A half-written `.kra` is reported ("Couldn't read") and changes nothing; the next good save still comes in. |
+| [`a_second_send_during_a_round_is_ignored`](../../src/app.rs#L9590) | Clicking Send again while a helper round is running sends no second request. |
+| [`resend_brings_in_an_unread_krita_save_first`](../../src/app.rs#L9604) | Without the helper, a re-send first pulls in a Krita save the watcher hasn't read yet, so it is not overwritten. |
+| [`layer_send_takes_only_that_layer`](../../src/app.rs#L9666) | Sending one layer from the layer menu writes only that layer to the `.kra`; Krita's later save changes that layer and leaves the unsent layer as it was. |
+| [`layer_resend_narrows_a_whole_link`](../../src/app.rs#L9688) | When the whole project is linked, re-sending a single layer narrows Krita's file to that layer; the other layer stays here, unlinked, and is not deleted by Krita's next save. |
+| [`layer_send_of_a_reference_layer_sends_nothing`](../../src/app.rs#L9713) | Sending a reference layer is refused before anything starts (no link is made) and the toast says it "stays here". |
+| [`layer_gone_before_the_send_ends_the_round`](../../src/app.rs#L9724) | If the layer a re-send was for no longer exists, the round ends with a "gone" note, the file is left untouched, and the link keeps going. |
+| [`dirty_regions_union_and_full_wins`](../../src/app.rs#L9750) | Combining dirty regions: clean plus a rect is that rect, two rects merge into their bounding box, and a "whole cell changed" mark swallows any rect. |
+| [`uploads_patch_inside_the_texture_and_recrop_past_it`](../../src/app.rs#L9776) | `plan_upload` keeps a texture when nothing changed, sends a patch for an edit inside the cropped texture (or only the overlapping part of an eraser pass), and rebuilds (re-crops) when the drawing spreads past it; under a live stroke a small cell grows to its whole size. |
+| [`a_stroke_texture_grows_with_room_to_spare`](../../src/app.rs#L9811) | On a huge (4320×7680) cell, a stroke's texture is the stroke's area grown by half again and at least `STROKE_ROOM`, never the whole cell at once; a brand-new blank drawing is not scanned, and going past the room rebuilds with room around the new extent. |
+| [`a_cell_texture_holds_just_its_drawing`](../../src/app.rs#L9842) | A blank cell gets a 1×1 texture; an inked cell gets a texture cropped to the drawing plus a 2-pixel clear rim; small edits are patched at texture (not cell) coordinates; ink elsewhere re-crops around all of it. |
+| [`a_stroke_past_the_drawing_takes_the_whole_cell_once`](../../src/app.rs#L9871) | On a normal-sized cell, a stroke that goes outside the existing drawing makes the texture cover the whole cell once, and the rest of the stroke is sent as small patches. |
+| [`resting_on_a_drawing_readies_its_stroke_snapshot`](../../src/app.rs#L9896) | Pausing on a drawing (not just passing through) pre-takes its "before" snapshot so pen-down has nothing to copy, and undo of the stroke restores it exactly; under auto-key it clears the snapshot instead, and during playback it does nothing. |
+| [`auto_key_ghosts_the_held_drawing_ahead_of_the_stroke`](../../src/app.rs#L9948) | With auto-key and onion skin on, resting on a frame builds the held drawing's onion "ghost" texture early, so when a stroke starts a new drawing the ghost is already there and not built again. |
+| [`a_cell_image_is_its_premultiplied_pixels`](../../src/app.rs#L9980) | `cell_image` (the fast, possibly threaded reader) gives exactly the same image as premultiplying a copy of the pixels, for several rectangles, on packed and unpacked cells. |
+| [`a_spreading_stroke_streams_and_pen_up_sends_only_the_rest`](../../src/app.rs#L10054) | On a 3000×4000 canvas, for both the ribbon and Krita brush engines, a long stroke's texture is re-made at most 6 times, always matches the cell pixel for pixel, and pen-up uploads only a small leftover (under 1/20 of the stroke's box). |
+| [`the_budget_drops_the_least_recently_shown_first`](../../src/app.rs#L10098) | Over the texture memory budget, the least recently shown textures are dropped first and only until it fits; under budget nothing is dropped. |
+| [`playback_drops_the_most_recently_shown_first`](../../src/app.rs#L10106) | During playback the order flips: the most recently shown texture goes first, because the loop comes back to the oldest one soonest. |
+| [`the_budget_never_drops_what_is_on_screen`](../../src/app.rs#L10113) | Textures used on the current frame are never evicted, even when they alone exceed the budget. |
+| [`ghosts_of_big_cells_are_small_and_keep_their_coverage`](../../src/app.rs#L10120) | Onion-skin ghosts of huge cells are shrunk (to at most `GHOST_MAX_SIDE`), small cells stay 1:1, a solid block stays solid and half coverage averages to half alpha. |
+| [`a_packed_cell_makes_the_same_ghost`](../../src/app.rs#L10145) | A packed (memory-compacted) cell produces exactly the same ghost as the unpacked one, including drawings that start partway through a ghost texel and edge texels. |
+| [`a_ghost_that_needs_no_shrinking_is_the_plain_silhouette`](../../src/app.rs#L10165) | When no shrinking is needed, the ghost's alpha is exactly each pixel's alpha (a tinted silhouette). |
+| [`blank_means_no_coverage_anywhere`](../../src/app.rs#L10173) | `no_alpha` treats colour with zero alpha as blank, notices a non-zero alpha in the very last pixel, and works on unaligned slices too. |
+| [`a_keyed_grid_tweens_as_the_frame_moves_and_undo_takes_a_key_back`](../../src/app.rs#L10214) | A grid keyed at frames 0 and 20 sits halfway (linear tween) at frame 10; undo removes the second key and the grid returns to the single key's pose, redo brings it back. |
+| [`inserting_frames_before_moves_grid_keys_in_one_undo`](../../src/app.rs#L10239) | Inserting frames before the playhead shifts grid keys along with camera keys and drawings in one undo step; deleting and adding frames shift them too, and a key on a deleted frame goes with it. |
+| [`dragging_a_keyed_grid_keys_the_frame_as_one_undo_step`](../../src/app.rs#L10278) | With auto-key on, dragging a keyed grid adds a key on the current frame (one undo step) so the move sticks; with auto-key off the drag only lasts until the frame changes, like the camera. |
+| [`a_grid_without_keys_just_moves`](../../src/app.rs#L10314) | Dragging a grid that has no keys moves it without creating any key, and the drag is still one undo step. |
+| [`a_grid_on_the_camera_rides_it_and_switching_keeps_it_in_place`](../../src/app.rs#L10326) | Switching a grid to follow the camera does not make it jump; it then moves with the camera and, when the camera zooms in, shrinks in document space so it keeps its size in the shot. |
+| [`a_grid_on_a_layer_finds_it_again_by_name_next_session`](../../src/app.rs#L10346) | A grid following a layer moves with that layer's transform, and when its stored layer id is lost (as after a restart) it finds the layer again by name. |
+| [`each_file_keeps_its_own_grids`](../../src/app.rs#L10366) | Grids are remembered per `.anim` path: switching files swaps grid sets, Save As copies them to the new path while the old file keeps its own, a new project starts with one default grid, and the store goes into the preferences. |
+| [`a_walls_top_corner_drags_its_height_and_nothing_else_moves_it`](../../src/app.rs#L10399) | Dragging a wall grid's top corner changes only its height while its base stays on the floor; pressing inside the wall selects it without starting a move; undo restores the height. |
+| [`dragging_a_grid_corner_moves_only_that_corner`](../../src/app.rs#L10427) | Dragging a corner handle moves just that corner (the other three stay put), and moves after release do nothing. |
+| [`a_locked_grid_is_selected_but_not_moved`](../../src/app.rs#L10445) | Pressing a locked grid makes it the active grid, but dragging does not move it. |
+| [`pressing_another_grid_makes_it_active`](../../src/app.rs#L10460) | Pressing inside a second grid makes it active and drags only it; pressing empty canvas grabs nothing and keeps the current selection. |
+| [`a_folding_corner_drag_is_refused`](../../src/app.rs#L10479) | A corner drag that would fold the grid's quad (cross the far diagonal) is ignored and the last valid shape is kept. |
+| [`an_extra_vp_slides_along_the_horizon_until_pulled_off_and_sticks_back`](../../src/app.rs#L10490) | An extra vanishing point stays on the horizon line while dragged near it, comes free when pulled well away, and snaps back onto the horizon when brought close again. |
+| [`moving_a_grid_takes_its_extra_vps_along`](../../src/app.rs#L10522) | Moving a whole grid moves its extra vanishing points by the same amount. |
+| [`a_stroke_heading_for_an_extra_vp_locks_onto_it`](../../src/app.rs#L10536) | With snap on, a stroke heading toward an extra vanishing point locks onto the line through it rather than the grid's rows or columns. |
+| [`snap_locks_a_stroke_to_one_grid_direction`](../../src/app.rs#L10557) | With snap on, a stroke is held at its start until its direction is clear, then locks to one grid direction and stays locked even if the hand drifts; with snap off points pass straight through. |
+| [`a_near_vertical_stroke_follows_the_vanishing_point_not_the_vertical`](../../src/app.rs#L10578) | On a one-point floor grid, a nearly vertical stroke leans toward the vanishing point along the grid's column; with "snap verticals" on, it stays truly vertical. |
+| [`a_rect_lies_on_the_grid_when_snap_is_on`](../../src/app.rs#L10631) | With snap on, a Shape-tool rectangle is drawn lying on the perspective floor (edges follow the grid's rows and leaning columns), not as a flat screen rectangle. |
+| [`with_snap_off_a_rect_stays_flat`](../../src/app.rs#L10643) | With snap off, the same drag draws a plain flat rectangle. |
+| [`a_rect_lies_on_the_grid_on_a_transformed_layer_too`](../../src/app.rs#L10652) | On a scaled, rotated and moved layer, the snapped rectangle still lands in the same place on screen as on an untransformed layer. |
+| [`shift_squares_a_rect_up_in_grid_cells`](../../src/app.rs#L10670) | Holding Shift while drawing a snapped rectangle makes it square in grid cells (equal number of columns and rows); letting go of Shift frees it again. |
+| [`a_shape_line_snaps_like_a_stroke`](../../src/app.rs#L10689) | A Shape-tool line snaps to one grid direction like a pen stroke (it does not lie on the plane), while a rectangle is not direction-locked but lies on the plane instead. |
+| [`shift_down_at_the_press_locks_only_once_pressed_again`](../../src/app.rs#L10730) | If Shift was already down when the drag began (it chose a pan or selection mode), it does not lock an axis until it is released and pressed again; if it goes down partway, it locks at once. |
+| [`shift_partway_turns_a_shape_line_to_a_fifteen_degree_step`](../../src/app.rs#L10748) | Pressing Shift mid-drag snaps a Shape line drawn at 50° to the nearest 15° step (45°), and the final line is drawn along that angle. |
+| [`a_held_line_is_level_on_the_canvas_or_the_screen`](../../src/app.rs#L10768) | The lock's "level" direction is the canvas horizontal, or the screen horizontal when the view is rotated and screen axes are chosen, and it is turned back by the layer's own rotation in cell pixels. |
+| [`shift_partway_squares_a_flat_rect`](../../src/app.rs#L10784) | Pressing Shift mid-drag turns a flat rectangle into a square as tall as it is wide. |
+| [`a_mid_key_down_at_the_press_counts_only_once_pressed_again`](../../src/app.rs#L10811) | Like Shift, the move and centre keys held when the drag began do not count until released and pressed again mid-drag. |
+| [`the_move_key_partway_slides_a_flat_rect`](../../src/app.rs#L10822) | Holding the move key (Space) mid-drag slides the rectangle without resizing it; releasing it resumes growing from where it was slid to, and the result is drawn there, not at the press. |
+| [`the_centre_key_partway_grows_a_rect_from_the_press`](../../src/app.rs#L10840) | Holding the centre key (Alt) makes the rectangle grow out from the press point in both directions, and with Shift as well it becomes a square centred on the press. |
+| [`a_centred_line_runs_both_ways_from_the_press`](../../src/app.rs#L10858) | A centred Shape line runs equally both ways from the press point, and with the move key too its middle follows the pointer. |
+| [`the_move_key_slides_a_rect_along_its_grid`](../../src/app.rs#L10873) | Sliding a perspective-snapped rectangle keeps it the same number of grid cells across while it gets smaller on screen as it moves up the floor toward the horizon. |
+| [`a_snapped_line_slid_stays_snapped_from_where_it_went`](../../src/app.rs#L10896) | Sliding a snapped line moves it to another grid row, and after the key is released it stays snapped to that new row. |
+| [`shift_partway_holds_a_stroke_to_an_axis_from_where_it_was`](../../src/app.rs#L10919) | Pressing Shift mid-stroke holds the stroke still until a direction shows, then keeps it on that axis from the point where Shift went down; releasing frees it, and a new press starts a new hold from the current point. |
+| [`shift_partway_holds_a_grid_move_to_an_axis`](../../src/app.rs#L10941) | Pressing Shift while moving a perspective grid restricts the move to horizontal or vertical, whichever the pointer is going along. |
+| [`next_grid_cycles_the_visible_grids_and_wraps`](../../src/app.rs#L10955) | The "next grid" shortcut cycles through visible grids, skipping hidden ones and wrapping around; with only one visible it stays put, and with no grids it does not crash. |
+| [`selecting_the_tool_brings_back_a_grid`](../../src/app.rs#L10978) | Choosing the Perspective tool when there are no grids creates one and makes it active. |
+| [`write_prefs_fixture`](../../src/app.rs#L11044) | Ignored by default (`#[ignore]`); run by hand with `cargo test write_prefs_fixture -- --ignored` to regenerate the old-format `src/testdata/ui_prefs_v1.ron` fixture. It checks nothing itself. |
+| [`prefs_written_before_the_brush_library_still_load`](../../src/app.rs#L11054) | A `ui.ron` from before the Krita brush library still loads with every saved value intact (one unreadable field would silently reset all preferences); newer fields get defaults, old onion sliders become the onion strip, and old fills stay grain-free. |
+| [`the_active_brush_is_saved_with_its_latest_changes`](../../src/app.rs#L11093) | Saving stores the active tool's brush as it is right now, not as it was at the last tool switch. |
+| [`each_pen_s_smoothing_outlasts_a_restart`](../../src/app.rs#L11108) | Turning the stabilizer on for Ink only is saved per pen: Pencil and Eraser stay on Basic smoothing after a reload. |
+| [`the_pen_slots_outlast_a_restart`](../../src/app.rs#L11123) | The pen slots outlast a restart: how many, and each one's name, icon, brush, smoothing and sizes. The app comes back on the first. |
+| [`the_first_two_slots_are_written_where_an_older_build_reads_them`](../../src/app.rs#L11150) | A build from before the slots finds the first two where the pencil and the ink always were, and the eraser where it was; and prefs from such a build come back the same. |
+| [`prefs_from_before_the_pen_slots_make_the_pencil_and_ink_slots`](../../src/app.rs#L11185) | A prefs file from before the pen slots gives its pencil and ink as the first two slots, and every other tool its own brush, as they were. |
+| [`hidden_panels_and_the_layout_reset_outlast_a_restart`](../../src/app.rs#L11204) | A panel layout reset shows every panel again; hidden panels and the reset counter are saved and come back after a reload. |
+| [`the_color_scheme_and_custom_colors_outlast_a_restart`](../../src/app.rs#L11222) | The default theme is Graphite; a Custom theme and its colours are saved and restored. |
+| [`a_screen_pick_keeps_the_brush`](../../src/app.rs#L11238) | Picking a colour from the screen changes only the brush colour, not its engine or size. |
+| [`a_new_project_keeps_the_brushes`](../../src/app.rs#L11251) | Starting a new project keeps every tool's brush settings and switches back to the Pencil. |
+| [`shape_shares_its_size_with_the_last_pen`](../../src/app.rs#L11265) | The Shape tool takes the size of the pen used last, and a size set on Shape goes back to that pen; the other pen keeps its own size, and Shape keeps its own hard edge (only size is shared). |
+| [`size_keys_keep_shape_and_the_pen_in_step`](../../src/app.rs#L11289) | With the full UI drawn, the `[` / `]` size keys change Ink's size and Shape picks it up, and a size change on Shape goes back to Ink. |
+| [`a_shape_thickness_is_saved_with_its_pen`](../../src/app.rs#L11340) | A thickness set on Shape is saved with the pen it follows, so after a restart both that pen and Shape have it. |
+| [`a_screen_pick_on_shape_keeps_the_pen_size`](../../src/app.rs#L11356) | Picking a colour from the screen while on Shape stays on Shape and does not change its size (or the pen's). |
+| [`a_stabilized_stroke_finishes_at_pen_up`](../../src/app.rs#L11372) | With the Stabilizer on, lifting the pen finishes the line to where the pen lifted, even if no UI frame ran between pen events to advance it. |
+| [`each_pen_keeps_its_own_smoothing`](../../src/app.rs#L11398) | Turning the stabilizer on for Ink does not affect Pencil or Eraser strokes, and Fill has no smoothing at all. |
+| [`the_smoothing_keys_change_the_pen_in_hand`](../../src/app.rs#L11423) | The Stabilizer key toggles the current pen to Stabilizer and back to what it had; the cycle key steps through Weighted, Stabilizer, None, Basic; neither changes other pens or does anything on a tool without smoothing. |
+| [`brushes_saved_before_the_perspective_tool_survive`](../../src/app.rs#L11451) | A saved brush list from before the Perspective tool existed (7 entries) is still restored, while a list of any other wrong length is thrown away. |
+| [`perspective_prefs_round_trip_and_default_when_missing`](../../src/app.rs#L11464) | Perspective settings survive a save/load round trip, and preferences from before grids existed load with the default grid. |
+| [`the_backdrop_is_kept_between_runs_and_across_new_projects`](../../src/app.rs#L11479) | The canvas backdrop colour and opacity are saved, kept across File > New, and default correctly in old preferences; an old "Polygon" selection shape opens as the freehand lasso, and an old checkerboard setting still loads. |
+| [`the_onion_strip_round_trips_and_old_ranges_carry_over`](../../src/app.rs#L11504) | Per-step onion show/hide and opacity survive a round trip, and an old "prev = 3" setting turns into three lit steps back (and one forward). |
+| [`the_magic_select_settings_round_trip_and_old_prefs_get_defaults`](../../src/app.rs#L11518) | Magic-wand selection settings survive a round trip and the app's own save; preferences without them, or with only some fields, fill in defaults. |
+| [`onion_layers_are_the_active_one_and_those_switched_on`](../../src/app.rs#L11551) | Onion skin shows on the active layer plus layers with their own onion switch on, but not on hidden layers, not during playback, and not when onion skin is off. |
+| [`saving_a_preset_needs_a_name_and_replaces_one_it_matches`](../../src/app.rs#L11578) | Saving a New Project preset needs a non-blank name (trimmed); saving under an existing name (any case) overwrites that preset in place and keeps its star. |
+| [`renaming_a_preset_rejects_blank_and_taken_names`](../../src/app.rs#L11598) | Renaming a preset refuses a blank name or one another preset already has, but allows changing the case of its own name. |
+| [`only_one_preset_is_starred`](../../src/app.rs#L11611) | Only one preset can be the starred default: starring another moves the star, starring the starred one clears it, and deleting it leaves none starred. |
+| [`new_project_opens_on_the_starred_preset_as_saved`](../../src/app.rs#L11629) | With no starred preset the New Project dialog starts at the current project's size; with one it starts at that preset, and applying a preset keeps its own orientation. |
+| [`presets_round_trip_and_default_to_none_when_missing`](../../src/app.rs#L11651) | Presets survive a save/load round trip, and preferences from before presets existed load with none. |
+| [`a_pinned_drawing_is_ghosted_once_in_the_pin_colour`](../../src/app.rs#L11670) | A drawing pinned in the onion skin is ghosted once in the pin's colour and not again as a normal onion step; switching onion skin off hides pins too. |
+| [`only_changed_pixels_are_marked_for_upload`](../../src/app.rs#L11702) | Timeline-structure edits (adding frames and keys) mark no texture for re-upload, and a one-pixel edit marks only that pixel's rectangle. |
+| [`undo_of_a_structural_edit_uploads_nothing`](../../src/app.rs#L11725) | Undoing a structural edit (adding a frame) marks no cell for re-upload. |
+| [`undo_of_a_stroke_uploads_its_rect`](../../src/app.rs#L11737) | Undoing a pixel patch marks only that patch's rectangle for re-upload, not the whole cell. |
+| [`fade_others_splits_above_and_below_the_active_layer`](../../src/app.rs#L11769) | With "fade others" on, layers below the active one are drawn at the "below" opacity, layers above at the "above" opacity, and the active layer at full strength. |
+| [`fade_others_spares_reference_and_lines_from_layers`](../../src/app.rs#L11776) | Reference layers, and the layer the active layer takes its lines from, are not faded; another layer's lines link does not count. |
+| [`the_key_link_toggle_links_the_layer_below`](../../src/app.rs#L11791) | The key-link shortcut links the current layer's keys to the nearest drawing layer below (skipping a group header), pressing it again unlinks, the bottom layer has nothing to link to, and linking is not an undo step. |
+| [`a_cleanup_layer_is_linked_and_one_undo`](../../src/app.rs#L11810) | "New cleanup layer" adds a layer directly above the rough, named "<rough> clean", key-linked to it and made active, and one undo takes it all back. |
+| [`fade_others_lifts_while_playing_or_switched_off`](../../src/app.rs#L11829) | During playback, or once the toggle is switched off, every layer shows at full opacity. |
+| [`a_dropped_drawing_lives_as_long_as_undo_can_reach_it`](../../src/app.rs#L11842) | A deleted layer's drawing is kept while undo can still restore it, and is freed (made a tombstone, texture dropped) once that undo step has fallen out of history, without renumbering other cells. |
+| [`packing_changes_nothing_on_screen_or_in_export`](../../src/app.rs#L11872) | Packing an idle cell to save memory leaves its uploaded texture and its flattened export pixels exactly the same. |
+| [`the_packer_leaves_the_drawing_being_drawn_alone`](../../src/app.rs#L11902) | The idle-cell packer never packs the cell a stroke is drawing into, even off the active slot, but does pack it once the stroke is done. |
+| [`play_shortcut_starts_from_the_current_frame`](../../src/app.rs#L11921) | Starting playback by shortcut steps from the frame the playhead is on: the first tick only starts the clock rather than jumping by however long it was paused. |
+| [`stopping_goes_back_to_the_start_frame_unless_paused_here`](../../src/app.rs#L11941) | Play/Pause returns to the frame playback started on when stopped, while the "pause here" action stops on the current frame. |
+| [`running_out_with_the_loop_off_goes_back_to_the_start_frame`](../../src/app.rs#L11966) | With looping off, playback that reaches the end of the range stops and returns to the start frame. |
+| [`fade_others_starts_off`](../../src/app.rs#L11982) | "Fade others" is session-only: a fresh state always starts with it off. |
+| [`perf_big_layer`](../../src/app.rs#L11991) | `#[ignore]` timing probe, not pass/fail: compares old and new ways of uploading, ghosting, blank-scanning and snapshotting one cell of a 3×-wide 4K frame. Run with `cargo test --release perf_big_layer -- --ignored --nocapture`. |
+| [`perf_liquify`](../../src/app.rs#L12169) | `#[ignore]` timing probe: Liquify pen-down, move, per-frame and apply times for several canvas and brush sizes. Run with `cargo test --release perf_liquify -- --ignored --nocapture`. |
+| [`perf_big_canvas_stroke`](../../src/app.rs#L12241) | `#[ignore]` timing probe: stage-by-stage stroke timings (pen-down, stroke frames, pen-up, upload and undo sizes) on a big 4320×7680 canvas for both brush engines, or on the `.anim` named by the `ANIM_PROBE` environment variable. |
+| [`perf_user_strokes`](../../src/app.rs#L12399) | The user's own pens (from a `ui_prefs` blob) on a real project, as wall-clock strokes. Not a pass/fail test — run it for the numbers: `PREFS_PROBE=<ui_prefs.ron> ANIM_PROBE=<x.anim> cargo test --release perf_user_strokes -- --ignored --nocapture` |
 
 **Test helpers** (used only by the tests above):
 
-- [`clip_state`](../../src/app.rs#L8662) — builds a two-layer state: layer 0 inked black on its left half, layer 1 solid red and clipped to it.
-- [`sync`](../../src/app.rs#L8687) — runs one headless egui frame of `sync_textures` (with the app's 8192 texture limit) and returns what egui was asked to upload.
-- [`uploaded_alpha`](../../src/app.rs#L8697) — reads the alpha of one pixel of an uploaded texture from that upload list.
-- [`ink_box`](../../src/app.rs#L8916) — inks a 1-px box outline from 100 to 200 on a layer's current drawing, with a 4-px hole in its top edge.
-- [`fill_state`](../../src/app.rs#L8933) — a state on the Fill tool, red, gap and expand at 0, with the leaky box inked on layer 0.
-- [`px`](../../src/app.rs#L8943) — reads one RGBA pixel of the current drawing.
-- [`fill_press`](../../src/app.rs#L8951) — presses the bucket at a cell point and anchors the press at a screen point (so later drags measure from it).
-- [`linked`](../../src/app.rs#L9418) — a state with a live Krita link on a temp `.kra` file after a first send, with zero poll delays and no Krita started.
-- [`pump`](../../src/app.rs#L9433) — runs the per-frame Krita step until a condition holds, failing after 10 seconds.
-- [`to_krita`](../../src/app.rs#L9443) — reads the last message the app left for the Krita helper (its sequence number and text).
-- [`stage`](../../src/app.rs#L9448) — the current stage of the Krita send round, if one is running.
-- [`krita_saves`](../../src/app.rs#L9453) — writes a project to the `.kra` path the way Krita would save it, using the link's layer uuids.
-- [`first_pixel_on_disk`](../../src/app.rs#L9461) — reads pixel 0 of layer 0's first drawing from the `.kra` on disk.
-- [`two_layer_link`](../../src/app.rs#L9598) — a state with two drawn layers and an unsent, helper-less Krita link; returns both layer uids.
-- [`names_on_disk`](../../src/app.rs#L9618) — the layer names in the `.kra` on disk.
-- [`krita_paints_only`](../../src/app.rs#L9624) — simulates Krita painting pixel 0 of one layer and saving a file holding only that layer.
-- [`layer_by_uid`](../../src/app.rs#L9632) — finds a layer by its uid (panics if it is gone).
-- [`rect`](../../src/app.rs#L9711) — shorthand to build a `DirtyRect` from min/max corners.
-- [`ink`](../../src/app.rs#L9734) — inks a rectangle of a cell opaque black and reports it dirty the way a tool does.
-- [`apply`](../../src/app.rs#L9983) — applies one upload list (full images, patches, frees) to the copy and returns how many pixels were sent.
-- [`assert_shows`](../../src/app.rs#L10011) — asserts the texture a layer shows matches its cell pixel for pixel and that every inked pixel lies inside it.
-- [`entry`](../../src/app.rs#L10061) — builds a texture-cache entry (cell id, last-used frame, size in MB) for the budget tests.
-- [`perspective_state`](../../src/app.rs#L10159) — a state on the Perspective tool with one 100-px square grid at (100, 100) and a 1:1 view.
-- [`doc_corners`](../../src/app.rs#L10169) — a grid's four corners in document pixels.
-- [`near`](../../src/app.rs#L10174) — true when two points are within 0.01 px of each other.
-- [`grid_centre_doc`](../../src/app.rs#L10180) — a grid's centre in document pixels on the current frame (after keys and follow links).
-- [`shape_state`](../../src/app.rs#L10577) — a state on the Shape tool drawing the given shape kind with snap on over the `FLOOR` grid.
-- [`drag_shape`](../../src/app.rs#L10590) — presses at one cell point, drags to another, and releases.
-- [`alpha`](../../src/app.rs#L10596) — the alpha of the current drawing at a point.
-- [`flat_shapes`](../../src/app.rs#L10686) — a state on the Shape tool with no grid to snap to, 1:1 view.
-- [`shift`](../../src/app.rs#L10695) — egui modifier state with Shift up or down.
-- [`shape_to`](../../src/app.rs#L10772) — feeds a Shape drag's next point through `stroke_point_doc`, as the canvas does (where the move key slides the shape).
-- [`shape_from`](../../src/app.rs#L10778) — starts a Shape drag through `snap_begin`, as the canvas does.
-- [`get_string`](../../src/app.rs#L10965) — Get string.
-- [`set_string`](../../src/app.rs#L10968) — Set string.
-- [`flush`](../../src/app.rs#L10971) — Flush.
-- [`fixture_brushes`](../../src/app.rs#L10978) — the brushes stored in that fixture, every slot changed from its default (including the Krita Pencil-5).
-- [`fixture_prefs`](../../src/app.rs#L10992) — the full `UiPrefs` value the fixture was written from.
-- [`save_as`](../../src/app.rs#L11543) — fills the New Project dialog with a size and fps and saves it as a named preset.
-- [`faded_stack`](../../src/app.rs#L11730) — four layers, the second active, "fade others" on (0.2 above, 0.5 below).
-- [`probe_project`](../../src/app.rs#L12030) — builds an `n`-frame project of a given size, each frame keyed with its own packed drawing of thick lines (for the perf probes).
-- [`probe_frame`](../../src/app.rs#L12059) — runs one full app frame headless (housekeeping, texture sync, whole UI, tessellation) and returns its time and bytes sent to the GPU.
-- [`probe_stroke`](../../src/app.rs#L12085) — draws a straight stroke four samples per frame and prints the cost of each stage.
-- [`wall_stroke`](../../src/app.rs#L12272) — One wall-clock stroke: samples come due at `hz` against real time, so a slow frame takes more of them, as in the app. Prints the frame-time spread and the worst frames, phase by phase.
+- [`clip_state`](../../src/app.rs#L8689) — builds a two-layer state: layer 0 inked black on its left half, layer 1 solid red and clipped to it.
+- [`sync`](../../src/app.rs#L8714) — runs one headless egui frame of `sync_textures` (with the app's 8192 texture limit) and returns what egui was asked to upload.
+- [`uploaded_alpha`](../../src/app.rs#L8724) — reads the alpha of one pixel of an uploaded texture from that upload list.
+- [`ink_box`](../../src/app.rs#L8943) — inks a 1-px box outline from 100 to 200 on a layer's current drawing, with a 4-px hole in its top edge.
+- [`fill_state`](../../src/app.rs#L8960) — a state on the Fill tool, red, gap and expand at 0, with the leaky box inked on layer 0.
+- [`px`](../../src/app.rs#L8970) — reads one RGBA pixel of the current drawing.
+- [`fill_press`](../../src/app.rs#L8978) — presses the bucket at a cell point and anchors the press at a screen point (so later drags measure from it).
+- [`linked`](../../src/app.rs#L9445) — a state with a live Krita link on a temp `.kra` file after a first send, with zero poll delays and no Krita started.
+- [`pump`](../../src/app.rs#L9460) — runs the per-frame Krita step until a condition holds, failing after 10 seconds.
+- [`to_krita`](../../src/app.rs#L9470) — reads the last message the app left for the Krita helper (its sequence number and text).
+- [`stage`](../../src/app.rs#L9475) — the current stage of the Krita send round, if one is running.
+- [`krita_saves`](../../src/app.rs#L9480) — writes a project to the `.kra` path the way Krita would save it, using the link's layer uuids.
+- [`first_pixel_on_disk`](../../src/app.rs#L9488) — reads pixel 0 of layer 0's first drawing from the `.kra` on disk.
+- [`two_layer_link`](../../src/app.rs#L9625) — a state with two drawn layers and an unsent, helper-less Krita link; returns both layer uids.
+- [`names_on_disk`](../../src/app.rs#L9645) — the layer names in the `.kra` on disk.
+- [`krita_paints_only`](../../src/app.rs#L9651) — simulates Krita painting pixel 0 of one layer and saving a file holding only that layer.
+- [`layer_by_uid`](../../src/app.rs#L9659) — finds a layer by its uid (panics if it is gone).
+- [`rect`](../../src/app.rs#L9738) — shorthand to build a `DirtyRect` from min/max corners.
+- [`ink`](../../src/app.rs#L9761) — inks a rectangle of a cell opaque black and reports it dirty the way a tool does.
+- [`apply`](../../src/app.rs#L10010) — applies one upload list (full images, patches, frees) to the copy and returns how many pixels were sent.
+- [`assert_shows`](../../src/app.rs#L10038) — asserts the texture a layer shows matches its cell pixel for pixel and that every inked pixel lies inside it.
+- [`entry`](../../src/app.rs#L10088) — builds a texture-cache entry (cell id, last-used frame, size in MB) for the budget tests.
+- [`perspective_state`](../../src/app.rs#L10186) — a state on the Perspective tool with one 100-px square grid at (100, 100) and a 1:1 view.
+- [`doc_corners`](../../src/app.rs#L10196) — a grid's four corners in document pixels.
+- [`near`](../../src/app.rs#L10201) — true when two points are within 0.01 px of each other.
+- [`grid_centre_doc`](../../src/app.rs#L10207) — a grid's centre in document pixels on the current frame (after keys and follow links).
+- [`shape_state`](../../src/app.rs#L10604) — a state on the Shape tool drawing the given shape kind with snap on over the `FLOOR` grid.
+- [`drag_shape`](../../src/app.rs#L10617) — presses at one cell point, drags to another, and releases.
+- [`alpha`](../../src/app.rs#L10623) — the alpha of the current drawing at a point.
+- [`flat_shapes`](../../src/app.rs#L10713) — a state on the Shape tool with no grid to snap to, 1:1 view.
+- [`shift`](../../src/app.rs#L10722) — egui modifier state with Shift up or down.
+- [`shape_to`](../../src/app.rs#L10799) — feeds a Shape drag's next point through `stroke_point_doc`, as the canvas does (where the move key slides the shape).
+- [`shape_from`](../../src/app.rs#L10805) — starts a Shape drag through `snap_begin`, as the canvas does.
+- [`get_string`](../../src/app.rs#L10992) — Get string.
+- [`set_string`](../../src/app.rs#L10995) — Set string.
+- [`flush`](../../src/app.rs#L10998) — Flush.
+- [`fixture_brushes`](../../src/app.rs#L11005) — the brushes stored in that fixture, every slot changed from its default (including the Krita Pencil-5).
+- [`fixture_prefs`](../../src/app.rs#L11019) — the full `UiPrefs` value the fixture was written from.
+- [`save_as`](../../src/app.rs#L11570) — fills the New Project dialog with a size and fps and saves it as a named preset.
+- [`faded_stack`](../../src/app.rs#L11757) — four layers, the second active, "fade others" on (0.2 above, 0.5 below).
+- [`probe_project`](../../src/app.rs#L12057) — builds an `n`-frame project of a given size, each frame keyed with its own packed drawing of thick lines (for the perf probes).
+- [`probe_frame`](../../src/app.rs#L12086) — runs one full app frame headless (housekeeping, texture sync, whole UI, tessellation) and returns its time and bytes sent to the GPU.
+- [`probe_stroke`](../../src/app.rs#L12112) — draws a straight stroke four samples per frame and prints the cost of each stage.
+- [`wall_stroke`](../../src/app.rs#L12299) — One wall-clock stroke: samples come due at `hz` against real time, so a slow frame takes more of them, as in the app. Prints the frame-time spread and the worst frames, phase by phase.
 
-**Test-only types and constants:** [`FILL_RED`](../../src/app.rs#L8912), [`GpuCopy`](../../src/app.rs#L9980), [`FLOOR`](../../src/app.rs#L10574), [`MemStorage`](../../src/app.rs#L10962), [`PREFS_FIXTURE`](../../src/app.rs#L10974)
+**Test-only types and constants:** [`FILL_RED`](../../src/app.rs#L8939), [`GpuCopy`](../../src/app.rs#L10007), [`FLOOR`](../../src/app.rs#L10601), [`MemStorage`](../../src/app.rs#L10989), [`PREFS_FIXTURE`](../../src/app.rs#L11001)
 
 ### `mod camera_rig_tests`
 
@@ -6126,38 +6136,38 @@ Run with `cargo test app::camera_rig_tests` · 25 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_camera_the_size_of_the_canvas_has_no_size_of_its_own`](../../src/app.rs#L12431) | The output size follows the canvas until a camera size is set; setting it back to the canvas size stores "no size of its own", silly sizes are clamped (at least 1, at most `MAX_CAMERA_SIDE`), and `None` returns to the canvas. |
-| [`a_new_size_leaves_zoom_and_keys_alone`](../../src/app.rs#L12448) | Changing the camera size is not a camera move: zoom and camera keys stay the same. |
-| [`undo_never_changes_the_camera_s_size`](../../src/app.rs#L12459) | Undo and redo take back camera keys but never change the camera's size (the size is session-only, not part of history). |
-| [`the_last_camera_size_is_kept_between_runs`](../../src/app.rs#L12474) | The last camera size set is remembered (even after handing the size back to the canvas) and saved in preferences, but the next run does not apply it to the project; old preferences without it still load. |
-| [`a_free_camera_box_sets_the_camera_size`](../../src/app.rs#L12494) | A free-shape camera box sets the camera to the box's size in even pixels, only on release, framed at zoom 1 and centred on the box, and keys it; a thin drag gets at least `MIN_FREE_CAMERA_SIDE`, a box hanging off the canvas is held on it, and with free shape off the box keeps the camera's shape. |
-| [`a_camera_box_grows_from_its_middle_and_slides`](../../src/app.rs#L12537) | Holding the centre key makes the press point the camera box's middle (free or shape-locked), and the move key slides the box. |
-| [`free_camera_box_and_panel_padding_are_kept_between_runs`](../../src/app.rs#L12562) | The "free camera box" switch and the panel padding are saved and restored with preferences. |
-| [`brush_sizes_are_kept_between_runs`](../../src/app.rs#L12579) | Each brush's pinned sizes are saved per tool: an Eraser pin comes back for the Eraser and not for Ink. |
-| [`keep_inside_is_on_for_every_project_unless_its_camera_leaves_the_canvas`](../../src/app.rs#L12598) | "Keep inside canvas" is on at launch, for new projects, and for opened projects whose camera stays on the canvas; a project whose camera is framed past the edge opens with it off, unchanged, and a toast says so. |
-| [`dragging_inside_the_frame_moves_the_camera_in_one_undo_step`](../../src/app.rs#L12630) | In camera edit mode, dragging inside the frame pans the camera by the drag distance as one undo step. |
-| [`shift_partway_holds_a_camera_move_to_an_axis`](../../src/app.rs#L12644) | Pressing Shift partway through a camera drag keeps the move to one axis. |
-| [`dragging_a_corner_zooms_and_past_a_corner_rolls`](../../src/app.rs#L12656) | Dragging a frame corner outward zooms the camera (twice as far out gives zoom 0.5); grabbing just past a corner rotates (rolls) it instead, each drag one undo step. |
-| [`a_press_off_the_frame_or_outside_edit_mode_is_left_to_the_tool`](../../src/app.rs#L12678) | A press outside the frame, or any press with camera edit off, is not taken by the camera: nothing moves and no undo step is recorded. |
-| [`a_click_on_the_frame_that_moves_nothing_is_no_undo_step`](../../src/app.rs#L12691) | Clicking the frame without moving records no undo step. |
-| [`a_dragged_frame_is_held_on_the_canvas_when_asked`](../../src/app.rs#L12700) | With "keep inside canvas" on, dragging the frame far away stops it at the canvas edge. |
-| [`the_view_holds_still_under_a_dragged_frame`](../../src/app.rs#L12713) | When looking through the camera, the view does not follow the frame during the drag (that would move the canvas under the cursor) and catches up on release. |
-| [`at_one_loop_the_camera_plays_in_step_with_the_frames`](../../src/app.rs#L12765) | With the camera move set to one loop, playback shows each frame with its own keyed camera, round and round. |
-| [`over_three_loops_the_drawings_repeat_under_one_move`](../../src/app.rs#L12774) | With three loops, the drawings repeat three times while the camera makes one continuous move from start to end, then everything starts over. |
-| [`pausing_a_stretched_move_parks_the_playhead_where_the_camera_is`](../../src/app.rs#L12790) | Stopping during a stretched move leaves the camera where it was and moves the playhead to the matching (nearest) frame of the move. |
-| [`a_camera_with_no_move_is_never_stretched`](../../src/app.rs#L12815) | A camera with only one key has no move to stretch, so the loops setting is ignored and playback is normal. |
-| [`copy_frame_takes_an_unkeyed_nudge_of_the_camera`](../../src/app.rs#L12842) | Copy frame copies what the camera shows, including an unkeyed nudge, rather than the keyed camera that Save PNG and exports use. |
-| [`copy_frame_mid_stretched_move_takes_where_the_move_has_got`](../../src/app.rs#L12859) | During playback of a stretched move, Copy frame uses the camera where the move has got to, not the camera keyed on the drawing showing. |
-| [`an_export_of_a_stretched_move_gives_each_frame_its_camera`](../../src/app.rs#L12874) | Exporting a move stretched over three loops repeats the frames three times with a camera per output frame (and the right frame count and length); the camera's ping-pong fill replaces the dialog's own; a sprite sheet stays one cell per frame. |
-| [`a_stretched_export_keeps_the_camera_s_other_options`](../../src/app.rs#L12911) | A stretched export still applies the camera's size and "keep inside canvas", so every exported camera stays on the canvas. |
-| [`opening_a_project_starts_the_camera_on_its_canvas`](../../src/app.rs#L12924) | Opening a project resets the session camera size, so the output is the new project's canvas size. |
+| [`a_camera_the_size_of_the_canvas_has_no_size_of_its_own`](../../src/app.rs#L12458) | The output size follows the canvas until a camera size is set; setting it back to the canvas size stores "no size of its own", silly sizes are clamped (at least 1, at most `MAX_CAMERA_SIDE`), and `None` returns to the canvas. |
+| [`a_new_size_leaves_zoom_and_keys_alone`](../../src/app.rs#L12475) | Changing the camera size is not a camera move: zoom and camera keys stay the same. |
+| [`undo_never_changes_the_camera_s_size`](../../src/app.rs#L12486) | Undo and redo take back camera keys but never change the camera's size (the size is session-only, not part of history). |
+| [`the_last_camera_size_is_kept_between_runs`](../../src/app.rs#L12501) | The last camera size set is remembered (even after handing the size back to the canvas) and saved in preferences, but the next run does not apply it to the project; old preferences without it still load. |
+| [`a_free_camera_box_sets_the_camera_size`](../../src/app.rs#L12521) | A free-shape camera box sets the camera to the box's size in even pixels, only on release, framed at zoom 1 and centred on the box, and keys it; a thin drag gets at least `MIN_FREE_CAMERA_SIDE`, a box hanging off the canvas is held on it, and with free shape off the box keeps the camera's shape. |
+| [`a_camera_box_grows_from_its_middle_and_slides`](../../src/app.rs#L12564) | Holding the centre key makes the press point the camera box's middle (free or shape-locked), and the move key slides the box. |
+| [`free_camera_box_and_panel_padding_are_kept_between_runs`](../../src/app.rs#L12589) | The "free camera box" switch and the panel padding are saved and restored with preferences. |
+| [`brush_sizes_are_kept_between_runs`](../../src/app.rs#L12606) | Each brush's pinned sizes are saved per tool: an Eraser pin comes back for the Eraser and not for Ink. |
+| [`keep_inside_is_on_for_every_project_unless_its_camera_leaves_the_canvas`](../../src/app.rs#L12625) | "Keep inside canvas" is on at launch, for new projects, and for opened projects whose camera stays on the canvas; a project whose camera is framed past the edge opens with it off, unchanged, and a toast says so. |
+| [`dragging_inside_the_frame_moves_the_camera_in_one_undo_step`](../../src/app.rs#L12657) | In camera edit mode, dragging inside the frame pans the camera by the drag distance as one undo step. |
+| [`shift_partway_holds_a_camera_move_to_an_axis`](../../src/app.rs#L12671) | Pressing Shift partway through a camera drag keeps the move to one axis. |
+| [`dragging_a_corner_zooms_and_past_a_corner_rolls`](../../src/app.rs#L12683) | Dragging a frame corner outward zooms the camera (twice as far out gives zoom 0.5); grabbing just past a corner rotates (rolls) it instead, each drag one undo step. |
+| [`a_press_off_the_frame_or_outside_edit_mode_is_left_to_the_tool`](../../src/app.rs#L12705) | A press outside the frame, or any press with camera edit off, is not taken by the camera: nothing moves and no undo step is recorded. |
+| [`a_click_on_the_frame_that_moves_nothing_is_no_undo_step`](../../src/app.rs#L12718) | Clicking the frame without moving records no undo step. |
+| [`a_dragged_frame_is_held_on_the_canvas_when_asked`](../../src/app.rs#L12727) | With "keep inside canvas" on, dragging the frame far away stops it at the canvas edge. |
+| [`the_view_holds_still_under_a_dragged_frame`](../../src/app.rs#L12740) | When looking through the camera, the view does not follow the frame during the drag (that would move the canvas under the cursor) and catches up on release. |
+| [`at_one_loop_the_camera_plays_in_step_with_the_frames`](../../src/app.rs#L12792) | With the camera move set to one loop, playback shows each frame with its own keyed camera, round and round. |
+| [`over_three_loops_the_drawings_repeat_under_one_move`](../../src/app.rs#L12801) | With three loops, the drawings repeat three times while the camera makes one continuous move from start to end, then everything starts over. |
+| [`pausing_a_stretched_move_parks_the_playhead_where_the_camera_is`](../../src/app.rs#L12817) | Stopping during a stretched move leaves the camera where it was and moves the playhead to the matching (nearest) frame of the move. |
+| [`a_camera_with_no_move_is_never_stretched`](../../src/app.rs#L12842) | A camera with only one key has no move to stretch, so the loops setting is ignored and playback is normal. |
+| [`copy_frame_takes_an_unkeyed_nudge_of_the_camera`](../../src/app.rs#L12869) | Copy frame copies what the camera shows, including an unkeyed nudge, rather than the keyed camera that Save PNG and exports use. |
+| [`copy_frame_mid_stretched_move_takes_where_the_move_has_got`](../../src/app.rs#L12886) | During playback of a stretched move, Copy frame uses the camera where the move has got to, not the camera keyed on the drawing showing. |
+| [`an_export_of_a_stretched_move_gives_each_frame_its_camera`](../../src/app.rs#L12901) | Exporting a move stretched over three loops repeats the frames three times with a camera per output frame (and the right frame count and length); the camera's ping-pong fill replaces the dialog's own; a sprite sheet stays one cell per frame. |
+| [`a_stretched_export_keeps_the_camera_s_other_options`](../../src/app.rs#L12938) | A stretched export still applies the camera's size and "keep inside canvas", so every exported camera stays on the canvas. |
+| [`opening_a_project_starts_the_camera_on_its_canvas`](../../src/app.rs#L12951) | Opening a project resets the session camera size, so the output is the new project's canvas size. |
 
 **Test helpers** (used only by the tests above):
 
-- [`framed`](../../src/app.rs#L12620) — a 1280×720 project with a 640×360 camera frame in the middle (x 320..960, y 180..540), 1:1 view, camera edit on.
-- [`panning`](../../src/app.rs#L12726) — a 64×64, 10 fps, five-frame project with the camera keyed from x 0 on the first frame to x 40 on the last, looping on.
-- [`play`](../../src/app.rs#L12747) — advances the app's playback clock a number of frames, as `update` does, and returns the frame and camera x shown after each.
-- [`mark`](../../src/app.rs#L12826) — draws a black vertical bar at x 40..44 on the first drawing so a camera pan visibly moves something.
+- [`framed`](../../src/app.rs#L12647) — a 1280×720 project with a 640×360 camera frame in the middle (x 320..960, y 180..540), 1:1 view, camera edit on.
+- [`panning`](../../src/app.rs#L12753) — a 64×64, 10 fps, five-frame project with the camera keyed from x 0 on the first frame to x 40 on the last, looping on.
+- [`play`](../../src/app.rs#L12774) — advances the app's playback clock a number of frames, as `update` does, and returns the frame and camera x shown after each.
+- [`mark`](../../src/app.rs#L12853) — draws a black vertical bar at x 40..44 on the first drawing so a camera pan visibly moves something.
 
 ### `mod pen_tex_tests`
 
@@ -6165,20 +6175,20 @@ Run with `cargo test app::pen_tex_tests` · 4 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_resting_pen_grows_its_drawing_whole_and_a_stroke_only_patches_it`](../../src/app.rs#L13027) | A resting pen grows its drawing whole and a stroke only patches it. |
-| [`moving_on_crops_the_drawing_left_behind`](../../src/app.rs#L13044) | Only the pen's drawing is kept whole: one per drawing outgrew the texture budget in playback. |
-| [`auto_key_s_new_drawing_takes_the_spare`](../../src/app.rs#L13070) | With auto-key, the press makes a new drawing: it takes the clear whole texture readied for it, and its first stroke only patches it. |
-| [`playback_never_remakes_the_pen_s_drawing_whole`](../../src/app.rs#L13092) | Playing only shows the drawing: one the budget dropped comes back cropped, not whole. |
+| [`a_resting_pen_grows_its_drawing_whole_and_a_stroke_only_patches_it`](../../src/app.rs#L13054) | A resting pen grows its drawing whole and a stroke only patches it. |
+| [`moving_on_crops_the_drawing_left_behind`](../../src/app.rs#L13071) | Only the pen's drawing is kept whole: one per drawing outgrew the texture budget in playback. |
+| [`auto_key_s_new_drawing_takes_the_spare`](../../src/app.rs#L13097) | With auto-key, the press makes a new drawing: it takes the clear whole texture readied for it, and its first stroke only patches it. |
+| [`playback_never_remakes_the_pen_s_drawing_whole`](../../src/app.rs#L13119) | Playing only shows the drawing: one the budget dropped comes back cropped, not whole. |
 
 **Test helpers** (used only by the tests above):
 
-- [`state`](../../src/app.rs#L12943) — Three drawings, each a small blob in the middle, so each texture is cropped well inside its cell.
-- [`frame`](../../src/app.rs#L12970) — One frame as `update` runs it, uploads and all.
-- [`rest`](../../src/app.rs#L12987) — Longer than `WARM_REST` at egui's 60 Hz default step.
-- [`at`](../../src/app.rs#L12993) — At.
-- [`stroke_without_rebuild`](../../src/app.rs#L13005) — From the blob to the far corner, a frame per sample. Panics if the drawing's texture is re-made or re-sent whole on the way; returns how many frames sent it a patch.
+- [`state`](../../src/app.rs#L12970) — Three drawings, each a small blob in the middle, so each texture is cropped well inside its cell.
+- [`frame`](../../src/app.rs#L12997) — One frame as `update` runs it, uploads and all.
+- [`rest`](../../src/app.rs#L13014) — Longer than `WARM_REST` at egui's 60 Hz default step.
+- [`at`](../../src/app.rs#L13020) — At.
+- [`stroke_without_rebuild`](../../src/app.rs#L13032) — From the blob to the far corner, a frame per sample. Panics if the drawing's texture is re-made or re-sent whole on the way; returns how many frames sent it a patch.
 
-**Test-only types and constants:** [`W`](../../src/app.rs#L12938), [`H`](../../src/app.rs#L12939)
+**Test-only types and constants:** [`W`](../../src/app.rs#L12965), [`H`](../../src/app.rs#L12966)
 
 ### `mod inbetween_tests`
 
@@ -6186,20 +6196,20 @@ Run with `cargo test app::inbetween_tests` · 8 tests
 
 | Test | What it checks |
 |---|---|
-| [`an_in_between_lands_on_every_picked_layer_in_one_undo`](../../src/app.rs#L13143) | An in between lands on every picked layer in one undo. |
-| [`a_locked_layer_keeps_its_timing`](../../src/app.rs#L13160) | A locked layer keeps its timing. |
-| [`with_nothing_after_it_says_so_and_changes_nothing`](../../src/app.rs#L13170) | With nothing after it says so and changes nothing. |
-| [`insert_before_moves_only_the_selected_layers`](../../src/app.rs#L13180) | Insert before moves only the selected layers. |
-| [`add_duplicate_and_delete_follow_the_same_selection`](../../src/app.rs#L13200) | Add duplicate and delete follow the same selection. |
-| [`a_frame_command_on_locked_layers_alone_does_nothing`](../../src/app.rs#L13226) | A frame command on locked layers alone does nothing. |
-| [`delete_with_every_layer_selected_shortens_the_scene`](../../src/app.rs#L13237) | Delete with every layer selected shortens the scene. |
-| [`insert_before_with_every_layer_selected_moves_the_whole_scene`](../../src/app.rs#L13253) | Insert before with every layer selected moves the whole scene. |
+| [`an_in_between_lands_on_every_picked_layer_in_one_undo`](../../src/app.rs#L13170) | An in between lands on every picked layer in one undo. |
+| [`a_locked_layer_keeps_its_timing`](../../src/app.rs#L13187) | A locked layer keeps its timing. |
+| [`with_nothing_after_it_says_so_and_changes_nothing`](../../src/app.rs#L13197) | With nothing after it says so and changes nothing. |
+| [`insert_before_moves_only_the_selected_layers`](../../src/app.rs#L13207) | Insert before moves only the selected layers. |
+| [`add_duplicate_and_delete_follow_the_same_selection`](../../src/app.rs#L13227) | Add duplicate and delete follow the same selection. |
+| [`a_frame_command_on_locked_layers_alone_does_nothing`](../../src/app.rs#L13253) | A frame command on locked layers alone does nothing. |
+| [`delete_with_every_layer_selected_shortens_the_scene`](../../src/app.rs#L13264) | Delete with every layer selected shortens the scene. |
+| [`insert_before_with_every_layer_selected_moves_the_whole_scene`](../../src/app.rs#L13280) | Insert before with every layer selected moves the whole scene. |
 
 **Test helpers** (used only by the tests above):
 
-- [`three_layers`](../../src/app.rs#L13113) — Three layers over 8 frames, each with drawings on 0 and 4, loaded into a test state with the playhead on 0 and layer 2 active.
-- [`keys`](../../src/app.rs#L13133) — Keys.
-- [`pick`](../../src/app.rs#L13137) — Pick.
+- [`three_layers`](../../src/app.rs#L13140) — Three layers over 8 frames, each with drawings on 0 and 4, loaded into a test state with the playhead on 0 and layer 2 active.
+- [`keys`](../../src/app.rs#L13160) — Keys.
+- [`pick`](../../src/app.rs#L13164) — Pick.
 
 ### `mod range_tests`
 
@@ -6207,13 +6217,26 @@ Run with `cargo test app::range_tests` · 5 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_range_edit_is_one_undo_step_and_leaves_the_result_selected`](../../src/app.rs#L13293) | A range edit is one undo step and leaves the result selected. |
-| [`stretch_reads_the_frame_box_arithmetic`](../../src/app.rs#L13306) | Stretch reads the frame box arithmetic. |
-| [`a_stretch_that_does_not_read_says_so_and_changes_nothing`](../../src/app.rs#L13316) | A stretch that does not read says so and changes nothing. |
-| [`the_range_shortcuts_reverse_and_swing`](../../src/app.rs#L13326) | The range shortcuts reverse and swing. |
-| [`a_locked_layer_is_left_alone`](../../src/app.rs#L13339) | A locked layer is left alone. |
+| [`a_range_edit_is_one_undo_step_and_leaves_the_result_selected`](../../src/app.rs#L13320) | A range edit is one undo step and leaves the result selected. |
+| [`stretch_reads_the_frame_box_arithmetic`](../../src/app.rs#L13333) | Stretch reads the frame box arithmetic. |
+| [`a_stretch_that_does_not_read_says_so_and_changes_nothing`](../../src/app.rs#L13343) | A stretch that does not read says so and changes nothing. |
+| [`the_range_shortcuts_reverse_and_swing`](../../src/app.rs#L13353) | The range shortcuts reverse and swing. |
+| [`a_locked_layer_is_left_alone`](../../src/app.rs#L13366) | A locked layer is left alone. |
 
 **Test helpers** (used only by the tests above):
 
-- [`picked`](../../src/app.rs#L13274) — One layer over 8 frames with drawings on 0, 2 and 4, the first two selected in the timeline.
-- [`keys`](../../src/app.rs#L13288) — Keys.
+- [`picked`](../../src/app.rs#L13301) — One layer over 8 frames with drawings on 0, 2 and 4, the first two selected in the timeline.
+- [`keys`](../../src/app.rs#L13315) — Keys.
+
+### `mod blend_tests`
+
+Run with `cargo test app::blend_tests` · 2 tests
+
+| Test | What it checks |
+|---|---|
+| [`a_blend_mode_is_one_undo_step_on_every_picked_layer`](../../src/app.rs#L13391) | A blend mode is one undo step on every picked layer. |
+| [`a_blend_mode_is_saved_with_the_project_and_autosaved_on_change`](../../src/app.rs#L13414) | A blend mode is saved with the project and autosaved on change. |
+
+**Test helpers** (used only by the tests above):
+
+- [`layered`](../../src/app.rs#L13381) — Three layers, the top two in a group, the bottom one active.

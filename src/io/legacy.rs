@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::doc::camera::{Camera, CameraKey};
 use crate::doc::canvas::Canvas;
-use crate::doc::layer::{Layer, TrackSample};
+use crate::doc::layer::{Layer, LayerKind, TrackSample};
 use crate::doc::project::Project;
 use crate::doc::transform::{Ease, Transform, TransformKey};
 
@@ -167,6 +167,7 @@ impl From<LayerV2> for Layer {
             kind: Default::default(),
             in_group: false,
             collapsed: false,
+            blend: Default::default(),
         }
     }
 }
@@ -215,6 +216,7 @@ impl From<LayerV3> for Layer {
             kind: Default::default(),
             in_group: false,
             collapsed: false,
+            blend: Default::default(),
         }
     }
 }
@@ -243,6 +245,7 @@ impl From<LayerV4> for Layer {
             kind: Default::default(),
             in_group: false,
             collapsed: false,
+            blend: Default::default(),
         }
     }
 }
@@ -352,6 +355,7 @@ impl From<LayerV6> for Layer {
             kind: Default::default(),
             in_group: false,
             collapsed: false,
+            blend: Default::default(),
         }
     }
 }
@@ -460,6 +464,185 @@ impl From<ProjectV7> for Project {
             camera: p.camera,
             camera_keys: p.camera_keys,
             camera_opts: Default::default(),
+        }
+    }
+}
+
+/// `Layer` as serialized by format v8 — before `blend` was appended.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LayerV8 {
+    pub name: String,
+    pub opacity: f32,
+    pub visible: bool,
+    pub locked: bool,
+    pub reference: bool,
+    pub exposures: Vec<Option<usize>>,
+    #[serde(default)]
+    pub transform: Transform,
+    #[serde(default)]
+    pub transform_keys: Vec<TransformKey>,
+    #[serde(default)]
+    pub track_points: Vec<TrackSample>,
+    #[serde(default)]
+    pub cell_w: u32,
+    #[serde(default)]
+    pub cell_h: u32,
+    #[serde(default)]
+    pub clip: bool,
+    #[serde(default)]
+    pub alpha_lock: bool,
+    #[serde(default)]
+    pub kind: LayerKind,
+    #[serde(default)]
+    pub in_group: bool,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// `Project` as serialized by format v8.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ProjectV8 {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    pub cells: Vec<Canvas>,
+    pub layers: Vec<LayerV8>,
+    pub frame_count: usize,
+    pub current_frame: usize,
+    pub current_layer: usize,
+    pub loop_start: usize,
+    pub loop_end: usize,
+    #[serde(default)]
+    pub camera: Camera,
+    #[serde(default)]
+    pub camera_keys: Vec<CameraKey>,
+}
+
+impl From<LayerV8> for Layer {
+    fn from(l: LayerV8) -> Self {
+        Layer {
+            kind: l.kind,
+            in_group: l.in_group,
+            collapsed: l.collapsed,
+            ..LayerV7 {
+                name: l.name,
+                opacity: l.opacity,
+                visible: l.visible,
+                locked: l.locked,
+                reference: l.reference,
+                exposures: l.exposures,
+                transform: l.transform,
+                transform_keys: l.transform_keys,
+                track_points: l.track_points,
+                cell_w: l.cell_w,
+                cell_h: l.cell_h,
+                clip: l.clip,
+                alpha_lock: l.alpha_lock,
+            }
+            .into()
+        }
+    }
+}
+
+impl From<ProjectV8> for Project {
+    fn from(p: ProjectV8) -> Self {
+        Project {
+            width: p.width,
+            height: p.height,
+            fps: p.fps,
+            cells: p.cells.into_iter().map(Arc::new).collect(),
+            layers: p.layers.into_iter().map(Into::into).collect(),
+            frame_count: p.frame_count,
+            current_frame: p.current_frame,
+            current_layer: p.current_layer,
+            loop_start: p.loop_start,
+            loop_end: p.loop_end,
+            camera: p.camera,
+            camera_keys: p.camera_keys,
+            camera_opts: Default::default(),
+        }
+    }
+}
+
+/// [`LayerV8`] borrowed from a live `Layer`, for writing a v8 file: the same
+/// bytes, nothing copied.
+#[derive(serde::Serialize)]
+pub struct LayerV8Ref<'a> {
+    pub name: &'a str,
+    pub opacity: f32,
+    pub visible: bool,
+    pub locked: bool,
+    pub reference: bool,
+    pub exposures: &'a [Option<usize>],
+    pub transform: &'a Transform,
+    pub transform_keys: &'a [TransformKey],
+    pub track_points: &'a [TrackSample],
+    pub cell_w: u32,
+    pub cell_h: u32,
+    pub clip: bool,
+    pub alpha_lock: bool,
+    pub kind: LayerKind,
+    pub in_group: bool,
+    pub collapsed: bool,
+}
+
+/// [`ProjectV8`] borrowed from a live `Project`: what a project whose layers
+/// are all Normal is written as, so builds from before blend modes still
+/// open it. Its bytes are exactly the ones those builds wrote.
+#[derive(serde::Serialize)]
+pub struct ProjectV8Ref<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    pub cells: &'a [Arc<Canvas>],
+    pub layers: Vec<LayerV8Ref<'a>>,
+    pub frame_count: usize,
+    pub current_frame: usize,
+    pub current_layer: usize,
+    pub loop_start: usize,
+    pub loop_end: usize,
+    pub camera: &'a Camera,
+    pub camera_keys: &'a [CameraKey],
+}
+
+impl<'a> ProjectV8Ref<'a> {
+    /// `p` as v8 writes it. Every blend mode is dropped, so call it only for
+    /// a project whose layers are all Normal.
+    pub fn of(p: &'a Project) -> Self {
+        ProjectV8Ref {
+            width: p.width,
+            height: p.height,
+            fps: p.fps,
+            cells: &p.cells,
+            layers: p
+                .layers
+                .iter()
+                .map(|l| LayerV8Ref {
+                    name: &l.name,
+                    opacity: l.opacity,
+                    visible: l.visible,
+                    locked: l.locked,
+                    reference: l.reference,
+                    exposures: &l.exposures,
+                    transform: &l.transform,
+                    transform_keys: &l.transform_keys,
+                    track_points: &l.track_points,
+                    cell_w: l.cell_w,
+                    cell_h: l.cell_h,
+                    clip: l.clip,
+                    alpha_lock: l.alpha_lock,
+                    kind: l.kind,
+                    in_group: l.in_group,
+                    collapsed: l.collapsed,
+                })
+                .collect(),
+            frame_count: p.frame_count,
+            current_frame: p.current_frame,
+            current_layer: p.current_layer,
+            loop_start: p.loop_start,
+            loop_end: p.loop_end,
+            camera: &p.camera,
+            camera_keys: &p.camera_keys,
         }
     }
 }

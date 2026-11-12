@@ -1,6 +1,6 @@
 # `src/doc/clip.rs` — clipping masks and merged group images
 
-> **Source:** [src/doc/clip.rs](../../../src/doc/clip.rs) · **Module:** `crate::doc::clip` · **Size:** 646 lines · Line links as of commit `f210c6f`
+> **Source:** [src/doc/clip.rs](../../../src/doc/clip.rs) · **Module:** `crate::doc::clip` · **Size:** 649 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 
@@ -255,7 +255,7 @@ Draws group `g`'s layers merged into `rect` of `out` (clearing it first) — at 
 drew.
 
 ### `group_sig`
-[src/doc/clip.rs:313](../../../src/doc/clip.rs#L313)
+[src/doc/clip.rs:316](../../../src/doc/clip.rs#L316)
 
 ```rust
 pub fn group_sig(p: &Project, g: usize, frame: usize, opacity: bool, xf: &dyn Fn(usize) -> Transform) -> u64
@@ -266,7 +266,7 @@ opacity, clip base). Equal hashes mean the cached image is still right (pixel ed
 separately per cell).
 
 ### `group_cells`
-[src/doc/clip.rs:337](../../../src/doc/clip.rs#L337)
+[src/doc/clip.rs:340](../../../src/doc/clip.rs#L340)
 
 ```rust
 pub fn group_cells(p: &Project, g: usize, frame: usize, xf: &dyn Fn(usize) -> Transform) -> Vec<(CellId, bool)>
@@ -278,7 +278,7 @@ the group canvas — so an edit to that cell only redraws the same rectangle.
 ## `impl Placement`
 
 ### `Placement::of_group`
-[src/doc/clip.rs:359](../../../src/doc/clip.rs#L359)
+[src/doc/clip.rs:362](../../../src/doc/clip.rs#L362)
 
 ```rust
 pub fn of_group(p: &Project, li: usize, frame: usize) -> Self
@@ -289,7 +289,7 @@ Where layer `li` sits against its group's mask (which is in group space, i.e. id
 ## Free functions
 
 ### `bake_clipping`
-[src/doc/clip.rs:376](../../../src/doc/clip.rs#L376)
+[src/doc/clip.rs:379](../../../src/doc/clip.rs#L379)
 
 ```rust
 pub fn bake_clipping(p: &mut Project) -> HashMap<CellId, CellId>
@@ -307,18 +307,18 @@ Run with `cargo test doc::clip::tests` · 9 tests
 
 | Test | What it checks |
 |---|---|
-| [`clipped_layers_share_the_first_unclipped_layer_below`](../../../src/doc/clip.rs#L467) | Clipped layers share the first unclipped layer below. |
-| [`the_mask_is_the_bases_alpha`](../../../src/doc/clip.rs#L484) | The mask is the bases alpha. |
-| [`packed_drawings_clip_the_same`](../../../src/doc/clip.rs#L497) | Clipping reads packed drawings in place and gets the same pixels. |
-| [`a_moved_base_moves_the_mask`](../../../src/doc/clip.rs#L512) | A moved base moves the mask. |
-| [`only_the_rect_is_touched`](../../../src/doc/clip.rs#L523) | Only the rect is touched. |
-| [`a_packed_rect_matches_the_same_rect_in_place`](../../../src/doc/clip.rs#L539) | A packed rect matches the same rect in place. |
-| [`a_hidden_base_hides_what_is_clipped_to_it`](../../../src/doc/clip.rs#L558) | A hidden base hides what is clipped to it. |
-| [`baking_splits_a_held_drawing_where_its_base_changes`](../../../src/doc/clip.rs#L573) | Baking splits a held drawing where its base changes. |
-| [`clip_timing`](../../../src/doc/clip.rs#L608) | Cost at a 1080p frame, for the record: `cargo test --release clip_timing -- --ignored --nocapture`. |
+| [`clipped_layers_share_the_first_unclipped_layer_below`](../../../src/doc/clip.rs#L470) | Clipped layers share the first unclipped layer below. |
+| [`the_mask_is_the_bases_alpha`](../../../src/doc/clip.rs#L487) | The mask is the bases alpha. |
+| [`packed_drawings_clip_the_same`](../../../src/doc/clip.rs#L500) | Clipping reads packed drawings in place and gets the same pixels. |
+| [`a_moved_base_moves_the_mask`](../../../src/doc/clip.rs#L515) | A moved base moves the mask. |
+| [`only_the_rect_is_touched`](../../../src/doc/clip.rs#L526) | Only the rect is touched. |
+| [`a_packed_rect_matches_the_same_rect_in_place`](../../../src/doc/clip.rs#L542) | A packed rect matches the same rect in place. |
+| [`a_hidden_base_hides_what_is_clipped_to_it`](../../../src/doc/clip.rs#L561) | A hidden base hides what is clipped to it. |
+| [`baking_splits_a_held_drawing_where_its_base_changes`](../../../src/doc/clip.rs#L576) | Baking splits a held drawing where its base changes. |
+| [`clip_timing`](../../../src/doc/clip.rs#L611) | Cost at a 1080p frame, for the record: `cargo test --release clip_timing -- --ignored --nocapture`. |
 
 **Test helpers** (used only by the tests above):
 
-- [`band`](../../../src/doc/clip.rs#L442) — An 8×8 cell painted `rgba` inside `x0..x1`, transparent elsewhere.
-- [`alpha`](../../../src/doc/clip.rs#L453) — Alpha.
-- [`still`](../../../src/doc/clip.rs#L457) — Still.
+- [`band`](../../../src/doc/clip.rs#L445) — An 8×8 cell painted `rgba` inside `x0..x1`, transparent elsewhere.
+- [`alpha`](../../../src/doc/clip.rs#L456) — Alpha.
+- [`still`](../../../src/doc/clip.rs#L460) — Still.

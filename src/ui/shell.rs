@@ -12,6 +12,7 @@ use crate::app::autosave::{Pending, Unsaved};
 use crate::app::brush_sizes::{same_size, size_label};
 use crate::app::pen_slots::{pen_action, MAX_PENS, PEN_ICONS};
 use crate::color::{fmt_rgb, parse_color};
+use crate::doc::blend::BlendMode;
 use crate::doc::camera::{Camera, Ease, Fill};
 use crate::doc::canvas::DirtyRect;
 use crate::doc::layer::CellId;
@@ -25,6 +26,7 @@ use crate::tools::fill;
 use crate::tools::select_mask::{SelOp, SelShape};
 use crate::tools::selection::Grab as SelGrab;
 use crate::tools::{ActiveTool, BrushMode, ShapeKind, Smoothing, SmoothingOptions, StrokeCap};
+use crate::ui::canvas_gpu::StackItem;
 use crate::ui::theme::Scheme;
 use crate::ui::{color_wheel, expr, theme};
 
@@ -935,9 +937,10 @@ fn panel_content(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, i
     }
 }
 
-/// The Layers panel's starting height, in points: its two toolbars and
-/// opacity slider, three rows of list and the folded sections under it.
-const LAYERS_DEFAULT_H: f32 = 496.0;
+/// The Layers panel's starting height, in points: its two toolbars, the
+/// blend mode and opacity rows, three rows of list and the folded sections
+/// under it.
+const LAYERS_DEFAULT_H: f32 = 525.0;
 
 /// The X-sheet panel's starting height, in points: its toolbar and about
 /// ten frames of sheet, what the sheet's old 260-point cap came to.
@@ -3868,6 +3871,8 @@ fn layer_selection_actions(state: &mut AppState, ui: &mut egui::Ui) {
         });
     });
 
+    layer_blend_menu(state, ui);
+
     // Opacity: the active layer's, set on every picked layer at once. One
     // undo step per drag; a double-click puts it back to full.
     let Some(mut v) = state.project.layers.get(cur).map(|l| l.opacity) else { return };
@@ -3890,6 +3895,77 @@ fn layer_selection_actions(state: &mut AppState, ui: &mut egui::Ui) {
     if !resp.dragged() && !resp.has_focus() && state.opacity_row_uid.is_none() {
         state.commit_layer_opacity();
     }
+}
+
+/// The icon a blend mode goes by in the Layers panel: what it does to the
+/// picture, at a glance.
+fn blend_icon(mode: BlendMode) -> &'static str {
+    match mode {
+        BlendMode::Normal => ic::STACK_SIMPLE,
+        BlendMode::Multiply => ic::MOON,
+        BlendMode::Screen => ic::SUN,
+        BlendMode::Add => ic::SPARKLE,
+        BlendMode::Overlay => ic::CIRCLE_HALF,
+    }
+}
+
+/// The Layers panel's blend mode menu: the active layer's mode, set on every
+/// layer picked with it. Groups have none of their own.
+fn layer_blend_menu(state: &mut AppState, ui: &mut egui::Ui) {
+    let sel = state.selected_layer_indices();
+    let cur = state.project.current_layer;
+    let drawing: Vec<usize> = sel.iter().copied().filter(|&i| !state.project.is_group(i)).collect();
+    let lead = drawing.iter().copied().find(|&i| i == cur).or_else(|| drawing.first().copied());
+    let mode = lead.map_or(BlendMode::Normal, |i| state.project.layers[i].blend);
+    let mixed = drawing.iter().any(|&i| state.project.layers[i].blend != mode);
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(lead.is_some(), |ui| {
+            let shown = if mixed { "Mixed".to_string() } else { theme::icon_text(blend_icon(mode), mode.label()) };
+            egui::ComboBox::from_id_salt("layer_blend")
+                .selected_text(shown)
+                .width(LAYER_BLEND_W)
+                .show_ui(ui, |ui| {
+                    for m in BlendMode::ALL {
+                        let on = !mixed && m == mode;
+                        if ui
+                            .selectable_label(on, theme::icon_text(blend_icon(m), m.label()))
+                            .on_hover_text(m.hint())
+                            .clicked()
+                        {
+                            chosen = Some(m);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(if drawing.len() > 1 {
+                    "Blend mode: how these layers mix with what is under them. Every selected layer takes the one you pick."
+                } else {
+                    "Blend mode: how this layer mixes with what is under it."
+                })
+                .on_disabled_hover_text("A group has no blend mode of its own: pick a layer inside it.");
+        });
+        ui.label("blend");
+    });
+    if let Some(m) = chosen {
+        state.set_selected_blend(m);
+    }
+}
+
+/// Width of the Layers panel's blend mode menu.
+const LAYER_BLEND_W: f32 = 120.0;
+
+/// Size of the marks after a layer's name: alpha lock, blend mode.
+const ROW_MARK_SIZE: f32 = 14.0;
+
+/// The least a layer's name keeps on its row before a mark gives way:
+/// room for its first letters and the "…".
+const ROW_NAME_MIN_W: f32 = 28.0;
+
+/// Width a row mark takes: its glyph, measured.
+fn row_mark_w(ui: &egui::Ui, icon: &str) -> f32 {
+    ui.fonts(|f| f.layout_no_wrap(icon.to_owned(), egui::FontId::proportional(ROW_MARK_SIZE), Color32::WHITE).size().x)
+        .ceil()
 }
 
 /// Side padding of the % on a layer row: as little as still reads as a
@@ -4224,8 +4300,31 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                         let room = ui.available_width();
                                         let gap = ui.spacing().item_spacing.x;
                                         let badge_w = if badge { opacity_badge_w(ui, layer.opacity) + gap } else { 0.0 };
-                                        let lock_w = if layer.alpha_lock { 14.0 + gap } else { 0.0 };
-                                        let name_w = (room - badge_w - lock_w - ROW_DOTS_W - gap).max(0.0);
+                                        // The marks take only the room the name
+                                        // can spare past its least: one that
+                                        // won't fit goes into the name's hover
+                                        // text instead, rather than pushing the
+                                        // row past the panel's edge.
+                                        let mut spare = room - badge_w - ROW_DOTS_W - gap - ROW_NAME_MIN_W;
+                                        let mut fits = |on: bool, icon: &str| {
+                                            let w = row_mark_w(ui, icon) + gap;
+                                            let fit = on && spare >= w;
+                                            if fit {
+                                                spare -= w;
+                                            }
+                                            (fit, if fit { w } else { 0.0 })
+                                        };
+                                        let (show_lock, lock_w) = fits(layer.alpha_lock, ic::CHECKERBOARD);
+                                        let blends = layer.blend != BlendMode::Normal && !layer.is_group();
+                                        let (show_blend, blend_w) = fits(blends, blend_icon(layer.blend));
+                                        let name_w = (room - badge_w - lock_w - blend_w - ROW_DOTS_W - gap).max(0.0);
+                                        let mut tip = format!("{}\nDouble-click to rename, drag to reorder", layer.name);
+                                        if layer.alpha_lock && !show_lock {
+                                            tip.push_str("\nAlpha locked");
+                                        }
+                                        if blends && !show_blend {
+                                            tip.push_str(&format!("\nBlend mode: {}", layer.blend.label()));
+                                        }
                                         let resp = ui
                                             .scope(|ui| {
                                                 ui.set_max_width(name_w);
@@ -4236,10 +4335,7 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                             })
                                             .inner
                                             .interact(Sense::click_and_drag())
-                                            .on_hover_text(format!(
-                                                "{}\nDouble-click to rename, drag to reorder",
-                                                layer.name
-                                            ));
+                                            .on_hover_text(tip);
                                         resp.dnd_set_drag_payload(LayerDrag(i));
                                         if resp.dragged() {
                                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -4258,15 +4354,27 @@ fn layers_content(state: &mut AppState, ui: &mut egui::Ui) {
                                                 select = Some(i);
                                             }
                                         }
-                                        if layer.alpha_lock {
+                                        if show_lock {
                                             ui.label(
                                                 egui::RichText::new(ic::CHECKERBOARD)
-                                                    .size(14.0)
+                                                    .size(ROW_MARK_SIZE)
                                                     .color(theme::accent()),
                                             )
                                             .on_hover_text(format!(
                                                 "Alpha locked ({lock_key}): painting only \
                                                  changes pixels that already have paint"
+                                            ));
+                                        }
+                                        if show_blend {
+                                            ui.label(
+                                                egui::RichText::new(blend_icon(layer.blend))
+                                                    .size(ROW_MARK_SIZE)
+                                                    .color(theme::accent()),
+                                            )
+                                            .on_hover_text(format!(
+                                                "Blend mode: {}. {}",
+                                                layer.blend.label(),
+                                                layer.blend.hint()
                                             ));
                                         }
                                         if badge {
@@ -6541,6 +6649,8 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) -> egui::layers
     // Ghosts come from `ghost_textures` — silhouettes already baked in the
     // tint colour. The vertex colour only fades them: multiplying a tint over
     // the plain cell texture leaves black line art black.
+    // Every quad of artwork below goes through this, bottom first.
+    let art = Art::new(&painter, state);
     let onion_layers = state.onion_layers();
     let draw_ghost = |li: usize, id: CellId, frame: usize, a: u8| {
         let Some((_, tex)) = state.ghost_textures.get(&id) else {
@@ -6551,7 +6661,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) -> egui::layers
         };
         let t = state.display_transform(li, frame);
         let lc = layer_screen_corners(&xf, t, cell.width as f32, cell.height as f32, pw, ph);
-        canvas_quad(&painter, state, tex.id(), lc, theme::white_alpha(a));
+        art.quad(tex.id(), lc, theme::white_alpha(a), BlendMode::Normal);
     };
     let draw_onion = |li: usize| {
         // Pins at the bottom: they're references, usually far off. Then the
@@ -6584,13 +6694,7 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) -> egui::layers
             if let Some((t, lc)) = tex.and_then(|t| Some((t, tex_corners(li, id, t.rect)?))) {
                 let dim = (layer.opacity * 0.45).clamp(0.0, 1.0);
                 let a = (dim * 255.0) as u8;
-                canvas_quad(
-                    &painter,
-                    state,
-                    t.tex.id(),
-                    lc,
-                    theme::white_alpha(a),
-                );
+                art.quad(t.tex.id(), lc, theme::white_alpha(a), BlendMode::Normal);
             }
         }
     }
@@ -6618,7 +6722,10 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) -> egui::layers
                 let (dx, dy) = p.xf.cell_to_doc(x, y, p.cw as f32, p.ch as f32, p.pw, p.ph);
                 xf.doc_to_screen(dx, dy)
             });
-            canvas_quad(&painter, state, tex, q, theme::white_alpha(a));
+            // Lifted pixels are the layer's, and blend as it does — unless
+            // its group's merged image holds them.
+            let blend = if state.in_group_image(li) { BlendMode::Normal } else { state.project.layers[li].blend };
+            art.quad(tex, q, theme::white_alpha(a), blend);
         }
     };
 
@@ -6647,7 +6754,8 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) -> egui::layers
                         xf.doc_to_screen(x0, y1),
                     ];
                     let op = layer.opacity * state.layer_view_alpha(li);
-                    canvas_quad(&painter, state, tex.id(), q, theme::white_alpha((op.clamp(0.0, 1.0) * 255.0) as u8));
+                    // Its layers' blend modes are in the image already.
+                    art.quad(tex.id(), q, theme::white_alpha((op.clamp(0.0, 1.0) * 255.0) as u8), BlendMode::Normal);
                     draw_floats(&|fl| state.project.group_of(fl) == Some(li), (op.clamp(0.0, 1.0) * 255.0) as u8);
                 }
             }
@@ -6673,19 +6781,14 @@ fn paint_canvas(state: &AppState, ui: &mut egui::Ui, rect: Rect) -> egui::layers
         let a = (op.clamp(0.0, 1.0) * 255.0) as u8;
         if let Some((id, tex, rect)) = state.layer_texture(li) {
             if let Some(lc) = tex_corners(li, id, rect) {
-                canvas_quad(
-                    &painter,
-                    state,
-                    tex.id(),
-                    lc,
-                    theme::white_alpha(a),
-                );
+                art.quad(tex.id(), lc, theme::white_alpha(a), layer.blend);
             }
         }
         draw_floats(&|fl| fl == li, a);
     }
     // A float its layer didn't draw — the active layer hidden — goes on top.
     draw_floats(&|_| true, 255);
+    art.finish();
 
     // Dim what is not selected. Over the artwork, under every overlay — but
     // not while pixels are lifted: they float at their layers' depths, under
@@ -7807,6 +7910,50 @@ fn canvas_quad(painter: &egui::Painter, state: &AppState, tex: egui::TextureId, 
             painter.add(shape);
         }
         None => image_quad(painter, tex, corners, tint),
+    }
+}
+
+/// Where the canvas's artwork goes: each quad straight onto the window, as
+/// ever — or, while a layer on show has a blend mode, into one art stack laid
+/// on the window once the art is done, so blends mix with the art alone and
+/// never with the paper (see `canvas_gpu::Stack`).
+struct Art<'a> {
+    painter: &'a egui::Painter,
+    state: &'a AppState,
+    stack: Option<std::cell::RefCell<Vec<StackItem>>>,
+}
+
+impl<'a> Art<'a> {
+    fn new(painter: &'a egui::Painter, state: &'a AppState) -> Self {
+        let stack = state.art_blends().then(|| std::cell::RefCell::new(Vec::new()));
+        Self { painter, state, stack }
+    }
+
+    /// One drawing's texture, in `blend`.
+    fn quad(&self, tex: egui::TextureId, corners: [egui::Pos2; 4], tint: Color32, blend: BlendMode) {
+        match &self.stack {
+            Some(items) => items.borrow_mut().push(StackItem { tex, corners, tint, blend }),
+            None => canvas_quad(self.painter, self.state, tex, corners, tint),
+        }
+    }
+
+    /// Lay the stack down, if there is one: as plain quads, every blend shown
+    /// as Normal, when the GPU has no stack.
+    fn finish(self) {
+        let Some(items) = self.stack.map(std::cell::RefCell::into_inner) else {
+            return;
+        };
+        let stacked = self.state.canvas_gpu.as_ref().and_then(|g| g.stack(self.painter.clip_rect(), &items));
+        match stacked {
+            Some(shape) => {
+                self.painter.add(shape);
+            }
+            None => {
+                for it in items {
+                    canvas_quad(self.painter, self.state, it.tex, it.corners, it.tint);
+                }
+            }
+        }
     }
 }
 
@@ -11419,14 +11566,15 @@ mod panel_padding_tests {
         let id = layers(&state);
         let w = rect(&ctx, id).width();
         // egui's drag threshold leaves a drag a point or two short of its aim.
-        let (held, after) = drag_to(&ctx, &mut state, id, pos2(SCREEN.right() - w - 25.0, 300.0));
+        // High enough that the bottom edge is nowhere near the screen's.
+        let (held, after) = drag_to(&ctx, &mut state, id, pos2(SCREEN.right() - w - 25.0, 250.0));
         assert!((held.right() - (SCREEN.right() - 25.0)).abs() < 4.0, "not while held: {held:?}");
         assert_eq!((after.right(), after.top()), (SCREEN.right() - 8.0, held.top()));
 
-        let (_, out) = drag_to(&ctx, &mut state, id, pos2(SCREEN.right() - w + 100.0, 300.0));
+        let (_, out) = drag_to(&ctx, &mut state, id, pos2(SCREEN.right() - w + 100.0, 250.0));
         assert_eq!(out.right(), SCREEN.right() - 8.0, "dragged past the edge");
 
-        let (held, free) = drag_to(&ctx, &mut state, id, pos2(700.0, 300.0));
+        let (held, free) = drag_to(&ctx, &mut state, id, pos2(700.0, 250.0));
         assert!((free.left() - 700.0).abs() < 4.0, "{free:?}");
         assert_eq!(free, held, "out in the open it stays put");
     }
@@ -15374,6 +15522,83 @@ mod canvas_gpu_tests {
         assert!(order.windows(2).all(|w| w[0] < w[1]), "stacked as the layers: {order:?}");
         let Token::Quad { tint, .. } = &toks[order[1]] else { unreachable!() };
         assert_eq!(tint.a(), 127, "at layer 0's half opacity");
+    }
+
+    /// The artwork's quads as the recording pipeline got them, in order.
+    fn art_quads(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::TextureId, [Pos2; 4], Color32)> {
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Callback(cb) => cb.callback.downcast_ref::<Recorded>().map(|r| (r.tex, r.corners, r.tint)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn stacks(shapes: &[egui::epaint::ClippedShape]) -> Vec<crate::ui::canvas_gpu::RecordedStack> {
+        shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Callback(cb) => cb.callback.downcast_ref::<crate::ui::canvas_gpu::RecordedStack>().cloned(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// With a layer on show in a blend mode, all the artwork goes through
+    /// one art stack — the reference, the ghosts, the layers, the group's
+    /// image and the lifted pixels, exactly as and where the plain quads
+    /// went — and only the blended layer's own pixels carry its mode.
+    #[test]
+    fn a_blend_mode_sends_the_art_through_one_stack_in_the_same_order() {
+        let (mut st, [_, _, plain, _]) = scene();
+        st.canvas_gpu = Some(CanvasGpu::recording());
+        let quads = art_quads(&paint(&mut st));
+        assert!(stacks(&paint(&mut st)).is_empty(), "no blend mode, no stack");
+
+        let (mut st, [_, _, plain2, _]) = scene();
+        assert_eq!(plain, plain2);
+        st.canvas_gpu = Some(CanvasGpu::recording());
+        st.project.layers[plain].blend = BlendMode::Multiply;
+        let shapes = paint(&mut st);
+        assert!(art_quads(&shapes).is_empty(), "no artwork left outside the stack");
+        let stacked = stacks(&shapes);
+        assert_eq!(stacked.len(), 1);
+        let items = &stacked[0].items;
+        let got: Vec<_> = items.iter().map(|i| (i.tex, i.corners, i.tint)).collect();
+        assert_eq!(got, quads, "the same quads in the same order");
+
+        let own = st.layer_texture(plain).expect("plain layer drawn").1.id();
+        let lifted = st.selection_tex.as_ref().expect("float texture").id();
+        for it in items {
+            let want = if it.tex == own || it.tex == lifted { BlendMode::Multiply } else { BlendMode::Normal };
+            assert_eq!(it.blend, want, "{:?}", it.tex);
+        }
+        assert!(items.iter().any(|i| i.tex == own) && items.iter().any(|i| i.tex == lifted));
+    }
+
+    /// Without a GPU pipeline there is no stack: the artwork draws as it
+    /// always did, every blend mode shown as Normal.
+    #[test]
+    fn without_a_gpu_a_blend_mode_draws_as_normal() {
+        let (mut plain_st, [_, _, plain, _]) = scene();
+        let (mut st, _) = scene();
+        st.project.layers[plain].blend = BlendMode::Screen;
+        assert_eq!(tokens(&paint(&mut plain_st)), tokens(&paint(&mut st)));
+    }
+
+    /// A blend mode inside a group is blended into the group's merged image;
+    /// the canvas draws that image Normal and needs no stack.
+    #[test]
+    fn a_blend_inside_a_group_needs_no_stack() {
+        let (mut st, [_, g, _, _]) = scene();
+        st.canvas_gpu = Some(CanvasGpu::recording());
+        let kid = st.project.children(g).next().expect("a layer in the group");
+        st.project.layers[kid].blend = BlendMode::Overlay;
+        st.project.layers[g].opacity = 1.0;
+        assert!(st.group_drawn_whole(g), "merged at full opacity, for the blend");
+        assert!(!st.art_blends());
+        assert!(stacks(&paint(&mut st)).is_empty());
     }
 
     /// Drawing through the canvas pipeline paints exactly what the mesh path

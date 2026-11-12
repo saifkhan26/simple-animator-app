@@ -5,12 +5,14 @@
 //! hasn't made yet.
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, RenderState, ScreenDescriptor};
 use eframe::wgpu::{self, util::DeviceExt};
 use egui::epaint::Vertex;
 use egui::{pos2, Color32, PaintCallbackInfo, Pos2, Rect, Shape, TextureId};
+
+use crate::doc::blend::BlendMode;
 
 /// Dithering, for egui's pipeline and this one alike: `main` hands this to
 /// eframe, so the two always agree.
@@ -29,6 +31,8 @@ struct Locals {
 pub(crate) struct Shared {
     pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
+    /// Kept for the art stack's pipelines, whose group 0 is this one.
+    locals_layout: wgpu::BindGroupLayout,
     locals: wgpu::Buffer,
     locals_group: wgpu::BindGroup,
     dithering: bool,
@@ -158,6 +162,7 @@ impl Shared {
         Self {
             pipeline,
             texture_layout,
+            locals_layout,
             locals,
             locals_group,
             dithering,
@@ -259,11 +264,387 @@ impl CallbackTrait for Quad {
     }
 }
 
+/// The art stack's own texture format: premultiplied gamma, as the CPU
+/// compositor works, whatever the window's format.
+const ART: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// One draw in the art stack: a drawing's texture over `corners` at `tint`,
+/// in `blend`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StackItem {
+    pub tex: TextureId,
+    pub corners: [Pos2; 4],
+    pub tint: Color32,
+    pub blend: BlendMode,
+}
+
+/// The art stack: the canvas's artwork drawn into a texture of its own, layer
+/// by layer, each in its blend mode, then laid on the window in one go. Only
+/// used while a layer on show has a blend mode — so a blend mixes with the
+/// art alone, never with the paper — and the plain quads draw everything
+/// else exactly as before.
+pub(crate) struct Stack {
+    shared: Arc<Shared>,
+    /// A Normal layer, premultiplied over, into the stack.
+    normal: wgpu::RenderPipeline,
+    /// Every other mode: written, not blended, from the layer and a copy of
+    /// what is under it.
+    blends: Vec<(BlendMode, wgpu::RenderPipeline)>,
+    /// The finished stack onto the window, as a quad is laid on it.
+    blit: wgpu::RenderPipeline,
+    /// The textures, made at the window's size on first use.
+    target: Mutex<Option<Target>>,
+}
+
+/// The stack's two screen-sized textures: the art so far, and a copy of the
+/// part of it under the layer being blended.
+struct Target {
+    size: [u32; 2],
+    art: wgpu::Texture,
+    art_view: wgpu::TextureView,
+    backdrop: wgpu::Texture,
+    /// `art` bound where a drawing would be, for the blit.
+    art_group: wgpu::BindGroup,
+    /// `backdrop` bound for the blend shader.
+    backdrop_group: wgpu::BindGroup,
+}
+
+impl Stack {
+    /// The pipelines, for a window of `format`. The shader is
+    /// canvas_gpu.wgsl with canvas_blend.wgsl after it, one module per blend
+    /// mode, each told its mode in a constant.
+    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat, shared: &Arc<Shared>) -> Self {
+        let module = |mode: u32| {
+            let source = format!(
+                "const MODE: u32 = {mode}u;\n{}\n{}",
+                include_str!("canvas_gpu.wgsl"),
+                include_str!("canvas_blend.wgsl")
+            );
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("canvas_stack"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+        let layout = |groups: &[&wgpu::BindGroupLayout]| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("canvas_stack"),
+                bind_group_layouts: groups,
+                push_constant_ranges: &[],
+            })
+        };
+        let over = Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::OneMinusDstAlpha,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        });
+        let pipeline = |module: &wgpu::ShaderModule,
+                        layout: &wgpu::PipelineLayout,
+                        entry: &str,
+                        format: wgpu::TextureFormat,
+                        blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    entry_point: "vs_main",
+                    module,
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: 5 * 4,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint32],
+                    }],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    unclipped_depth: false,
+                    conservative: false,
+                    cull_mode: None,
+                    front_face: wgpu::FrontFace::default(),
+                    polygon_mode: wgpu::PolygonMode::default(),
+                    strip_index_format: None,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    alpha_to_coverage_enabled: false,
+                    count: 1,
+                    mask: !0,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: entry,
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let plain = module(BlendMode::Normal.shader_index());
+        let two = layout(&[&shared.locals_layout, &shared.texture_layout]);
+        let three = layout(&[&shared.locals_layout, &shared.texture_layout, &shared.texture_layout]);
+        let normal = pipeline(&plain, &two, "fs_stack_normal", ART, over);
+        let blends = BlendMode::ALL
+            .into_iter()
+            .filter(|&m| m != BlendMode::Normal)
+            .map(|m| (m, pipeline(&module(m.shader_index()), &three, "fs_stack_blend", ART, None)))
+            .collect();
+        let blit_entry = if format.is_srgb() {
+            "fs_blit_linear_framebuffer"
+        } else {
+            "fs_blit_gamma_framebuffer"
+        };
+        let blit = pipeline(&plain, &two, blit_entry, format, over);
+        Self {
+            shared: Arc::clone(shared),
+            normal,
+            blends,
+            blit,
+            target: Mutex::new(None),
+        }
+    }
+
+    /// `items`, bottom first, as one shape clipped to `clip`. An item whose
+    /// texture egui doesn't have is left out, as a quad would be.
+    fn draw(
+        self: &Arc<Self>,
+        device: &wgpu::Device,
+        renderer: &egui_wgpu::Renderer,
+        clip: Rect,
+        items: &[StackItem],
+    ) -> StackDraw {
+        let draws = items
+            .iter()
+            .filter_map(|it| Some((it.blend, it.corners, self.shared.quad(device, renderer, it.tex, it.corners, it.tint)?)))
+            .collect();
+        let corners = [clip.left_top(), clip.right_top(), clip.right_bottom(), clip.left_bottom()];
+        let blit = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("canvas_stack_blit"),
+            contents: bytemuck::cast_slice(&vertices(corners, Color32::WHITE)),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        StackDraw {
+            stack: Arc::clone(self),
+            draws,
+            blit,
+        }
+    }
+
+    /// The textures at `size`, made or remade to fit.
+    fn target<'a>(&self, device: &wgpu::Device, slot: &'a mut Option<Target>, size: [u32; 2]) -> &'a Target {
+        if slot.as_ref().map_or(true, |t| t.size != size) {
+            let extent = wgpu::Extent3d {
+                width: size[0].max(1),
+                height: size[1].max(1),
+                depth_or_array_layers: 1,
+            };
+            let texture = |label: &str, usage: wgpu::TextureUsages| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: ART,
+                    usage,
+                    view_formats: &[],
+                })
+            };
+            use wgpu::TextureUsages as U;
+            let art = texture("canvas_stack_art", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC);
+            let backdrop = texture("canvas_stack_backdrop", U::TEXTURE_BINDING | U::COPY_DST);
+            let art_view = art.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind = |view: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("canvas_stack"),
+                    layout: &self.shared.texture_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    }],
+                })
+            };
+            let art_group = bind(&art_view);
+            let backdrop_group = bind(&backdrop.create_view(&wgpu::TextureViewDescriptor::default()));
+            *slot = Some(Target {
+                size,
+                art,
+                art_view,
+                backdrop,
+                art_group,
+                backdrop_group,
+            });
+        }
+        slot.as_ref().expect("just made")
+    }
+}
+
+/// One frame's art stack on its way to the GPU: its draws, each bound, and
+/// the quad that lays the result on the window.
+struct StackDraw {
+    stack: Arc<Stack>,
+    draws: Vec<(BlendMode, [Pos2; 4], Quad)>,
+    blit: wgpu::Buffer,
+}
+
+/// Pixels of a `size` screen that a quad at `corners` (in points) can touch,
+/// with a pixel to spare, as an origin and an extent. `None` when off screen.
+fn reach(corners: &[Pos2; 4], ppp: f32, size: [u32; 2]) -> Option<([u32; 2], [u32; 2])> {
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for c in corners {
+        x0 = x0.min(c.x * ppp);
+        y0 = y0.min(c.y * ppp);
+        x1 = x1.max(c.x * ppp);
+        y1 = y1.max(c.y * ppp);
+    }
+    let clamp = |v: f32, hi: u32| v.clamp(0.0, hi as f32) as u32;
+    let (x0, y0) = (clamp(x0.floor() - 1.0, size[0]), clamp(y0.floor() - 1.0, size[1]));
+    let (x1, y1) = (clamp(x1.ceil() + 1.0, size[0]), clamp(y1.ceil() + 1.0, size[1]));
+    (x1 > x0 && y1 > y0).then_some(([x0, y0], [x1 - x0, y1 - y0]))
+}
+
+/// A pass drawing into the art texture, cleared first or carrying on.
+fn art_pass(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: bool) -> wgpu::RenderPass<'static> {
+    encoder
+        .begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("canvas_stack"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: if clear {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        })
+        .forget_lifetime()
+}
+
+impl CallbackTrait for StackDraw {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &ScreenDescriptor,
+        encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let s = &self.stack;
+        let ppp = screen.pixels_per_point;
+        let locals = Locals {
+            screen_size_in_points: [
+                screen.size_in_pixels[0] as f32 / ppp,
+                screen.size_in_pixels[1] as f32 / ppp,
+            ],
+            dithering: u32::from(s.shared.dithering),
+            _padding: 0,
+        };
+        queue.write_buffer(&s.shared.locals, 0, bytemuck::bytes_of(&locals));
+        let mut slot = s.target.lock().unwrap_or_else(|e| e.into_inner());
+        let size = screen.size_in_pixels;
+        let t = s.target(device, &mut slot, size);
+        // Cleared once, before anything; every blend after picks up there.
+        let mut pass = Some(art_pass(encoder, &t.art_view, true));
+        for (mode, corners, quad) in &self.draws {
+            if *mode == BlendMode::Normal {
+                let p = pass.get_or_insert_with(|| art_pass(encoder, &t.art_view, false));
+                p.set_pipeline(&s.normal);
+                p.set_bind_group(0, &s.shared.locals_group, &[]);
+                p.set_bind_group(1, &quad.texture, &[]);
+                p.set_vertex_buffer(0, quad.vertices.slice(..));
+                p.draw(0..6, 0..1);
+                continue;
+            }
+            let Some(pipeline) = s.blends.iter().find(|(m, _)| m == mode).map(|(_, p)| p) else {
+                continue;
+            };
+            let Some((origin, extent)) = reach(corners, ppp, size) else {
+                continue;
+            };
+            // What is under the layer, copied out of the texture it is about
+            // to be written into.
+            drop(pass.take());
+            let at = wgpu::Origin3d {
+                x: origin[0],
+                y: origin[1],
+                z: 0,
+            };
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &t.art,
+                    mip_level: 0,
+                    origin: at,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &t.backdrop,
+                    mip_level: 0,
+                    origin: at,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: extent[0],
+                    height: extent[1],
+                    depth_or_array_layers: 1,
+                },
+            );
+            let p = pass.insert(art_pass(encoder, &t.art_view, false));
+            p.set_pipeline(pipeline);
+            p.set_bind_group(0, &s.shared.locals_group, &[]);
+            p.set_bind_group(1, &quad.texture, &[]);
+            p.set_bind_group(2, &t.backdrop_group, &[]);
+            p.set_vertex_buffer(0, quad.vertices.slice(..));
+            p.draw(0..6, 0..1);
+        }
+        drop(pass);
+        Vec::new()
+    }
+
+    fn paint(&self, info: PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, _resources: &CallbackResources) {
+        let s = &self.stack;
+        let slot = s.target.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(t) = slot.as_ref() else {
+            return;
+        };
+        let [w, h] = info.screen_size_px;
+        pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+        pass.set_pipeline(&s.blit);
+        pass.set_bind_group(0, &s.shared.locals_group, &[]);
+        pass.set_bind_group(1, &t.art_group, &[]);
+        pass.set_vertex_buffer(0, self.blit.slice(..));
+        pass.draw(0..6, 0..1);
+    }
+}
+
 /// Draws canvas textures in gamma space. `None` in `AppState` without a GPU.
 pub struct CanvasGpu(Kind);
 
 enum Kind {
-    Gpu { rs: RenderState, shared: Arc<Shared> },
+    Gpu {
+        rs: RenderState,
+        shared: Arc<Shared>,
+        /// `None` if the GPU refused the stack's pipelines: blend modes
+        /// then show as Normal, and nothing else changes.
+        stack: Option<Arc<Stack>>,
+    },
     /// Records what it would draw instead, for headless tests.
     #[cfg(test)]
     Recording,
@@ -281,9 +662,22 @@ impl CanvasGpu {
             log::warn!("canvas pipeline disabled, drawing through egui instead: {err}");
             return None;
         }
+        let shared = Arc::new(shared);
+        // Apart from the quads' pipeline, so a GPU that refuses this loses
+        // blend modes on the canvas and nothing more.
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let stack = Stack::new(device, rs.target_format, &shared);
+        let stack = match pollster::block_on(device.pop_error_scope()) {
+            Some(err) => {
+                log::warn!("canvas blend modes disabled, showing them as Normal: {err}");
+                None
+            }
+            None => Some(Arc::new(stack)),
+        };
         Some(Self(Kind::Gpu {
             rs: rs.clone(),
-            shared: Arc::new(shared),
+            shared,
+            stack,
         }))
     }
 
@@ -296,7 +690,7 @@ impl CanvasGpu {
     /// `clip`. `None` when egui has no such texture yet.
     pub fn quad(&self, clip: Rect, tex: TextureId, corners: [Pos2; 4], tint: Color32) -> Option<Shape> {
         match &self.0 {
-            Kind::Gpu { rs, shared } => {
+            Kind::Gpu { rs, shared, .. } => {
                 let quad = shared.quad(&rs.device, &rs.renderer.read(), tex, corners, tint)?;
                 Some(Shape::Callback(egui_wgpu::Callback::new_paint_callback(clip, quad)))
             }
@@ -307,6 +701,33 @@ impl CanvasGpu {
             })),
         }
     }
+}
+
+impl CanvasGpu {
+    /// `items` drawn as the art stack, clipped to `clip`: see [`Stack`].
+    /// `None` when the GPU has no stack, for the caller to draw the items as
+    /// plain quads instead.
+    pub fn stack(&self, clip: Rect, items: &[StackItem]) -> Option<Shape> {
+        match &self.0 {
+            Kind::Gpu { rs, stack, .. } => {
+                let draw = stack.as_ref()?.draw(&rs.device, &rs.renderer.read(), clip, items);
+                Some(Shape::Callback(egui_wgpu::Callback::new_paint_callback(clip, draw)))
+            }
+            #[cfg(test)]
+            Kind::Recording => Some(Shape::Callback(egui::PaintCallback {
+                rect: clip,
+                callback: Arc::new(RecordedStack { items: items.to_vec() }),
+            })),
+        }
+    }
+}
+
+/// What a recording `CanvasGpu` was asked to draw as an art stack.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedStack {
+    /// The items, bottom first.
+    pub items: Vec<StackItem>,
 }
 
 /// What a recording `CanvasGpu` was asked to draw.
@@ -343,6 +764,7 @@ mod tests {
         queue: wgpu::Queue,
         renderer: egui_wgpu::Renderer,
         shared: Arc<Shared>,
+        stack: Arc<Stack>,
         /// Uploaded so far, by id, as egui holds them.
         images: Vec<ColorImage>,
     }
@@ -363,11 +785,13 @@ mod tests {
         eprintln!("ran on {}", adapter.get_info().name);
         let renderer = egui_wgpu::Renderer::new(&device, FORMAT, None, 1, DITHERING);
         let shared = Arc::new(Shared::new(&device, FORMAT, DITHERING));
+        let stack = Arc::new(Stack::new(&device, FORMAT, &shared));
         Some(Gpu {
             device,
             queue,
             renderer,
             shared,
+            stack,
             images: Vec::new(),
         })
     }
@@ -497,6 +921,11 @@ mod tests {
                 },
             })
             .collect();
+        render_jobs(g, jobs)
+    }
+
+    /// `jobs` rendered over the paper, read back, RGBA per pixel.
+    fn render_jobs(g: &mut Gpu, jobs: Vec<ClippedPrimitive>) -> Vec<[u8; 4]> {
         let screen = ScreenDescriptor {
             size_in_pixels: [W, H],
             pixels_per_point: 1.0,
@@ -575,6 +1004,122 @@ mod tests {
                 line.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    /// `items` drawn as one art stack over the paper, read back.
+    fn render_stack(g: &mut Gpu, items: &[StackItem]) -> Vec<[u8; 4]> {
+        let stack = Arc::clone(&g.stack);
+        let draw = stack.draw(&g.device, &g.renderer, full(), items);
+        let job = ClippedPrimitive {
+            clip_rect: full(),
+            primitive: Primitive::Callback(egui_wgpu::Callback::new_paint_callback(full(), draw)),
+        };
+        render_jobs(g, vec![job])
+    }
+
+    fn item(tex: TextureId, corners: [Pos2; 4], tint: Color32, blend: BlendMode) -> StackItem {
+        StackItem { tex, corners, tint, blend }
+    }
+
+    /// 16×8, opaque, every pixel its own colour: something to blend onto.
+    fn gradient() -> Vec<u8> {
+        (0..16 * 8)
+            .flat_map(|i| {
+                let (x, y) = ((i % 16) as u8, (i / 16) as u8);
+                [x * 16, 40 + y * 25, 255 - x * 12, 255]
+            })
+            .collect()
+    }
+
+    /// What the stack should come to at texel (x, y) of two 16×8 images laid
+    /// 1:1 — `under` Normal, `over` in `mode` at `opacity` — over the paper,
+    /// worked out by `doc::blend` as the CPU compositor does.
+    fn expected(under: &[u8], over: &[u8], mode: BlendMode, opacity: f32, x: usize, y: usize) -> [f32; 3] {
+        let i = (y * 16 + x) * 4;
+        let mut d = [0u8; 4];
+        crate::doc::blend::blend_px(BlendMode::Normal, &mut d, &under[i..i + 4], under[i + 3] as f32 / 255.0);
+        crate::doc::blend::blend_px(mode, &mut d, &over[i..i + 4], over[i + 3] as f32 / 255.0 * opacity);
+        let a = d[3] as f32 / 255.0;
+        [0, 1, 2].map(|c| d[c] as f32 * a + PAPER[c] as f32 * (1.0 - a))
+    }
+
+    /// Normal layers through the stack look as they do drawn straight onto
+    /// the window, to within the dithering's last level.
+    #[test]
+    fn a_stack_of_normal_layers_matches_the_quads() {
+        let Some(mut g) = gpu() else { return };
+        let (a, b) = (upload(&mut g, [16, 8], &gradient()), upload(&mut g, [16, 8], &speckle()));
+        for tint in [white_alpha(255), white_alpha(100)] {
+            let (ca, cb) = (at(20.0, 10.0, [16, 8]), at(26.0, 13.0, [16, 8]));
+            let direct = render(&mut g, &[draw(a, ca, tint, Via::Ours), draw(b, cb, tint, Via::Ours)]);
+            let stacked = render_stack(
+                &mut g,
+                &[item(a, ca, tint, BlendMode::Normal), item(b, cb, tint, BlendMode::Normal)],
+            );
+            assert!(changed(&stacked) > 0, "drew nothing");
+            assert!(max_diff(&direct, &stacked) <= 2, "{tint:?}: off by {}", max_diff(&direct, &stacked));
+        }
+    }
+
+    /// Every mode on the GPU comes out as the CPU — export, merged groups —
+    /// works it out, over solid and soft pixels alike.
+    #[test]
+    fn each_blend_mode_matches_the_cpu() {
+        let Some(mut g) = gpu() else { return };
+        let (under, over) = (gradient(), speckle());
+        let (a, b) = (upload(&mut g, [16, 8], &under), upload(&mut g, [16, 8], &over));
+        let corners = at(30.0, 20.0, [16, 8]);
+        for mode in BlendMode::ALL {
+            for opacity in [1.0f32, 0.6] {
+                let tint = white_alpha((opacity * 255.0).round() as u8);
+                let px = render_stack(&mut g, &[item(a, corners, white_alpha(255), BlendMode::Normal), item(b, corners, tint, mode)]);
+                let mut worst = 0.0f32;
+                for y in 0..8 {
+                    for x in 0..16 {
+                        let want = expected(&under, &over, mode, tint.a() as f32 / 255.0, x, y);
+                        let got = px[(20 + y) * W as usize + 30 + x];
+                        for c in 0..3 {
+                            worst = worst.max((got[c] as f32 - want[c]).abs());
+                        }
+                    }
+                }
+                assert!(worst <= 3.0, "{mode:?} at {opacity}: off by {worst}");
+            }
+        }
+    }
+
+    /// A blend mixes with the art, never the paper: over bare paper a
+    /// Multiply layer looks just as a Normal one does.
+    #[test]
+    fn the_paper_takes_no_part_in_a_blend() {
+        let Some(mut g) = gpu() else { return };
+        let b = upload(&mut g, [16, 8], &speckle());
+        let corners = at(40.0, 30.0, [16, 8]);
+        let normal = render_stack(&mut g, &[item(b, corners, white_alpha(255), BlendMode::Normal)]);
+        for mode in BlendMode::ALL {
+            let blended = render_stack(&mut g, &[item(b, corners, white_alpha(255), mode)]);
+            assert!(max_diff(&normal, &blended) <= 1, "{mode:?}: off by {}", max_diff(&normal, &blended));
+        }
+    }
+
+    /// A blended layer only touches the pixels under it: art beside it stays
+    /// as it was.
+    #[test]
+    fn a_blend_leaves_the_art_beside_it_alone() {
+        let Some(mut g) = gpu() else { return };
+        let (a, b) = (upload(&mut g, [16, 8], &gradient()), upload(&mut g, [16, 8], &band(DARK)));
+        let left = at(10.0, 10.0, [16, 8]);
+        let right = at(60.0, 10.0, [16, 8]);
+        let alone = render_stack(&mut g, &[item(a, left, white_alpha(255), BlendMode::Normal)]);
+        let with = render_stack(
+            &mut g,
+            &[item(a, left, white_alpha(255), BlendMode::Normal), item(b, right, white_alpha(255), BlendMode::Multiply)],
+        );
+        for y in 0..H as usize {
+            for x in 0..50 {
+                assert_eq!(alone[y * W as usize + x], with[y * W as usize + x], "({x}, {y})");
+            }
+        }
     }
 
     /// Largest per-channel difference between two renders.

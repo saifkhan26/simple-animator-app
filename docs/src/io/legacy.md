@@ -1,6 +1,6 @@
 # `src/io/legacy.rs` — frozen layouts of old `.anim` versions
 
-> **Source:** [src/io/legacy.rs](../../../src/io/legacy.rs) · **Module:** `crate::io::legacy` · **Size:** 466 lines · Line links as of commit `f210c6f`
+> **Source:** [src/io/legacy.rs](../../../src/io/legacy.rs) · **Module:** `crate::io::legacy` · **Size:** 649 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 
@@ -256,7 +256,7 @@ carries it through instead of defaulting it. Same fields as `ProjectV3` with
 | `camera_keys` | `Vec<CameraKey>` | Camera keyframes. |
 
 ### `struct LayerV6`
-[src/io/legacy.rs:293](../../../src/io/legacy.rs#L293)
+[src/io/legacy.rs:296](../../../src/io/legacy.rs#L296)
 
 `Layer` as formats v5 and v6 wrote it — before `clip` and `alpha_lock`. Same fields as
 [`LayerV4`](#struct-layerv4) except `transform_keys` is the live `Vec<TransformKey>`
@@ -277,7 +277,7 @@ carries it through instead of defaulting it. Same fields as `ProjectV3` with
 | `cell_h` | `u32` | As `Layer::cell_h` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
 
 ### `struct ProjectV6`
-[src/io/legacy.rs:314](../../../src/io/legacy.rs#L314)
+[src/io/legacy.rs:317](../../../src/io/legacy.rs#L317)
 
 `Project` as formats v5 and v6 wrote it. Same fields as `ProjectV4` with
 `layers: Vec<LayerV6>`. (v5 and v6 differ only in that v6's body is compressed.)
@@ -298,7 +298,7 @@ carries it through instead of defaulting it. Same fields as `ProjectV3` with
 | `camera_keys` | `Vec<CameraKey>` | As `Project::camera_keys` in the current format ([project.md](../doc/project.md)), at this version's position. |
 
 ### `struct LayerV7`
-[src/io/legacy.rs:382](../../../src/io/legacy.rs#L382)
+[src/io/legacy.rs:386](../../../src/io/legacy.rs#L386)
 
 `Layer` as format v7 wrote it — before `kind`, `in_group` and `collapsed` (layer groups).
 Same fields as [`LayerV6`](#struct-layerv6) plus:
@@ -320,7 +320,7 @@ Same fields as [`LayerV6`](#struct-layerv6) plus:
 | `alpha_lock` | `bool` | Painting only recolours existing paint. |
 
 ### `struct ProjectV7`
-[src/io/legacy.rs:407](../../../src/io/legacy.rs#L407)
+[src/io/legacy.rs:411](../../../src/io/legacy.rs#L411)
 
 `Project` as format v7 wrote it. Same fields as `ProjectV6` with `layers: Vec<LayerV7>`.
 
@@ -338,6 +338,94 @@ Same fields as [`LayerV6`](#struct-layerv6) plus:
 | `loop_end` | `usize` | As `Project::loop_end` in the current format ([project.md](../doc/project.md)), at this version's position. |
 | `camera` | `Camera` | As `Project::camera` in the current format ([project.md](../doc/project.md)), at this version's position. |
 | `camera_keys` | `Vec<CameraKey>` | As `Project::camera_keys` in the current format ([project.md](../doc/project.md)), at this version's position. |
+
+### `struct LayerV8`
+[src/io/legacy.rs:473](../../../src/io/legacy.rs#L473)
+
+`Layer` as serialized by format v8 — before `blend` was appended.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | `String` | As `Layer::name` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `opacity` | `f32` | As `Layer::opacity` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `visible` | `bool` | As `Layer::visible` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `locked` | `bool` | As `Layer::locked` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `reference` | `bool` | As `Layer::reference` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `exposures` | `Vec<Option<usize>>` | As `Layer::exposures` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `transform` | `Transform` | As `Layer::transform` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `transform_keys` | `Vec<TransformKey>` | As `Layer::transform_keys` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `track_points` | `Vec<TrackSample>` | As `Layer::track_points` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `cell_w` | `u32` | As `Layer::cell_w` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `cell_h` | `u32` | As `Layer::cell_h` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `clip` | `bool` | Clipped to the layer below (only shows where its base has pixels). |
+| `alpha_lock` | `bool` | Painting only recolours existing paint. |
+| `kind` | `LayerKind` | A drawing layer or a group's header. |
+| `in_group` | `bool` | One of a group's layers. |
+| `collapsed` | `bool` | A group header shown folded. |
+
+### `struct ProjectV8`
+[src/io/legacy.rs:504](../../../src/io/legacy.rs#L504)
+
+`Project` as serialized by format v8.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `width` | `u32` | As `Project::width` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `height` | `u32` | As `Project::height` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `fps` | `f32` | As `Project::fps` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `cells` | `Vec<Canvas>` | As `Project::cells` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `layers` | `Vec<LayerV8>` | As `Project::layers` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `frame_count` | `usize` | As `Project::frame_count` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `current_frame` | `usize` | As `Project::current_frame` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `current_layer` | `usize` | As `Project::current_layer` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `loop_start` | `usize` | As `Project::loop_start` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `loop_end` | `usize` | As `Project::loop_end` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `camera` | `Camera` | As `Project::camera` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `camera_keys` | `Vec<CameraKey>` | As `Project::camera_keys` in the current format ([project.md](../doc/project.md)), at this version's position. |
+
+### `struct LayerV8Ref`
+[src/io/legacy.rs:570](../../../src/io/legacy.rs#L570)
+
+`LayerV8` borrowed from a live `Layer`, for writing a v8 file: the same bytes, nothing copied.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | `&'a str` | As `Layer::name` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `opacity` | `f32` | As `Layer::opacity` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `visible` | `bool` | As `Layer::visible` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `locked` | `bool` | As `Layer::locked` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `reference` | `bool` | As `Layer::reference` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `exposures` | `&'a [Option<usize>]` | As `Layer::exposures` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `transform` | `&'a Transform` | As `Layer::transform` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `transform_keys` | `&'a [TransformKey]` | As `Layer::transform_keys` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `track_points` | `&'a [TrackSample]` | As `Layer::track_points` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `cell_w` | `u32` | As `Layer::cell_w` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `cell_h` | `u32` | As `Layer::cell_h` in the current format ([layer.md](../doc/layer.md)), at this version's position. |
+| `clip` | `bool` | Clipped to the layer below (only shows where its base has pixels). |
+| `alpha_lock` | `bool` | Painting only recolours existing paint. |
+| `kind` | `LayerKind` | A drawing layer or a group's header. |
+| `in_group` | `bool` | One of a group's layers. |
+| `collapsed` | `bool` | A group header shown folded. |
+
+### `struct ProjectV8Ref`
+[src/io/legacy.rs:593](../../../src/io/legacy.rs#L593)
+
+`ProjectV8` borrowed from a live `Project`: what a project whose layers are all Normal is written as, so builds from before blend modes still open it. Its bytes are exactly the ones those builds wrote.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `width` | `u32` | As `Project::width` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `height` | `u32` | As `Project::height` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `fps` | `f32` | As `Project::fps` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `cells` | `&'a [Arc<Canvas>]` | As `Project::cells` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `layers` | `Vec<LayerV8Ref<'a>>` | As `Project::layers` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `frame_count` | `usize` | As `Project::frame_count` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `current_frame` | `usize` | As `Project::current_frame` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `current_layer` | `usize` | As `Project::current_layer` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `loop_start` | `usize` | As `Project::loop_start` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `loop_end` | `usize` | As `Project::loop_end` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `camera` | `&'a Camera` | As `Project::camera` in the current format ([project.md](../doc/project.md)), at this version's position. |
+| `camera_keys` | `&'a [CameraKey]` | As `Project::camera_keys` in the current format ([project.md](../doc/project.md)), at this version's position. |
 
 ## `impl From<TransformKeyV4> for TransformKey`
 
@@ -386,7 +474,7 @@ points, project-sized cells, fresh `uid`).
 ## `impl From<ProjectV2> for Project`
 
 ### `Project::from`
-[src/io/legacy.rs:175](../../../src/io/legacy.rs#L175)
+[src/io/legacy.rs:176](../../../src/io/legacy.rs#L176)
 
 ```rust
 fn from(p: ProjectV2) -> Self
@@ -402,7 +490,7 @@ camera (`Camera::default()`), no camera keys and default `camera_opts`.
 ## `impl From<LayerV3> for Layer`
 
 ### `Layer::from`
-[src/io/legacy.rs:195](../../../src/io/legacy.rs#L195)
+[src/io/legacy.rs:196](../../../src/io/legacy.rs#L196)
 
 ```rust
 fn from(l: LayerV3) -> Self
@@ -415,7 +503,7 @@ Like the v2 conversion, but keeps the file's `track_points`.
 ## `impl From<LayerV4> for Layer`
 
 ### `Layer::from`
-[src/io/legacy.rs:223](../../../src/io/legacy.rs#L223)
+[src/io/legacy.rs:225](../../../src/io/legacy.rs#L225)
 
 ```rust
 fn from(l: LayerV4) -> Self
@@ -429,7 +517,7 @@ through [`keys`](#keys) because v4 keys have no `ease`.
 ## `impl From<ProjectV4> for Project`
 
 ### `Project::from`
-[src/io/legacy.rs:251](../../../src/io/legacy.rs#L251)
+[src/io/legacy.rs:254](../../../src/io/legacy.rs#L254)
 
 ```rust
 fn from(p: ProjectV4) -> Self
@@ -443,7 +531,7 @@ were added in v4). `camera_opts` is default.
 ## `impl From<ProjectV3> for Project`
 
 ### `Project::from`
-[src/io/legacy.rs:271](../../../src/io/legacy.rs#L271)
+[src/io/legacy.rs:274](../../../src/io/legacy.rs#L274)
 
 ```rust
 fn from(p: ProjectV3) -> Self
@@ -457,7 +545,7 @@ converted by [`Layer::from(LayerV3)`](#impl-fromlayerv3-for-layer).
 ## `impl From<LayerV6> for Layer`
 
 ### `Layer::from`
-[src/io/legacy.rs:332](../../../src/io/legacy.rs#L332)
+[src/io/legacy.rs:335](../../../src/io/legacy.rs#L335)
 
 ```rust
 fn from(l: LayerV6) -> Self
@@ -473,7 +561,7 @@ group, fresh `uid`).
 ## `impl From<ProjectV6> for Project`
 
 ### `Project::from`
-[src/io/legacy.rs:360](../../../src/io/legacy.rs#L360)
+[src/io/legacy.rs:364](../../../src/io/legacy.rs#L364)
 
 ```rust
 fn from(p: ProjectV6) -> Self
@@ -488,7 +576,7 @@ Same shape as the v4 project conversion (camera carried), with layers converted 
 ## `impl From<LayerV7> for Layer`
 
 ### `Layer::from`
-[src/io/legacy.rs:425](../../../src/io/legacy.rs#L425)
+[src/io/legacy.rs:429](../../../src/io/legacy.rs#L429)
 
 ```rust
 fn from(l: LayerV7) -> Self
@@ -505,7 +593,7 @@ so every v7 layer opens ungrouped.
 ## `impl From<ProjectV7> for Project`
 
 ### `Project::from`
-[src/io/legacy.rs:448](../../../src/io/legacy.rs#L448)
+[src/io/legacy.rs:452](../../../src/io/legacy.rs#L452)
 
 ```rust
 fn from(p: ProjectV7) -> Self
@@ -515,3 +603,36 @@ Same shape as the v6 project conversion, with layers converted by
 [`Layer::from(LayerV7)`](#impl-fromlayerv7-for-layer).
 
 **Used by:** [project_file.rs](project_file.md) `decode_from` (version 7).
+
+## `impl From<LayerV8> for Layer`
+
+### `Layer::from`
+[src/io/legacy.rs:522](../../../src/io/legacy.rs#L522)
+
+```rust
+fn from(l: LayerV8) -> Self
+```
+
+A v8 layer as a current one: every field carried over, blend Normal.
+
+## `impl From<ProjectV8> for Project`
+
+### `Project::from`
+[src/io/legacy.rs:548](../../../src/io/legacy.rs#L548)
+
+```rust
+fn from(p: ProjectV8) -> Self
+```
+
+A v8 project as a current one: cells shared, every layer Normal.
+
+## `impl<'a> ProjectV8Ref<'a>`
+
+### `ProjectV8Ref::of`
+[src/io/legacy.rs:611](../../../src/io/legacy.rs#L611)
+
+```rust
+pub fn of(p: &'a Project) -> Self
+```
+
+`p` as v8 writes it. Every blend mode is dropped, so call it only for a project whose layers are all Normal.

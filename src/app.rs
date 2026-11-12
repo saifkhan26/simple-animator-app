@@ -2962,7 +2962,10 @@ impl AppState {
                     // Passing the *baked* size as the doc size keeps the
                     // transform maths centred on the same point, since the
                     // baked cell is itself centred on the doc.
-                    crate::io::composite::composite_layer(&mut out, &src, &xform, l.opacity, bw, bh);
+                    // The lower layer down as it is; the upper in its blend
+                    // mode, mixed with the lower one alone.
+                    let blend = if idx == li { l.blend } else { crate::doc::blend::BlendMode::Normal };
+                    crate::io::composite::composite_layer(&mut out, &src, &xform, l.opacity, blend, bw, bh);
                 }
                 (f, out)
             })
@@ -6759,7 +6762,7 @@ impl AppState {
         // solid wall, or the fill leaks straight through it.
         let (pw, ph) = (p.width, p.height);
         let mut doc = Canvas::new(pw, ph);
-        crate::io::composite::composite_layer(&mut doc, src, &src_xform, 1.0, pw, ph);
+        crate::io::composite::composite_layer(&mut doc, src, &src_xform, 1.0, Default::default(), pw, ph);
         Some(doc_to_cell(doc, &dst_xform, cell_w, cell_h, pw, ph))
     }
 
@@ -6896,6 +6899,27 @@ impl AppState {
         for i in self.selected_layer_indices() {
             self.project.layers[i].opacity = v.clamp(0.0, 1.0);
         }
+    }
+
+    /// Set every selected layer's blend mode — a group's own stays Normal.
+    /// One undo step; nothing when none changes. Only the look changes:
+    /// the timeline selection and any lifted pixels stay as they are.
+    pub fn set_selected_blend(&mut self, mode: crate::doc::blend::BlendMode) {
+        let layers: Vec<usize> =
+            self.selected_layer_indices().into_iter().filter(|&i| !self.project.is_group(i)).collect();
+        if layers.iter().all(|&i| self.project.layers[i].blend == mode) {
+            return;
+        }
+        let before = undo::TimelineState::capture(&self.project);
+        for i in layers {
+            self.project.layers[i].blend = mode;
+        }
+        let after = undo::TimelineState::capture(&self.project);
+        self.history.push(undo::Command::Structural {
+            before,
+            after,
+            cell_pixels: Vec::new(),
+        });
     }
 
     /// Set layer `i`'s opacity alone, from the % on its row. One undo step
@@ -8442,6 +8466,7 @@ impl AppState {
             group: bool,
             in_group: bool,
             collapsed: bool,
+            blend: crate::doc::blend::BlendMode,
         }
         let mut layers: Vec<Imported> = Vec::new();
         for kl in &doc.layers {
@@ -8479,6 +8504,7 @@ impl AppState {
                 group: kl.group,
                 in_group: kl.in_group,
                 collapsed: kl.collapsed,
+                blend: kl.blend,
             });
         }
         // A group of nothing — every layer in it held back — isn't worth
@@ -8526,6 +8552,7 @@ impl AppState {
                 l.locked = im.locked;
                 l.in_group = im.in_group || (inherit && !im.group);
                 l.collapsed = im.collapsed;
+                l.blend = im.blend;
                 let base = p.cells.len();
                 if let Some((cw, ch)) = im.cells.first().map(|c| (c.width, c.height)).filter(|&s| s != (pw, ph)) {
                     l.cell_w = cw;
@@ -13342,5 +13369,52 @@ mod range_tests {
         st.reverse_track_selection();
         st.repeat_track_selection(3);
         assert_eq!(keys(&st), [0, 2, 4]);
+    }
+}
+
+#[cfg(test)]
+mod blend_tests {
+    use super::*;
+    use crate::doc::blend::BlendMode;
+
+    /// Three layers, the top two in a group, the bottom one active.
+    fn layered() -> AppState {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.project.add_layer();
+        st.project.group_layers(&[1, 2]).expect("grouped");
+        st.project.current_layer = 0;
+        st
+    }
+
+    #[test]
+    fn a_blend_mode_is_one_undo_step_on_every_picked_layer() {
+        let mut st = layered();
+        let g = st.project.layers.iter().position(|l| l.is_group()).unwrap();
+        st.selected_layers.insert(st.project.layers[1].uid);
+        st.selected_layers.insert(st.project.layers[g].uid);
+        st.track_sel = [(0, 0)].into_iter().collect();
+        let steps = st.history.undo_len();
+        st.set_selected_blend(BlendMode::Multiply);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        assert_eq!(st.project.layers[0].blend, BlendMode::Multiply);
+        assert_eq!(st.project.layers[1].blend, BlendMode::Multiply);
+        assert_eq!(st.project.layers[g].blend, BlendMode::Normal, "a group has none of its own");
+        assert_eq!(st.track_sel, [(0, 0)].into_iter().collect(), "the timeline selection stays");
+        // The same again changes nothing and records nothing.
+        st.set_selected_blend(BlendMode::Multiply);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        assert!(st.project.layers.iter().all(|l| l.blend == BlendMode::Normal));
+        st.redo();
+        assert_eq!(st.project.layers[1].blend, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn a_blend_mode_is_saved_with_the_project_and_autosaved_on_change() {
+        let mut st = layered();
+        let before = crate::io::project_file::content_key(&st.project);
+        st.set_selected_blend(BlendMode::Screen);
+        assert_ne!(crate::io::project_file::content_key(&st.project), before, "autosave sees it");
     }
 }

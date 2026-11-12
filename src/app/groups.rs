@@ -77,11 +77,29 @@ impl AppState {
         let Some(l) = p.layers.get(g).filter(|l| l.is_group()) else {
             return false;
         };
-        if !l.visible || l.opacity >= 1.0 {
+        // At full opacity a group draws as its layers, unless one has a
+        // blend mode: that mixes with the group's own layers only, so the
+        // group is merged first.
+        if !l.visible || (l.opacity >= 1.0 && !p.blends_inside(g)) {
             return false;
         }
         let fading_inside = self.fade_others && !self.playback.playing && p.group_of(p.current_layer) == Some(g);
         !fading_inside
+    }
+
+    /// Whether a layer the canvas draws by itself has a blend mode: then
+    /// the art goes through the GPU's art stack (`ui::canvas_gpu::Stack`).
+    /// A layer inside a merged group image is blended there, on the CPU.
+    pub(crate) fn art_blends(&self) -> bool {
+        let p = &self.project;
+        (0..p.layers.len()).any(|li| {
+            let l = &p.layers[li];
+            l.blend != crate::doc::blend::BlendMode::Normal
+                && !l.is_group()
+                && !l.reference
+                && p.shows(li)
+                && !self.in_group_image(li)
+        })
     }
 
     /// Whether layer `li` shows only as part of its group's merged image.

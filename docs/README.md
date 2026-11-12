@@ -49,6 +49,7 @@ Each link opens that file's page. The page links to the source itself.
 
 | File | What it is |
 |---|---|
+| [`src/doc/blend.rs`](src/doc/blend.md) | layer blend modes |
 | [`src/doc/camera.rs`](src/doc/camera.md) | the camera (what each exported frame shows) |
 | [`src/doc/canvas.rs`](src/doc/canvas.md) | Pixel storage for one drawing (a cell) |
 | [`src/doc/clip.rs`](src/doc/clip.md) | clipping masks and merged group images |
@@ -202,4 +203,4 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/platform.rs`](src/platform.md) | rounded corners and a border for the frameless window (Windows) |
 | [`src/undo.rs`](src/undo.md) | undo and redo history |
 
-_121 pages._
+_122 pages._

@@ -1,6 +1,6 @@
 # `src/ui/krita_import.rs` — the Import Krita brushes window
 
-> **Source:** [src/ui/krita_import.rs](../../../src/ui/krita_import.rs) · **Module:** `crate::ui::krita_import` · **Size:** 214 lines · Line links as of commit `f210c6f`
+> **Source:** [src/ui/krita_import.rs](../../../src/ui/krita_import.rs) · **Module:** `crate::ui::krita_import` · **Size:** 214 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 

@@ -27,6 +27,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
+use crate::doc::blend::BlendMode;
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::CellId;
 use crate::doc::project::Project;
@@ -240,6 +241,8 @@ pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>> {
             visible: l.visible,
             locked: l.locked,
             selected: i == opts.selected_layer,
+            // A group's own is always Normal here.
+            compositeop: if l.is_group() { "normal" } else { l.blend.krita_id() },
         })
         .collect();
     // Each layer is preceded by whatever carried layers sat just above it —
@@ -444,6 +447,9 @@ pub struct KraLayer {
     pub in_group: bool,
     /// A group shown folded in Krita.
     pub collapsed: bool,
+    /// The layer's blend mode; Normal for one this app doesn't have, and
+    /// for a group.
+    pub blend: BlendMode,
 }
 
 pub struct KraDoc {
@@ -559,6 +565,7 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
         group: bool,
         in_group: bool,
         collapsed: bool,
+        blend: BlendMode,
     }
     struct Walk<'a> {
         keep: &'a dyn Fn(&str, &[String]) -> bool,
@@ -601,9 +608,10 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
                         );
                     }
                     let op = n.attribute("compositeop").unwrap_or("normal");
-                    if op != "normal" {
-                        w.warnings.push(format!("\"{name}\" blend mode {op} ignored"));
-                    }
+                    let blend = BlendMode::from_krita(op).unwrap_or_else(|| {
+                        w.warnings.push(format!("\"{name}\" blend mode {op} shows as Normal"));
+                        BlendMode::Normal
+                    });
                     w.found.push(Found {
                         uuid: n.attribute("uuid").unwrap_or("").to_string(),
                         filename: n.attribute("filename").context("layer without filename")?.to_string(),
@@ -617,6 +625,7 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
                         group: false,
                         in_group: !w.groups.is_empty(),
                         collapsed: false,
+                        blend,
                     });
                 }
                 "grouplayer" => {
@@ -624,6 +633,10 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
                         continue;
                     };
                     let top_level = w.groups.is_empty();
+                    let op = n.attribute("compositeop").unwrap_or("normal");
+                    if op != "normal" && !hold {
+                        w.warnings.push(format!("group \"{name}\" blend mode {op} shows as Normal"));
+                    }
                     if top_level && !hold {
                         // Ours: a header, its layers keeping their own state.
                         w.found.push(Found {
@@ -639,6 +652,7 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
                             group: true,
                             in_group: false,
                             collapsed: n.attribute("collapsed") == Some("1"),
+                            blend: BlendMode::Normal,
                         });
                     } else if !hold && own_opacity < 1.0 {
                         w.warnings.push(format!(
@@ -680,6 +694,7 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
                 group: true,
                 in_group: false,
                 collapsed: f.collapsed,
+                blend: BlendMode::Normal,
             });
             continue;
         }
@@ -736,6 +751,7 @@ pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> 
             group: false,
             in_group: f.in_group,
             collapsed: false,
+            blend: f.blend,
         });
     }
 
@@ -813,6 +829,103 @@ pub(crate) mod tests {
         let (c, clipped) = d.place(x, y, w, h);
         assert!(!clipped);
         c
+    }
+
+    /// For checking blend modes against Krita itself: one .kra per mode, and
+    /// beside it this app's own flattening as a PNG. Krita renders the .kra
+    /// headless (see the Krita headless checks note) to diff against.
+    /// `KRA_BLEND_DIR=… cargo test kra_blend_check -- --ignored`
+    #[test]
+    #[ignore]
+    fn kra_blend_check() {
+        let Some(dir) = std::env::var_os("KRA_BLEND_DIR").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let (w, h) = (64u32, 32u32);
+        for mode in BlendMode::ALL {
+            let mut p = Project::new(w, h, 12.0);
+            p.add_layer();
+            let mut under = Canvas::new(w, h);
+            let mut over = Canvas::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    if x < w * 3 / 4 {
+                        let px = [(x * 4) as u8, (60 + y * 5) as u8, (250 - x * 3) as u8, 255];
+                        under.pixels_mut()[i..i + 4].copy_from_slice(&px);
+                    }
+                    if x >= w / 4 {
+                        let a = [255u8, 200, 128, 60][(y / 8) as usize];
+                        let px = [(200 - x * 2) as u8, (x * 3) as u8, (40 + y * 6) as u8, a];
+                        over.pixels_mut()[i..i + 4].copy_from_slice(&px);
+                    }
+                }
+            }
+            for (li, c) in [under, over].into_iter().enumerate() {
+                let id = p.cells.len();
+                p.cells.push(c.into());
+                p.layers[li].set_key(0, id);
+            }
+            p.layers[1].blend = mode;
+            let name = mode.krita_id();
+            let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(2), selected_layer: 1, carried: &[] }).unwrap();
+            std::fs::write(dir.join(format!("{name}.kra")), bytes).unwrap();
+            let flat = composite::flatten_frame(&p, 0);
+            image::RgbaImage::from_raw(w, h, flat.pixels().into_owned())
+                .unwrap()
+                .save(dir.join(format!("{name}_ours.png")))
+                .unwrap();
+        }
+    }
+
+    /// A layer's blend mode goes to Krita as its compositeop and comes back,
+    /// and the flattened preview Krita shows is blended too.
+    #[test]
+    fn blend_modes_round_trip_through_kra() {
+        let mut p = sample_project();
+        p.layers[1].blend = BlendMode::Multiply;
+        let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(2), selected_layer: 1, carried: &[] }).unwrap();
+        let doc = read(bytes).unwrap();
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        assert_eq!(doc.layers[0].blend, BlendMode::Normal);
+        assert_eq!(doc.layers[1].blend, BlendMode::Multiply);
+    }
+
+    /// A mode this app doesn't have comes in as Normal, and says so.
+    #[test]
+    fn an_unknown_krita_blend_mode_comes_in_as_normal_with_a_warning() {
+        let p = sample_project();
+        let bytes = write(&p, &WriteOpts { layer_uuids: &uuids(2), selected_layer: 1, carried: &[] }).unwrap();
+        // Krita's colour burn on the first layer, Linear Dodge on the second.
+        let bytes = rewrite_maindoc(bytes, |xml| {
+            xml.replacen("compositeop=\"normal\"", "compositeop=\"burn\"", 1)
+                .replacen("compositeop=\"normal\"", "compositeop=\"linear_dodge\"", 1)
+        });
+        let doc = read(bytes).unwrap();
+        let modes: Vec<BlendMode> = doc.layers.iter().map(|l| l.blend).collect();
+        assert!(modes.contains(&BlendMode::Add), "linear dodge is add: {modes:?}");
+        assert!(modes.contains(&BlendMode::Normal));
+        assert_eq!(doc.warnings.len(), 1, "{:?}", doc.warnings);
+        assert!(doc.warnings[0].contains("burn") && doc.warnings[0].contains("Normal"));
+    }
+
+    /// `bytes` with maindoc.xml put through `edit`, every other entry as it was.
+    fn rewrite_maindoc(bytes: Vec<u8>, edit: impl Fn(&str) -> String) -> Vec<u8> {
+        let mut zin = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut out = ZipWriter::new(Cursor::new(Vec::new()));
+        for i in 0..zin.len() {
+            let mut f = zin.by_index(i).unwrap();
+            let name = f.name().to_string();
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).unwrap();
+            if name == "maindoc.xml" {
+                data = edit(std::str::from_utf8(&data).unwrap()).into_bytes();
+            }
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            out.start_file(name, opts).unwrap();
+            out.write_all(&data).unwrap();
+        }
+        out.finish().unwrap().into_inner()
     }
 
     #[test]

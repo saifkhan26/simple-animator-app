@@ -1,6 +1,6 @@
 # `src/io/kra/mod.rs` — reading and writing Krita .kra files
 
-> **Source:** [src/io/kra/mod.rs](../../../../src/io/kra/mod.rs) · **Module:** `crate::io::kra` · **Size:** 1314 lines · Line links as of commit `f210c6f`
+> **Source:** [src/io/kra/mod.rs](../../../../src/io/kra/mod.rs) · **Module:** `crate::io::kra` · **Size:** 1427 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 
@@ -61,7 +61,7 @@ a file, similar to wrapping a buffer in a stream.
 ## Types
 
 ### `const IMAGE`
-[src/io/kra/mod.rs:36](../../../../src/io/kra/mod.rs#L36)
+[src/io/kra/mod.rs:37](../../../../src/io/kra/mod.rs#L37)
 
 ```rust
 const IMAGE: &str = "image";
@@ -70,7 +70,7 @@ const IMAGE: &str = "image";
 The folder name used inside the zip for this document's data (Krita reads it from the image's `name`).
 
 ### `const MIMETYPE`
-[src/io/kra/mod.rs:37](../../../../src/io/kra/mod.rs#L37)
+[src/io/kra/mod.rs:38](../../../../src/io/kra/mod.rs#L38)
 
 ```rust
 const MIMETYPE: &[u8] = b"application/x-krita";
@@ -79,7 +79,7 @@ const MIMETYPE: &[u8] = b"application/x-krita";
 The text of the `mimetype` file: `application/x-krita`.
 
 ### `const SRGB_ICC`
-[src/io/kra/mod.rs:43](../../../../src/io/kra/mod.rs#L43)
+[src/io/kra/mod.rs:44](../../../../src/io/kra/mod.rs#L44)
 
 ```rust
 const SRGB_ICC: &[u8] = include_bytes!("srgb-built-in.icc");
@@ -89,7 +89,7 @@ The sRGB colour profile bytes embedded with every layer and the image (byte-for-
 "sRGB built-in"), since this app's pixels are sRGB.
 
 ### `struct WriteOpts`
-[src/io/kra/mod.rs:45](../../../../src/io/kra/mod.rs#L45)
+[src/io/kra/mod.rs:46](../../../../src/io/kra/mod.rs#L46)
 
 Options for `write`: Krita uuids to give the layers, which layer Krita opens selected, and carried layers
 to put back.
@@ -101,7 +101,7 @@ to put back.
 | `carried` | `&'a [Carried]` | Layers of the file being replaced that go back in untouched (see `carry`). |
 
 ### `const OUR_PREFIX`
-[src/io/kra/mod.rs:58](../../../../src/io/kra/mod.rs#L58)
+[src/io/kra/mod.rs:59](../../../../src/io/kra/mod.rs#L59)
 
 ```rust
 const OUR_PREFIX: &str = "anim";
@@ -111,7 +111,7 @@ Prefix for the layer file names this app writes (`anim1`, `anim2`, …), differe
 carried Krita layers can't clash.
 
 ### `struct Carried`
-[src/io/kra/mod.rs:64](../../../../src/io/kra/mod.rs#L64)
+[src/io/kra/mod.rs:65](../../../../src/io/kra/mod.rs#L65)
 
 A layer — or a whole group — of a Krita file, carried untouched into a rewrite of that file: its `<layer>` element exactly as Krita wrote it, and every file under `layers/` it names (pixels, frames, keyframes, profile, vector shapes, masks…). Nothing is decoded, so any layer type survives.
 
@@ -124,7 +124,7 @@ A layer — or a whole group — of a Krita file, carried untouched into a rewri
 | `group` | `Option<String>` | The uuid of the group it sat in — the outermost one, as groups fold on reading — so it goes back inside it while the rewrite has it. |
 
 ### `enum Seen`
-[src/io/kra/mod.rs:95](../../../../src/io/kra/mod.rs#L95)
+[src/io/kra/mod.rs:96](../../../../src/io/kra/mod.rs#L96)
 
 Inside `carry`: for each layer met during the walk, whether it was carried (index into the output) or kept
 (its uuid).
@@ -135,7 +135,7 @@ Inside `carry`: for each layer met during the walk, whether it was carried (inde
 | `Kept(String)` | Stays with the app; its uuid. |
 
 ### `struct Walk`
-[src/io/kra/mod.rs:99](../../../../src/io/kra/mod.rs#L99)
+[src/io/kra/mod.rs:100](../../../../src/io/kra/mod.rs#L100)
 
 State carried through the recursive XML walk (one version in `carry`, one in `read_filtered`): the filter,
 the stack of enclosing group names, and what has been found so far.
@@ -150,7 +150,7 @@ the stack of enclosing group names, and what has been found so far.
 | `out` | `Vec<(String, String, Vec<String>, Option<String>)>` | Carried layers found: (name, xml, files below, group uuid). |
 
 ### `struct Drawing`
-[src/io/kra/mod.rs:383](../../../../src/io/kra/mod.rs#L383)
+[src/io/kra/mod.rs:386](../../../../src/io/kra/mod.rs#L386)
 
 One Krita drawing decoded: the bounding box of its tiles in Krita canvas coordinates, its RGBA pixels, and
 the default pixel used outside the box.
@@ -165,7 +165,7 @@ the default pixel used outside the box.
 | `default` | `[u8; 4]` | The colour everywhere outside the box (usually transparent; a Krita "fill layer" background is a non-transparent default). |
 
 ### `struct KraLayer`
-[src/io/kra/mod.rs:429](../../../../src/io/kra/mod.rs#L429)
+[src/io/kra/mod.rs:432](../../../../src/io/kra/mod.rs#L432)
 
 One layer read from a `.kra`: identity, attributes, its drawings and keys, group flags.
 
@@ -181,9 +181,10 @@ One layer read from a `.kra`: identity, attributes, its drawings and keys, group
 | `group` | `bool` | A group's header — no drawings — with its layers listed just below it in `KraDoc::layers`. |
 | `in_group` | `bool` | One of a group's layers. Groups inside groups are folded into the outermost one. |
 | `collapsed` | `bool` | A group shown folded in Krita. |
+| `blend` | `BlendMode` | The layer's blend mode; Normal for one this app doesn't have, and for a group. |
 
 ### `struct KraDoc`
-[src/io/kra/mod.rs:449](../../../../src/io/kra/mod.rs#L449)
+[src/io/kra/mod.rs:455](../../../../src/io/kra/mod.rs#L455)
 
 A decoded `.kra`: size, fps, playback range end, layers (bottom first), warnings and held-back layers.
 
@@ -198,7 +199,7 @@ A decoded `.kra`: size, fps, playback range end, layers (bottom first), warnings
 | `held` | `Vec<(String, String)>` | `(uuid, name)` of paint layers the caller's filter kept out (see `read_filtered`). Not decoded. |
 
 ### `struct Reader`
-[src/io/kra/mod.rs:466](../../../../src/io/kra/mod.rs#L466)
+[src/io/kra/mod.rs:472](../../../../src/io/kra/mod.rs#L472)
 
 A small wrapper around the open zip with helpers for reading entries.
 
@@ -207,7 +208,7 @@ A small wrapper around the open zip with helpers for reading entries.
 | `zip` | `ZipArchive<Cursor<Vec<u8>>>` | The zip archive, read from memory. |
 
 ### `struct Found`
-[src/io/kra/mod.rs:549](../../../../src/io/kra/mod.rs#L549)
+[src/io/kra/mod.rs:555](../../../../src/io/kra/mod.rs#L555)
 
 Inside `read_filtered`: one paint layer or group found in `maindoc.xml`, before its pixels are decoded.
 
@@ -225,9 +226,10 @@ Inside `read_filtered`: one paint layer or group found in `maindoc.xml`, before 
 | `group` | `bool` | Is a group header. |
 | `in_group` | `bool` | Is inside a group. |
 | `collapsed` | `bool` | Group shown folded. |
+| `blend` | `BlendMode` | The layer's blend mode, read from its `compositeop`; Normal for a group or a mode this app lacks. |
 
 ### `struct Walk`
-[src/io/kra/mod.rs:563](../../../../src/io/kra/mod.rs#L563)
+[src/io/kra/mod.rs:570](../../../../src/io/kra/mod.rs#L570)
 
 State carried through the recursive XML walk (one version in `carry`, one in `read_filtered`): the filter,
 the stack of enclosing group names, and what has been found so far.
@@ -243,7 +245,7 @@ the stack of enclosing group names, and what has been found so far.
 ## Free functions
 
 ### `carry`
-[src/io/kra/mod.rs:81](../../../../src/io/kra/mod.rs#L81)
+[src/io/kra/mod.rs:82](../../../../src/io/kra/mod.rs#L82)
 
 ```rust
 pub fn carry(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> Result<Vec<Carried>>
@@ -254,7 +256,7 @@ and every file under `layers/` they reference, undecoded, plus where in the stac
 in, so a rewrite can put them back exactly.
 
 #### `carry::walk`
-[src/io/kra/mod.rs:108](../../../../src/io/kra/mod.rs#L108)
+[src/io/kra/mod.rs:109](../../../../src/io/kra/mod.rs#L109)
 
 ```rust
 fn walk(layers: roxmltree::Node, w: &mut Walk)
@@ -264,7 +266,7 @@ Recursive walk over `maindoc.xml`'s `<layers>` element for `carry`, descending i
 layer as carried or kept.
 
 ### `cell_origin`
-[src/io/kra/mod.rs:176](../../../../src/io/kra/mod.rs#L176)
+[src/io/kra/mod.rs:177](../../../../src/io/kra/mod.rs#L177)
 
 ```rust
 pub fn cell_origin(pw: u32, ph: u32, cw: u32, ch: u32) -> (i32, i32)
@@ -274,7 +276,7 @@ The top-left (in frame coordinates) of a `cw`×`ch` cell centred on a `pw`×`ph`
 difference lands on the same pixel both directions of the round trip.
 
 ### `write`
-[src/io/kra/mod.rs:184](../../../../src/io/kra/mod.rs#L184)
+[src/io/kra/mod.rs:185](../../../../src/io/kra/mod.rs#L185)
 
 ```rust
 pub fn write(project: &Project, opts: &WriteOpts) -> Result<Vec<u8>>
@@ -289,7 +291,7 @@ Serialises the project as an animated `.kra` (bytes of a zip):
 4. `animation/index.xml` with fps, range and current frame; a flattened `mergedimage.png` and preview.
 
 ### `png_bytes`
-[src/io/kra/mod.rs:370](../../../../src/io/kra/mod.rs#L370)
+[src/io/kra/mod.rs:373](../../../../src/io/kra/mod.rs#L373)
 
 ```rust
 fn png_bytes(img: &image::RgbaImage) -> Result<Vec<u8>>
@@ -298,7 +300,7 @@ fn png_bytes(img: &image::RgbaImage) -> Result<Vec<u8>>
 Encodes an RGBA image as PNG bytes (for the merged image and preview inside the zip).
 
 ### `opacity_u8`
-[src/io/kra/mod.rs:376](../../../../src/io/kra/mod.rs#L376)
+[src/io/kra/mod.rs:379](../../../../src/io/kra/mod.rs#L379)
 
 ```rust
 pub fn opacity_u8(o: f32) -> u8
@@ -309,7 +311,7 @@ Converts a 0–1 opacity to Krita's 0–255.
 ## `impl Drawing`
 
 ### `Drawing::place`
-[src/io/kra/mod.rs:396](../../../../src/io/kra/mod.rs#L396)
+[src/io/kra/mod.rs:399](../../../../src/io/kra/mod.rs#L399)
 
 ```rust
 pub fn place(&self, cx: i32, cy: i32, cw: u32, ch: u32) -> (Canvas, bool)
@@ -321,7 +323,7 @@ canvas and whether any visible paint fell outside the cell and was cut off (repo
 ## `impl Reader`
 
 ### `Reader::bytes`
-[src/io/kra/mod.rs:471](../../../../src/io/kra/mod.rs#L471)
+[src/io/kra/mod.rs:477](../../../../src/io/kra/mod.rs#L477)
 
 ```rust
 fn bytes(&mut self, name: &str) -> Result<Vec<u8>>
@@ -330,7 +332,7 @@ fn bytes(&mut self, name: &str) -> Result<Vec<u8>>
 Reads a zip entry fully; an error if it's missing.
 
 ### `Reader::opt_bytes`
-[src/io/kra/mod.rs:478](../../../../src/io/kra/mod.rs#L478)
+[src/io/kra/mod.rs:484](../../../../src/io/kra/mod.rs#L484)
 
 ```rust
 fn opt_bytes(&mut self, name: &str) -> Result<Option<Vec<u8>>>
@@ -339,7 +341,7 @@ fn opt_bytes(&mut self, name: &str) -> Result<Option<Vec<u8>>>
 Reads a zip entry if present (`Ok(None)` when absent).
 
 ### `Reader::text`
-[src/io/kra/mod.rs:485](../../../../src/io/kra/mod.rs#L485)
+[src/io/kra/mod.rs:491](../../../../src/io/kra/mod.rs#L491)
 
 ```rust
 fn text(&mut self, name: &str) -> Result<String>
@@ -348,7 +350,7 @@ fn text(&mut self, name: &str) -> Result<String>
 Reads a zip entry as UTF-8 text.
 
 ### `Reader::default_pixel`
-[src/io/kra/mod.rs:490](../../../../src/io/kra/mod.rs#L490)
+[src/io/kra/mod.rs:496](../../../../src/io/kra/mod.rs#L496)
 
 ```rust
 fn default_pixel(&mut self, name: &str) -> Result<[u8; 4]>
@@ -357,7 +359,7 @@ fn default_pixel(&mut self, name: &str) -> Result<[u8; 4]>
 Reads a layer's default-pixel file (stored as BGRA) and returns it as RGBA; transparent if absent.
 
 ### `Reader::drawing`
-[src/io/kra/mod.rs:497](../../../../src/io/kra/mod.rs#L497)
+[src/io/kra/mod.rs:503](../../../../src/io/kra/mod.rs#L503)
 
 ```rust
 fn drawing(&mut self, file: &str, fallback_default: [u8; 4], dx: i32, dy: i32) -> Result<Drawing>
@@ -368,7 +370,7 @@ Reads and decodes one drawing's tile file into a `Drawing`, offset by the layer 
 ## Free functions
 
 ### `attr_i32`
-[src/io/kra/mod.rs:510](../../../../src/io/kra/mod.rs#L510)
+[src/io/kra/mod.rs:516](../../../../src/io/kra/mod.rs#L516)
 
 ```rust
 fn attr_i32(n: roxmltree::Node, name: &str) -> i32
@@ -377,7 +379,7 @@ fn attr_i32(n: roxmltree::Node, name: &str) -> i32
 An integer XML attribute, 0 if missing or invalid.
 
 ### `read`
-[src/io/kra/mod.rs:517](../../../../src/io/kra/mod.rs#L517)
+[src/io/kra/mod.rs:523](../../../../src/io/kra/mod.rs#L523)
 
 ```rust
 pub fn read(bytes: Vec<u8>) -> Result<KraDoc>
@@ -386,7 +388,7 @@ pub fn read(bytes: Vec<u8>) -> Result<KraDoc>
 Reads a `.kra` with every layer kept (tests use this; the app always filters).
 
 ### `read_filtered`
-[src/io/kra/mod.rs:525](../../../../src/io/kra/mod.rs#L525)
+[src/io/kra/mod.rs:531](../../../../src/io/kra/mod.rs#L531)
 
 ```rust
 pub fn read_filtered(bytes: Vec<u8>, keep: &dyn Fn(&str, &[String]) -> bool) -> Result<KraDoc>
@@ -398,7 +400,7 @@ range from `animation/index.xml`, folds nested groups into one level (passing vi
 lists rejected layers in `held` without decoding them, and collects warnings for unsupported content.
 
 #### `read_filtered::walk`
-[src/io/kra/mod.rs:573](../../../../src/io/kra/mod.rs#L573)
+[src/io/kra/mod.rs:580](../../../../src/io/kra/mod.rs#L580)
 
 ```rust
 fn walk(
@@ -419,36 +421,40 @@ group headers as `Found`, and adds warnings for unsupported layer types, blend m
 
 ### `mod tests`
 
-Run with `cargo test io::kra::tests` · 16 tests
+Run with `cargo test io::kra::tests` · 19 tests
 
 | Test | What it checks |
 |---|---|
-| [`write_then_read_keeps_keys_holds_repeats_and_pixels`](../../../../src/io/kra/mod.rs#L819) | Write then read keeps keys holds repeats and pixels. |
-| [`reads_krita_written_file_byte_identical`](../../../../src/io/kra/mod.rs#L889) | The reader against a file Krita itself wrote: `fixture_project` went through our writer, then `krita --export resaved.kra` (Krita 5.2.9). Regenerate with `KRA_FIXTURE_DIR=… cargo test kra_fixture -- --ignored` and that export. Krita re-encodes every tile (LZF, channel-planar), renames the frame files and keeps a cloned keyframe — every drawing must still come back byte-identical, or the link would see changes that were never made. |
-| [`carries_a_krita_written_layer_into_a_rewrite`](../../../../src/io/kra/mod.rs#L920) | Carry a layer out of a file Krita itself wrote — Krita's folder name, Krita's `layerN` file names, LZF tiles — into a rewrite that doesn't have it: it goes back in the same place, drawing for drawing. |
-| [`carries_a_whole_group_with_its_files`](../../../../src/io/kra/mod.rs#L954) | A rejected group comes out whole — any layer type inside — with the files its layers name, and only those (`layer9…`, not `layer90`). |
-| [`kra_carry_src`](../../../../src/io/kra/mod.rs#L1013) | Not a unit test: step 1 of the carry check — writes `carry_src.kra` (the project with `sketch-x`) into `$KRA_FIXTURE_DIR`. Then `krita --export --export-filename carry_krita.kra carry_src.kra`. |
-| [`a_group_round_trips_through_kra`](../../../../src/io/kra/mod.rs#L1038) | A group round trips through kra. |
-| [`carried_layers_keep_their_side_of_a_group`](../../../../src/io/kra/mod.rs#L1067) | Krita-only layers beside a group go back on the same side of its edge: one just above the group stays out of it, one at the bottom of it stays in. |
-| [`a_nested_krita_group_folds_into_the_outer`](../../../../src/io/kra/mod.rs#L1109) | Krita groups can nest; ours can't. A group inside a group folds into the outer one, its own visibility and opacity going into its layers. |
-| [`kra_group_src`](../../../../src/io/kra/mod.rs#L1147) | Not a unit test: writes `group_src.kra` (see `grouped_project`) into `$KRA_FIXTURE_DIR`, for checking against Krita: `krita --export-sequence --export-filename seq.png group_src.kra` should match our own flatten, and `krita --export --export-filename group_krita.kra group_src.kra` should read back with its group. |
-| [`kra_group_back`](../../../../src/io/kra/mod.rs#L1173) | Not a unit test: reads Krita's re-save of `group_src.kra` and checks the group came through. |
-| [`kra_carry_out`](../../../../src/io/kra/mod.rs#L1214) | Not a unit test: step 2 — carries `sketch-x` out of Krita's `carry_krita.kra` into a rewrite of the project *without* it, `carry_out.kra`. Krita should render that exactly like `carry_src.kra`. |
-| [`kra_fixture`](../../../../src/io/kra/mod.rs#L1229) | Not a unit test: writes `ours.kra` plus our own flattened frames (`ours_NNNN.png`) into `$KRA_FIXTURE_DIR`, to check the writer against a real Krita (`krita --export-sequence`, `krita --export`). |
-| [`first_drawing_lives_in_the_main_file_next_to_a_profile`](../../../../src/io/kra/mod.rs#L1248) | Krita loads a single-keyframe layer from the layer's main file alone, and reports a layer without its own `.icc` as a load problem — both found the hard way in the Krita GUI, which the CLI export stays quiet about. |
-| [`place_reports_paint_outside_the_cell`](../../../../src/io/kra/mod.rs#L1269) | Place reports paint outside the cell. |
-| [`a_rejected_group_holds_its_layers_undecoded`](../../../../src/io/kra/mod.rs#L1279) | A group the filter rejects takes its layers along: they come back as `held`, undecoded — this file has no pixel data for them at all. |
-| [`rejects_non_rgba_colour_space`](../../../../src/io/kra/mod.rs#L1304) | Rejects non rgba colour space. |
+| [`kra_blend_check`](../../../../src/io/kra/mod.rs#L840) | For checking blend modes against Krita itself: one .kra per mode, and beside it this app's own flattening as a PNG. Krita renders the .kra headless (see the Krita headless checks note) to diff against. `KRA_BLEND_DIR=… cargo test kra_blend_check -- --ignored` |
+| [`blend_modes_round_trip_through_kra`](../../../../src/io/kra/mod.rs#L884) | A layer's blend mode goes to Krita as its compositeop and comes back, and the flattened preview Krita shows is blended too. |
+| [`an_unknown_krita_blend_mode_comes_in_as_normal_with_a_warning`](../../../../src/io/kra/mod.rs#L896) | A mode this app doesn't have comes in as Normal, and says so. |
+| [`write_then_read_keeps_keys_holds_repeats_and_pixels`](../../../../src/io/kra/mod.rs#L932) | Write then read keeps keys holds repeats and pixels. |
+| [`reads_krita_written_file_byte_identical`](../../../../src/io/kra/mod.rs#L1002) | The reader against a file Krita itself wrote: `fixture_project` went through our writer, then `krita --export resaved.kra` (Krita 5.2.9). Regenerate with `KRA_FIXTURE_DIR=… cargo test kra_fixture -- --ignored` and that export. Krita re-encodes every tile (LZF, channel-planar), renames the frame files and keeps a cloned keyframe — every drawing must still come back byte-identical, or the link would see changes that were never made. |
+| [`carries_a_krita_written_layer_into_a_rewrite`](../../../../src/io/kra/mod.rs#L1033) | Carry a layer out of a file Krita itself wrote — Krita's folder name, Krita's `layerN` file names, LZF tiles — into a rewrite that doesn't have it: it goes back in the same place, drawing for drawing. |
+| [`carries_a_whole_group_with_its_files`](../../../../src/io/kra/mod.rs#L1067) | A rejected group comes out whole — any layer type inside — with the files its layers name, and only those (`layer9…`, not `layer90`). |
+| [`kra_carry_src`](../../../../src/io/kra/mod.rs#L1126) | Not a unit test: step 1 of the carry check — writes `carry_src.kra` (the project with `sketch-x`) into `$KRA_FIXTURE_DIR`. Then `krita --export --export-filename carry_krita.kra carry_src.kra`. |
+| [`a_group_round_trips_through_kra`](../../../../src/io/kra/mod.rs#L1151) | A group round trips through kra. |
+| [`carried_layers_keep_their_side_of_a_group`](../../../../src/io/kra/mod.rs#L1180) | Krita-only layers beside a group go back on the same side of its edge: one just above the group stays out of it, one at the bottom of it stays in. |
+| [`a_nested_krita_group_folds_into_the_outer`](../../../../src/io/kra/mod.rs#L1222) | Krita groups can nest; ours can't. A group inside a group folds into the outer one, its own visibility and opacity going into its layers. |
+| [`kra_group_src`](../../../../src/io/kra/mod.rs#L1260) | Not a unit test: writes `group_src.kra` (see `grouped_project`) into `$KRA_FIXTURE_DIR`, for checking against Krita: `krita --export-sequence --export-filename seq.png group_src.kra` should match our own flatten, and `krita --export --export-filename group_krita.kra group_src.kra` should read back with its group. |
+| [`kra_group_back`](../../../../src/io/kra/mod.rs#L1286) | Not a unit test: reads Krita's re-save of `group_src.kra` and checks the group came through. |
+| [`kra_carry_out`](../../../../src/io/kra/mod.rs#L1327) | Not a unit test: step 2 — carries `sketch-x` out of Krita's `carry_krita.kra` into a rewrite of the project *without* it, `carry_out.kra`. Krita should render that exactly like `carry_src.kra`. |
+| [`kra_fixture`](../../../../src/io/kra/mod.rs#L1342) | Not a unit test: writes `ours.kra` plus our own flattened frames (`ours_NNNN.png`) into `$KRA_FIXTURE_DIR`, to check the writer against a real Krita (`krita --export-sequence`, `krita --export`). |
+| [`first_drawing_lives_in_the_main_file_next_to_a_profile`](../../../../src/io/kra/mod.rs#L1361) | Krita loads a single-keyframe layer from the layer's main file alone, and reports a layer without its own `.icc` as a load problem — both found the hard way in the Krita GUI, which the CLI export stays quiet about. |
+| [`place_reports_paint_outside_the_cell`](../../../../src/io/kra/mod.rs#L1382) | Place reports paint outside the cell. |
+| [`a_rejected_group_holds_its_layers_undecoded`](../../../../src/io/kra/mod.rs#L1392) | A group the filter rejects takes its layers along: they come back as `held`, undecoded — this file has no pixel data for them at all. |
+| [`rejects_non_rgba_colour_space`](../../../../src/io/kra/mod.rs#L1417) | Rejects non rgba colour space. |
 
 **Test helpers** (used only by the tests above):
 
-- [`cell`](../../../../src/io/kra/mod.rs#L771) — A cell with a few coloured pixels, distinct per `seed`.
-- [`uuids`](../../../../src/io/kra/mod.rs#L781) — Uuids.
-- [`sample_project`](../../../../src/io/kra/mod.rs#L787) — Two layers: one with a key, a hold and a repeated cell; one with its first key late and a bigger-than-frame cell.
-- [`read_cell`](../../../../src/io/kra/mod.rs#L811) — The frame-space placement read back into a cell of the original size.
-- [`fixture_project`](../../../../src/io/kra/mod.rs#L851) — `sample_project` with drawings big enough to see — the project behind `testdata/krita-5.2.9-resaved.kra`.
-- [`with_sketch`](../../../../src/io/kra/mod.rs#L990) — `fixture_project` with a Krita-only `sketch-x` layer between Ink and Big, and the uuids to write it with (`uuids(3)` for the fixture's own layers, in order, so a rewrite without the sketch lines up).
-- [`grouped_project`](../../../../src/io/kra/mod.rs#L1022) — `sample_project` with its two layers in a half-opaque, folded group under a third layer.
-- [`with_maindoc`](../../../../src/io/kra/mod.rs#L1089) — Rewrite `bytes`' `maindoc.xml` with `f`, every other file as it was.
+- [`cell`](../../../../src/io/kra/mod.rs#L787) — A cell with a few coloured pixels, distinct per `seed`.
+- [`uuids`](../../../../src/io/kra/mod.rs#L797) — Uuids.
+- [`sample_project`](../../../../src/io/kra/mod.rs#L803) — Two layers: one with a key, a hold and a repeated cell; one with its first key late and a bigger-than-frame cell.
+- [`read_cell`](../../../../src/io/kra/mod.rs#L827) — The frame-space placement read back into a cell of the original size.
+- [`rewrite_maindoc`](../../../../src/io/kra/mod.rs#L913) — `bytes` with maindoc.xml put through `edit`, every other entry as it was.
+- [`fixture_project`](../../../../src/io/kra/mod.rs#L964) — `sample_project` with drawings big enough to see — the project behind `testdata/krita-5.2.9-resaved.kra`.
+- [`with_sketch`](../../../../src/io/kra/mod.rs#L1103) — `fixture_project` with a Krita-only `sketch-x` layer between Ink and Big, and the uuids to write it with (`uuids(3)` for the fixture's own layers, in order, so a rewrite without the sketch lines up).
+- [`grouped_project`](../../../../src/io/kra/mod.rs#L1135) — `sample_project` with its two layers in a half-opaque, folded group under a third layer.
+- [`with_maindoc`](../../../../src/io/kra/mod.rs#L1202) — Rewrite `bytes`' `maindoc.xml` with `f`, every other file as it was.
 
-**Test-only types and constants:** [`SKETCH_UUID`](../../../../src/io/kra/mod.rs#L985)
+**Test-only types and constants:** [`SKETCH_UUID`](../../../../src/io/kra/mod.rs#L1098)
