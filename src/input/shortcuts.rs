@@ -170,6 +170,9 @@ pub enum Action {
     TrackSwing,
     /// Open the Replace color window. Unbound by default.
     ReplaceColor,
+    /// Give each picked drawing that shares its drawing with another key
+    /// one of its own. Unbound by default.
+    TrackUnlink,
     SaveProject,
     SaveProjectAs,
     OpenProject,
@@ -310,6 +313,7 @@ impl Action {
         Action::TrackReverse,
         Action::TrackSwing,
         Action::ReplaceColor,
+        Action::TrackUnlink,
         Action::SaveProject,
         Action::SaveProjectAs,
         Action::OpenProject,
@@ -444,6 +448,7 @@ impl Action {
             Action::TrackReverse => "Timeline: reverse drawings",
             Action::TrackSwing => "Timeline: swing drawings (forward, then back)",
             Action::ReplaceColor => "Replace color…",
+            Action::TrackUnlink => "Timeline: make drawings independent",
             Action::SaveProject => "Save project",
             Action::SaveProjectAs => "Save project as…",
             Action::OpenProject => "Open project",

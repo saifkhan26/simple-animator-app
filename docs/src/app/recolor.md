@@ -1,6 +1,6 @@
 # `src/app/recolor.rs` — the Replace color command
 
-> **Source:** [src/app/recolor.rs](../../../src/app/recolor.rs) · **Module:** `crate::app::recolor` · **Size:** 375 lines · Line links as of commit `7901e50`
+> **Source:** [src/app/recolor.rs](../../../src/app/recolor.rs) · **Module:** `crate::app::recolor` · **Size:** 375 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 

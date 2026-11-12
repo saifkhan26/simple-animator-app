@@ -1,6 +1,6 @@
 # `src/io/png_import.rs` — importing a PNG sequence as a layer
 
-> **Source:** [src/io/png_import.rs](../../../src/io/png_import.rs) · **Module:** `crate::io::png_import` · **Size:** 113 lines · Line links as of commit `7901e50`
+> **Source:** [src/io/png_import.rs](../../../src/io/png_import.rs) · **Module:** `crate::io::png_import` · **Size:** 113 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 

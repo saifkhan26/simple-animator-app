@@ -1,6 +1,6 @@
 # `src/tools/lasso.rs` — turning a lasso outline into a coverage mask
 
-> **Source:** [src/tools/lasso.rs](../../../src/tools/lasso.rs) · **Module:** `crate::tools::lasso` · **Size:** 380 lines · Line links as of commit `7901e50`
+> **Source:** [src/tools/lasso.rs](../../../src/tools/lasso.rs) · **Module:** `crate::tools::lasso` · **Size:** 380 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 

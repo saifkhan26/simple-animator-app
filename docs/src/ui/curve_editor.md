@@ -1,6 +1,6 @@
 # `src/ui/curve_editor.rs` — the sensor curve editor widget
 
-> **Source:** [src/ui/curve_editor.rs](../../../src/ui/curve_editor.rs) · **Module:** `crate::ui::curve_editor` · **Size:** 201 lines · Line links as of commit `7901e50`
+> **Source:** [src/ui/curve_editor.rs](../../../src/ui/curve_editor.rs) · **Module:** `crate::ui::curve_editor` · **Size:** 201 lines · Line links as of commit `f210c6f`
 
 ## What this file is for
 

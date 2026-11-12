@@ -323,9 +323,10 @@ impl Project {
 
     /// The drawing showing at the active slot, deep-copied.
     ///
-    /// A copy, not a `CellId`: cells are never shared between slots (see
-    /// [`Project::layer_cell_ids`]), so handing out an id would let two frames
-    /// alias one buffer the moment it was pasted.
+    /// A copy, not a `CellId`: a pasted drawing is its own, and may land on
+    /// another layer, where sharing is never allowed (see
+    /// [`Project::layer_cell_ids`]). Keys share a drawing only when asked to,
+    /// through [`Project::set_drawing`].
     pub fn copy_active_cell(&self) -> Option<Canvas> {
         self.resolved_current().and_then(|id| self.cell(id)).cloned()
     }
@@ -1193,6 +1194,54 @@ impl Project {
         let c = self.cells[id].clone();
         self.cells.push(c);
         self.cells.len() - 1
+    }
+
+    /// Show drawing `id` from `frame` on layer `layer`: the key there points
+    /// at it, or a new key there does. The drawing is shared, not copied —
+    /// drawing on it changes every key that shows it. Only one of the
+    /// layer's own drawings: a drawing is never shared between layers.
+    /// Returns whether anything changed.
+    pub fn set_drawing(&mut self, layer: usize, frame: usize, id: CellId) -> bool {
+        if !self.layer_cell_ids(layer).contains(&id) {
+            return false;
+        }
+        let Some(e) = self.layers[layer].exposures.get_mut(frame) else {
+            return false;
+        };
+        if *e == Some(id) {
+            return false;
+        }
+        *e = Some(id);
+        true
+    }
+
+    /// How many keys on layer `layer` show drawing `id`.
+    pub fn keys_showing(&self, layer: usize, id: CellId) -> usize {
+        self.layers.get(layer).map_or(0, |l| l.exposures.iter().filter(|e| **e == Some(id)).count())
+    }
+
+    /// Give each drawing keyed at `starts` a drawing of its own where it
+    /// shares one with another key: a copy, sharing pixels until drawn on.
+    /// Of keys sharing a drawing that are all picked, the last keeps the
+    /// original. Returns the keys, which stay where they are.
+    pub fn unlink_keys(&mut self, starts: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        let mut keys: Vec<(usize, usize)> = starts
+            .iter()
+            .copied()
+            .filter(|&(l, f)| self.layers.get(l).is_some_and(|l| l.is_key(f)))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        for &(l, f) in &keys {
+            let Some(id) = self.layers[l].exposures[f] else {
+                continue;
+            };
+            if self.keys_showing(l, id) > 1 {
+                let copy = self.copy_cell(id);
+                self.layers[l].exposures[f] = Some(copy);
+            }
+        }
+        keys
     }
 
     /// Delete the drawings keyed at `starts`, leaving blank frames: each run
@@ -2501,6 +2550,57 @@ mod tests {
             assert_eq!(out.iter().sum::<usize>(), t.max(lens.len()), "{lens:?} -> {t}");
             assert!(out.iter().all(|&n| n >= 1));
         }
+    }
+
+    // --- Drawing substitution ---
+
+    #[test]
+    fn a_key_can_show_another_of_its_layers_drawings() {
+        let mut p = sheet(8, &[0, 2, 4]);
+        let a = p.layers[0].exposures[0].unwrap();
+        assert!(p.set_drawing(0, 4, a), "the key on 4 now shows the first drawing");
+        assert_eq!(p.layers[0].exposures[4], Some(a));
+        assert_eq!(p.keys_showing(0, a), 2);
+        assert!(!p.set_drawing(0, 4, a), "already showing it");
+        // A held frame takes a key of its own.
+        assert!(p.set_drawing(0, 3, a));
+        assert_eq!(key_frames(&p, 0), vec![0, 2, 3, 4]);
+        assert_eq!(p.frame_count, 8, "nothing moves");
+        assert_sound(&p);
+    }
+
+    #[test]
+    fn a_drawing_is_never_shared_with_another_layer() {
+        let mut p = sheet(4, &[0]);
+        p.add_layer();
+        key(&mut p, 1, 0, 9);
+        let other = p.layers[1].exposures[0].unwrap();
+        assert!(!p.set_drawing(0, 0, other));
+        assert!(!p.set_drawing(0, 99, p.layers[0].exposures[0].unwrap()), "past the end");
+    }
+
+    #[test]
+    fn unlinking_gives_each_picked_key_its_own_drawing() {
+        let mut p = sheet(9, &[0, 3, 6]);
+        let a = p.layers[0].exposures[0].unwrap();
+        p.set_drawing(0, 3, a);
+        p.set_drawing(0, 6, a);
+        // Picked alone, the key on 3 takes a copy; 0 and 6 go on sharing.
+        let out = p.unlink_keys(&[(0, 3)]);
+        assert_eq!(out, vec![(0, 3)]);
+        let b = p.layers[0].exposures[3].unwrap();
+        assert_ne!(b, a);
+        assert!(Arc::ptr_eq(&p.cells[a], &p.cells[b]), "sharing pixels until drawn on");
+        assert_eq!(p.keys_showing(0, a), 2);
+        // Both picked: one copy, the last keeps the original.
+        p.unlink_keys(&[(0, 0), (0, 6)]);
+        assert_ne!(p.layers[0].exposures[0], Some(a));
+        assert_eq!(p.layers[0].exposures[6], Some(a));
+        // A drawing on one key only is left as it is.
+        let len = p.cells.len();
+        p.unlink_keys(&[(0, 6), (0, 1)]);
+        assert_eq!(p.cells.len(), len, "nothing to copy; 1 is a hold");
+        assert_sound(&p);
     }
 
     #[test]

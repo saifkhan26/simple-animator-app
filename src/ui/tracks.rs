@@ -1131,6 +1131,19 @@ fn paint(
         Some(Target::Body { moved, .. }) => moved && !copy,
         _ => false,
     };
+    // Layers that show a drawing on more than one key number their bars, so
+    // a reused drawing reads as one. Hovering a shared drawing outlines the
+    // other keys that show it.
+    let mut numbers: std::collections::HashMap<usize, Vec<CellId>> = std::collections::HashMap::new();
+    for b in &todo {
+        if !numbers.contains_key(&b.layer) && state.layer_reuses(b.layer) {
+            numbers.insert(b.layer, state.numbered_drawings(b.layer));
+        }
+    }
+    let hovered_drawing = hover.and_then(|h| h.block).and_then(|b| {
+        let id = state.project.layers[b.layer].exposures.get(b.start).copied().flatten()?;
+        (state.project.keys_showing(b.layer, id) > 1).then_some((b.layer, b.start, id))
+    });
     let mut pending_scan = false;
     for b in &todo {
         let blank = if b.cell == PREVIEW_BLANK {
@@ -1165,6 +1178,11 @@ fn paint(
             ),
         };
         painter.rect(rect, BAR_ROUNDING, fill, stroke);
+        if let Some((hl, hs, hid)) = hovered_drawing {
+            if !b.preview && b.layer == hl && b.cell == hid && b.start != hs {
+                painter.rect_stroke(rect.shrink(0.5), BAR_ROUNDING, Stroke::new(1.0, theme::accent()));
+            }
+        }
 
         // The key: a filled dot for a drawing, a ring for a blank.
         let r = 2.5f32.min(rect.width() / 2.0 - 1.0).max(1.0);
@@ -1184,10 +1202,28 @@ fn paint(
             painter.circle_filled(dot, r, ink);
         }
 
+        // The drawing's number, on a layer that reuses drawings.
+        let number = numbers
+            .get(&b.layer)
+            .filter(|_| !blank && b.cell != PREVIEW_BLANK && rect.width() >= 20.0)
+            .and_then(|ids| ids.iter().position(|&d| d == b.cell))
+            .map(|i| (i + 1).to_string());
+        // Room it takes from the hold length: a digit is about 6 points.
+        let number_w = number.as_ref().map_or(0.0, |n| n.len() as f32 * 6.0 + 4.0);
+        if let Some(n) = number {
+            painter.text(
+                pos2(dot.x + r + 3.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                n,
+                egui::FontId::proportional(10.0),
+                ink,
+            );
+        }
+
         // Hold length, where there's room to read it. The last drawing holds
         // to the end, so its length is the timeline's, not a timing choice.
         let open = b.end >= fc && !b.preview;
-        if rect.width() >= 36.0 && !open {
+        if rect.width() >= 36.0 + number_w && !open {
             let color = if selected {
                 theme::accent_text().gamma_multiply(0.85)
             } else {
@@ -1369,13 +1405,27 @@ fn pointer_label(ctx: &egui::Context, id: Id, p: Pos2, text: String) {
 fn hover_text(state: &AppState, b: Block) -> String {
     let fc = state.project.frame_count;
     let span = b.span(fc);
-    let cell = state.project.layers[b.layer].exposures[b.start].unwrap_or_default();
+    let l = &state.project.layers[b.layer];
+    let cell = l.exposures[b.start].unwrap_or_default();
     let length = match b.len {
         Some(n) => format!("{n} fr"),
         None => "holds to the end".into(),
     };
+    let name = match state.drawing_number(b.layer, cell) {
+        Some(n) => format!("Drawing {n}"),
+        None => "Blank".to_string(),
+    };
+    let also: Vec<String> = (0..l.exposures.len())
+        .filter(|&f| f != b.start && l.exposures[f] == Some(cell))
+        .map(|f| f.to_string())
+        .collect();
+    let shared = match also.len() {
+        0 => String::new(),
+        1 => format!(", also on frame {}", also[0]),
+        _ => format!(", also on frames {}", also.join(", ")),
+    };
     format!(
-        "Cell {cell} · frames {}–{} · {length}\n\
+        "{name}{shared} · frames {}–{} · {length}\n\
          Drag to move, Ctrl-drag to copy. Drag the right edge to retime.",
         span.start,
         span.end - 1,
@@ -1481,6 +1531,26 @@ fn context_menu(state: &mut AppState, ui: &mut egui::Ui) {
             ui.close_menu();
         }
     });
+    ui.menu_button("Drawing", |ui| drawing_picker(state, ui))
+        .response
+        .on_hover_text(
+            "Show another of this layer's drawings on the picked keys. Right-clicked partway \
+             through a drawing's hold, it starts on the frame clicked instead. It is shared: \
+             drawing on it changes every key that shows it.",
+        );
+    let shared = state.picked_drawings_shared();
+    if ui
+        .add_enabled(
+            shared,
+            egui::Button::new("Make independent").shortcut_text(combo_text(state, Action::TrackUnlink)),
+        )
+        .on_hover_text("Give each picked drawing a copy of its own, so drawing on it changes it alone")
+        .on_disabled_hover_text("None of the picked drawings is shared with another key")
+        .clicked()
+    {
+        state.unlink_track_selection();
+        ui.close_menu();
+    }
     ui.separator();
     let n = state.frame_step_count();
     let frames = if n == 1 {
@@ -1555,6 +1625,85 @@ fn context_menu(state: &mut AppState, ui: &mut egui::Ui) {
     }
 }
 
+/// Displayed size of a thumbnail's longer side in the Drawing picker.
+const PICK_THUMB: f32 = 64.0;
+
+/// Thumbnails to a row in the Drawing picker.
+const PICK_COLUMNS: usize = 4;
+
+/// The Drawing submenu: the active layer's drawings as numbered thumbnails.
+/// A click shows that drawing on the layer's picked keys, or from the
+/// playhead when none are picked or the menu was opened partway through
+/// the picked drawing's hold — shared, not copied. What shows there now
+/// is outlined.
+fn drawing_picker(state: &mut AppState, ui: &mut egui::Ui) {
+    let li = state.project.current_layer;
+    let ids = state.numbered_drawings(li);
+    if ids.is_empty() {
+        ui.label(egui::RichText::new("No drawings on this layer yet").color(theme::text_muted()));
+        return;
+    }
+    let showing = state.substitution_shows();
+    let editable = state.project.paintable(li);
+    let ctx = ui.ctx().clone();
+    let (pw, ph) = (state.project.width.max(1) as f32, state.project.height.max(1) as f32);
+    let card = if pw >= ph {
+        vec2(PICK_THUMB, (PICK_THUMB * ph / pw).max(PICK_THUMB / 3.0))
+    } else {
+        vec2((PICK_THUMB * pw / ph).max(PICK_THUMB / 3.0), PICK_THUMB)
+    };
+    let label_h = 14.0;
+    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+        egui::Grid::new("drawing_picker").spacing([6.0, 6.0]).show(ui, |ui| {
+            for (i, &id) in ids.iter().enumerate() {
+                let sense = if editable { Sense::click() } else { Sense::hover() };
+                let (rect, resp) = ui.allocate_exact_size(card + vec2(0.0, label_h), sense);
+                let frame = Rect::from_min_size(rect.min, card);
+                let painter = ui.painter();
+                // The paper the drawing sits on, as on the canvas.
+                painter.rect_filled(frame, 3.0, Color32::from_gray(238));
+                if let Some(t) = state.drawing_thumb(&ctx, id) {
+                    let k = (card.x / t.size.x).min(card.y / t.size.y);
+                    let at = Rect::from_center_size(frame.center(), t.size * k);
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    painter.image(t.id, at, uv, Color32::WHITE);
+                }
+                let shown = showing.contains(&id);
+                let edge = if shown {
+                    Stroke::new(2.0, theme::accent())
+                } else if resp.hovered() && editable {
+                    Stroke::new(1.0, theme::text())
+                } else {
+                    Stroke::new(1.0, theme::text_muted().gamma_multiply(0.4))
+                };
+                painter.rect_stroke(frame, 3.0, edge);
+                painter.text(
+                    pos2(frame.center().x, frame.max.y + label_h / 2.0 + 1.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{}", i + 1),
+                    egui::FontId::proportional(11.0),
+                    if shown { theme::text() } else { theme::text_muted() },
+                );
+                let keys = state.project.keys_showing(li, id);
+                let tip = match keys {
+                    1 => format!("Drawing {} · on 1 key", i + 1),
+                    k => format!("Drawing {} · on {k} keys", i + 1),
+                };
+                if resp.on_hover_text(tip).clicked() {
+                    state.substitute_drawing(id);
+                    ui.close_menu();
+                }
+                if (i + 1) % PICK_COLUMNS == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    });
+    if !editable {
+        ui.label(egui::RichText::new("This layer can't be edited").color(theme::text_muted()).size(11.0));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1623,6 +1772,29 @@ mod tests {
         }
         frame(&ctx, state, vec![button(to, false)], modifiers);
         frame(&ctx, state, vec![], modifiers);
+    }
+
+    /// A right-click partway through a hold, then a drawing picked from the
+    /// menu: it starts on the frame clicked, and the drawing held there
+    /// keeps the frames before it.
+    #[test]
+    fn a_drawing_picked_on_a_held_frame_starts_there() {
+        let mut state = AppState::for_test();
+        state.project = sheet(8, &[0, 2]);
+        let first = state.project.layers[0].exposures[0].unwrap();
+        let ctx = egui::Context::default();
+        let right = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let m = egui::Modifiers::NONE;
+        frame(&ctx, &mut state, vec![], m);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(at(5, 0)), right(at(5, 0), true)], m);
+        frame(&ctx, &mut state, vec![right(at(5, 0), false)], m);
+        state.substitute_drawing(first);
+        assert_eq!(row(&state.project, 0), vec![1, 1, 3, 3, 3, 1, 1, 1]);
     }
 
     #[test]
