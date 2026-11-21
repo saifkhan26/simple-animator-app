@@ -8450,20 +8450,48 @@ fn draw_cursor_guides(
     xf: &Xform,
     clip: Rect,
     cursor: egui::Pos2,
+    drawing: bool,
 ) {
+    let (x, y) = xf.screen_to_doc(cursor);
+    for (c, bright) in cursor_guide_curves(state, [x, y], drawing) {
+        if bright {
+            draw_snap_curve(state, painter, xf, clip, &c, 230, 2.0);
+        } else {
+            draw_snap_curve(state, painter, xf, clip, &c, 150, 1.0);
+        }
+    }
+}
+
+/// The curves the cursor guides show, each with whether it is the bright
+/// one. Before a stroke: every way it could go from the cursor, and — bright
+/// — a ruler or an ellipse close enough for a press to take. While a stroke
+/// is drawn (`drawing`): every way it could have gone, pinned where it
+/// started so none of them vanish or wander, with the way it took bright.
+fn cursor_guide_curves(
+    state: &AppState,
+    cursor: [f32; 2],
+    drawing: bool,
+) -> Vec<(crate::tools::guides::Candidate, bool)> {
     use crate::tools::guides;
 
-    let (x, y) = xf.screen_to_doc(cursor);
-    let cands = state.snap_candidates([x, y]);
-    for c in cands.iter().filter(|c| !c.fixed) {
-        draw_snap_curve(state, painter, xf, clip, c, 150, 1.0);
-    }
-    // A ruler or an ellipse the pen is close enough to take: brighter, so
-    // the press is no surprise.
-    let tol = crate::app::SNAP_CAPTURE_PX / state.view_scale.max(1e-6);
-    if let Some(c) = guides::nearest_fixed(&cands, [x, y], tol) {
-        draw_snap_curve(state, painter, xf, clip, &c, 230, 2.0);
-    }
+    let at = if drawing {
+        match state.snap_start() {
+            Some(start) => start,
+            None => return Vec::new(),
+        }
+    } else {
+        cursor
+    };
+    let cands = state.snap_candidates(at);
+    let mut out: Vec<_> = cands.iter().filter(|c| !c.fixed).map(|&c| (c, false)).collect();
+    let bright = if drawing {
+        state.snap_curve()
+    } else {
+        let tol = crate::app::SNAP_CAPTURE_PX / state.view_scale.max(1e-6);
+        guides::nearest_fixed(&cands, at, tol)
+    };
+    out.extend(bright.map(|c| (c, true)));
+    out
 }
 
 /// One of the curves a stroke can keep to, dashed in its guide's colour: a
@@ -9158,13 +9186,10 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
     // Before a stroke picks its way, show the ways it could pick.
     let idle = state.stroke.is_none() && state.shape_drag.is_none();
     if state.perspective.cursor_guides && state.guiding() {
-        if idle {
-            draw_cursor_guides(state, &painter, &xf, canvas_rect, pos);
-        } else if let Some(c) = state.snap_curve() {
-            // The way the stroke took, held still while it is drawn — what
-            // a freehand stroke follows by eye.
-            draw_snap_curve(state, &painter, &xf, canvas_rect, &c, 170, 1.0);
-        }
+        // Every axis stays up while a stroke is drawn, pinned where it
+        // started; the way it took — what a freehand stroke follows by eye —
+        // is the bright one.
+        draw_cursor_guides(state, &painter, &xf, canvas_rect, pos, !idle);
     }
 
     let white = theme::white_alpha(220);
@@ -11250,6 +11275,37 @@ mod tests {
 /// The perspective tool through the real canvas: egui events in, grid out.
 #[cfg(test)]
 mod perspective_tests {
+    #[test]
+    fn every_cursor_guide_stays_up_while_a_stroke_is_drawn() {
+        let mut state = state();
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.cursor_guides = true;
+        state.view_scale = 1.0;
+        for snap in [true, false] {
+            state.perspective.snap = snap;
+            let before = super::cursor_guide_curves(&state, [500.0, 600.0], false);
+            assert!(before.len() >= 2, "a floor shows at least two axes: {}", before.len());
+            assert!(before.iter().all(|(_, bright)| !bright));
+            state.snap_begin([500.0, 600.0]);
+            // Down, before the stroke shows its way: every axis still there.
+            let held = super::cursor_guide_curves(&state, [503.0, 601.0], true);
+            assert_eq!(held.len(), before.len(), "snap {snap}: none vanish at pen-down");
+            // On its way: every axis, pinned at the start, and the one it
+            // took bright on top.
+            state.snap_doc([560.0, 602.0]);
+            let held = super::cursor_guide_curves(&state, [560.0, 640.0], true);
+            assert_eq!(held.len(), before.len() + 1, "snap {snap}");
+            assert_eq!(held.iter().filter(|(_, b)| *b).count(), 1);
+            for (c, _) in &held {
+                if let crate::tools::guides::SnapCurve::Line { origin, .. } = c.curve {
+                    assert_eq!(origin, [500.0, 600.0], "pinned where the pen went down");
+                }
+            }
+            state.pointer_up();
+        }
+    }
+
     use super::*;
     use crate::tools::perspective::Space;
     use egui::{pos2, vec2, Pos2};

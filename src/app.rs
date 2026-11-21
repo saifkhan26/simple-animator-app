@@ -6247,6 +6247,12 @@ impl AppState {
         self.snap_lock.and_then(|l| l.curve)
     }
 
+    /// Where the stroke in hand started, while the guides are in play: the
+    /// cursor guides stay pinned there until the pen lifts.
+    pub fn snap_start(&self) -> Option<[f32; 2]> {
+        self.snap_lock.map(|l| l.start)
+    }
+
     /// `raw` pulled onto `to` as hard as the snap strength says.
     fn snap_pull(&self, raw: [f32; 2], to: [f32; 2]) -> [f32; 2] {
         guides::pull(raw, to, self.perspective.snap_strength)
