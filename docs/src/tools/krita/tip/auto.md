@@ -1,6 +1,6 @@
 # `src/tools/krita/tip/auto.rs` — generated ("auto") brush tips
 
-> **Source:** [src/tools/krita/tip/auto.rs](../../../../../src/tools/krita/tip/auto.rs) · **Module:** `crate::tools::krita::tip::auto` · **Size:** 1007 lines · Line links as of commit `84b26e8`
+> **Source:** [src/tools/krita/tip/auto.rs](../../../../../src/tools/krita/tip/auto.rs) · **Module:** `crate::tools::krita::tip::auto` · **Size:** 1007 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

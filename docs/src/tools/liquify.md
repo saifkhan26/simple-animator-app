@@ -1,6 +1,6 @@
 # `src/tools/liquify.rs` — Liquify: warp field and resampling
 
-> **Source:** [src/tools/liquify.rs](../../../src/tools/liquify.rs) · **Module:** `crate::tools::liquify` · **Size:** 760 lines · Line links as of commit `84b26e8`
+> **Source:** [src/tools/liquify.rs](../../../src/tools/liquify.rs) · **Module:** `crate::tools::liquify` · **Size:** 760 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

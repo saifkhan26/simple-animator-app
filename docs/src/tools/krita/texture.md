@@ -1,6 +1,6 @@
 # `src/tools/krita/texture.rs` — Krita brush textures (the Pattern option)
 
-> **Source:** [src/tools/krita/texture.rs](../../../../src/tools/krita/texture.rs) · **Module:** `crate::tools::krita::texture` · **Size:** 206 lines · Line links as of commit `84b26e8`
+> **Source:** [src/tools/krita/texture.rs](../../../../src/tools/krita/texture.rs) · **Module:** `crate::tools::krita::texture` · **Size:** 206 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

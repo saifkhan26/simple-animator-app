@@ -1,6 +1,6 @@
 # `src/input/pen_record.rs` — record a few seconds of pen vs. cursor positions to a CSV file
 
-> **Source:** [src/input/pen_record.rs](../../../src/input/pen_record.rs) · **Module:** `crate::input::pen_record` · **Size:** 97 lines · Line links as of commit `84b26e8`
+> **Source:** [src/input/pen_record.rs](../../../src/input/pen_record.rs) · **Module:** `crate::input::pen_record` · **Size:** 97 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

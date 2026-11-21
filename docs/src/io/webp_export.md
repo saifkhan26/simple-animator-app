@@ -1,6 +1,6 @@
 # `src/io/webp_export.rs` — animated WebP export
 
-> **Source:** [src/io/webp_export.rs](../../../src/io/webp_export.rs) · **Module:** `crate::io::webp_export` · **Size:** 403 lines · Line links as of commit `84b26e8`
+> **Source:** [src/io/webp_export.rs](../../../src/io/webp_export.rs) · **Module:** `crate::io::webp_export` · **Size:** 403 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 
