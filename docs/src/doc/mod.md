@@ -1,6 +1,6 @@
 # `src/doc/mod.rs` — The document model's table of contents
 
-> **Source:** [src/doc/mod.rs](../../../src/doc/mod.rs) · **Module:** `crate::doc` · **Size:** 15 lines · Line links as of commit `c09072f`
+> **Source:** [src/doc/mod.rs](../../../src/doc/mod.rs) · **Module:** `crate::doc` · **Size:** 15 lines · Line links as of commit `31ab01e`
 
 ## What this file is for
 
@@ -42,14 +42,14 @@ quarter-turning pixels without resampling.
 
 | Line | Submodule | Page | In one line |
 |---|---|---|---|
-| [6](../../../src/doc/mod.rs#L6) | `camera` | [camera.md](camera.md) | the camera (pan / zoom / roll) and its keyframes: which part of document space each exported frame shows |
-| [7](../../../src/doc/mod.rs#L7) | `canvas` | [canvas.md](canvas.md) | the pixels of one drawing (a cell), RGBA8 |
-| [8](../../../src/doc/mod.rs#L8) | `clip` | [clip.md](clip.md) | clipping masks: a layer that only shows where the layer below has paint |
-| [9](../../../src/doc/mod.rs#L9) | `groups` | [groups.md](groups.md) | layer groups (a header row plus the layers under it) |
-| [10](../../../src/doc/mod.rs#L10) | `layer` | [layer.md](layer.md) | one layer: which cell shows on each frame, plus its settings |
-| [11](../../../src/doc/mod.rs#L11) | `orient` | [orient.md](orient.md) | the eight lossless ways to turn pixels over: mirror and quarter turns |
-| [12](../../../src/doc/mod.rs#L12) | `project` | [project.md](project.md) | the whole animation: cells, layers, timeline, camera, and every edit on them |
-| [13](../../../src/doc/mod.rs#L13) | `transform` | [transform.md](transform.md) | a layer's move / scale / rotate, its keyframes, and ease curves |
+| [7](../../../src/doc/mod.rs#L7) | `camera` | [camera.md](camera.md) | the camera (pan / zoom / roll) and its keyframes: which part of document space each exported frame shows |
+| [8](../../../src/doc/mod.rs#L8) | `canvas` | [canvas.md](canvas.md) | the pixels of one drawing (a cell), RGBA8 |
+| [9](../../../src/doc/mod.rs#L9) | `clip` | [clip.md](clip.md) | clipping masks: a layer that only shows where the layer below has paint |
+| [10](../../../src/doc/mod.rs#L10) | `groups` | [groups.md](groups.md) | layer groups (a header row plus the layers under it) |
+| [11](../../../src/doc/mod.rs#L11) | `layer` | [layer.md](layer.md) | one layer: which cell shows on each frame, plus its settings |
+| [12](../../../src/doc/mod.rs#L12) | `orient` | [orient.md](orient.md) | the eight lossless ways to turn pixels over: mirror and quarter turns |
+| [13](../../../src/doc/mod.rs#L13) | `project` | [project.md](project.md) | the whole animation: cells, layers, timeline, camera, and every edit on them |
+| [14](../../../src/doc/mod.rs#L14) | `transform` | [transform.md](transform.md) | a layer's move / scale / rotate, its keyframes, and ease curves |
 
 ## Rust concepts in this file
 

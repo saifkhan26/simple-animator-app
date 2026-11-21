@@ -1,6 +1,6 @@
 # `src/io/sprite_sheet.rs` — sprite-sheet export
 
-> **Source:** [src/io/sprite_sheet.rs](../../../src/io/sprite_sheet.rs) · **Module:** `crate::io::sprite_sheet` · **Size:** 170 lines · Line links as of commit `c09072f`
+> **Source:** [src/io/sprite_sheet.rs](../../../src/io/sprite_sheet.rs) · **Module:** `crate::io::sprite_sheet` · **Size:** 170 lines · Line links as of commit `31ab01e`
 
 ## What this file is for
 

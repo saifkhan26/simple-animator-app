@@ -1,6 +1,6 @@
 # `src/io/autosave.rs` — the autosave folders, and finding what a crash left
 
-> **Source:** [src/io/autosave.rs](../../../src/io/autosave.rs) · **Module:** `crate::io::autosave` · **Size:** 336 lines · Line links as of commit `c09072f`
+> **Source:** [src/io/autosave.rs](../../../src/io/autosave.rs) · **Module:** `crate::io::autosave` · **Size:** 336 lines · Line links as of commit `31ab01e`
 
 ## What this file is for
 

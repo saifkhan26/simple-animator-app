@@ -1,6 +1,6 @@
 # `src/input/clipboard_keys.rs` — making Ctrl+C / Ctrl+X / Ctrl+V usable as shortcuts
 
-> **Source:** [src/input/clipboard_keys.rs](../../../src/input/clipboard_keys.rs) · **Module:** `crate::input::clipboard_keys` · **Size:** 148 lines · Line links as of commit `c09072f`
+> **Source:** [src/input/clipboard_keys.rs](../../../src/input/clipboard_keys.rs) · **Module:** `crate::input::clipboard_keys` · **Size:** 148 lines · Line links as of commit `31ab01e`
 
 ## What this file is for
 

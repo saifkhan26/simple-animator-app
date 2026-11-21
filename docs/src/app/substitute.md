@@ -1,6 +1,6 @@
 # `src/app/substitute.rs` — reusing drawings across keys
 
-> **Source:** [src/app/substitute.rs](../../../src/app/substitute.rs) · **Module:** `crate::app::substitute` · **Size:** 429 lines · Line links as of commit `c09072f`
+> **Source:** [src/app/substitute.rs](../../../src/app/substitute.rs) · **Module:** `crate::app::substitute` · **Size:** 429 lines · Line links as of commit `31ab01e`
 
 ## What this file is for
 
