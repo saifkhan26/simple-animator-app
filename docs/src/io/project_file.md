@@ -1,6 +1,6 @@
 # `src/io/project_file.rs` — saving and opening `.anim` projects
 
-> **Source:** [src/io/project_file.rs](../../../src/io/project_file.rs) · **Module:** `crate::io::project_file` · **Size:** 1029 lines · Line links as of commit `f210c6f`
+> **Source:** [src/io/project_file.rs](../../../src/io/project_file.rs) · **Module:** `crate::io::project_file` · **Size:** 1029 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 

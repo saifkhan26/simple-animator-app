@@ -58,6 +58,9 @@ glam     = { version = "0.29", features = ["bytemuck"] }
 pollster = "0.3"
 
 serde    = { version = "1", features = ["derive", "rc"] }
+# Exported guide files (`.guides`): readable text, in the same RON the
+# preferences are kept in. Already in the tree via eframe's persistence.
+ron      = "0.8"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 toml     = "0.8"
 # Saving shortcuts.toml in place, comments and hand edits kept.

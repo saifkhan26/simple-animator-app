@@ -16,16 +16,22 @@ use super::{AppState, GridDrag, HORIZON_ATTACH_PX, HORIZON_DETACH_PX};
 use crate::doc::camera::Ease;
 use crate::doc::transform::Transform;
 use crate::tools::axis_lock;
+use crate::tools::guides;
 use crate::tools::perspective::{
     self, Follow, GridGrab, GridKind, PerspectiveConfig, PerspectiveGrid, Space, P,
 };
 use crate::undo;
 
 /// One project file's grids, as the app keeps them between sessions.
+///
+/// Saved through [`GridFileRepr`], so an older build — which knows only the
+/// plane kinds, and would throw away *every* preference over one guide kind
+/// it can't read — still finds just planes where it looks.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(from = "GridFileRepr", into = "GridFileRepr")]
 pub struct GridFile {
     pub path: PathBuf,
+    /// Every guide, in list order: planes, rulers, points, ellipses.
     pub grids: Vec<PerspectiveGrid>,
     pub active: usize,
     /// Seconds since the Unix epoch it was last open. Past
@@ -33,8 +39,111 @@ pub struct GridFile {
     pub used: u64,
 }
 
+/// [`GridFile`] as written. `grids` and `active` keep their old shape and
+/// hold only planes, so an older build reads them as it always did; the
+/// other guides go in `guides`, each with its place in the whole list, where
+/// an older build doesn't look.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct GridFileRepr {
+    path: PathBuf,
+    grids: Vec<PerspectiveGrid>,
+    /// Into `grids` — what an older build makes active.
+    active: usize,
+    used: u64,
+    guides: Vec<(usize, PerspectiveGrid)>,
+    /// The active guide's place in the whole list. Only meant when
+    /// `split` is set: a file from before has none, and `active` is it.
+    active_all: usize,
+    /// 1 once written this way; 0 (missing) in an older file.
+    split: u8,
+}
+
+impl From<GridFile> for GridFileRepr {
+    fn from(f: GridFile) -> Self {
+        let mut grids = Vec::new();
+        let mut guides = Vec::new();
+        let mut active = 0;
+        for (i, g) in f.grids.into_iter().enumerate() {
+            if g.kind.is_plane() {
+                if i <= f.active {
+                    active = grids.len();
+                }
+                grids.push(g);
+            } else {
+                guides.push((i, g));
+            }
+        }
+        Self {
+            path: f.path,
+            active: active.min(grids.len().saturating_sub(1)),
+            grids,
+            used: f.used,
+            guides,
+            active_all: f.active,
+            split: 1,
+        }
+    }
+}
+
+impl From<GridFileRepr> for GridFile {
+    fn from(r: GridFileRepr) -> Self {
+        let n = r.grids.len() + r.guides.len();
+        let mut slots: Vec<Option<PerspectiveGrid>> = vec![None; n];
+        let mut late = Vec::new();
+        for (i, g) in r.guides {
+            match slots.get_mut(i) {
+                Some(s @ None) => *s = Some(g),
+                _ => late.push(g),
+            }
+        }
+        let mut planes = r.grids.into_iter();
+        for s in slots.iter_mut().filter(|s| s.is_none()) {
+            *s = planes.next();
+        }
+        let mut grids: Vec<PerspectiveGrid> = slots.into_iter().flatten().collect();
+        grids.extend(planes);
+        grids.extend(late);
+        let active = if r.split == 0 { r.active } else { r.active_all };
+        Self {
+            path: r.path,
+            active: active.min(grids.len().saturating_sub(1)),
+            grids,
+            used: r.used,
+        }
+    }
+}
+
 /// Most files whose grids the app remembers.
 const MAX_GRID_FILES: usize = 256;
+
+/// A `.guides` file: guides exported from one project, to bring into
+/// another. Text, so it can be read and mailed about.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct GuidesFile {
+    /// 1 for now; a later layout bumps it.
+    version: u32,
+    guides: Vec<PerspectiveGrid>,
+}
+
+/// Write `guides` to a `.guides` file at `path`.
+pub fn write_guides(path: &Path, guides: &[PerspectiveGrid]) -> anyhow::Result<()> {
+    let file = GuidesFile {
+        version: 1,
+        guides: guides.to_vec(),
+    };
+    let text = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())?;
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
+/// The guides in the `.guides` file at `path`.
+pub fn read_guides(path: &Path) -> anyhow::Result<Vec<PerspectiveGrid>> {
+    let text = std::fs::read_to_string(path)?;
+    let file: GuidesFile = ron::from_str(&text)?;
+    Ok(file.guides)
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -115,6 +224,71 @@ impl AppState {
     pub(super) fn grid_files_for_prefs(&mut self) -> Vec<GridFile> {
         self.stash_grids();
         self.grid_files.clone()
+    }
+
+    // --- Guide files ---
+
+    /// Export every guide of the open file to a `.guides` file the artist
+    /// picks.
+    pub fn export_guides(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Guides", &["guides"])
+            .set_file_name("guides.guides")
+            .set_title("Export guides")
+            .save_file()
+        else {
+            return;
+        };
+        let n = self.perspective.grids.len();
+        self.guide_file_note = Some(match write_guides(&path, &self.perspective.grids) {
+            Ok(()) => format!("Exported {n} guide{}", if n == 1 { "" } else { "s" }),
+            Err(e) => format!("Couldn't export the guides: {e:#}"),
+        });
+    }
+
+    /// Add the guides in a `.guides` file the artist picks to the open
+    /// file's own.
+    pub fn import_guides(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Guides", &["guides"])
+            .set_title("Import guides")
+            .pick_file()
+        else {
+            return;
+        };
+        self.guide_file_note = Some(match read_guides(&path) {
+            Ok(guides) => {
+                let n = self.merge_guides(guides);
+                format!("Imported {n} guide{}", if n == 1 { "" } else { "s" })
+            }
+            Err(e) => format!("Couldn't read {}: {e:#}", path.display()),
+        });
+    }
+
+    /// Append `incoming` to the live guides under fresh ids, keeping each
+    /// wall on its own floor — or freeing it, if its floor didn't come too.
+    /// The last one added becomes active. How many came in.
+    pub(super) fn merge_guides(&mut self, incoming: Vec<PerspectiveGrid>) -> usize {
+        let cfg = &mut self.perspective;
+        let first = cfg.grids.len();
+        let mut ids = std::collections::HashMap::new();
+        for g in incoming {
+            let old = g.id;
+            let i = cfg.push(g);
+            if old != 0 {
+                ids.insert(old, cfg.grids[i].id);
+            }
+        }
+        for g in &mut cfg.grids[first..] {
+            if let Some(w) = g.wall.as_mut() {
+                match ids.get(&w.parent) {
+                    Some(&id) => w.parent = id,
+                    None => g.wall = None,
+                }
+            }
+        }
+        cfg.relink();
+        cfg.grids.len() - first
     }
 
     // --- What a grid follows ---
@@ -364,7 +538,12 @@ impl AppState {
             let corners = g.doc_corners(&space);
             let extra_at = g.extra_doc(&space);
             let eye_level = g.horizon && g.kind == GridKind::Perspective && !g.is_wall();
-            let Some(grab) = perspective::grab_at(&corners, &extra_at, p, tol, eye_level) else {
+            let grab = if g.kind.is_plane() {
+                perspective::grab_at(&corners, &extra_at, p, tol, eye_level)
+            } else {
+                guides::grab_at(g.kind, g.bend, &corners, p, tol)
+            };
+            let Some(grab) = grab else {
                 continue;
             };
             self.perspective.active = i;
@@ -402,13 +581,20 @@ impl AppState {
             return;
         };
         let s = d.space;
-        let rigid = self.perspective.grids.get(d.grid).is_some_and(|g| g.kind.rigid());
+        let kind = self.perspective.grids.get(d.grid).map_or(GridKind::Perspective, |g| g.kind);
+        let rigid = kind.rigid();
+        // A ruler's end and a helper line's end turn in 15° steps about the
+        // other end instead (see `guides::dragged`).
+        let turns = matches!(kind, GridKind::Ruler | GridKind::Parallel | GridKind::Point);
+        // A curved guide's side point only stretches it along its axis.
         let slides = match d.grab {
-            GridGrab::Move | GridGrab::Vp(_) | GridGrab::Extra(_) => true,
-            GridGrab::Corner(_) => !rigid,
+            GridGrab::Move | GridGrab::Extra(_) => true,
+            GridGrab::Vp(_) => !kind.is_curved(),
+            GridGrab::Corner(_) => !rigid && !turns,
             _ => false,
         };
         let snap = self.axis_lock_on();
+        let centred = self.centre_on();
         let p = if snap && slides {
             let (x, y) = axis_lock::lock_hv((d.start[0], d.start[1]), (p[0], p[1]), self.lock_basis_doc());
             [x, y]
@@ -435,6 +621,12 @@ impl AppState {
         let Some(g) = self.perspective.grids.get_mut(d.grid) else {
             return;
         };
+        if d.grab == GridGrab::Bend {
+            if let Some(b) = guides::bend_at(kind, &d.corners, p) {
+                g.bend = b;
+            }
+            return;
+        }
         if let GridGrab::Extra(i) = d.grab {
             let (Some(from), Some(v)) = (d.extra[i as usize], g.extra_vps.get(i as usize)) else {
                 return;
@@ -451,7 +643,22 @@ impl AppState {
             g.extra_vps[i as usize].on_horizon = on_horizon;
             return;
         }
-        let Some(c) = perspective::dragged(&d.corners, d.grab, d.start, p, snap, rigid) else {
+        // The centre key (Alt) on a two-point grid's vanishing point moves
+        // both, evenly about the middle between them, as in Harmony.
+        let both = match d.grab {
+            GridGrab::Vp(which) if kind == GridKind::Perspective && centred => {
+                mirror_vps(&d.corners, which, [p[0] - d.start[0], p[1] - d.start[1]])
+            }
+            _ => None,
+        };
+        let c = if both.is_some() {
+            both
+        } else if kind.is_plane() {
+            perspective::dragged(&d.corners, d.grab, d.start, p, snap, rigid)
+        } else {
+            guides::dragged(kind, &d.corners, d.grab, d.start, p, snap)
+        };
+        let Some(c) = c else {
             return;
         };
         let whole = matches!(d.grab, GridGrab::Move | GridGrab::Rotate)
@@ -465,6 +672,39 @@ impl AppState {
         }
         g.set_doc_corners(c, &s);
         self.perspective.relink();
+    }
+
+    /// What the grid drag in hand is turning, in degrees, for beside the pen:
+    /// a ruler's or a helper line's heading, a grid turned whole, a horizon
+    /// tilted. Up the screen counts positive, as on a protractor.
+    pub fn grid_drag_readout(&self) -> Option<String> {
+        let d = self.grid_drag?;
+        let g = self.perspective.grids.get(d.grid)?;
+        let c = g.doc_corners(&d.space);
+        // A line has no head or tail: (-90°, 90°].
+        let line = |v: P| {
+            let mut a = (-v[1]).atan2(v[0]).to_degrees();
+            if a > 90.0 {
+                a -= 180.0;
+            } else if a <= -90.0 {
+                a += 180.0;
+            }
+            format!("{a:.1}°")
+        };
+        match (g.kind, d.grab) {
+            (GridKind::Ruler | GridKind::Parallel, GridGrab::Corner(_)) => Some(line(perspective::sub(c[1], c[0]))),
+            (GridKind::Point, GridGrab::Corner(i)) => {
+                let (a, b) = if matches!(i, 0 | 3) { (c[0], c[3]) } else { (c[1], c[2]) };
+                Some(line(perspective::sub(a, b)))
+            }
+            (_, GridGrab::Rotate) => Some(format!("{:.1}°", -g.angle().to_degrees())),
+            (_, GridGrab::Bend) => Some(format!("Shape {:+.0}%", g.bend * 100.0)),
+            (GridKind::Perspective, GridGrab::Tilt) => {
+                let hz = perspective::Plane::new(c)?.horizon()?;
+                Some(line(hz.d))
+            }
+            _ => None,
+        }
     }
 
     /// The pen lifted off a grid drag: key it where auto-key says to, and
@@ -484,5 +724,188 @@ impl AppState {
                 after: Box::new(after.clone()),
             });
         }
+    }
+}
+
+/// A grid's corners re-aimed with its vanishing point `which` moved by
+/// `delta` and the other moved the opposite way, so both stay as far from the
+/// middle between them. `None` unless both are finite, or if the quad would
+/// fold.
+fn mirror_vps(c: &[P; 4], which: u8, delta: P) -> Option<[P; 4]> {
+    let plane = perspective::Plane::new(*c)?;
+    let (rows, cols) = (plane.vp_point(0)?, plane.vp_point(1)?);
+    let (rows, cols) = if which == 0 {
+        (perspective::add(rows, delta), perspective::sub(cols, delta))
+    } else {
+        (perspective::sub(rows, delta), perspective::add(cols, delta))
+    };
+    perspective::re_aim(c, perspective::Vp::Point(rows), perspective::Vp::Point(cols))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::MemStorage;
+    use super::*;
+
+    const KEY: &str = "grid_files";
+
+    fn file() -> GridFile {
+        let kinds = [
+            GridKind::Perspective,
+            GridKind::PanHorizontal,
+            GridKind::Ruler,
+            GridKind::Flat,
+            GridKind::Ellipse,
+            GridKind::Point,
+            GridKind::Fisheye,
+            GridKind::PanVertical,
+            GridKind::PanLoop,
+        ];
+        let mut grids = kinds.map(PerspectiveGrid::fresh).to_vec();
+        grids[1].bend = 0.4;
+        grids[8].bend = -0.25;
+        GridFile {
+            path: PathBuf::from("shot.anim"),
+            grids,
+            active: 4,
+            used: 7,
+        }
+    }
+
+    /// The store as an older build declares it: planes only.
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    #[serde(default)]
+    struct OldGridFile {
+        path: PathBuf,
+        grids: Vec<OldGrid>,
+        active: usize,
+        used: u64,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    #[serde(default)]
+    struct OldGrid {
+        kind: OldKind,
+        corners: [P; 4],
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Default, Debug, PartialEq)]
+    enum OldKind {
+        #[default]
+        Perspective,
+        Flat,
+        Isometric,
+    }
+
+    #[test]
+    fn exported_guides_come_back_in_another_file_with_their_walls() {
+        let mut from = AppState::for_test();
+        from.perspective.grids = vec![PerspectiveGrid::default(), PerspectiveGrid::fresh(GridKind::Ruler)];
+        from.perspective.ensure_ids();
+        assert!(from.perspective.add_wall(0, 1).is_some());
+        let path = std::env::temp_dir().join(format!("animator_guides_{}.guides", std::process::id()));
+        write_guides(&path, &from.perspective.grids).unwrap();
+        let read = read_guides(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read, from.perspective.grids);
+
+        let mut to = AppState::for_test();
+        to.perspective.grids = vec![PerspectiveGrid::fresh(GridKind::Flat)];
+        to.perspective.ensure_ids();
+        assert_eq!(to.merge_guides(read), 3);
+        let g = &to.perspective.grids;
+        assert_eq!(g.len(), 4);
+        assert_eq!(to.perspective.active, 3);
+        let mut ids: Vec<u32> = g.iter().map(|g| g.id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "every id its own");
+        // The wall stands on the floor that came with it.
+        let wall = g[3].wall.expect("still a wall");
+        assert_eq!(wall.parent, g[1].id);
+    }
+
+    #[test]
+    fn a_wall_without_its_floor_comes_in_free() {
+        let mut from = AppState::for_test();
+        from.perspective.grids = vec![PerspectiveGrid::default()];
+        from.perspective.ensure_ids();
+        let w = from.perspective.add_wall(0, 2).unwrap();
+        let alone = vec![from.perspective.grids[w].clone()];
+        let mut to = AppState::for_test();
+        to.merge_guides(alone);
+        assert!(to.perspective.grids.last().unwrap().wall.is_none());
+    }
+
+    #[test]
+    fn the_centre_key_moves_both_vanishing_points_evenly() {
+        let g = PerspectiveGrid::preset(perspective::Preset::TwoPoint);
+        let plane = perspective::Plane::new(g.corners).unwrap();
+        let (r0, c0) = (plane.vp_point(0).unwrap(), plane.vp_point(1).unwrap());
+        let c = mirror_vps(&g.corners, 0, [0.1, 0.0]).unwrap();
+        let plane = perspective::Plane::new(c).unwrap();
+        let (r1, c1) = (plane.vp_point(0).unwrap(), plane.vp_point(1).unwrap());
+        let near = |a: P, b: P| (a[0] - b[0]).abs() < 2e-3 && (a[1] - b[1]).abs() < 2e-3;
+        assert!(near(r1, [r0[0] + 0.1, r0[1]]), "{r1:?}");
+        assert!(near(c1, [c0[0] - 0.1, c0[1]]), "{c1:?}");
+    }
+
+    #[test]
+    fn the_store_keeps_every_guide_kind_in_order() {
+        let mut storage = MemStorage::default();
+        eframe::set_value(&mut storage, KEY, &vec![file()]);
+        let back: Vec<GridFile> = eframe::get_value(&storage, KEY).expect("reads back");
+        assert_eq!(back, vec![file()]);
+    }
+
+    #[test]
+    fn an_older_build_reads_only_the_planes() {
+        let mut storage = MemStorage::default();
+        eframe::set_value(&mut storage, KEY, &vec![file()]);
+        let old: Vec<OldGridFile> = eframe::get_value(&storage, KEY).expect("an older build still reads it");
+        let kinds: Vec<_> = old[0].grids.iter().map(|g| &g.kind).collect();
+        assert_eq!(kinds, [&OldKind::Perspective, &OldKind::Flat]);
+        // The ellipse was active: the plane before it stands in.
+        assert_eq!(old[0].active, 1);
+        assert_eq!(old[0].used, 7);
+    }
+
+    #[test]
+    fn curved_guides_go_where_an_older_build_does_not_look() {
+        let repr = GridFileRepr::from(file());
+        let kinds = |gs: Vec<GridKind>| gs.iter().filter(|k| k.is_curved()).count();
+        assert_eq!(kinds(repr.grids.iter().map(|g| g.kind).collect()), 0, "planes only where it looks");
+        assert_eq!(kinds(repr.guides.iter().map(|(_, g)| g.kind).collect()), 4);
+        // Each keeps its place in the whole list, and a pan its shape.
+        assert!(repr.guides.iter().any(|(i, g)| *i == 1 && g.kind == GridKind::PanHorizontal && g.bend == 0.4));
+        assert!(repr.guides.iter().any(|(i, g)| *i == 8 && g.kind == GridKind::PanLoop));
+    }
+
+    #[test]
+    fn curved_guides_export_and_come_back_with_their_shape() {
+        let guides = file().grids;
+        let path = std::env::temp_dir().join(format!("animator_curved_{}.guides", std::process::id()));
+        write_guides(&path, &guides).unwrap();
+        let read = read_guides(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read, guides);
+    }
+
+    #[test]
+    fn a_store_an_older_build_wrote_still_loads() {
+        let mut storage = MemStorage::default();
+        let written = vec![OldGridFile {
+            path: PathBuf::from("old.anim"),
+            grids: vec![
+                OldGrid { kind: OldKind::Flat, corners: PerspectiveGrid::fresh(GridKind::Flat).corners },
+                OldGrid { kind: OldKind::Perspective, corners: PerspectiveGrid::default().corners },
+            ],
+            active: 1,
+            used: 3,
+        }];
+        eframe::set_value(&mut storage, KEY, &written);
+        let back: Vec<GridFile> = eframe::get_value(&storage, KEY).expect("reads");
+        let kinds: Vec<_> = back[0].grids.iter().map(|g| g.kind).collect();
+        assert_eq!(kinds, [GridKind::Flat, GridKind::Perspective]);
+        assert_eq!(back[0].active, 1);
     }
 }

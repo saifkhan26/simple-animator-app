@@ -1,6 +1,6 @@
 # `src/tools/stroke.rs` — building a stroke from pen samples
 
-> **Source:** [src/tools/stroke.rs](../../../src/tools/stroke.rs) · **Module:** `crate::tools::stroke` · **Size:** 2127 lines · Line links as of commit `f210c6f`
+> **Source:** [src/tools/stroke.rs](../../../src/tools/stroke.rs) · **Module:** `crate::tools::stroke` · **Size:** 2127 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 

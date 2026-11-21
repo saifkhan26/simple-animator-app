@@ -1,6 +1,6 @@
 # `src/app/groups.rs` — drawing layer groups on screen
 
-> **Source:** [src/app/groups.rs](../../../src/app/groups.rs) · **Module:** `crate::app::groups` · **Size:** 535 lines · Line links as of commit `f210c6f`
+> **Source:** [src/app/groups.rs](../../../src/app/groups.rs) · **Module:** `crate::app::groups` · **Size:** 535 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 

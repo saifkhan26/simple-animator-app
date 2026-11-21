@@ -47,6 +47,7 @@ use crate::krita_link::{self, KritaLink, Pulled};
 use crate::timeline::onion::{OnionConfig, OnionDirection, OnionPin, OnionStep};
 use crate::timeline::playback::Playback;
 use crate::tools::axis_lock;
+use crate::tools::guides;
 use crate::tools::lasso::Mask;
 use crate::tools::ribbon::{union_rect, StrokeWorkspace};
 use crate::tools::perspective::{self, GridGrab, PerspectiveConfig};
@@ -256,12 +257,21 @@ struct GridDrag {
 const HORIZON_DETACH_PX: f32 = 40.0;
 const HORIZON_ATTACH_PX: f32 = 10.0;
 
-/// Perspective snap state for one stroke: where it started, and — once the
-/// pointer has moved far enough to tell — the grid direction it is locked to.
+/// Screen points from a ruler or an ellipse a press has to land within to
+/// take it — see [`AppState::snap_begin`].
+pub const SNAP_CAPTURE_PX: f32 = 14.0;
+
+/// Guide snap state for one stroke: where it started, and — once the pointer
+/// has moved far enough to tell, or at once for a press on a ruler — the
+/// curve it keeps to.
 #[derive(Clone, Copy)]
 struct SnapLock {
     start: [f32; 2],
-    dir: Option<[f32; 2]>,
+    curve: Option<guides::Candidate>,
+    /// Points are pulled onto the curve. Off — snap off, cursor guides on —
+    /// the curve is still picked, to show the way, but the stroke stays the
+    /// hand's.
+    apply: bool,
 }
 
 /// A hold read partway through a drag (the move and centre keys), sampled
@@ -1445,6 +1455,9 @@ pub struct AppState {
     /// The grids from before grids were kept per file, for files the app
     /// has none kept for.
     grid_seed: Vec<perspective::PerspectiveGrid>,
+    /// How the last guide export or import went, shown under the guide list
+    /// until the next one. Session-only.
+    pub guide_file_note: Option<String>,
     /// Perspective snap for the stroke in progress, or `None` when the stroke
     /// isn't snapping.
     snap_lock: Option<SnapLock>,
@@ -1959,6 +1972,7 @@ impl AppState {
             grid_sync_last: None,
             grid_files: prefs.grid_files.clone(),
             grid_seed: prefs.perspective.grids.clone(),
+            guide_file_note: None,
             snap_lock: None,
             view: View::default(),
             view_scale: 1.0,
@@ -6155,24 +6169,80 @@ impl AppState {
         (self.project.width as f32, self.project.height as f32)
     }
 
-    /// Whether the active grid is up for snapping to: switched on, shown, and
-    /// not hidden itself.
+    /// Whether the active grid is up for shapes to lie on: snap on, grids
+    /// shown, and the grid itself a plane, visible, with its magnet on.
     fn grid_snap_on(&self) -> bool {
         self.perspective.snap
             && self.perspective.show
-            && self.perspective.active_grid().is_some_and(|g| g.visible)
+            && self
+                .perspective
+                .active_grid()
+                .is_some_and(|g| g.visible && g.magnet && g.kind.is_plane())
     }
 
-    /// Whether strokes should snap to a grid direction right now. A shape
-    /// line counts as a stroke; rectangles and ellipses lie on the plane
-    /// instead (see [`Self::shape_plane`]).
-    pub fn snapping(&self) -> bool {
-        let stroke_tool = match self.tool {
-            ActiveTool::Pen(_) | ActiveTool::Eraser => true,
+    /// The guides strokes can snap to: every visible one with its magnet on,
+    /// the active one first.
+    pub fn snap_sources(&self) -> Vec<usize> {
+        let cfg = &self.perspective;
+        let n = cfg.grids.len();
+        std::iter::once(cfg.active)
+            .chain((0..n).filter(|&i| i != cfg.active))
+            .filter(|&i| cfg.grids.get(i).is_some_and(|g| g.visible && g.magnet))
+            .collect()
+    }
+
+    /// The tool in hand draws strokes the guides can hold: the pens, the
+    /// eraser unless it is let off, and the Shape tool's line. Rectangles
+    /// and ellipses lie on the plane instead (see [`Self::shape_plane`]).
+    fn guided_tool(&self) -> bool {
+        match self.tool {
+            ActiveTool::Pen(_) => true,
+            ActiveTool::Eraser => self.perspective.snap_eraser,
             ActiveTool::Shape => self.brush.shape_kind == ShapeKind::Line,
             _ => false,
-        };
-        stroke_tool && self.grid_snap_on()
+        }
+    }
+
+    /// Whether strokes snap to the guides right now.
+    pub fn snapping(&self) -> bool {
+        self.guided_tool()
+            && self.perspective.snap
+            && self.perspective.show
+            && !self.snap_sources().is_empty()
+    }
+
+    /// Whether strokes go by the guides right now: snapped onto them, or —
+    /// snap off, cursor guides on — just shown the way they would go.
+    pub fn guiding(&self) -> bool {
+        self.guided_tool()
+            && self.perspective.show
+            && (self.perspective.snap || self.perspective.cursor_guides)
+            && !self.snap_sources().is_empty()
+    }
+
+    /// Every way a stroke starting at document point `at` could go, from
+    /// every snap source.
+    pub fn snap_candidates(&self, at: [f32; 2]) -> Vec<guides::Candidate> {
+        let f = self.project.current_frame;
+        let vertical = self.perspective.snap_vertical;
+        self.snap_sources()
+            .into_iter()
+            .flat_map(|i| {
+                let g = &self.perspective.grids[i];
+                guides::candidates(g, &self.grid_space(g, f), at, vertical, i)
+            })
+            .collect()
+    }
+
+    /// The curve the stroke in hand keeps to, once it has picked one — what
+    /// the canvas draws ahead of the pen.
+    pub fn snap_curve(&self) -> Option<guides::Candidate> {
+        self.snap_lock.and_then(|l| l.curve)
+    }
+
+    /// `raw` pulled onto `to` as hard as the snap strength says.
+    fn snap_pull(&self, raw: [f32; 2], to: [f32; 2]) -> [f32; 2] {
+        guides::pull(raw, to, self.perspective.snap_strength)
     }
 
     /// Whether a shape drag started now would lie on the active grid — the
@@ -6268,31 +6338,46 @@ impl AppState {
             return;
         };
         lock.start = [lock.start[0] + p[0] - last[0], lock.start[1] + p[1] - last[1]];
-        if let Some(dir) = lock.dir {
+        if let Some(c) = lock.curve.filter(|c| !c.fixed) {
             // The family it was heading for, from here: a line slid across a
-            // one-point floor still runs to the vanishing point.
-            let f = self.project.current_frame;
-            let dirs = self
-                .perspective
-                .active_grid()
-                .map(|g| {
-                    let s = self.grid_space(g, f);
-                    g.snap_dirs(&s, lock.start, self.perspective.snap_vertical)
-                })
-                .unwrap_or_default();
-            lock.dir = perspective::pick_dir(&dirs, dir).or(Some(dir));
+            // one-point floor still runs to the vanishing point. A ruler or
+            // an ellipse stays where it is.
+            let heading = c.curve.tangent_at(lock.start).unwrap_or([1.0, 0.0]);
+            let cands = self.snap_candidates(lock.start);
+            lock.curve = guides::pick(&cands, lock.start, heading).or(Some(guides::Candidate {
+                curve: c.curve.through(lock.start),
+                ..c
+            }));
         }
         self.snap_lock = Some(lock);
     }
 
-    /// Start of a stroke at document point `p`. Arms perspective snap when it
-    /// is on; the first point itself is never moved.
+    /// Start of a stroke at document point `p`. Arms guide snap when it is
+    /// on, or the freehand guide when only that is. A press on a ruler or an
+    /// ellipse — within [`SNAP_CAPTURE_PX`] of it — takes it at once, and
+    /// the first point goes onto it; otherwise the first point is never
+    /// moved, and the way is picked once the pointer shows it.
     pub fn snap_begin(&mut self, p: [f32; 2]) -> [f32; 2] {
-        self.snap_lock = self.snapping().then_some(SnapLock { start: p, dir: None });
+        self.snap_lock = self.guiding().then_some(SnapLock {
+            start: p,
+            curve: None,
+            apply: self.snapping(),
+        });
+        let mut out = p;
+        if let Some(mut lock) = self.snap_lock {
+            let tol = SNAP_CAPTURE_PX / self.view_scale.max(1e-6);
+            if let Some(c) = guides::nearest_fixed(&self.snap_candidates(p), p, tol) {
+                if lock.apply {
+                    out = self.snap_pull(p, c.curve.project(p));
+                }
+                lock.curve = Some(c);
+                self.snap_lock = Some(lock);
+            }
+        }
         self.stroke_axis = None;
-        self.stroke_last_doc = Some(p);
+        self.stroke_last_doc = Some(out);
         self.shape_pointer_doc = Some(p);
-        p
+        out
     }
 
     /// Shift is held, and went down after the drag in hand began: hold the
@@ -6411,7 +6496,7 @@ impl AppState {
         let out = if !self.axis_lock_on() {
             if self.stroke_axis.take().is_some() {
                 if let (Some(lock), Some(at)) = (self.snap_lock.as_mut(), self.stroke_last_doc) {
-                    *lock = SnapLock { start: at, dir: None };
+                    *lock = SnapLock { start: at, curve: None, ..*lock };
                 }
             }
             self.snap_doc(p)
@@ -6449,33 +6534,29 @@ impl AppState {
         let Some(mut lock) = self.snap_lock else {
             return p;
         };
-        let dir = match lock.dir {
-            Some(d) => d,
+        let curve = match lock.curve {
+            Some(c) => c.curve,
             None => {
                 let motion = [p[0] - lock.start[0], p[1] - lock.start[1]];
                 if motion[0].hypot(motion[1]) * self.view_scale < DECIDE_PX {
-                    return lock.start;
+                    return if lock.apply { self.snap_pull(p, lock.start) } else { p };
                 }
-                let f = self.project.current_frame;
-                let dirs = self
-                    .perspective
-                    .active_grid()
-                    .map(|g| {
-                        let s = self.grid_space(g, f);
-                        g.snap_dirs(&s, lock.start, self.perspective.snap_vertical)
-                    })
-                    .unwrap_or_default();
-                let Some(d) = perspective::pick_dir(&dirs, motion) else {
+                let cands = self.snap_candidates(lock.start);
+                let Some(c) = guides::pick(&cands, lock.start, motion) else {
                     // A degenerate grid has nothing to snap to.
                     self.snap_lock = None;
                     return p;
                 };
-                lock.dir = Some(d);
+                lock.curve = Some(c);
                 self.snap_lock = Some(lock);
-                d
+                c.curve
             }
         };
-        perspective::project(lock.start, dir, p)
+        if lock.apply {
+            self.snap_pull(p, curve.project(p))
+        } else {
+            p
+        }
     }
 
     /// Most swatches kept. Past this the oldest is dropped, so the strip stays
@@ -10568,6 +10649,269 @@ mod tests {
         state.snap_begin([170.0, 400.0]);
         let p = state.snap_doc([170.0, 300.0]);
         assert!((p[0] - 170.0).abs() < 1e-3, "{p:?}");
+    }
+
+    /// `perspective_state` plus a second grid: a square turned 45°, so its
+    /// families run along the diagonals.
+    fn two_grid_state() -> AppState {
+        let mut state = perspective_state();
+        let (w, h) = state.frame_size();
+        let diamond = [[150.0, 100.0], [200.0, 150.0], [150.0, 200.0], [100.0, 150.0]];
+        let mut g = perspective::PerspectiveGrid::fresh(perspective::GridKind::Perspective);
+        g.set_doc_corners(diamond, &perspective::Space::flat(w, h));
+        state.perspective.push(g);
+        state.perspective.active = 0;
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        state
+    }
+
+    #[test]
+    fn a_stroke_snaps_to_whichever_visible_guide_fits_it_best() {
+        let mut state = two_grid_state();
+        // Down-right: the turned grid's family, though grid 1 is active.
+        state.snap_begin([150.0, 150.0]);
+        let p = state.snap_doc([170.0, 168.0]);
+        assert!(near(p, [169.0, 169.0]), "{p:?}");
+        assert_eq!(state.snap_curve().unwrap().grid, 1);
+        state.pointer_up();
+        // Its magnet off, the stroke keeps to the active grid's rows.
+        state.perspective.grids[1].magnet = false;
+        state.snap_begin([150.0, 150.0]);
+        let p = state.snap_doc([170.0, 168.0]);
+        assert_eq!(state.snap_curve().unwrap().grid, 0);
+        assert!(near(p, [170.0, 150.0]) || near(p, [150.0, 168.0]), "{p:?}");
+        state.pointer_up();
+        // Hidden counts as off too.
+        state.perspective.grids[1].magnet = true;
+        state.perspective.grids[1].visible = false;
+        state.snap_begin([150.0, 150.0]);
+        state.snap_doc([170.0, 168.0]);
+        assert_eq!(state.snap_curve().unwrap().grid, 0);
+    }
+
+    #[test]
+    fn snap_strength_pulls_part_way_onto_the_line() {
+        let mut state = perspective_state();
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        state.perspective.snap_strength = 0.5;
+        state.snap_begin([150.0, 150.0]);
+        // Locked to the rows; the point lands halfway between hand and line.
+        let p = state.snap_doc([170.0, 160.0]);
+        assert!(near(p, [170.0, 155.0]), "{p:?}");
+    }
+
+    #[test]
+    fn the_eraser_can_be_let_off_snapping() {
+        let mut state = perspective_state();
+        state.dispatch(Action::ToolEraser);
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        assert!(state.snapping());
+        state.perspective.snap_eraser = false;
+        assert!(!state.snapping());
+        state.snap_begin([150.0, 150.0]);
+        assert_eq!(state.snap_doc([170.0, 160.0]), [170.0, 160.0]);
+        // The pens still snap.
+        state.dispatch(Action::ToolPencil);
+        assert!(state.snapping());
+    }
+
+    #[test]
+    fn freehand_guides_pick_the_way_but_leave_the_stroke_alone() {
+        let mut state = perspective_state();
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.snap = false;
+        state.perspective.cursor_guides = true;
+        assert!(state.guiding() && !state.snapping());
+        state.snap_begin([150.0, 150.0]);
+        assert_eq!(state.snap_doc([152.0, 151.0]), [152.0, 151.0], "not held either");
+        assert_eq!(state.snap_doc([170.0, 153.0]), [170.0, 153.0]);
+        let c = state.snap_curve().expect("the way is picked, to show");
+        assert!(matches!(c.curve, guides::SnapCurve::Line { dir, .. } if dir[1].abs() < 1e-3));
+        // No cursor guides, no guiding at all.
+        state.pointer_up();
+        state.perspective.cursor_guides = false;
+        assert!(!state.guiding());
+        state.snap_begin([150.0, 150.0]);
+        state.snap_doc([170.0, 153.0]);
+        assert!(state.snap_curve().is_none());
+    }
+
+    /// Pencil, snap on, and grid 1 made into a guide of `kind` with corners
+    /// `c` in document space.
+    fn guide_state(kind: perspective::GridKind, c: [[f32; 2]; 4]) -> AppState {
+        let mut state = perspective_state();
+        let (w, h) = state.frame_size();
+        let g = &mut state.perspective.grids[0];
+        *g = perspective::PerspectiveGrid::fresh(kind);
+        g.set_doc_corners(c, &perspective::Space::flat(w, h));
+        state.dispatch(Action::ToolPencil);
+        state.perspective.show = true;
+        state.perspective.snap = true;
+        state
+    }
+
+    #[test]
+    fn a_press_on_a_ruler_draws_along_it_from_the_first_point() {
+        let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
+        let mut state = guide_state(perspective::GridKind::Ruler, ruler);
+        // Pressed just off it: on it at once.
+        assert!(near(state.snap_begin([150.0, 306.0]), [150.0, 300.0]));
+        assert!(state.snap_curve().is_some_and(|c| c.fixed));
+        assert!(near(state.snap_doc([200.0, 340.0]), [200.0, 300.0]));
+        // Past its end the stroke stops at the end.
+        assert!(near(state.snap_doc([380.0, 290.0]), [300.0, 300.0]));
+        state.pointer_up();
+        // Pressed well away, the ruler leaves the stroke alone.
+        assert_eq!(state.snap_begin([150.0, 200.0]), [150.0, 200.0]);
+        assert_eq!(state.snap_doc([190.0, 230.0]), [190.0, 230.0]);
+        assert!(state.snap_curve().is_none());
+    }
+
+    #[test]
+    fn an_ellipse_with_rings_keeps_a_stroke_on_the_ring_it_started_on() {
+        let sq = [[100.0, 100.0], [300.0, 100.0], [300.0, 300.0], [100.0, 300.0]];
+        let mut state = guide_state(perspective::GridKind::Ellipse, sq);
+        state.perspective.grids[0].rings = true;
+        // Fifty out from the middle: the ring of radius fifty.
+        state.snap_begin([200.0, 150.0]);
+        let p = state.snap_doc([230.0, 152.0]);
+        let r = (p[0] - 200.0).hypot(p[1] - 200.0);
+        assert!((r - 50.0).abs() < 0.5, "{p:?} is {r} out");
+        state.pointer_up();
+        // Pressed on the ellipse itself: round the ellipse.
+        state.snap_begin([200.0, 104.0]);
+        let p = state.snap_doc([260.0, 140.0]);
+        let r = (p[0] - 200.0).hypot(p[1] - 200.0);
+        assert!((r - 100.0).abs() < 0.5, "{p:?} is {r} out");
+    }
+
+    #[test]
+    fn a_vanishing_point_guide_sends_strokes_to_its_point() {
+        // Helpers meet at (200, 100).
+        let c = [[150.0, 200.0], [250.0, 200.0], [300.0, 300.0], [100.0, 300.0]];
+        let mut state = guide_state(perspective::GridKind::Point, c);
+        state.snap_begin([400.0, 400.0]);
+        let p = state.snap_doc([380.0, 370.0]);
+        // On the line from the start to the point.
+        let (d0, d1) = ([p[0] - 400.0, p[1] - 400.0], [200.0 - 400.0, 100.0 - 400.0]);
+        assert!((d0[0] * d1[1] - d0[1] * d1[0]).abs() < 1e-1, "{p:?}");
+    }
+
+    #[test]
+    fn a_horizontal_pan_bends_a_level_stroke_down_to_its_side_points() {
+        // Side points at (100, 300) and (700, 300).
+        let c = perspective::box_quad([400.0, 300.0], 300.0, 150.0);
+        let mut state = guide_state(perspective::GridKind::PanHorizontal, c);
+        state.snap_begin([450.0, 200.0]);
+        state.snap_doc([470.0, 201.0]);
+        let p = state.snap_doc([620.0, 200.0]);
+        let curve = state.snap_curve().expect("picked").curve;
+        assert!(matches!(curve, guides::SnapCurve::Wave { .. }), "{curve:?}");
+        assert!(curve.distance(p) < 0.5, "held on the arch: {p:?}");
+        assert!(curve.distance([100.0, 300.0]) < 0.5 && curve.distance([700.0, 300.0]) < 0.5);
+        // A level line drawn by hand comes out bent down toward the point.
+        assert!(p[1] > 230.0, "{p:?}");
+        state.pointer_up();
+        // Heading up instead: the vertical, straight.
+        state.snap_begin([450.0, 200.0]);
+        state.snap_doc([451.0, 180.0]);
+        let p = state.snap_doc([447.0, 120.0]);
+        assert!(near(p, [450.0, 120.0]), "{p:?}");
+    }
+
+    #[test]
+    fn a_fisheye_bows_a_downward_stroke_through_its_top_and_bottom_points() {
+        let c = perspective::box_quad([400.0, 300.0], 200.0, 200.0);
+        let mut state = guide_state(perspective::GridKind::Fisheye, c);
+        state.snap_begin([500.0, 250.0]);
+        state.snap_doc([501.0, 270.0]);
+        let p = state.snap_doc([505.0, 380.0]);
+        let curve = state.snap_curve().expect("picked").curve;
+        assert!(matches!(curve, guides::SnapCurve::Arc { .. }), "{curve:?}");
+        assert!(curve.distance([400.0, 100.0]) < 0.5 && curve.distance([400.0, 500.0]) < 0.5);
+        // The circle through those and the start, about (262.5, 300): the
+        // pen at (505, 380) lands straight in from it, at x ≈ 493.
+        assert!(curve.distance(p) < 0.5 && (p[0] - 493.0).abs() < 1.0, "{p:?}");
+        state.pointer_up();
+        // Heading for the centre: straight to it.
+        state.snap_begin([500.0, 250.0]);
+        state.snap_doc([490.0, 255.0]);
+        let p = state.snap_doc([440.0, 270.0]);
+        let (d0, d1) = ([p[0] - 500.0, p[1] - 250.0], [-100.0, 50.0]);
+        assert!((d0[0] * d1[1] - d0[1] * d1[0]).abs() < 1.0, "{p:?}");
+    }
+
+    #[test]
+    fn a_360_pan_takes_a_stroke_on_round_past_the_loop() {
+        // One turn 800 wide: points every 200, the box's ends the same one.
+        let c = perspective::box_quad([400.0, 300.0], 400.0, 150.0);
+        let mut state = guide_state(perspective::GridKind::PanLoop, c);
+        let draw = |state: &mut AppState, dx: f32| {
+            state.snap_begin([350.0 + dx, 220.0]);
+            state.snap_doc([370.0 + dx, 221.0]);
+            let p = state.snap_doc([480.0 + dx, 240.0]);
+            state.pointer_up();
+            p
+        };
+        let inside = draw(&mut state, 0.0);
+        let round = draw(&mut state, 800.0);
+        assert!(near(round, [inside[0] + 800.0, inside[1]]), "{inside:?} then {round:?}");
+    }
+
+    #[test]
+    fn a_pans_handles_stretch_it_and_bend_its_curves_each_one_undo() {
+        use perspective::GridKind;
+        let c = perspective::box_quad([400.0, 300.0], 300.0, 150.0);
+        let mut state = guide_state(GridKind::PanHorizontal, c);
+        state.dispatch(Action::ToolPerspective);
+        let (w, h) = state.frame_size();
+        let space = perspective::Space::flat(w, h);
+        // The right side point, out by half again: the left one goes too.
+        state.perspective_down([700.0, 300.0]);
+        state.perspective_move([850.0, 310.0]);
+        state.pointer_up();
+        let stretched = state.perspective.grids[0].doc_corners(&space);
+        assert!(near(stretched[0], [-50.0, 150.0]) && near(stretched[2], [850.0, 450.0]), "{stretched:?}");
+        // The shape handle, out toward the box's top: fuller arches.
+        let at = guides::bend_handle(GridKind::PanHorizontal, 0.0, &stretched).unwrap();
+        state.perspective_down(at);
+        state.perspective_move([at[0] + 4.0, 300.0 - 150.0 * 0.9]);
+        assert_eq!(state.grid_drag_readout().as_deref(), Some("Shape +80%"));
+        state.pointer_up();
+        let g = &state.perspective.grids[0];
+        assert!((g.bend - 0.8).abs() < 1e-3, "{}", g.bend);
+        assert_eq!(g.doc_corners(&space), stretched, "the box stays");
+        state.undo();
+        assert_eq!(state.perspective.grids[0].bend, 0.0);
+        state.undo();
+        assert_eq!(state.perspective.grids[0].doc_corners(&space), c);
+    }
+
+    #[test]
+    fn a_ruler_end_drag_shows_its_heading() {
+        let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
+        let mut state = guide_state(perspective::GridKind::Ruler, ruler);
+        state.dispatch(Action::ToolPerspective);
+        state.perspective_down([300.0, 300.0]);
+        state.perspective_move([300.0, 100.0]);
+        assert_eq!(state.grid_drag_readout().as_deref(), Some("45.0°"));
+        state.pointer_up();
+        assert!(state.grid_drag_readout().is_none());
+    }
+
+    #[test]
+    fn shapes_lie_only_on_a_plane() {
+        let ruler = perspective::line_quad([100.0, 300.0], [300.0, 300.0]);
+        let mut state = guide_state(perspective::GridKind::Ruler, ruler);
+        state.dispatch(Action::ToolShape);
+        state.brush.shape_kind = ShapeKind::Rect;
+        assert!(!state.shapes_on_grid(), "a ruler is no plane to lie on");
     }
 
     /// One-point floor whose columns meet at (150, 66.7).

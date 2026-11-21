@@ -470,6 +470,25 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Respon
     }
 }
 
+/// A smaller icon button with no frame until the pointer is over it, for a
+/// row that carries several — a guide's eye, lock and magnet — so they don't
+/// crowd out the row's name.
+pub fn quiet_icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
+    // A frameless button has no padding either; its hover fill goes in a
+    // slot kept under it, filled once it is known to be hovered.
+    let under = ui.painter().add(egui::Shape::Noop);
+    let text = egui::RichText::new(icon).size(14.0);
+    let resp = ui.add(egui::Button::new(text).frame(false).min_size(egui::vec2(20.0, 20.0)));
+    if resp.hovered() {
+        ui.painter().set(under, egui::Shape::rect_filled(resp.rect, 4.0, bg_hover()));
+    }
+    if tooltip.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(tooltip)
+    }
+}
+
 /// Selectable icon button used in the tool palette. When selected it shows the
 /// accent fill via the active widget visuals; an accent underline reinforces it.
 pub fn icon_toggle(ui: &mut egui::Ui, icon: &str, tooltip: &str, selected: bool) -> egui::Response {

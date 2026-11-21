@@ -46,6 +46,9 @@ enum Win {
     Unsaved,
     Recovery,
     Recolor,
+    /// The canvas's guide overlay alone, over the whole screen: for
+    /// `snapshots`, not the sweeps.
+    Guides,
 }
 
 impl std::fmt::Debug for Win {
@@ -66,6 +69,7 @@ impl std::fmt::Debug for Win {
             Win::Unsaved => write!(f, "Unsaved"),
             Win::Recovery => write!(f, "Recovery"),
             Win::Recolor => write!(f, "Recolor"),
+            Win::Guides => write!(f, "Guides"),
         }
     }
 }
@@ -197,6 +201,7 @@ impl Win {
                 state.project.layers[0].name = "Shirt colour, cleanup pass two".into();
                 state.open_recolor();
             }
+            Win::Guides => {}
         }
     }
 
@@ -220,6 +225,10 @@ impl Win {
             Win::Unsaved => unsaved_dialog(state, ctx),
             Win::Recovery => recovery_dialog(state, ctx),
             Win::Recolor => recolor_window(state, ctx),
+            Win::Guides => {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                draw_perspective_grids(state, &painter, &Xform::new(state, SCREEN), SCREEN);
+            }
         }
     }
 
@@ -317,6 +326,14 @@ impl Rig {
         let r = self.rect();
         let from = pos2(r.max.x - 1.0, r.center().y);
         self.drag(from, from + egui::vec2(dx, 0.0));
+    }
+
+    /// Pull the window's bottom-right corner down by `dy`: taller, for a
+    /// window whose body scrolls.
+    fn drag_corner_down(&mut self, dy: f32) {
+        let r = self.rect();
+        let from = r.max - egui::vec2(3.0, 3.0);
+        self.drag(from, from + egui::vec2(0.0, dy));
     }
 
     fn drag_bottom_edge(&mut self, dy: f32) {
@@ -849,6 +866,41 @@ fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage {
     image::RgbaImage::from_raw(w as u32, h as u32, bytes).expect("sized to fit")
 }
 
+/// A floor and one guide of every other kind, spread out so each shows —
+/// the curved ones last, each a box round the middle, so they are drawn on
+/// their own.
+fn guide_set() -> Vec<crate::tools::perspective::PerspectiveGrid> {
+    use crate::tools::perspective::{GridKind, PerspectiveGrid};
+    let at = |kind, d: [f32; 2]| {
+        let mut g = PerspectiveGrid::fresh(kind);
+        g.translate(d);
+        g
+    };
+    let mut ruler = at(GridKind::Ruler, [0.45, 0.32]);
+    ruler.infinite_ruler = true;
+    let mut ring = at(GridKind::Ellipse, [0.55, -0.15]);
+    ring.rings = true;
+    ring.centre_lines = true;
+    // Squashed into a floor-like quad: a circle in perspective.
+    ring.corners[0][0] += 0.06;
+    ring.corners[1][0] -= 0.06;
+    let mut tilt = PerspectiveGrid::fresh(GridKind::PanVertical);
+    tilt.bend = 0.6;
+    let mut round = PerspectiveGrid::fresh(GridKind::PanLoop);
+    round.bend = -0.4;
+    vec![
+        PerspectiveGrid::preset(crate::tools::perspective::Preset::TwoPoint),
+        ruler,
+        at(GridKind::Parallel, [-0.55, -0.3]),
+        at(GridKind::Point, [0.0, -0.05]),
+        ring,
+        PerspectiveGrid::fresh(GridKind::PanHorizontal),
+        tilt,
+        round,
+        PerspectiveGrid::fresh(GridKind::Fisheye),
+    ]
+}
+
 /// Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a
 /// look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots`
 #[test]
@@ -927,9 +979,63 @@ fn snapshots() {
     });
     snapshot_of(&mut rig, 2.0, menu.expand(4.0)).save(dir.join("drawing_picker.png")).unwrap();
 
-    // A grid's settings, with Fill canvas's rows showing.
+    // A grid's settings, with Fill canvas's rows showing, pulled tall
+    // enough to show the whole of it.
     let mut rig = Rig::new(Win::GridSettings);
+    rig.drag_corner_down(600.0);
     snapshot(&mut rig, 2.0).save(dir.join("grid_settings.png")).unwrap();
+    // …and scrolled to its end, its folded sections open.
+    let at = rig.rect().center();
+    let wheel = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -4000.0),
+        modifiers: egui::Modifiers::NONE,
+    };
+    rig.frame(vec![egui::Event::PointerMoved(at), wheel.clone()]);
+    rig.open_sections();
+    rig.frame(vec![egui::Event::PointerMoved(at), wheel]);
+    snapshot(&mut rig, 2.0).save(dir.join("grid_settings_end.png")).unwrap();
+    // Each other guide kind's settings, the Grid tool's list of them all,
+    // and how they paint on the canvas.
+    let guides = guide_set();
+    for (i, g) in guides.iter().enumerate().skip(1) {
+        let mut rig = Rig::new(Win::GridSettings);
+        rig.state.perspective.grids = guides.clone();
+        rig.state.perspective.ensure_ids();
+        rig.state.perspective.active = i;
+        rig.settle();
+        rig.drag_corner_down(600.0);
+        let name = g.kind.row_name().to_lowercase();
+        snapshot(&mut rig, 2.0).save(dir.join(format!("guide_settings_{name}_{i}.png"))).unwrap();
+    }
+    let mut rig = Rig::new(Win::ToolPanel(ActiveTool::Perspective));
+    rig.state.perspective.grids = guides.clone();
+    rig.state.perspective.ensure_ids();
+    rig.state.perspective.grids[2].magnet = false;
+    rig.settle();
+    rig.drag_corner_down(600.0);
+    snapshot(&mut rig, 2.0).save(dir.join("guide_list.png")).unwrap();
+    let (straight, curved): (Vec<_>, Vec<_>) = guides.iter().cloned().partition(|g| !g.kind.is_curved());
+    for tool in [ActiveTool::Perspective, ActiveTool::Pen(0)] {
+        let name = if tool == ActiveTool::Perspective { "edit" } else { "draw" };
+        let mut rig = Rig::new(Win::Guides);
+        rig.state.perspective.grids = straight.clone();
+        rig.state.perspective.ensure_ids();
+        rig.state.perspective.show = true;
+        rig.state.perspective.active = 1;
+        rig.state.set_tool(tool);
+        snapshot_of(&mut rig, 1.0, SCREEN).save(dir.join(format!("guides_{name}.png"))).unwrap();
+        // Each curved guide alone: it covers the canvas.
+        for g in &curved {
+            let mut rig = Rig::new(Win::Guides);
+            rig.state.perspective.grids = vec![g.clone()];
+            rig.state.perspective.ensure_ids();
+            rig.state.perspective.show = true;
+            rig.state.set_tool(tool);
+            let kind = format!("{:?}", g.kind).to_lowercase();
+            snapshot_of(&mut rig, 1.0, SCREEN).save(dir.join(format!("guides_{kind}_{name}.png"))).unwrap();
+        }
+    }
 
     // Brush settings with noise on, tall enough to see it.
     let mut rig = Rig::new(Win::BrushSettings);

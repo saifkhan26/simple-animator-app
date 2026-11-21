@@ -67,6 +67,7 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/tools/dab.rs`](src/tools/dab.md) | brush dabs (one stamp of a brush) |
 | [`src/tools/fill.rs`](src/tools/fill.md) | flood fill, gap closing and fill painting |
 | [`src/tools/golden_tests.rs`](src/tools/golden_tests.md) | golden-image tests for every brush (test-only) |
+| [`src/tools/guides.rs`](src/tools/guides.md) | snapping strokes to guides |
 | [`src/tools/lasso.rs`](src/tools/lasso.md) | turning a lasso outline into a coverage mask |
 | [`src/tools/liquify.rs`](src/tools/liquify.md) | Liquify: warp field and resampling |
 | [`src/tools/mod.rs`](src/tools/mod.md) | the tools folder, tool list and brush settings |
@@ -202,4 +203,4 @@ Each link opens that file's page. The page links to the source itself.
 | [`src/platform.rs`](src/platform.md) | rounded corners and a border for the frameless window (Windows) |
 | [`src/undo.rs`](src/undo.md) | undo and redo history |
 
-_121 pages._
+_122 pages._

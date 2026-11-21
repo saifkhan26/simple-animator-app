@@ -29,22 +29,22 @@ use crate::doc::transform::{Ease, Transform};
 /// A point or vector in document space.
 pub type P = [f32; 2];
 
-fn sub(a: P, b: P) -> P {
+pub(crate) fn sub(a: P, b: P) -> P {
     [a[0] - b[0], a[1] - b[1]]
 }
-fn add(a: P, b: P) -> P {
+pub(crate) fn add(a: P, b: P) -> P {
     [a[0] + b[0], a[1] + b[1]]
 }
-fn dot(a: P, b: P) -> f32 {
+pub(crate) fn dot(a: P, b: P) -> f32 {
     a[0] * b[0] + a[1] * b[1]
 }
-fn cross(a: P, b: P) -> f32 {
+pub(crate) fn cross(a: P, b: P) -> f32 {
     a[0] * b[1] - a[1] * b[0]
 }
-fn len(a: P) -> f32 {
+pub(crate) fn len(a: P) -> f32 {
     a[0].hypot(a[1])
 }
-fn normalize(a: P) -> Option<P> {
+pub(crate) fn normalize(a: P) -> Option<P> {
     let l = len(a);
     (l > 1e-9).then(|| [a[0] / l, a[1] / l])
 }
@@ -56,7 +56,7 @@ const FRONT_EPS: f64 = 1e-6;
 
 /// Projective map from the unit square onto a quad: `(u, v)` → document
 /// point. Row-major 3×3, applied to `(u, v, 1)`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Homography {
     m: [f64; 9],
 }
@@ -286,11 +286,33 @@ pub enum GridGrab {
     Tilt,
     Rotate,
     Move,
+    /// A pan's curve-shape handle, on its outermost arch.
+    Bend,
 }
 
-/// What kind of guide a grid is. All three are a four-corner quad; flat and
-/// isometric grids hold theirs to a square or a 60° rhombus, and tile it over
-/// the whole canvas.
+/// What kind of guide a grid is. Every kind keeps four corners, so keys,
+/// follow links, undo and the pose fields work the same for all of them.
+///
+/// The first three are planes: a four-corner quad, which flat and isometric
+/// grids hold to a square or a 60° rhombus and tile over the whole canvas.
+/// The rest are single guides (see [`super::guides`]):
+///
+/// - [`Ruler`](Self::Ruler) and [`Parallel`](Self::Parallel) are a line
+///   from corner 0 to corner 1, kept as the flat quad `[a, b, b, a]` so its
+///   centre and turn read off the corners like any grid's.
+/// - [`Point`](Self::Point) is a lone vanishing point where two helper lines
+///   meet, corners 0–1 and 3–2: lay them along lines in a reference and the
+///   point lands where those lines run to.
+/// - [`Ellipse`](Self::Ellipse) is the circle drawn in its quad: a plain
+///   ellipse in a rectangle, a circle in perspective in a floor-like quad.
+///
+/// The curved kinds — the pans and the fisheye — are a box: corners
+/// `C ± w·u ± h·n` round a centre point `C`, with `u` along the horizon and
+/// `n` square to it. Their side points sit where the box's edges cross the
+/// horizon and the line through `C` square to it (see [`super::guides`]).
+///
+/// Older builds know only the planes, so the store keeps the rest apart
+/// where they won't look (see `app::grids`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GridKind {
     #[default]
@@ -300,6 +322,29 @@ pub enum GridKind {
     /// Three families at 60° to each other: the rhombus's two edge
     /// directions, and the vertical through its corners.
     Isometric,
+    /// A straight edge: a press on it draws along it.
+    Ruler,
+    /// Strokes anywhere run parallel to its line.
+    Parallel,
+    /// A vanishing point of its own, fitted by two helper lines.
+    Point,
+    /// A circle or ellipse — in perspective when its quad is.
+    Ellipse,
+    /// A horizontal pan, three points: lines level with the horizon bow into
+    /// arches through a point at each side, depth lines bend through the
+    /// centre point, verticals stay straight. Panning across a background
+    /// drawn on it reads as the camera turning.
+    PanHorizontal,
+    /// The same on its side, for a tilt: verticals bow through a point above
+    /// and one below, horizontals stay straight.
+    PanVertical,
+    /// A horizontal pan all the way round, four points to a turn: the box is
+    /// one whole turn, and its curves run on past it so the background loops.
+    PanLoop,
+    /// Five points: horizontals arc through a point at each side, verticals
+    /// through one above and one below, depth lines run straight to the
+    /// centre.
+    Fisheye,
 }
 
 impl GridKind {
@@ -308,13 +353,51 @@ impl GridKind {
             GridKind::Perspective => "Perspective",
             GridKind::Flat => "Flat",
             GridKind::Isometric => "Isometric",
+            GridKind::Ruler => "Ruler",
+            GridKind::Parallel => "Parallel lines",
+            GridKind::Point => "Vanishing point",
+            GridKind::Ellipse => "Ellipse",
+            GridKind::PanHorizontal => "Horizontal pan",
+            GridKind::PanVertical => "Vertical pan",
+            GridKind::PanLoop => "360° pan",
+            GridKind::Fisheye => "Fisheye",
         }
+    }
+
+    /// What its row in the list is called, before its number.
+    pub fn row_name(self) -> &'static str {
+        match self {
+            GridKind::Perspective | GridKind::Flat | GridKind::Isometric => "Grid",
+            GridKind::Ruler => "Ruler",
+            GridKind::Parallel => "Lines",
+            GridKind::Point => "Point",
+            GridKind::Ellipse => "Ellipse",
+            GridKind::PanHorizontal | GridKind::PanVertical => "Pan",
+            GridKind::PanLoop => "Loop",
+            GridKind::Fisheye => "Fisheye",
+        }
+    }
+
+    /// A curvilinear guide — the pans and the fisheye — whose lines bend
+    /// through side points round a centre point.
+    pub fn is_curved(self) -> bool {
+        matches!(
+            self,
+            GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye
+        )
+    }
+
+    /// A plane with rows and columns: perspective, flat or isometric. Only
+    /// these have walls, fill the canvas, and take shapes lying on them —
+    /// and only these are what an older build can read.
+    pub fn is_plane(self) -> bool {
+        matches!(self, GridKind::Perspective | GridKind::Flat | GridKind::Isometric)
     }
 
     /// Whether the quad keeps its shape: flat and isometric grids only move,
     /// turn and scale.
     pub fn rigid(self) -> bool {
-        self != GridKind::Perspective
+        matches!(self, GridKind::Flat | GridKind::Isometric)
     }
 }
 
@@ -487,6 +570,25 @@ pub struct PerspectiveGrid {
     pub snap_rows: bool,
     pub snap_cols: bool,
     pub snap_third: bool,
+    /// Strokes may snap to this guide at all — the magnet on its row. Every
+    /// visible guide with it on is a snap source, not just the active one.
+    pub magnet: bool,
+    /// A ruler runs on past its ends, across the whole canvas.
+    pub infinite_ruler: bool,
+    /// A ruler's ticks: it is split into this many equal parts, 0 for none.
+    /// An infinite ruler carries them on past its ends.
+    pub divisions: u32,
+    /// Smaller ticks splitting each of a ruler's divisions into this many
+    /// parts; 1 or less for none.
+    pub subdivisions: u32,
+    /// An ellipse also takes strokes that start inside it round its centre,
+    /// on the ring through where they start.
+    pub rings: bool,
+    /// A pan's curve shape: 0 plain arches; up to 1 fuller,
+    /// square-shouldered ones that close in on their points steeply; down
+    /// to flatter ones that close in at a shallow angle. Not keyed, like the
+    /// rows: it is how the guide looks, not where it is.
+    pub bend: f32,
     pub follow: Follow,
     /// Sorted by frame. None: the grid holds still in its space.
     pub keys: Vec<GridKey>,
@@ -562,6 +664,12 @@ impl Default for PerspectiveGrid {
             snap_rows: true,
             snap_cols: true,
             snap_third: true,
+            magnet: true,
+            infinite_ruler: false,
+            divisions: 0,
+            subdivisions: 1,
+            rings: false,
+            bend: 0.0,
             follow: Follow::Document,
             keys: Vec::new(),
             wall: None,
@@ -572,10 +680,45 @@ impl Default for PerspectiveGrid {
 /// Side of a fresh flat or isometric grid's home quad, in frame heights.
 const RIGID_SIDE: f32 = 0.4;
 
+/// A ready-made perspective setup, as the Add menu offers them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    /// A floor facing the viewer: one vanishing point.
+    OnePoint,
+    /// A floor turned to the viewer: two vanishing points out on the
+    /// horizon, past the sides of the frame.
+    TwoPoint,
+    /// Two-point from above: the horizon high, verticals running down to a
+    /// third point below the frame.
+    BirdsEye,
+    /// Two-point from below: the horizon low, verticals running up to a
+    /// third point above the frame.
+    WormsEye,
+}
+
+/// A line from `a` to `b` as a guide keeps it: the flat quad `[a, b, b, a]`,
+/// whose centre is the line's middle and whose turn is the line's.
+pub fn line_quad(a: P, b: P) -> [P; 4] {
+    [a, b, b, a]
+}
+
+/// The level box `w` either side of `o` and `h` above and below it, TL, TR,
+/// BR, BL — how a curved guide keeps its centre point and side points.
+pub fn box_quad(o: P, w: f32, h: f32) -> [P; 4] {
+    [
+        [o[0] - w, o[1] - h],
+        [o[0] + w, o[1] - h],
+        [o[0] + w, o[1] + h],
+        [o[0] - w, o[1] + h],
+    ]
+}
+
 impl PerspectiveGrid {
     /// A fresh grid of `kind`: a floor trapezoid, a square, or a rhombus with
     /// its long diagonal level — each centred, four cells to a side for the
-    /// tiled kinds.
+    /// tiled kinds. A ruler lies level across the middle; a vanishing point
+    /// sits above it with its helper lines fanning down; an ellipse starts as
+    /// a circle; a pan or a fisheye is a level box round the middle.
     pub fn fresh(kind: GridKind) -> Self {
         let base = Self {
             kind,
@@ -604,7 +747,90 @@ impl PerspectiveGrid {
                     ..base
                 }
             }
+            GridKind::Ruler | GridKind::Parallel => {
+                let (a, b) = ([-0.25, 0.0], [0.25, 0.0]);
+                let ruler = kind == GridKind::Ruler;
+                Self {
+                    corners: line_quad(a, b),
+                    rows: 8,
+                    divisions: if ruler { 8 } else { 0 },
+                    subdivisions: if ruler { 2 } else { 1 },
+                    horizon: false,
+                    color: if kind == GridKind::Ruler { [255, 170, 60] } else { [190, 150, 255] },
+                    ..base
+                }
+            }
+            // Its helpers are the quad's left and right edges, which meet
+            // up at (0, -0.275).
+            GridKind::Point => Self {
+                corners: [[-0.15, -0.05], [0.15, -0.05], [0.35, 0.25], [-0.35, 0.25]],
+                horizon: false,
+                color: [255, 110, 150],
+                ..base
+            },
+            GridKind::Ellipse => {
+                let r = RIGID_SIDE * 0.375;
+                Self {
+                    corners: [[-r, -r], [r, -r], [r, r], [-r, r]],
+                    horizon: false,
+                    color: [120, 220, 140],
+                    ..base
+                }
+            }
+            // Side points out near the frame's edges: a pan's past its sides
+            // or above and below, a fisheye's on a circle a frame high.
+            GridKind::PanHorizontal | GridKind::PanVertical | GridKind::PanLoop | GridKind::Fisheye => {
+                let (w, h, color) = match kind {
+                    GridKind::PanHorizontal => (0.8, 0.3, [60, 200, 200]),
+                    GridKind::PanVertical => (0.3, 0.45, [60, 200, 200]),
+                    GridKind::PanLoop => (0.8, 0.3, [230, 120, 230]),
+                    _ => (0.45, 0.45, [240, 200, 80]),
+                };
+                Self {
+                    corners: box_quad([0.0, 0.0], w, h),
+                    rows: 6,
+                    fan_rays: 24,
+                    horizon: false,
+                    color,
+                    ..base
+                }
+            }
         }
+    }
+
+    /// A perspective grid set up as `preset` says: its floor aimed at two
+    /// vanishing points out past the frame's sides, its near corner just
+    /// right of the middle, and — for three-point — a third point for the
+    /// verticals, off the horizon.
+    pub fn preset(preset: Preset) -> Self {
+        let base = Self::fresh(GridKind::Perspective);
+        let (eye, near, third) = match preset {
+            Preset::OnePoint => return base,
+            Preset::TwoPoint => (-0.15, [0.05, 0.32], None),
+            Preset::BirdsEye => (-0.42, [0.05, 0.36], Some([0.05, 2.2])),
+            Preset::WormsEye => (0.22, [0.05, 0.46], Some([0.05, -2.2])),
+        };
+        let (left, right) = ([-1.15, eye], [1.15, eye]);
+        // A third of the way from the near corner to each point, and the far
+        // corner where the lines back to the other points cross.
+        let toward = |v: P| add(near, sub(v, near).map(|x| x * 0.3));
+        let (a, b) = (toward(left), toward(right));
+        let Some(far) = intersect(a, sub(right, a), b, sub(left, b)) else {
+            return base;
+        };
+        let mut g = Self {
+            corners: [a, far, b, near],
+            ..base
+        };
+        if let Some(pos) = third {
+            g.extra_vps.push(ExtraVp {
+                pos,
+                on_horizon: false,
+                rays: true,
+                snap: true,
+            });
+        }
+        g
     }
 
     /// Corners in document space.
@@ -766,6 +992,7 @@ impl PerspectiveGrid {
 
     /// Candidate snap directions at `at`: toward each of
     /// [`Self::snap_targets`].
+    #[cfg(test)]
     pub fn snap_dirs(&self, s: &Space, at: P, vertical: bool) -> Vec<P> {
         self.snap_targets(s, vertical)
             .into_iter()
@@ -900,10 +1127,11 @@ impl PerspectiveGrid {
     }
 
     /// Take back everything a drag or a key step can change — the pose, the
-    /// keys, a wall's height — from `snap`, leaving the look and the
-    /// switches as they are now.
+    /// keys, a wall's height, a pan's curve shape — from `snap`, leaving the
+    /// look and the switches as they are now.
     pub fn restore_motion(&mut self, snap: &PerspectiveGrid) {
         self.corners = snap.corners;
+        self.bend = snap.bend;
         self.extra_vps.clone_from(&snap.extra_vps);
         self.opacity = snap.opacity;
         self.keys.clone_from(&snap.keys);
@@ -1054,8 +1282,14 @@ pub struct PerspectiveConfig {
     /// Draw the grids while other tools are active. The perspective tool
     /// always shows them.
     pub show: bool,
-    /// Lock brush strokes to the active grid's lines.
+    /// Lock brush strokes to the guides' lines. Off, the guides are only
+    /// something to draw by — see `cursor_guides`.
     pub snap: bool,
+    /// How hard a snapped stroke is pulled onto its line: 1 all the way, 0
+    /// not at all — a lighter pull keeps some of the hand in the line.
+    pub snap_strength: f32,
+    /// The eraser snaps as well as the pens.
+    pub snap_eraser: bool,
     /// Also offer the vertical as a snap direction. Off by default: near the
     /// middle of a one-point grid the columns are nearly vertical too, and a
     /// stroke meant to run to the vanishing point would lock straight up.
@@ -1064,8 +1298,10 @@ pub struct PerspectiveConfig {
     pub auto_key: bool,
     /// Faint outlines of the active grid at its keys either side.
     pub ghosts: bool,
-    /// While a stroke would snap, faint lines from the cursor along every way
-    /// it could go.
+    /// Faint lines from the cursor along every way a stroke could go, and
+    /// the one it went, held for the stroke. With snap off this is the
+    /// freehand way of drawing by the guides: the line shows, the stroke
+    /// stays the hand's.
     pub cursor_guides: bool,
 }
 
@@ -1076,6 +1312,8 @@ impl Default for PerspectiveConfig {
             active: 0,
             show: false,
             snap: false,
+            snap_strength: 1.0,
+            snap_eraser: true,
             snap_vertical: false,
             auto_key: true,
             ghosts: true,
@@ -1603,7 +1841,7 @@ pub fn place_extra(
     }
 }
 
-fn inside(c: &[P; 4], p: P) -> bool {
+pub(crate) fn inside(c: &[P; 4], p: P) -> bool {
     let mut sign = 0.0f32;
     for i in 0..4 {
         let z = cross(sub(c[(i + 1) % 4], c[i]), sub(p, c[i]));
@@ -1731,8 +1969,9 @@ pub fn dragged(
             }
             tilt_horizon(start_c, hz.p, a)
         }
-        // The point moves, not the grid: see `place_extra`.
-        GridGrab::Extra(_) => Some(*start_c),
+        // The point moves, not the grid: see `place_extra`. A plane has no
+        // curve shape to bend.
+        GridGrab::Extra(_) | GridGrab::Bend => Some(*start_c),
         GridGrab::Rotate => {
             let o = centroid(start_c);
             let a0 = (start[1] - o[1]).atan2(start[0] - o[0]);
@@ -1747,7 +1986,7 @@ pub fn dragged(
 }
 
 /// Where `p + s·d` meets `q + r·e`, or `None` for parallel lines.
-fn intersect(p: P, d: P, q: P, e: P) -> Option<P> {
+pub(crate) fn intersect(p: P, d: P, q: P, e: P) -> Option<P> {
     let den = cross(d, e);
     if den.abs() <= 1e-9 * len(d) * len(e) {
         return None;
@@ -2077,6 +2316,7 @@ pub fn fade_pieces(ra: f32, rb: f32, n: u32) -> Vec<(f32, f32, f32)> {
 }
 
 /// Of `dirs`, the one most nearly parallel to `motion` (either sense).
+#[cfg(test)]
 pub fn pick_dir(dirs: &[P], motion: P) -> Option<P> {
     let m = normalize(motion)?;
     dirs.iter()
@@ -2121,6 +2361,29 @@ mod tests {
     }
 
     const TRAP: [P; 4] = [[40.0, 0.0], [60.0, 0.0], [100.0, 100.0], [0.0, 100.0]];
+
+    #[test]
+    fn presets_put_their_points_where_they_say() {
+        for (preset, eye, third) in [
+            (Preset::TwoPoint, -0.15, None),
+            (Preset::BirdsEye, -0.42, Some(1.0)),
+            (Preset::WormsEye, 0.22, Some(-1.0)),
+        ] {
+            let g = PerspectiveGrid::preset(preset);
+            assert!(is_convex(&g.corners), "{preset:?}");
+            let plane = Plane::new(g.corners).unwrap();
+            let (l, r) = (plane.vp_point(1).unwrap(), plane.vp_point(0).unwrap());
+            let (l, r) = if l[0] < r[0] { (l, r) } else { (r, l) };
+            let at = |p: P, q: P| (p[0] - q[0]).abs() < 1e-2 && (p[1] - q[1]).abs() < 1e-2;
+            assert!(at(l, [-1.15, eye]) && at(r, [1.15, eye]), "{preset:?}: {l:?} {r:?}");
+            match third {
+                None => assert!(g.extra_vps.is_empty()),
+                // Below the frame looking down, above it looking up.
+                Some(side) => assert!(g.extra_vps[0].pos[1] * side > 1.0 && !g.extra_vps[0].on_horizon),
+            }
+        }
+        assert_eq!(PerspectiveGrid::preset(Preset::OnePoint), PerspectiveGrid::default());
+    }
     const QUAD: [P; 4] = [[10.0, 5.0], [90.0, 20.0], [80.0, 70.0], [0.0, 90.0]];
 
     #[test]
@@ -3038,5 +3301,27 @@ mod tests {
     fn grids_saved_before_fill_canvas_load_without_it() {
         let g: PerspectiveGrid = toml::from_str("rows = 3").unwrap();
         assert_eq!((g.rows, g.fill_canvas, g.fan_rays, g.ceiling), (3, false, 48, 1.0));
+    }
+
+    #[test]
+    fn a_curved_guide_is_a_level_box_round_the_middle_and_no_plane() {
+        for kind in [GridKind::PanHorizontal, GridKind::PanVertical, GridKind::PanLoop, GridKind::Fisheye] {
+            assert!(kind.is_curved() && !kind.is_plane(), "{kind:?}");
+            let mut g = PerspectiveGrid::fresh(kind);
+            assert!(close(g.centre(), [0.0, 0.0]), "{kind:?}");
+            assert_eq!((g.scale(), g.angle()), (1.0, 0.0), "{kind:?}");
+            let c = g.corners;
+            assert!(c[0][1] == c[1][1] && c[0][0] == c[3][0], "{kind:?}: level, square-cornered");
+            // Its pose fields work on it as on any guide.
+            g.rotate(0.3);
+            g.scale_by(2.0);
+            assert!((g.angle() - 0.3).abs() < 1e-5 && (g.scale() - 2.0).abs() < 1e-5, "{kind:?}");
+        }
+        // A pan's curve shape comes back with an undo, like its corners.
+        let mut g = PerspectiveGrid::fresh(GridKind::PanHorizontal);
+        let before = g.clone();
+        g.bend = 0.5;
+        g.restore_motion(&before);
+        assert_eq!(g.bend, 0.0);
     }
 }

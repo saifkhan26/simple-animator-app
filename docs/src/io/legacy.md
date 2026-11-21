@@ -1,6 +1,6 @@
 # `src/io/legacy.rs` — frozen layouts of old `.anim` versions
 
-> **Source:** [src/io/legacy.rs](../../../src/io/legacy.rs) · **Module:** `crate::io::legacy` · **Size:** 466 lines · Line links as of commit `f210c6f`
+> **Source:** [src/io/legacy.rs](../../../src/io/legacy.rs) · **Module:** `crate::io::legacy` · **Size:** 466 lines · Line links as of commit `c09072f`
 
 ## What this file is for
 
