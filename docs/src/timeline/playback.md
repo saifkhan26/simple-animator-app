@@ -1,6 +1,6 @@
 # `src/timeline/playback.rs` — the playback clock
 
-> **Source:** [src/timeline/playback.rs](../../../src/timeline/playback.rs) · **Module:** `crate::timeline::playback` · **Size:** 376 lines · Line links as of commit `84b26e8`
+> **Source:** [src/timeline/playback.rs](../../../src/timeline/playback.rs) · **Module:** `crate::timeline::playback` · **Size:** 376 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

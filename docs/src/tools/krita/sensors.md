@@ -1,6 +1,6 @@
 # `src/tools/krita/sensors.rs` — sensors: turning pen input into dab size, rotation, opacity
 
-> **Source:** [src/tools/krita/sensors.rs](../../../../src/tools/krita/sensors.rs) · **Module:** `crate::tools::krita::sensors` · **Size:** 560 lines · Line links as of commit `84b26e8`
+> **Source:** [src/tools/krita/sensors.rs](../../../../src/tools/krita/sensors.rs) · **Module:** `crate::tools::krita::sensors` · **Size:** 560 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

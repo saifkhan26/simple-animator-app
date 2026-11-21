@@ -1,6 +1,6 @@
 # `src/tools/recolor.rs` — swapping one colour for another
 
-> **Source:** [src/tools/recolor.rs](../../../src/tools/recolor.rs) · **Module:** `crate::tools::recolor` · **Size:** 347 lines · Line links as of commit `84b26e8`
+> **Source:** [src/tools/recolor.rs](../../../src/tools/recolor.rs) · **Module:** `crate::tools::recolor` · **Size:** 347 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

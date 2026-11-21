@@ -1,6 +1,6 @@
 # `src/io/kra/tiles.rs` — Krita's tiled pixel files
 
-> **Source:** [src/io/kra/tiles.rs](../../../../src/io/kra/tiles.rs) · **Module:** `crate::io::kra::tiles` · **Size:** 373 lines · Line links as of commit `84b26e8`
+> **Source:** [src/io/kra/tiles.rs](../../../../src/io/kra/tiles.rs) · **Module:** `crate::io::kra::tiles` · **Size:** 373 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

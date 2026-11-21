@@ -1,6 +1,6 @@
 # `src/ui/sweep_tests.rs` — headless layout sweep over every window (test-only)
 
-> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 1177 lines · Line links as of commit `84b26e8`
+> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 1177 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

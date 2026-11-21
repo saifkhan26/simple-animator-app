@@ -1,6 +1,6 @@
 # `src/tools/selection.rs` — floating selected pixels and the transform box
 
-> **Source:** [src/tools/selection.rs](../../../src/tools/selection.rs) · **Module:** `crate::tools::selection` · **Size:** 1563 lines · Line links as of commit `84b26e8`
+> **Source:** [src/tools/selection.rs](../../../src/tools/selection.rs) · **Module:** `crate::tools::selection` · **Size:** 1563 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

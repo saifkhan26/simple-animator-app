@@ -1,6 +1,6 @@
 # `src/doc/blend.rs` — layer blend modes
 
-> **Source:** [src/doc/blend.rs](../../../src/doc/blend.rs) · **Module:** `crate::doc::blend` · **Size:** 219 lines · Line links as of commit `84b26e8`
+> **Source:** [src/doc/blend.rs](../../../src/doc/blend.rs) · **Module:** `crate::doc::blend` · **Size:** 219 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/app/liquify.rs` — a Liquify session on AppState
 
-> **Source:** [src/app/liquify.rs](../../../src/app/liquify.rs) · **Module:** `crate::app::liquify` · **Size:** 762 lines · Line links as of commit `84b26e8`
+> **Source:** [src/app/liquify.rs](../../../src/app/liquify.rs) · **Module:** `crate::app::liquify` · **Size:** 762 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 

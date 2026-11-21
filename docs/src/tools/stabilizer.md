@@ -1,6 +1,6 @@
 # `src/tools/stabilizer.rs` — Krita's Stabilizer smoothing
 
-> **Source:** [src/tools/stabilizer.rs](../../../src/tools/stabilizer.rs) · **Module:** `crate::tools::stabilizer` · **Size:** 302 lines · Line links as of commit `84b26e8`
+> **Source:** [src/tools/stabilizer.rs](../../../src/tools/stabilizer.rs) · **Module:** `crate::tools::stabilizer` · **Size:** 302 lines · Line links as of commit `0a6b2ae`
 
 ## What this file is for
 
