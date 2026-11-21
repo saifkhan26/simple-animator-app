@@ -1,6 +1,6 @@
 # `src/krita_link.rs` — the two-way live link with Krita
 
-> **Source:** [src/krita_link.rs](../../src/krita_link.rs) · **Module:** `crate::krita_link` · **Size:** 1879 lines · Line links as of commit `c09072f`
+> **Source:** [src/krita_link.rs](../../src/krita_link.rs) · **Module:** `crate::krita_link` · **Size:** 1895 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 
@@ -170,7 +170,7 @@ More: [Attributes and cfg](../rust-primer.md#attributes-and-cfg)
 ## impl KritaLink
 
 ### Session constants
-[src/krita_link.rs:934](../../src/krita_link.rs#L934)
+[src/krita_link.rs:950](../../src/krita_link.rs#L950)
 
 | Const | Value | Meaning |
 |---|---|---|
@@ -182,7 +182,7 @@ More: [Attributes and cfg](../rust-primer.md#attributes-and-cfg)
 ## Types
 
 ### `const EVERYTHING_DELETED`
-[src/krita_link.rs:60](../../src/krita_link.rs#L60)
+[src/krita_link.rs:61](../../src/krita_link.rs#L61)
 
 ```rust
 pub const EVERYTHING_DELETED: &str = "Krita's save deletes every layer here";
@@ -193,7 +193,7 @@ pub const EVERYTHING_DELETED: &str = "Krita's save deletes every layer here";
 all. The stress test checks error text starts with it.
 
 ### `struct LayerBase`
-[src/krita_link.rs:118](../../src/krita_link.rs#L118)
+[src/krita_link.rs:119](../../src/krita_link.rs#L119)
 
 What Krita holds for **one layer**, as of the last sync. Derives `Clone`.
 
@@ -210,9 +210,10 @@ What Krita holds for **one layer**, as of the last sync. Derives `Clone`.
 | `cell_size` | `(u32, u32)` | Size to use for a drawing Krita adds when there is no neighbouring key to copy a size from. |
 | `in_group` | `bool` | The layer is inside a group. |
 | `collapsed` | `bool` | (For a group) it is folded in the layer list. |
+| `blend` | `BlendMode` | The layer's blend mode as Krita had it at the last sync. |
 
 ### `struct Baseline`
-[src/krita_link.rs:140](../../src/krita_link.rs#L140)
+[src/krita_link.rs:142](../../src/krita_link.rs#L142)
 
 What Krita holds as of the last sync — the send, or the last pull. The "common ancestor" of
 the three-way merge. Derives `Clone`.
@@ -226,7 +227,7 @@ the three-way merge. Derives `Clone`.
 | `ignored` | `HashSet<String>` | Krita uuids whose link was ended from this side (the layer here became reference or `-x`). They are never brought back, until the next send rewrites Krita's file without them. |
 
 ### `struct PulledDrawing`
-[src/krita_link.rs:205](../../src/krita_link.rs#L205)
+[src/krita_link.rs:208](../../src/krita_link.rs#L208)
 
 One Krita drawing after the worker has rasterized it into cell space and looked it up in the
 baseline.
@@ -240,7 +241,7 @@ baseline.
 | `blank` | `bool` | Fully transparent. |
 
 ### `struct PulledLayer`
-[src/krita_link.rs:216](../../src/krita_link.rs#L216)
+[src/krita_link.rs:219](../../src/krita_link.rs#L219)
 
 One Krita layer, decoded and matched.
 
@@ -256,9 +257,10 @@ One Krita layer, decoded and matched.
 | `group` | `bool` | This Krita layer is a group. |
 | `in_group` | `bool` | Inside a group. |
 | `collapsed` | `bool` | Folded group. |
+| `blend` | `BlendMode` | The layer's blend mode in the pulled save. |
 
 ### `struct Pulled`
-[src/krita_link.rs:238](../../src/krita_link.rs#L238)
+[src/krita_link.rs:242](../../src/krita_link.rs#L242)
 
 A Krita save, decoded and matched against the baseline — the heavy part of a pull, done off
 the UI thread by [`prepare`](#prepare).
@@ -271,7 +273,7 @@ the UI thread by [`prepare`](#prepare).
 | `held` | `Vec<(String, String)>` | `(uuid, name)` of Krita layers that stay in Krita (named `-x`, see [`comes_back`](#comes_back)). |
 
 ### `enum CellRef`
-[src/krita_link.rs:353](../../src/krita_link.rs#L353)
+[src/krita_link.rs:358](../../src/krita_link.rs#L358)
 
 Which cell a planned key will point at. Derives `Clone, Copy, Debug, PartialEq, Eq`.
 
@@ -281,7 +283,7 @@ Which cell a planned key will point at. Derives `Clone, Copy, Debug, PartialEq, 
 | `New(usize)` | Index into the plan's `new_cells`; becomes a real id at apply time. |
 
 ### `struct LayerEdit`
-[src/krita_link.rs:360](../../src/krita_link.rs#L360)
+[src/krita_link.rs:365](../../src/krita_link.rs#L365)
 
 Field-by-field changes to one layer. Every field is an `Option`; `None` means "leave alone".
 Derives `Default` (all `None`).
@@ -296,9 +298,10 @@ Derives `Default` (all `None`).
 | `group` | `Option<bool>` | Only for a layer Krita added: whether it is a group. |
 | `in_group` | `Option<bool>` | New group membership, or `None`. |
 | `collapsed` | `Option<bool>` | New folded state for a group, or `None`. |
+| `blend` | `Option<BlendMode>` | A new blend mode for the layer; never set on a group. |
 
 ### `enum Entry`
-[src/krita_link.rs:417](../../src/krita_link.rs#L417)
+[src/krita_link.rs:427](../../src/krita_link.rs#L427)
 
 One row of the planned layer stack.
 
@@ -308,7 +311,7 @@ One row of the planned layer stack.
 | `New { uuid: String, edit: LayerEdit }` | A layer Krita added (or one deleted here that Krita then changed): created at apply time and linked to `uuid`. |
 
 ### `struct Report`
-[src/krita_link.rs:426](../../src/krita_link.rs#L426)
+[src/krita_link.rs:436](../../src/krita_link.rs#L436)
 
 What a pull did, for the toast message. Derives `Default, Debug, PartialEq, Eq`.
 
@@ -323,7 +326,7 @@ What a pull did, for the toast message. Derives `Default, Debug, PartialEq, Eq`.
 | `grew_to` | `Option<usize>` | New frame count when the timeline grew. |
 
 ### `struct PullPlan`
-[src/krita_link.rs:466](../../src/krita_link.rs#L466)
+[src/krita_link.rs:476](../../src/krita_link.rs#L476)
 
 A pull, planned against the current project and ready to apply. Made by
 [`plan`](#plan); nothing in the project changes until
@@ -342,7 +345,7 @@ A pull, planned against the current project and ready to apply. Made by
 | `unlink` | `Vec<u64>` | [`Layer::uid`](doc/layer.md)s whose link ends with this pull (renamed to stay in Krita there, or made reference / `-x` here). Their layers stay as they are; only the link goes. Applies even to a no-op plan. |
 
 ### `enum Slot`
-[src/krita_link.rs:594](../../src/krita_link.rs#L594)
+[src/krita_link.rs:604](../../src/krita_link.rs#L604)
 
 A local enum inside the pull planner: for each Krita layer, in Krita order, what the plan does with it — keep it on its linked layer, add it as new, or skip it (deleted here, untouched in Krita, so it stays deleted).
 
@@ -353,7 +356,7 @@ A local enum inside the pull planner: for each Krita layer, in Krita order, what
 | `Skip` | Deleted here, untouched in Krita: stays deleted. |
 
 ### `const SETTLE`
-[src/krita_link.rs:934](../../src/krita_link.rs#L934)
+[src/krita_link.rs:950](../../src/krita_link.rs#L950)
 
 ```rust
 const SETTLE: Duration = Duration::from_millis(500);
@@ -362,7 +365,7 @@ const SETTLE: Duration = Duration::from_millis(500);
 Minimum quiet time after the file changes before it is read, so a save still being written isn't read half-done.
 
 ### `const POLL`
-[src/krita_link.rs:936](../../src/krita_link.rs#L936)
+[src/krita_link.rs:952](../../src/krita_link.rs#L952)
 
 ```rust
 const POLL: Duration = Duration::from_secs(1);
@@ -371,7 +374,7 @@ const POLL: Duration = Duration::from_secs(1);
 How often the file is stat'ed.
 
 ### `const READY_TIMEOUT`
-[src/krita_link.rs:939](../../src/krita_link.rs#L939)
+[src/krita_link.rs:955](../../src/krita_link.rs#L955)
 
 ```rust
 const READY_TIMEOUT: Duration = Duration::from_secs(4);
@@ -380,7 +383,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(4);
 How long the helper plugin gets to say it's ready (it ticks every 400 ms, and may have a save to make first).
 
 ### `const RELOAD_TIMEOUT`
-[src/krita_link.rs:942](../../src/krita_link.rs#L942)
+[src/krita_link.rs:958](../../src/krita_link.rs#L958)
 
 ```rust
 const RELOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -389,7 +392,7 @@ const RELOAD_TIMEOUT: Duration = Duration::from_secs(30);
 How long it gets to reload — reopening a big animated document takes a while.
 
 ### `type Stamp`
-[src/krita_link.rs:945](../../src/krita_link.rs#L945)
+[src/krita_link.rs:961](../../src/krita_link.rs#L961)
 
 ```rust
 pub type Stamp = (SystemTime, u64);
@@ -399,7 +402,7 @@ pub type Stamp = (SystemTime, u64);
 either moves, Krita (or someone) wrote the file.
 
 ### `struct Round`
-[src/krita_link.rs:954](../../src/krita_link.rs#L954)
+[src/krita_link.rs:970](../../src/krita_link.rs#L970)
 
 One **"Send to Krita again"**: get Krita's latest onto disk and into Animator, write the new
 file, and — with the helper plugin — have Krita reload it. [app.rs](app.md)'s
@@ -417,7 +420,7 @@ file, and — with the helper plugin — have Krita reload it. [app.rs](app.md)'
 | `note` | `String` | Extra toast text (layers kept out here, Krita-only layers kept there), shown once Krita confirms the reload. |
 
 ### `enum Stage`
-[src/krita_link.rs:975](../../src/krita_link.rs#L975)
+[src/krita_link.rs:991](../../src/krita_link.rs#L991)
 
 Steps of a [`Round`](#struct-round). Derives `Clone, Copy, Debug, PartialEq, Eq`.
 
@@ -429,7 +432,7 @@ Steps of a [`Round`](#struct-round). Derives `Clone, Copy, Debug, PartialEq, Eq`
 | `AwaitReloaded { until: Instant }` | Told the helper the file is there; waiting for it to reload. |
 
 ### `struct KritaLink`
-[src/krita_link.rs:986](../../src/krita_link.rs#L986)
+[src/krita_link.rs:1002](../../src/krita_link.rs#L1002)
 
 The live link itself. One exists while a link is active (`AppState::krita` is
 `Option<KritaLink>`).
@@ -453,7 +456,7 @@ The live link itself. One exists while a link is active (`AppState::krita` is
 | `reload_timeout` | `Duration` | How long to wait for the helper plugin to reload (see `ready_timeout`). |
 
 ### `struct Sent`
-[src/krita_link.rs:1145](../../src/krita_link.rs#L1145)
+[src/krita_link.rs:1161](../../src/krita_link.rs#L1161)
 
 What a [`send`](#send) wrote.
 
@@ -466,7 +469,7 @@ What a [`send`](#send) wrote.
 ## Free functions
 
 ### `cell_hash`
-[src/krita_link.rs:44](../../src/krita_link.rs#L44)
+[src/krita_link.rs:45](../../src/krita_link.rs#L45)
 
 ```rust
 pub fn cell_hash(c: &Canvas) -> u64
@@ -486,7 +489,7 @@ const cellHash = c => hash64([c.width, c.height, ...c.pixels]); // same pixels �
 and [krita_stress.rs](krita_stress.md) (`shows`).
 
 ### `packed`
-[src/krita_link.rs:54](../../src/krita_link.rs#L54)
+[src/krita_link.rs:55](../../src/krita_link.rs#L55)
 
 ```rust
 fn packed(mut c: Canvas) -> Canvas
@@ -497,7 +500,7 @@ Calls `Canvas::pack` (keep only the rectangle that has paint, see
 drawings arrive in the project already packed. **Used by:** `prepare`.
 
 ### `stays_put`
-[src/krita_link.rs:65](../../src/krita_link.rs#L65)
+[src/krita_link.rs:66](../../src/krita_link.rs#L66)
 
 ```rust
 pub fn stays_put(name: &str) -> bool
@@ -516,7 +519,7 @@ with `"-x"` case-insensitively.
 [krita_stress.rs](krita_stress.md).
 
 ### `stays_here`
-[src/krita_link.rs:72](../../src/krita_link.rs#L72)
+[src/krita_link.rs:73](../../src/krita_link.rs#L73)
 
 ```rust
 pub fn stays_here(l: &Layer) -> bool
@@ -526,7 +529,7 @@ A layer of ours that never goes to Krita: a reference (light-table) layer, or on
 passes [`stays_put`](#stays_put). **Used by:** `stays_here_at`.
 
 ### `stays_here_at`
-[src/krita_link.rs:78](../../src/krita_link.rs#L78)
+[src/krita_link.rs:79](../../src/krita_link.rs#L79)
 
 ```rust
 pub fn stays_here_at(p: &Project, li: usize) -> bool
@@ -540,7 +543,7 @@ a value and does it pass this test".
 [ui/shell.rs](ui/shell.md) (layer panel markers), [krita_stress.rs](krita_stress.md).
 
 ### `sendable`
-[src/krita_link.rs:83](../../src/krita_link.rs#L83)
+[src/krita_link.rs:84](../../src/krita_link.rs#L84)
 
 ```rust
 pub fn sendable(p: &Project) -> Vec<bool>
@@ -551,7 +554,7 @@ One `bool` per layer of `p`: `true` if a send takes it to Krita (the opposite of
 tests.
 
 ### `comes_back`
-[src/krita_link.rs:89](../../src/krita_link.rs#L89)
+[src/krita_link.rs:90](../../src/krita_link.rs#L90)
 
 ```rust
 pub fn comes_back(name: &str, groups: &[String]) -> bool
@@ -564,7 +567,7 @@ as a function value to `kra::read_filtered` and `kra::carry` (see [io/kra/mod.rs
 **Used by:** `send`, `pull`, [app.rs](app.md) `import_kra`, [krita_stress.rs](krita_stress.md).
 
 ### `is_blank`
-[src/krita_link.rs:93](../../src/krita_link.rs#L93)
+[src/krita_link.rs:94](../../src/krita_link.rs#L94)
 
 ```rust
 fn is_blank(c: &Canvas) -> bool
@@ -574,7 +577,7 @@ fn is_blank(c: &Canvas) -> bool
 `prepare`.
 
 ### `new_uuid`
-[src/krita_link.rs:99](../../src/krita_link.rs#L99)
+[src/krita_link.rs:100](../../src/krita_link.rs#L100)
 
 ```rust
 pub fn new_uuid() -> String
@@ -597,7 +600,7 @@ braces, 38 characters, a version-4 style id.
 ## `impl Baseline`
 
 ### `Baseline::empty`
-[src/krita_link.rs:156](../../src/krita_link.rs#L156)
+[src/krita_link.rs:158](../../src/krita_link.rs#L158)
 
 ```rust
 pub fn empty(pw: u32, ph: u32) -> Self
@@ -607,7 +610,7 @@ A baseline with nothing sent yet — no layers, `range_end` 0. Compiled only for
 (`#[cfg(test)]`). **Used by:** [krita_stress.rs](krita_stress.md) (sessions start from here).
 
 ### `Baseline::capture`
-[src/krita_link.rs:161](../../src/krita_link.rs#L161)
+[src/krita_link.rs:163](../../src/krita_link.rs#L163)
 
 ```rust
 pub fn capture(project: &Project, uuids: &[String]) -> Self
@@ -633,7 +636,7 @@ each keyed drawing and the hash → cell map.
 **Used by:** `send`, tests.
 
 ### `Baseline::layer`
-[src/krita_link.rs:199](../../src/krita_link.rs#L199)
+[src/krita_link.rs:202](../../src/krita_link.rs#L202)
 
 ```rust
 fn layer(&self, uuid: &str) -> Option<&LayerBase>
@@ -644,7 +647,7 @@ Finds the baseline layer with that Krita uuid, or `None`. **Used by:** `prepare`
 ## `impl PulledLayer`
 
 ### `PulledLayer::key_hashes`
-[src/krita_link.rs:231](../../src/krita_link.rs#L231)
+[src/krita_link.rs:235](../../src/krita_link.rs#L235)
 
 ```rust
 fn key_hashes(&self) -> Vec<(usize, u64)>
@@ -656,7 +659,7 @@ can be compared with `!=`. **Used by:** `plan`.
 ## Free functions
 
 ### `present`
-[src/krita_link.rs:247](../../src/krita_link.rs#L247)
+[src/krita_link.rs:251](../../src/krita_link.rs#L251)
 
 ```rust
 pub fn present(project: &Project, links: &HashMap<u64, String>) -> HashSet<String>
@@ -668,7 +671,7 @@ layers have a local partner. **Used by:** [app.rs](app.md) (`poll_krita`, `drive
 [krita_stress.rs](krita_stress.md), tests.
 
 ### `prepare`
-[src/krita_link.rs:255](../../src/krita_link.rs#L255)
+[src/krita_link.rs:259](../../src/krita_link.rs#L259)
 
 ```rust
 pub fn prepare(doc: KraDoc, base: &Baseline, present: &HashSet<String>) -> Pulled
@@ -709,7 +712,7 @@ or deleted since.
 ## `impl LayerEdit`
 
 ### `LayerEdit::is_empty`
-[src/krita_link.rs:373](../../src/krita_link.rs#L373)
+[src/krita_link.rs:379](../../src/krita_link.rs#L379)
 
 ```rust
 fn is_empty(&self) -> bool
@@ -718,7 +721,7 @@ fn is_empty(&self) -> bool
 `true` when every field is `None` — the edit would change nothing. **Used by:** `plan`.
 
 ### `LayerEdit::apply`
-[src/krita_link.rs:384](../../src/krita_link.rs#L384)
+[src/krita_link.rs:391](../../src/krita_link.rs#L391)
 
 ```rust
 fn apply(self, l: &mut Layer, fc: usize, resolve: impl Fn(CellRef) -> CellId)
@@ -741,7 +744,7 @@ from scratch: `fc` empty frames, then each key `(t, r)` with `t < fc` becomes
 ## `impl Report`
 
 ### `Report::summary`
-[src/krita_link.rs:437](../../src/krita_link.rs#L437)
+[src/krita_link.rs:447](../../src/krita_link.rs#L447)
 
 ```rust
 pub fn summary(&self) -> String
@@ -757,7 +760,7 @@ plural.
 ## `impl PullPlan`
 
 ### `PullPlan::is_noop`
-[src/krita_link.rs:484](../../src/krita_link.rs#L484)
+[src/krita_link.rs:494](../../src/krita_link.rs#L494)
 
 ```rust
 pub fn is_noop(&self) -> bool
@@ -767,7 +770,7 @@ pub fn is_noop(&self) -> bool
 **Used by:** [app.rs](app.md) `apply_krita_pull`, [krita_stress.rs](krita_stress.md), tests.
 
 ### `PullPlan::apply`
-[src/krita_link.rs:491](../../src/krita_link.rs#L491)
+[src/krita_link.rs:501](../../src/krita_link.rs#L501)
 
 ```rust
 pub fn apply(self, project: &mut Project) -> Vec<(u64, String)>
@@ -802,7 +805,7 @@ undo step), [krita_stress.rs](krita_stress.md), tests.
 ## Free functions
 
 ### `plan`
-[src/krita_link.rs:539](../../src/krita_link.rs#L539)
+[src/krita_link.rs:549](../../src/krita_link.rs#L549)
 
 ```rust
 pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pulled: Pulled) -> Result<PullPlan>
@@ -880,7 +883,7 @@ function cellFor(drawing, layerIsKeptHere) {
 **Used by:** [app.rs](app.md) `apply_krita_pull`, [krita_stress.rs](krita_stress.md), tests.
 
 ### `stamp`
-[src/krita_link.rs:947](../../src/krita_link.rs#L947)
+[src/krita_link.rs:963](../../src/krita_link.rs#L963)
 
 ```rust
 pub fn stamp(path: &Path) -> Option<Stamp>
@@ -892,7 +895,7 @@ The file's `(modified time, length)`, or `None` if the file or its time can't be
 ## `impl KritaLink`
 
 ### `KritaLink::new`
-[src/krita_link.rs:1018](../../src/krita_link.rs#L1018)
+[src/krita_link.rs:1034](../../src/krita_link.rs#L1034)
 
 ```rust
 pub fn new(path: PathBuf) -> Self
@@ -903,7 +906,7 @@ process, default timings (`POLL`, `SETTLE`, `READY_TIMEOUT`, `RELOAD_TIMEOUT`) a
 `use_helper: None`. **Used by:** [app.rs](app.md) `start_send`, app tests.
 
 ### `KritaLink::unseen_change`
-[src/krita_link.rs:1040](../../src/krita_link.rs#L1040)
+[src/krita_link.rs:1056](../../src/krita_link.rs#L1056)
 
 ```rust
 pub fn unseen_change(&self) -> Option<Stamp>
@@ -914,7 +917,7 @@ Unlike `poll` it doesn't wait for the change to settle. **Used by:** [app.rs](ap
 `drive_round` (the `Sync` stage pulls it before re-sending).
 
 ### `KritaLink::start_pull`
-[src/krita_link.rs:1046](../../src/krita_link.rs#L1046)
+[src/krita_link.rs:1062](../../src/krita_link.rs#L1062)
 
 ```rust
 pub fn start_pull(&mut self, at: Stamp, present: HashSet<String>) -> bool
@@ -931,7 +934,7 @@ there is no baseline yet — a send is in flight.
 **Used by:** [app.rs](app.md) `poll_krita`, `drive_round`.
 
 ### `KritaLink::temp_path`
-[src/krita_link.rs:1060](../../src/krita_link.rs#L1060)
+[src/krita_link.rs:1076](../../src/krita_link.rs#L1076)
 
 ```rust
 pub fn temp_path(project_path: Option<&Path>) -> PathBuf
@@ -944,7 +947,7 @@ plugin looks for ([mailbox.py](../krita-plugin/animator_link/mailbox.md)). **Use
 [app.rs](app.md) `start_send`.
 
 ### `KritaLink::mark_seen`
-[src/krita_link.rs:1071](../../src/krita_link.rs#L1071)
+[src/krita_link.rs:1087](../../src/krita_link.rs#L1087)
 
 ```rust
 pub fn mark_seen(&mut self, s: Option<Stamp>)
@@ -954,7 +957,7 @@ Records that the file now on disk is ours (just written or just pulled), and for
 change being watched. **Used by:** [app.rs](app.md) `poll_krita`, app tests.
 
 ### `KritaLink::poll`
-[src/krita_link.rs:1078](../../src/krita_link.rs#L1078)
+[src/krita_link.rs:1094](../../src/krita_link.rs#L1094)
 
 ```rust
 pub fn poll(&mut self, now: Instant) -> Option<Stamp>
@@ -983,7 +986,7 @@ return null;
 **Used by:** [app.rs](app.md) `poll_krita`.
 
 ### `KritaLink::krita_running`
-[src/krita_link.rs:1102](../../src/krita_link.rs#L1102)
+[src/krita_link.rs:1118](../../src/krita_link.rs#L1118)
 
 ```rust
 pub fn krita_running(&mut self) -> bool
@@ -994,7 +997,7 @@ Whether the Krita process **we** launched is still open: `Child::try_wait` retur
 (don't launch a second Krita).
 
 ### `KritaLink::launch`
-[src/krita_link.rs:1106](../../src/krita_link.rs#L1106)
+[src/krita_link.rs:1122](../../src/krita_link.rs#L1122)
 
 ```rust
 pub fn launch(&mut self, krita: &Path) -> Result<()>
@@ -1007,7 +1010,7 @@ the child handle. Errors read "starting <path>". **Used by:** [app.rs](app.md) `
 ## Free functions
 
 ### `find_krita`
-[src/krita_link.rs:1118](../../src/krita_link.rs#L1118)
+[src/krita_link.rs:1134](../../src/krita_link.rs#L1134)
 
 ```rust
 pub fn find_krita(pref: Option<&Path>) -> Option<PathBuf>
@@ -1027,7 +1030,7 @@ file dialog).
 [brush_library/import.rs](brush_library/import.md) (ignored survey test).
 
 ### `send`
-[src/krita_link.rs:1165](../../src/krita_link.rs#L1165)
+[src/krita_link.rs:1181](../../src/krita_link.rs#L1181)
 
 ```rust
 pub fn send(
@@ -1072,7 +1075,7 @@ Krita-only layers.
 [krita_stress.rs](krita_stress.md), tests.
 
 ### `pull`
-[src/krita_link.rs:1213](../../src/krita_link.rs#L1213)
+[src/krita_link.rs:1229](../../src/krita_link.rs#L1229)
 
 ```rust
 pub fn pull(path: &Path, base: &Baseline, present: &HashSet<String>) -> Result<Pulled>
@@ -1090,48 +1093,48 @@ re-saved by Krita 5.2.9 (`src/io/kra/testdata/krita-5.2.9-resaved.kra`).
 
 | Test | What it checks |
 |---|---|
-| [`real_krita_resave_of_what_we_sent_is_a_noop`](../../src/krita_link.rs#L1284) | What we sent, opened and re-saved untouched by real Krita 5.2.9, pulls back as no change and no warnings. |
-| [`uuids_are_krita_shaped_and_distinct`](../../src/krita_link.rs#L1296) | `new_uuid` gives distinct, 38-character, braced ids with the version `4` in place. |
-| [`untouched_krita_file_is_a_noop`](../../src/krita_link.rs#L1305) | Pulling exactly what was sent plans nothing. |
-| [`only_the_drawing_krita_changed_is_replaced`](../../src/krita_link.rs#L1313) | One painted drawing becomes one new cell; other keys, the old cell's pixels and the other layer are untouched. |
-| [`local_edit_krita_did_not_touch_survives`](../../src/krita_link.rs#L1339) | An edit made here to drawing A survives a pull where Krita edited drawing B. |
-| [`both_edited_krita_wins`](../../src/krita_link.rs#L1355) | When both apps edited the same drawing, Krita's pixels win. |
-| [`krita_retime_reuses_cells`](../../src/krita_link.rs#L1368) | Moving a key in Krita retimes the layer without making new cells. |
-| [`local_retime_on_a_layer_krita_left_alone_stays`](../../src/krita_link.rs#L1383) | A retime here survives when Krita only changed another layer. |
-| [`link_survives_undo_to_before_the_send`](../../src/krita_link.rs#L1399) | Restoring layer snapshots from before the send (what undo does) keeps the link, because it keys on `uid`. |
-| [`layers_added_removed_and_reordered_in_krita`](../../src/krita_link.rs#L1412) | Krita's added layer arrives, a local-only layer keeps its place, then a Krita delete and swap land correctly. |
-| [`krita_key_past_the_end_grows_the_timeline`](../../src/krita_link.rs#L1450) | A Krita key past the last frame grows every layer's timeline. |
-| [`second_pull_after_first_is_a_noop`](../../src/krita_link.rs#L1466) | After applying a pull, the same Krita file again changes nothing. |
-| [`a_clipped_layer_goes_cut_and_an_untouched_round_trip_is_a_noop`](../../src/krita_link.rs#L1483) | A clipped layer goes cut, one drawing per base drawing, each standing for the whole clipped cell; the round trip is a no-op. |
-| [`leading_blank_keys_do_not_count_as_changes`](../../src/krita_link.rs#L1521) | The blank lead-in key the writer adds is not seen as a change. |
-| [`oversized_layer_cells_keep_their_size`](../../src/krita_link.rs#L1531) | A layer with cells bigger than the frame gets new cells at the same size. |
-| [`stays_put_is_a_trailing_dash_x`](../../src/krita_link.rs#L1548) | The `-x` rule on many names, and `comes_back` with `-x` groups. |
-| [`an_untouched_round_trip_with_groups_is_a_noop`](../../src/krita_link.rs#L1617) | Groups survive a no-change round trip, including through a real `send`. |
-| [`a_group_made_in_krita_comes_back`](../../src/krita_link.rs#L1630) | A group created in Krita arrives with its opacity, is linked, and a second pull is quiet. |
-| [`a_layer_moved_into_a_group_in_krita_moves_here`](../../src/krita_link.rs#L1650) | A layer moved into a group (and the group renamed) in Krita does the same here. |
-| [`a_group_made_in_krita_takes_only_its_own_layers`](../../src/krita_link.rs#L1669) | A new Krita group sits right on its layer; a layer added here stays on top. |
-| [`a_layer_moved_into_a_group_that_stays_here_stays_out`](../../src/krita_link.rs#L1688) | A layer Krita moves into a group that is now `-x` here stays synced and out of the group; the next pull is quiet. |
-| [`a_dash_x_group_stays_here_with_its_layers`](../../src/krita_link.rs#L1714) | A `-x` group and its children are not sent. |
-| [`a_layer_clipped_to_a_group_goes_cut`](../../src/krita_link.rs#L1727) | A layer clipped to a group is sent cut to the group, and the round trip is a no-op. |
-| [`reference_and_dash_x_layers_are_not_sent`](../../src/krita_link.rs#L1744) | Reference and `-x` layers are left out; pulling the untouched file changes nothing. |
-| [`a_dash_x_layer_made_in_krita_stays_there`](../../src/krita_link.rs#L1759) | A `-x` layer added in Krita never comes here. |
-| [`renamed_dash_x_in_krita_stops_syncing_and_keeps_ours`](../../src/krita_link.rs#L1774) | Renaming a layer to `-x` in Krita unlinks it with a warning, keeps ours as it was, and later pulls are quiet. |
-| [`odd_layer_names_survive_the_round_trip`](../../src/krita_link.rs#L1808) | Quotes, markup characters and non-Latin names go out and come back unchanged. |
-| [`resend_keeps_krita_only_layers_in_place`](../../src/krita_link.rs#L1826) | A re-send carries Krita's `sketch-x` layer over untouched and in its place; the baseline holds only our layers. |
-| [`a_layer_made_reference_here_after_the_send_unlinks`](../../src/krita_link.rs#L1862) | A layer made reference here after the send is unlinked and left exactly as it was, even though Krita edited it. |
+| [`real_krita_resave_of_what_we_sent_is_a_noop`](../../src/krita_link.rs#L1300) | What we sent, opened and re-saved untouched by real Krita 5.2.9, pulls back as no change and no warnings. |
+| [`uuids_are_krita_shaped_and_distinct`](../../src/krita_link.rs#L1312) | `new_uuid` gives distinct, 38-character, braced ids with the version `4` in place. |
+| [`untouched_krita_file_is_a_noop`](../../src/krita_link.rs#L1321) | Pulling exactly what was sent plans nothing. |
+| [`only_the_drawing_krita_changed_is_replaced`](../../src/krita_link.rs#L1329) | One painted drawing becomes one new cell; other keys, the old cell's pixels and the other layer are untouched. |
+| [`local_edit_krita_did_not_touch_survives`](../../src/krita_link.rs#L1355) | An edit made here to drawing A survives a pull where Krita edited drawing B. |
+| [`both_edited_krita_wins`](../../src/krita_link.rs#L1371) | When both apps edited the same drawing, Krita's pixels win. |
+| [`krita_retime_reuses_cells`](../../src/krita_link.rs#L1384) | Moving a key in Krita retimes the layer without making new cells. |
+| [`local_retime_on_a_layer_krita_left_alone_stays`](../../src/krita_link.rs#L1399) | A retime here survives when Krita only changed another layer. |
+| [`link_survives_undo_to_before_the_send`](../../src/krita_link.rs#L1415) | Restoring layer snapshots from before the send (what undo does) keeps the link, because it keys on `uid`. |
+| [`layers_added_removed_and_reordered_in_krita`](../../src/krita_link.rs#L1428) | Krita's added layer arrives, a local-only layer keeps its place, then a Krita delete and swap land correctly. |
+| [`krita_key_past_the_end_grows_the_timeline`](../../src/krita_link.rs#L1466) | A Krita key past the last frame grows every layer's timeline. |
+| [`second_pull_after_first_is_a_noop`](../../src/krita_link.rs#L1482) | After applying a pull, the same Krita file again changes nothing. |
+| [`a_clipped_layer_goes_cut_and_an_untouched_round_trip_is_a_noop`](../../src/krita_link.rs#L1499) | A clipped layer goes cut, one drawing per base drawing, each standing for the whole clipped cell; the round trip is a no-op. |
+| [`leading_blank_keys_do_not_count_as_changes`](../../src/krita_link.rs#L1537) | The blank lead-in key the writer adds is not seen as a change. |
+| [`oversized_layer_cells_keep_their_size`](../../src/krita_link.rs#L1547) | A layer with cells bigger than the frame gets new cells at the same size. |
+| [`stays_put_is_a_trailing_dash_x`](../../src/krita_link.rs#L1564) | The `-x` rule on many names, and `comes_back` with `-x` groups. |
+| [`an_untouched_round_trip_with_groups_is_a_noop`](../../src/krita_link.rs#L1633) | Groups survive a no-change round trip, including through a real `send`. |
+| [`a_group_made_in_krita_comes_back`](../../src/krita_link.rs#L1646) | A group created in Krita arrives with its opacity, is linked, and a second pull is quiet. |
+| [`a_layer_moved_into_a_group_in_krita_moves_here`](../../src/krita_link.rs#L1666) | A layer moved into a group (and the group renamed) in Krita does the same here. |
+| [`a_group_made_in_krita_takes_only_its_own_layers`](../../src/krita_link.rs#L1685) | A new Krita group sits right on its layer; a layer added here stays on top. |
+| [`a_layer_moved_into_a_group_that_stays_here_stays_out`](../../src/krita_link.rs#L1704) | A layer Krita moves into a group that is now `-x` here stays synced and out of the group; the next pull is quiet. |
+| [`a_dash_x_group_stays_here_with_its_layers`](../../src/krita_link.rs#L1730) | A `-x` group and its children are not sent. |
+| [`a_layer_clipped_to_a_group_goes_cut`](../../src/krita_link.rs#L1743) | A layer clipped to a group is sent cut to the group, and the round trip is a no-op. |
+| [`reference_and_dash_x_layers_are_not_sent`](../../src/krita_link.rs#L1760) | Reference and `-x` layers are left out; pulling the untouched file changes nothing. |
+| [`a_dash_x_layer_made_in_krita_stays_there`](../../src/krita_link.rs#L1775) | A `-x` layer added in Krita never comes here. |
+| [`renamed_dash_x_in_krita_stops_syncing_and_keeps_ours`](../../src/krita_link.rs#L1790) | Renaming a layer to `-x` in Krita unlinks it with a warning, keeps ours as it was, and later pulls are quiet. |
+| [`odd_layer_names_survive_the_round_trip`](../../src/krita_link.rs#L1824) | Quotes, markup characters and non-Latin names go out and come back unchanged. |
+| [`resend_keeps_krita_only_layers_in_place`](../../src/krita_link.rs#L1842) | A re-send carries Krita's `sketch-x` layer over untouched and in its place; the baseline holds only our layers. |
+| [`a_layer_made_reference_here_after_the_send_unlinks`](../../src/krita_link.rs#L1878) | A layer made reference here after the send is unlinked and left exactly as it was, even though Krita edited it. |
 
 **Test helpers:**
-- [`cell`](../../src/krita_link.rs#L1222) — a small canvas with six seeded pixels.
-- [`project`](../../src/krita_link.rs#L1233) — two layers over 6 frames: "Ink" keys 0, 2, 4 (4 repeats 0), "Color" key 0.
+- [`cell`](../../src/krita_link.rs#L1238) — a small canvas with six seeded pixels.
+- [`project`](../../src/krita_link.rs#L1249) — two layers over 6 frames: "Ink" keys 0, 2, 4 (4 repeats 0), "Color" key 0.
 - `type Links` — `HashMap<u64, String>` (uid → uuid).
-- [`link`](../../src/krita_link.rs#L1253) — gives each layer a uuid and returns links plus the baseline.
-- [`base_of`](../../src/krita_link.rs#L1259) — a baseline of the project's linked layers as they stand.
-- [`pull_from`](../../src/krita_link.rs#L1268) — "Krita saves" a project and the pull is planned; new Krita layers get fresh uuids.
-- [`paint`](../../src/krita_link.rs#L1276) — overwrites the first pixel of a cell.
-- [`project_with_stay_here_layers`](../../src/krita_link.rs#L1562) — `project()` with Color as reference plus a `notes-x` layer: only Ink goes.
-- [`send_linked`](../../src/krita_link.rs#L1573) — does a real `send` to a temp folder and returns links, baseline and the file bytes.
-- [`grouped`](../../src/krita_link.rs#L1593) — `project()` plus a "Top" layer, with Ink and Color grouped as "Char".
-- [`rows`](../../src/krita_link.rs#L1605) — the stack as strings (`[Group]`, ` child`, `plain`) for easy asserts.
+- [`link`](../../src/krita_link.rs#L1269) — gives each layer a uuid and returns links plus the baseline.
+- [`base_of`](../../src/krita_link.rs#L1275) — a baseline of the project's linked layers as they stand.
+- [`pull_from`](../../src/krita_link.rs#L1284) — "Krita saves" a project and the pull is planned; new Krita layers get fresh uuids.
+- [`paint`](../../src/krita_link.rs#L1292) — overwrites the first pixel of a cell.
+- [`project_with_stay_here_layers`](../../src/krita_link.rs#L1578) — `project()` with Color as reference plus a `notes-x` layer: only Ink goes.
+- [`send_linked`](../../src/krita_link.rs#L1589) — does a real `send` to a temp folder and returns links, baseline and the file bytes.
+- [`grouped`](../../src/krita_link.rs#L1609) — `project()` plus a "Top" layer, with Ink and Color grouped as "Char".
+- [`rows`](../../src/krita_link.rs#L1621) — the stack as strings (`[Group]`, ` child`, `plain`) for easy asserts.
 
 ### `mod tests`
 
@@ -1139,47 +1142,47 @@ Run with `cargo test krita_link::tests` · 29 tests
 
 | Test | What it checks |
 |---|---|
-| [`real_krita_resave_of_what_we_sent_is_a_noop`](../../src/krita_link.rs#L1284) | The whole premise, against real Krita output: what we sent, loaded and re-saved by Krita 5.2.9 untouched, must pull back as no change at all. |
-| [`uuids_are_krita_shaped_and_distinct`](../../src/krita_link.rs#L1296) | Uuids are krita shaped and distinct. |
-| [`untouched_krita_file_is_a_noop`](../../src/krita_link.rs#L1305) | Untouched krita file is a noop. |
-| [`only_the_drawing_krita_changed_is_replaced`](../../src/krita_link.rs#L1313) | Only the drawing krita changed is replaced. |
-| [`local_edit_krita_did_not_touch_survives`](../../src/krita_link.rs#L1339) | Local edit krita did not touch survives. |
-| [`both_edited_krita_wins`](../../src/krita_link.rs#L1355) | Both edited krita wins. |
-| [`krita_retime_reuses_cells`](../../src/krita_link.rs#L1368) | Krita retime reuses cells. |
-| [`local_retime_on_a_layer_krita_left_alone_stays`](../../src/krita_link.rs#L1383) | Local retime on a layer krita left alone stays. |
-| [`link_survives_undo_to_before_the_send`](../../src/krita_link.rs#L1399) | Undo restores layer snapshots taken before the send; the link must survive that, which is why it keys on `uid` rather than a field set at send time. |
-| [`layers_added_removed_and_reordered_in_krita`](../../src/krita_link.rs#L1412) | Layers added removed and reordered in krita. |
-| [`krita_key_past_the_end_grows_the_timeline`](../../src/krita_link.rs#L1450) | Krita key past the end grows the timeline. |
-| [`second_pull_after_first_is_a_noop`](../../src/krita_link.rs#L1466) | Second pull after first is a noop. |
-| [`a_clipped_layer_goes_cut_and_an_untouched_round_trip_is_a_noop`](../../src/krita_link.rs#L1483) | A clipped layer goes to Krita cut to its base — one drawing per base drawing under it — and an untouched round trip brings nothing back. |
-| [`leading_blank_keys_do_not_count_as_changes`](../../src/krita_link.rs#L1521) | Leading blank keys do not count as changes. |
-| [`oversized_layer_cells_keep_their_size`](../../src/krita_link.rs#L1531) | Oversized layer cells keep their size. |
-| [`stays_put_is_a_trailing_dash_x`](../../src/krita_link.rs#L1548) | Stays put is a trailing dash x. |
-| [`an_untouched_round_trip_with_groups_is_a_noop`](../../src/krita_link.rs#L1617) | An untouched round trip with groups is a noop. |
-| [`a_group_made_in_krita_comes_back`](../../src/krita_link.rs#L1630) | A group made in krita comes back. |
-| [`a_layer_moved_into_a_group_in_krita_moves_here`](../../src/krita_link.rs#L1650) | A layer moved into a group in krita moves here. |
-| [`a_group_made_in_krita_takes_only_its_own_layers`](../../src/krita_link.rs#L1669) | Krita puts Top in a new group while a layer is added above Top here: the new group lands right on Top, the layer here on top of the group. |
-| [`a_layer_moved_into_a_group_that_stays_here_stays_out`](../../src/krita_link.rs#L1688) | The group stays here now (`-x`), and Krita moves Top, just under it, into its copy of it: Top stays synced and out of the group here, and the next pull is quiet. |
-| [`a_dash_x_group_stays_here_with_its_layers`](../../src/krita_link.rs#L1714) | A dash x group stays here with its layers. |
-| [`a_layer_clipped_to_a_group_goes_cut`](../../src/krita_link.rs#L1727) | Top clipped to the group goes to Krita cut to it, and the untouched round trip still changes nothing. |
-| [`reference_and_dash_x_layers_are_not_sent`](../../src/krita_link.rs#L1744) | Reference and dash x layers are not sent. |
-| [`a_dash_x_layer_made_in_krita_stays_there`](../../src/krita_link.rs#L1759) | A dash x layer made in krita stays there. |
-| [`renamed_dash_x_in_krita_stops_syncing_and_keeps_ours`](../../src/krita_link.rs#L1774) | Renamed dash x in krita stops syncing and keeps ours. |
-| [`odd_layer_names_survive_the_round_trip`](../../src/krita_link.rs#L1808) | Quotes, markup characters and non-Latin scripts in layer names go out and come back unchanged, both ways. |
-| [`resend_keeps_krita_only_layers_in_place`](../../src/krita_link.rs#L1826) | Krita adds `sketch-x` between two synced layers and saves; the next send from here rewrites the file but leaves the sketch in its place. |
-| [`a_layer_made_reference_here_after_the_send_unlinks`](../../src/krita_link.rs#L1862) | A layer made reference here after the send unlinks. |
+| [`real_krita_resave_of_what_we_sent_is_a_noop`](../../src/krita_link.rs#L1300) | The whole premise, against real Krita output: what we sent, loaded and re-saved by Krita 5.2.9 untouched, must pull back as no change at all. |
+| [`uuids_are_krita_shaped_and_distinct`](../../src/krita_link.rs#L1312) | Uuids are krita shaped and distinct. |
+| [`untouched_krita_file_is_a_noop`](../../src/krita_link.rs#L1321) | Untouched krita file is a noop. |
+| [`only_the_drawing_krita_changed_is_replaced`](../../src/krita_link.rs#L1329) | Only the drawing krita changed is replaced. |
+| [`local_edit_krita_did_not_touch_survives`](../../src/krita_link.rs#L1355) | Local edit krita did not touch survives. |
+| [`both_edited_krita_wins`](../../src/krita_link.rs#L1371) | Both edited krita wins. |
+| [`krita_retime_reuses_cells`](../../src/krita_link.rs#L1384) | Krita retime reuses cells. |
+| [`local_retime_on_a_layer_krita_left_alone_stays`](../../src/krita_link.rs#L1399) | Local retime on a layer krita left alone stays. |
+| [`link_survives_undo_to_before_the_send`](../../src/krita_link.rs#L1415) | Undo restores layer snapshots taken before the send; the link must survive that, which is why it keys on `uid` rather than a field set at send time. |
+| [`layers_added_removed_and_reordered_in_krita`](../../src/krita_link.rs#L1428) | Layers added removed and reordered in krita. |
+| [`krita_key_past_the_end_grows_the_timeline`](../../src/krita_link.rs#L1466) | Krita key past the end grows the timeline. |
+| [`second_pull_after_first_is_a_noop`](../../src/krita_link.rs#L1482) | Second pull after first is a noop. |
+| [`a_clipped_layer_goes_cut_and_an_untouched_round_trip_is_a_noop`](../../src/krita_link.rs#L1499) | A clipped layer goes to Krita cut to its base — one drawing per base drawing under it — and an untouched round trip brings nothing back. |
+| [`leading_blank_keys_do_not_count_as_changes`](../../src/krita_link.rs#L1537) | Leading blank keys do not count as changes. |
+| [`oversized_layer_cells_keep_their_size`](../../src/krita_link.rs#L1547) | Oversized layer cells keep their size. |
+| [`stays_put_is_a_trailing_dash_x`](../../src/krita_link.rs#L1564) | Stays put is a trailing dash x. |
+| [`an_untouched_round_trip_with_groups_is_a_noop`](../../src/krita_link.rs#L1633) | An untouched round trip with groups is a noop. |
+| [`a_group_made_in_krita_comes_back`](../../src/krita_link.rs#L1646) | A group made in krita comes back. |
+| [`a_layer_moved_into_a_group_in_krita_moves_here`](../../src/krita_link.rs#L1666) | A layer moved into a group in krita moves here. |
+| [`a_group_made_in_krita_takes_only_its_own_layers`](../../src/krita_link.rs#L1685) | Krita puts Top in a new group while a layer is added above Top here: the new group lands right on Top, the layer here on top of the group. |
+| [`a_layer_moved_into_a_group_that_stays_here_stays_out`](../../src/krita_link.rs#L1704) | The group stays here now (`-x`), and Krita moves Top, just under it, into its copy of it: Top stays synced and out of the group here, and the next pull is quiet. |
+| [`a_dash_x_group_stays_here_with_its_layers`](../../src/krita_link.rs#L1730) | A dash x group stays here with its layers. |
+| [`a_layer_clipped_to_a_group_goes_cut`](../../src/krita_link.rs#L1743) | Top clipped to the group goes to Krita cut to it, and the untouched round trip still changes nothing. |
+| [`reference_and_dash_x_layers_are_not_sent`](../../src/krita_link.rs#L1760) | Reference and dash x layers are not sent. |
+| [`a_dash_x_layer_made_in_krita_stays_there`](../../src/krita_link.rs#L1775) | A dash x layer made in krita stays there. |
+| [`renamed_dash_x_in_krita_stops_syncing_and_keeps_ours`](../../src/krita_link.rs#L1790) | Renamed dash x in krita stops syncing and keeps ours. |
+| [`odd_layer_names_survive_the_round_trip`](../../src/krita_link.rs#L1824) | Quotes, markup characters and non-Latin scripts in layer names go out and come back unchanged, both ways. |
+| [`resend_keeps_krita_only_layers_in_place`](../../src/krita_link.rs#L1842) | Krita adds `sketch-x` between two synced layers and saves; the next send from here rewrites the file but leaves the sketch in its place. |
+| [`a_layer_made_reference_here_after_the_send_unlinks`](../../src/krita_link.rs#L1878) | A layer made reference here after the send unlinks. |
 
 **Test helpers** (used only by the tests above):
 
-- [`cell`](../../src/krita_link.rs#L1222) — Cell.
-- [`project`](../../src/krita_link.rs#L1233) — Two layers over 6 frames: "Ink" keys 0,2,4 (4 repeats 0), "Color" key 0.
-- [`link`](../../src/krita_link.rs#L1253) — Link `p`: a uuid per layer, and the baseline of what Krita now holds.
-- [`base_of`](../../src/krita_link.rs#L1259) — A baseline of `p`'s linked layers as they stand.
-- [`pull_from`](../../src/krita_link.rs#L1268) — "Krita saves" `krita` and we plan the pull. `krita`'s layers are named through `links`; one Krita made up gets a fresh uuid, as Krita would.
-- [`paint`](../../src/krita_link.rs#L1276) — Paint.
-- [`project_with_stay_here_layers`](../../src/krita_link.rs#L1562) — A project whose bottom layer is a reference and top layer is named -x: only "Ink" goes.
-- [`send_linked`](../../src/krita_link.rs#L1573) — Send linked.
-- [`grouped`](../../src/krita_link.rs#L1593) — `project()` plus a "Top" layer, with Ink and Color grouped under it.
-- [`rows`](../../src/krita_link.rs#L1605) — Rows.
+- [`cell`](../../src/krita_link.rs#L1238) — Cell.
+- [`project`](../../src/krita_link.rs#L1249) — Two layers over 6 frames: "Ink" keys 0,2,4 (4 repeats 0), "Color" key 0.
+- [`link`](../../src/krita_link.rs#L1269) — Link `p`: a uuid per layer, and the baseline of what Krita now holds.
+- [`base_of`](../../src/krita_link.rs#L1275) — A baseline of `p`'s linked layers as they stand.
+- [`pull_from`](../../src/krita_link.rs#L1284) — "Krita saves" `krita` and we plan the pull. `krita`'s layers are named through `links`; one Krita made up gets a fresh uuid, as Krita would.
+- [`paint`](../../src/krita_link.rs#L1292) — Paint.
+- [`project_with_stay_here_layers`](../../src/krita_link.rs#L1578) — A project whose bottom layer is a reference and top layer is named -x: only "Ink" goes.
+- [`send_linked`](../../src/krita_link.rs#L1589) — Send linked.
+- [`grouped`](../../src/krita_link.rs#L1609) — `project()` plus a "Top" layer, with Ink and Color grouped under it.
+- [`rows`](../../src/krita_link.rs#L1621) — Rows.
 
-**Test-only types and constants:** [`Links`](../../src/krita_link.rs#L1250)
+**Test-only types and constants:** [`Links`](../../src/krita_link.rs#L1266)

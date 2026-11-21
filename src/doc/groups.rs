@@ -87,6 +87,14 @@ impl Project {
             || self.group_of(li).is_some_and(|g| self.layers[g].locked)
     }
 
+    /// Whether one of group `g`'s layers has a blend mode: then the group
+    /// is merged before it is laid down at any opacity, so the blend mixes
+    /// with the group's own layers only.
+    pub fn blends_inside(&self, g: usize) -> bool {
+        self.children(g)
+            .any(|c| self.layers[c].blend != crate::doc::blend::BlendMode::Normal)
+    }
+
     /// Whether layer `li`'s drawings may be edited: a drawing layer, not a
     /// reference, and not locked by itself or its group.
     pub fn paintable(&self, li: usize) -> bool {

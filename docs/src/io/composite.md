@@ -1,6 +1,6 @@
 # `src/io/composite.rs` — flatten all layers of a frame into one picture
 
-> **Source:** [src/io/composite.rs](../../../src/io/composite.rs) · **Module:** `crate::io::composite` · **Size:** 987 lines · Line links as of commit `c09072f`
+> **Source:** [src/io/composite.rs](../../../src/io/composite.rs) · **Module:** `crate::io::composite` · **Size:** 1081 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 
@@ -136,7 +136,7 @@ More: [Modules and visibility](../../rust-primer.md#modules-and-visibility),
 ## Types
 
 ### `const AVERAGE_BELOW`
-[src/io/composite.rs:409](../../../src/io/composite.rs#L409)
+[src/io/composite.rs:499](../../../src/io/composite.rs#L499)
 
 ```rust
 const AVERAGE_BELOW: f32 = 0.5;
@@ -150,7 +150,7 @@ fall *between* samples and a thin line "comes and goes" as the camera moves.
 ## Free functions
 
 ### `flatten_frame`
-[src/io/composite.rs:21](../../../src/io/composite.rs#L21)
+[src/io/composite.rs:22](../../../src/io/composite.rs#L22)
 
 ```rust
 pub fn flatten_frame(project: &Project, frame: usize) -> Canvas
@@ -177,7 +177,7 @@ which keeps the fast 1:1 path alive for projects made before the camera existed.
 tests across the crate.
 
 ### `flatten_through`
-[src/io/composite.rs:29](../../../src/io/composite.rs#L29)
+[src/io/composite.rs:30](../../../src/io/composite.rs#L30)
 
 ```rust
 pub fn flatten_through(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas
@@ -198,7 +198,7 @@ camera is passed as `Some(cam)`. With `None` it behaves exactly like `flatten_fr
 [app.rs](../app.md) (`clipboard_frame`).
 
 ### `flatten_doc`
-[src/io/composite.rs:38](../../../src/io/composite.rs#L38)
+[src/io/composite.rs:39](../../../src/io/composite.rs#L39)
 
 ```rust
 pub fn flatten_doc(project: &Project, frame: usize) -> Canvas
@@ -213,7 +213,7 @@ whatever the camera frames.
 (`wand_down`), [kra/mod.rs](kra/mod.md) (`write`, when the camera has its own size).
 
 ### `flatten`
-[src/io/composite.rs:43](../../../src/io/composite.rs#L43)
+[src/io/composite.rs:44](../../../src/io/composite.rs#L44)
 
 ```rust
 fn flatten(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas
@@ -256,10 +256,18 @@ each at 50%:  blue at 50%, then red at 50% over it → some blue still shows thr
 ```
 
 ### `composite_layer`
-[src/io/composite.rs:97](../../../src/io/composite.rs#L97)
+[src/io/composite.rs:99](../../../src/io/composite.rs#L99)
 
 ```rust
-pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacity: f32, pw: u32, ph: u32)
+pub fn composite_layer(
+    dst: &mut Canvas,
+    src: &Canvas,
+    xform: &Transform,
+    opacity: f32,
+    blend: BlendMode,
+    pw: u32,
+    ph: u32,
+)
 ```
 
 **What it does.** Paints one cell (`src`) onto `dst` with source-over blending, placed by the
@@ -276,7 +284,7 @@ rectangle covering the whole `pw × ph` output.
 **Used by:** `flatten` above; [app.rs](../app.md) (`merge_layer_down`, `fill_boundary`).
 
 ### `composite_layer_in`
-[src/io/composite.rs:109](../../../src/io/composite.rs#L109)
+[src/io/composite.rs:120](../../../src/io/composite.rs#L120)
 
 ```rust
 pub fn composite_layer_in(
@@ -284,6 +292,7 @@ pub fn composite_layer_in(
     src: &Canvas,
     xform: &Transform,
     opacity: f32,
+    blend: BlendMode,
     pw: u32,
     ph: u32,
     rect: DirtyRect,
@@ -361,7 +370,7 @@ sourceOver([0, 0, 255, 255], [255, 0, 0, 128], 1); // → [128, 0, 127, 255]
 **Used by:** `composite_layer`; [doc/clip.rs](../doc/clip.md) (`render_group`).
 
 ### `shrunk_for`
-[src/io/composite.rs:423](../../../src/io/composite.rs#L423)
+[src/io/composite.rs:513](../../../src/io/composite.rs#L513)
 
 ```rust
 fn shrunk_for(src: &Canvas, xform: &Transform) -> (Canvas, Transform)
@@ -389,7 +398,7 @@ normally.
 `scale = 0.3` → `1/0.3 ≈ 3.33` → `log2 ≈ 1.74` → floor 1 → `k = 2` → new scale 0.6.
 
 ### `shrunk`
-[src/io/composite.rs:446](../../../src/io/composite.rs#L446)
+[src/io/composite.rs:536](../../../src/io/composite.rs#L536)
 
 ```rust
 fn shrunk(src: &Canvas, k: u32) -> Canvas
@@ -413,7 +422,7 @@ colour = `200·255 / 255 = 200`, alpha = `255 / 4 ≈ 64` → `(200, 0, 0, 64)`.
 would have given a dark `(50, 0, 0, 64)`; the premultiplied one keeps the red, just fainter.
 
 ### `sample_bilinear`
-[src/io/composite.rs:492](../../../src/io/composite.rs#L492)
+[src/io/composite.rs:582](../../../src/io/composite.rs#L582)
 
 ```rust
 pub(crate) fn sample_bilinear(src: &Canvas, x: f32, y: f32) -> [u8; 4]
@@ -436,7 +445,7 @@ the bottom pair by `fx`, then blend those two results by `fy`.
 **Used by:** `composite_layer_in`; [app.rs](../app.md) (free function `doc_to_cell`).
 
 ### `composite_over`
-[src/io/composite.rs:518](../../../src/io/composite.rs#L518)
+[src/io/composite.rs:608](../../../src/io/composite.rs#L608)
 
 ```rust
 pub(crate) fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32)
@@ -448,10 +457,10 @@ size), scaled by `opacity`. Calls `composite_over_in` over the whole canvas.
 **Used by:** `flatten` (laying down a partly transparent group).
 
 ### `composite_over_in`
-[src/io/composite.rs:529](../../../src/io/composite.rs#L529)
+[src/io/composite.rs:619](../../../src/io/composite.rs#L619)
 
 ```rust
-fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, rect: DirtyRect)
+fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, blend: BlendMode, rect: DirtyRect)
 ```
 
 **What it does.** The same-size, no-transform blend, limited to `rect`. Uses the same
@@ -474,57 +483,61 @@ size) and `downscale_tests` (the averaging shrink).
 
 | Test | What it checks |
 |---|---|
-| [`export_shows_a_clipped_layer_only_over_its_base`](../../../src/io/composite.rs#L174) | A clipped red layer shows only where the blue base has paint; unclipped it covers the frame. |
-| [`a_half_opaque_group_composites_first`](../../../src/io/composite.rs#L237) | A group at 50% merges its layers first, so the blue under the red never shows through. |
-| [`an_opaque_group_matches_direct_drawing`](../../../src/io/composite.rs#L254) | A group at full opacity exports byte-for-byte the same as its layers ungrouped. |
-| [`a_hidden_group_exports_nothing`](../../../src/io/composite.rs#L265) | Hiding a group hides all its layers in the export. |
-| [`a_layer_clipped_to_a_group_shows_over_all_of_it`](../../../src/io/composite.rs#L276) | A layer clipped to a group shows over everything the group covers, ignores child opacity, disappears when the group is hidden, and matches the Krita "baked" version. |
-| [`identity_camera_exports_unchanged`](../../../src/io/composite.rs#L315) | An untouched camera exports exactly as before the camera existed. |
-| [`panning_the_camera_shifts_the_frame`](../../../src/io/composite.rs#L325) | Panning the camera right by 2 moves the artwork 2 px left. |
-| [`offscreen_layer_appears_only_once_the_camera_arrives`](../../../src/io/composite.rs#L339) | A layer parked a frame-width to the right is invisible until the camera pans over to it. |
-| [`keyed_camera_pans_between_two_characters`](../../../src/io/composite.rs#L353) | A keyed camera move shows character A at frame 0 and B at frame 10, and ease-both barely moves at frame 1. |
-| [`frames_through_a_keyed_camera_are_what_they_were`](../../../src/io/composite.rs#L675) | Pinned hashes of frames through a keyed camera have not changed. |
-| [`frames_through_a_still_camera_are_what_they_were`](../../../src/io/composite.rs#L690) | Pinned hashes through a moved still camera and the resting camera have not changed. |
-| [`frames_in_document_space_are_what_they_were`](../../../src/io/composite.rs#L703) | Pinned hashes of `flatten_doc` output have not changed. |
-| [`a_smaller_frame_is_a_window_onto_the_canvas`](../../../src/io/composite.rs#L735) | A 12×8 camera on a 24×16 canvas gives exactly the middle crop, 1:1. |
-| [`panning_moves_the_window_across_the_canvas`](../../../src/io/composite.rs#L747) | Panning a smaller camera frame crops a different area of the canvas. |
-| [`a_portrait_frame_stands_on_end`](../../../src/io/composite.rs#L760) | A tall 8×12 camera frame gives the right crop and size. |
-| [`a_frame_bigger_than_the_canvas_shows_nothing_past_its_edge`](../../../src/io/composite.rs#L770) | A camera frame larger than the canvas is clear outside the canvas area. |
-| [`document_space_is_the_canvas_whatever_the_camera_s_size`](../../../src/io/composite.rs#L787) | `flatten_doc` ignores the camera's own size. |
-| [`a_thin_line_is_never_skipped`](../../../src/io/composite.rs#L824) | At zoom 0.25 a 1-px line always becomes a quarter-alpha column, wherever it falls in the block. |
-| [`thinning_a_line_keeps_its_colour`](../../../src/io/composite.rs#L840) | A shrunk red line stays pure red, just at lower alpha. |
-| [`solid_paint_stays_solid`](../../../src/io/composite.rs#L847) | A canvas filled with one opaque colour still exports as that colour when shrunk. |
-| [`down_to_a_half_frames_are_sampled_as_before`](../../../src/io/composite.rs#L871) | At zoom 1, 0.75, 0.5 nothing is averaged (output unchanged); at 0.25 it is. |
-| [`a_shrunken_layer_is_averaged_through_a_resting_camera`](../../../src/io/composite.rs#L887) | A layer scaled to 0.25 is averaged even with the camera at rest. |
-| [`an_odd_sized_cell_is_shrunk_in_place`](../../../src/io/composite.rs#L900) | A cell that is not a whole number of blocks is padded but still lands in the right place. |
-| [`shrinking_averages_each_block`](../../../src/io/composite.rs#L923) | `shrunk` averages each 2×2 block premultiplied, including a half-off-edge block. |
-| [`document_space_is_never_averaged`](../../../src/io/composite.rs#L940) | `flatten_doc` never uses the shrink, even for a small layer. |
-| [`perf_export_downscale`](../../../src/io/composite.rs#L956) | `#[ignore]`d timing probe on an 8K canvas (run with `--ignored --nocapture`); not pass/fail. |
+| [`export_shows_a_clipped_layer_only_over_its_base`](../../../src/io/composite.rs#L190) | A clipped red layer shows only where the blue base has paint; unclipped it covers the frame. |
+| [`a_half_opaque_group_composites_first`](../../../src/io/composite.rs#L327) | A group at 50% merges its layers first, so the blue under the red never shows through. |
+| [`an_opaque_group_matches_direct_drawing`](../../../src/io/composite.rs#L344) | A group at full opacity exports byte-for-byte the same as its layers ungrouped. |
+| [`a_hidden_group_exports_nothing`](../../../src/io/composite.rs#L355) | Hiding a group hides all its layers in the export. |
+| [`a_layer_clipped_to_a_group_shows_over_all_of_it`](../../../src/io/composite.rs#L366) | A layer clipped to a group shows over everything the group covers, ignores child opacity, disappears when the group is hidden, and matches the Krita "baked" version. |
+| [`identity_camera_exports_unchanged`](../../../src/io/composite.rs#L405) | An untouched camera exports exactly as before the camera existed. |
+| [`panning_the_camera_shifts_the_frame`](../../../src/io/composite.rs#L415) | Panning the camera right by 2 moves the artwork 2 px left. |
+| [`offscreen_layer_appears_only_once_the_camera_arrives`](../../../src/io/composite.rs#L429) | A layer parked a frame-width to the right is invisible until the camera pans over to it. |
+| [`keyed_camera_pans_between_two_characters`](../../../src/io/composite.rs#L443) | A keyed camera move shows character A at frame 0 and B at frame 10, and ease-both barely moves at frame 1. |
+| [`frames_through_a_keyed_camera_are_what_they_were`](../../../src/io/composite.rs#L769) | Pinned hashes of frames through a keyed camera have not changed. |
+| [`frames_through_a_still_camera_are_what_they_were`](../../../src/io/composite.rs#L784) | Pinned hashes through a moved still camera and the resting camera have not changed. |
+| [`frames_in_document_space_are_what_they_were`](../../../src/io/composite.rs#L797) | Pinned hashes of `flatten_doc` output have not changed. |
+| [`a_smaller_frame_is_a_window_onto_the_canvas`](../../../src/io/composite.rs#L829) | A 12×8 camera on a 24×16 canvas gives exactly the middle crop, 1:1. |
+| [`panning_moves_the_window_across_the_canvas`](../../../src/io/composite.rs#L841) | Panning a smaller camera frame crops a different area of the canvas. |
+| [`a_portrait_frame_stands_on_end`](../../../src/io/composite.rs#L854) | A tall 8×12 camera frame gives the right crop and size. |
+| [`a_frame_bigger_than_the_canvas_shows_nothing_past_its_edge`](../../../src/io/composite.rs#L864) | A camera frame larger than the canvas is clear outside the canvas area. |
+| [`document_space_is_the_canvas_whatever_the_camera_s_size`](../../../src/io/composite.rs#L881) | `flatten_doc` ignores the camera's own size. |
+| [`a_thin_line_is_never_skipped`](../../../src/io/composite.rs#L918) | At zoom 0.25 a 1-px line always becomes a quarter-alpha column, wherever it falls in the block. |
+| [`thinning_a_line_keeps_its_colour`](../../../src/io/composite.rs#L934) | A shrunk red line stays pure red, just at lower alpha. |
+| [`solid_paint_stays_solid`](../../../src/io/composite.rs#L941) | A canvas filled with one opaque colour still exports as that colour when shrunk. |
+| [`down_to_a_half_frames_are_sampled_as_before`](../../../src/io/composite.rs#L965) | At zoom 1, 0.75, 0.5 nothing is averaged (output unchanged); at 0.25 it is. |
+| [`a_shrunken_layer_is_averaged_through_a_resting_camera`](../../../src/io/composite.rs#L981) | A layer scaled to 0.25 is averaged even with the camera at rest. |
+| [`an_odd_sized_cell_is_shrunk_in_place`](../../../src/io/composite.rs#L994) | A cell that is not a whole number of blocks is padded but still lands in the right place. |
+| [`shrinking_averages_each_block`](../../../src/io/composite.rs#L1017) | `shrunk` averages each 2×2 block premultiplied, including a half-off-edge block. |
+| [`document_space_is_never_averaged`](../../../src/io/composite.rs#L1034) | `flatten_doc` never uses the shrink, even for a small layer. |
+| [`perf_export_downscale`](../../../src/io/composite.rs#L1050) | `#[ignore]`d timing probe on an 8K canvas (run with `--ignored --nocapture`); not pass/fail. |
 
 **Test helpers** (only compiled for tests):
 
 ### `mod tests`
 
-Run with `cargo test io::composite::tests` · 9 tests
+Run with `cargo test io::composite::tests` · 12 tests
 
 | Test | What it checks |
 |---|---|
-| [`export_shows_a_clipped_layer_only_over_its_base`](../../../src/io/composite.rs#L174) | Export shows a clipped layer only over its base. |
-| [`a_half_opaque_group_composites_first`](../../../src/io/composite.rs#L237) | At half opacity the group's layers merge first: blue under red never shows through, only the merged red at half strength. |
-| [`an_opaque_group_matches_direct_drawing`](../../../src/io/composite.rs#L254) | An opaque group matches direct drawing. |
-| [`a_hidden_group_exports_nothing`](../../../src/io/composite.rs#L265) | A hidden group exports nothing. |
-| [`a_layer_clipped_to_a_group_shows_over_all_of_it`](../../../src/io/composite.rs#L276) | Green clipped to the group shows only over what the group covers — the left half — and the mask ignores the layers' opacity. |
-| [`identity_camera_exports_unchanged`](../../../src/io/composite.rs#L315) | An untouched project must export exactly as it did before the camera existed: the identity camera folds to a no-op. |
-| [`panning_the_camera_shifts_the_frame`](../../../src/io/composite.rs#L325) | Panning the camera right moves the artwork left in the exported frame — which is how a character parked off to the side comes into shot. |
-| [`offscreen_layer_appears_only_once_the_camera_arrives`](../../../src/io/composite.rs#L339) | A layer parked a full frame to the right is invisible until the camera keys pan over to it. |
-| [`keyed_camera_pans_between_two_characters`](../../../src/io/composite.rs#L353) | The whole point, end to end: character A in frame, character B parked off to the right, keyed camera pans from one to the other. |
+| [`export_shows_a_clipped_layer_only_over_its_base`](../../../src/io/composite.rs#L190) | Export shows a clipped layer only over its base. |
+| [`export_mixes_each_layer_in_its_blend_mode`](../../../src/io/composite.rs#L273) | Export mixes each layer in its blend mode. |
+| [`a_moved_layer_blends_like_one_in_place`](../../../src/io/composite.rs#L285) | The same blend through a transform takes the sampled path, and mixes the same. |
+| [`a_blend_inside_a_group_stays_inside_it`](../../../src/io/composite.rs#L304) | A blend mode inside a group mixes with the group's layers only — at full opacity as at half — so the green under the group is untouched. |
+| [`a_half_opaque_group_composites_first`](../../../src/io/composite.rs#L327) | At half opacity the group's layers merge first: blue under red never shows through, only the merged red at half strength. |
+| [`an_opaque_group_matches_direct_drawing`](../../../src/io/composite.rs#L344) | An opaque group matches direct drawing. |
+| [`a_hidden_group_exports_nothing`](../../../src/io/composite.rs#L355) | A hidden group exports nothing. |
+| [`a_layer_clipped_to_a_group_shows_over_all_of_it`](../../../src/io/composite.rs#L366) | Green clipped to the group shows only over what the group covers — the left half — and the mask ignores the layers' opacity. |
+| [`identity_camera_exports_unchanged`](../../../src/io/composite.rs#L405) | An untouched project must export exactly as it did before the camera existed: the identity camera folds to a no-op. |
+| [`panning_the_camera_shifts_the_frame`](../../../src/io/composite.rs#L415) | Panning the camera right moves the artwork left in the exported frame — which is how a character parked off to the side comes into shot. |
+| [`offscreen_layer_appears_only_once_the_camera_arrives`](../../../src/io/composite.rs#L429) | A layer parked a full frame to the right is invisible until the camera keys pan over to it. |
+| [`keyed_camera_pans_between_two_characters`](../../../src/io/composite.rs#L443) | The whole point, end to end: character A in frame, character B parked off to the right, keyed camera pans from one to the other. |
 
 **Test helpers** (used only by the tests above):
 
-- [`grouped`](../../../src/io/composite.rs#L206) — Three frame-sized layers on an 8×4 project, bottom first: blue on the left half, red on the left half too, green over everything. Each opaque. Layers 0 and 1 then go into a group.
-- [`px`](../../../src/io/composite.rs#L230) — Px.
-- [`dot_project`](../../../src/io/composite.rs#L298) — Paint one opaque red pixel at `(x, y)` of the project's only cell.
-- [`red_at`](../../../src/io/composite.rs#L307) — Red at.
+- [`grouped`](../../../src/io/composite.rs#L222) — Three frame-sized layers on an 8×4 project, bottom first: blue on the left half, red on the left half too, green over everything. Each opaque. Layers 0 and 1 then go into a group.
+- [`px`](../../../src/io/composite.rs#L246) — Px.
+- [`over_grey`](../../../src/io/composite.rs#L252) — A 4×1 project: a grey layer on the left half, then a layer over all of it, opaque 128-grey, in `mode`.
+- [`dot_project`](../../../src/io/composite.rs#L388) — Paint one opaque red pixel at `(x, y)` of the project's only cell.
+- [`red_at`](../../../src/io/composite.rs#L397) — Red at.
 
 ### `mod pins`
 
@@ -532,16 +545,16 @@ Run with `cargo test io::composite::pins` · 3 tests
 
 | Test | What it checks |
 |---|---|
-| [`frames_through_a_keyed_camera_are_what_they_were`](../../../src/io/composite.rs#L675) | Frames through a keyed camera are what they were. |
-| [`frames_through_a_still_camera_are_what_they_were`](../../../src/io/composite.rs#L690) | Frames through a still camera are what they were. |
-| [`frames_in_document_space_are_what_they_were`](../../../src/io/composite.rs#L703) | Frames in document space are what they were. |
+| [`frames_through_a_keyed_camera_are_what_they_were`](../../../src/io/composite.rs#L769) | Frames through a keyed camera are what they were. |
+| [`frames_through_a_still_camera_are_what_they_were`](../../../src/io/composite.rs#L784) | Frames through a still camera are what they were. |
+| [`frames_in_document_space_are_what_they_were`](../../../src/io/composite.rs#L797) | Frames in document space are what they were. |
 
 **Test helpers** (used only by the tests above):
 
-- [`fnv`](../../../src/io/composite.rs#L583) — FNV-1a, 64 bit.
-- [`speckle`](../../../src/io/composite.rs#L591) — Speckle a cell: clear, half and full alpha, in colours that depend on `seed`, so every layer and drawing is told apart.
-- [`scene`](../../../src/io/composite.rs#L616) — Sixteen frames of everything an export goes through: a background with two drawings, a layer with a keyed pose, a half-opaque group of two, a clipped layer with an oversized cell on top, and a camera keyed through a pan, a push-in, a pull-out and a roll with every ease.
-- [`hashes`](../../../src/io/composite.rs#L670) — Hashes.
+- [`fnv`](../../../src/io/composite.rs#L677) — FNV-1a, 64 bit.
+- [`speckle`](../../../src/io/composite.rs#L685) — Speckle a cell: clear, half and full alpha, in colours that depend on `seed`, so every layer and drawing is told apart.
+- [`scene`](../../../src/io/composite.rs#L710) — Sixteen frames of everything an export goes through: a background with two drawings, a layer with a keyed pose, a half-opaque group of two, a clipped layer with an oversized cell on top, and a camera keyed through a pan, a push-in, a pull-out and a roll with every ease.
+- [`hashes`](../../../src/io/composite.rs#L764) — Hashes.
 
 ### `mod camera_size_tests`
 
@@ -549,16 +562,16 @@ Run with `cargo test io::composite::camera_size_tests` · 5 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_smaller_frame_is_a_window_onto_the_canvas`](../../../src/io/composite.rs#L735) | A smaller frame is a window onto the canvas. |
-| [`panning_moves_the_window_across_the_canvas`](../../../src/io/composite.rs#L747) | Panning moves the window across the canvas. |
-| [`a_portrait_frame_stands_on_end`](../../../src/io/composite.rs#L760) | A portrait frame stands on end. |
-| [`a_frame_bigger_than_the_canvas_shows_nothing_past_its_edge`](../../../src/io/composite.rs#L770) | A frame bigger than the canvas shows nothing past its edge. |
-| [`document_space_is_the_canvas_whatever_the_camera_s_size`](../../../src/io/composite.rs#L787) | The fill tool's source is the canvas, whatever the camera frames. |
+| [`a_smaller_frame_is_a_window_onto_the_canvas`](../../../src/io/composite.rs#L829) | A smaller frame is a window onto the canvas. |
+| [`panning_moves_the_window_across_the_canvas`](../../../src/io/composite.rs#L841) | Panning moves the window across the canvas. |
+| [`a_portrait_frame_stands_on_end`](../../../src/io/composite.rs#L854) | A portrait frame stands on end. |
+| [`a_frame_bigger_than_the_canvas_shows_nothing_past_its_edge`](../../../src/io/composite.rs#L864) | A frame bigger than the canvas shows nothing past its edge. |
+| [`document_space_is_the_canvas_whatever_the_camera_s_size`](../../../src/io/composite.rs#L881) | The fill tool's source is the canvas, whatever the camera frames. |
 
 **Test helpers** (used only by the tests above):
 
-- [`crop`](../../../src/io/composite.rs#L716) — `[x0, x0 + w) × [y0, y0 + h)` of `c`, as its own pixels.
-- [`scene`](../../../src/io/composite.rs#L727) — The pinned scene on its 24×16 canvas, with the camera at rest.
+- [`crop`](../../../src/io/composite.rs#L810) — `[x0, x0 + w) × [y0, y0 + h)` of `c`, as its own pixels.
+- [`scene`](../../../src/io/composite.rs#L821) — The pinned scene on its 24×16 canvas, with the camera at rest.
 
 ### `mod downscale_tests`
 
@@ -566,18 +579,18 @@ Run with `cargo test io::composite::downscale_tests` · 9 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_thin_line_is_never_skipped`](../../../src/io/composite.rs#L824) | The point of it. A line one pixel wide used to show or vanish by where it fell among the samples; now it is a quarter of the exported pixel it lies in, wherever in it that is. |
-| [`thinning_a_line_keeps_its_colour`](../../../src/io/composite.rs#L840) | Averaged premultiplied: a red line among clear pixels is fainter, not darker. |
-| [`solid_paint_stays_solid`](../../../src/io/composite.rs#L847) | Solid paint stays solid. |
-| [`down_to_a_half_frames_are_sampled_as_before`](../../../src/io/composite.rs#L871) | Down to a half, nothing is averaged: those frames are the bytes they were. Only past it does the export change. |
-| [`a_shrunken_layer_is_averaged_through_a_resting_camera`](../../../src/io/composite.rs#L887) | A layer shrunk on the canvas is averaged in an export too — it is the size it is drawn at that counts, camera and layer together. |
-| [`an_odd_sized_cell_is_shrunk_in_place`](../../../src/io/composite.rs#L900) | A cell that isn't a whole number of blocks is padded to shrink it — and still drawn where it was: its paint lands in the exported pixels it covers, not half a block over. |
-| [`shrinking_averages_each_block`](../../../src/io/composite.rs#L923) | Shrinking averages each block. |
-| [`document_space_is_never_averaged`](../../../src/io/composite.rs#L940) | Document space — what the fill tool reads its boundaries from — is not an export, and is sampled as it always was. |
-| [`perf_export_downscale`](../../../src/io/composite.rs#L956) | What averaging costs, and that frames it doesn't touch cost what they did. Not a pass/fail test — run it for the numbers: `cargo test --release perf_export_downscale -- --ignored --nocapture` |
+| [`a_thin_line_is_never_skipped`](../../../src/io/composite.rs#L918) | The point of it. A line one pixel wide used to show or vanish by where it fell among the samples; now it is a quarter of the exported pixel it lies in, wherever in it that is. |
+| [`thinning_a_line_keeps_its_colour`](../../../src/io/composite.rs#L934) | Averaged premultiplied: a red line among clear pixels is fainter, not darker. |
+| [`solid_paint_stays_solid`](../../../src/io/composite.rs#L941) | Solid paint stays solid. |
+| [`down_to_a_half_frames_are_sampled_as_before`](../../../src/io/composite.rs#L965) | Down to a half, nothing is averaged: those frames are the bytes they were. Only past it does the export change. |
+| [`a_shrunken_layer_is_averaged_through_a_resting_camera`](../../../src/io/composite.rs#L981) | A layer shrunk on the canvas is averaged in an export too — it is the size it is drawn at that counts, camera and layer together. |
+| [`an_odd_sized_cell_is_shrunk_in_place`](../../../src/io/composite.rs#L994) | A cell that isn't a whole number of blocks is padded to shrink it — and still drawn where it was: its paint lands in the exported pixels it covers, not half a block over. |
+| [`shrinking_averages_each_block`](../../../src/io/composite.rs#L1017) | Shrinking averages each block. |
+| [`document_space_is_never_averaged`](../../../src/io/composite.rs#L1034) | Document space — what the fill tool reads its boundaries from — is not an export, and is sampled as it always was. |
+| [`perf_export_downscale`](../../../src/io/composite.rs#L1050) | What averaging costs, and that frames it doesn't touch cost what they did. Not a pass/fail test — run it for the numbers: `cargo test --release perf_export_downscale -- --ignored --nocapture` |
 
 **Test helpers** (used only by the tests above):
 
-- [`pulled_back`](../../../src/io/composite.rs#L804) — A 64×64 canvas seen whole through a 16×16 frame: a camera pulled back to a quarter, four canvas pixels to each exported one.
-- [`column`](../../../src/io/composite.rs#L811) — Column.
-- [`sampled`](../../../src/io/composite.rs#L859) — What `flatten_frame` gave before any of this: every layer through `composite_layer`.
+- [`pulled_back`](../../../src/io/composite.rs#L898) — A 64×64 canvas seen whole through a 16×16 frame: a camera pulled back to a quarter, four canvas pixels to each exported one.
+- [`column`](../../../src/io/composite.rs#L905) — Column.
+- [`sampled`](../../../src/io/composite.rs#L953) — What `flatten_frame` gave before any of this: every layer through `composite_layer`.

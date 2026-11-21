@@ -1,6 +1,6 @@
 # `src/ui/color_wheel.rs` — the HSL colour wheel and Color panel
 
-> **Source:** [src/ui/color_wheel.rs](../../../src/ui/color_wheel.rs) · **Module:** `crate::ui::color_wheel` · **Size:** 831 lines · Line links as of commit `c09072f`
+> **Source:** [src/ui/color_wheel.rs](../../../src/ui/color_wheel.rs) · **Module:** `crate::ui::color_wheel` · **Size:** 831 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 

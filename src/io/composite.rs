@@ -1,6 +1,7 @@
 //! CPU composite — used for PNG / GIF export where we need flat pixels for a
 //! given frame. Onion skins and reference layers are excluded from export.
 
+use crate::doc::blend::BlendMode;
 use crate::doc::camera::Camera;
 use crate::doc::canvas::{Canvas, DirtyRect};
 use crate::doc::project::Project;
@@ -62,9 +63,9 @@ fn flatten(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas {
         let xform = cam.map_or(xform, |cam| cam.apply(&xform));
         if through_camera && xform.scale.abs() < AVERAGE_BELOW {
             let (small, xform) = shrunk_for(&src, &xform);
-            composite_layer(dst, &small, &xform, layer.opacity, pw, ph);
+            composite_layer(dst, &small, &xform, layer.opacity, layer.blend, pw, ph);
         } else {
-            composite_layer(dst, &src, &xform, layer.opacity, pw, ph);
+            composite_layer(dst, &src, &xform, layer.opacity, layer.blend, pw, ph);
         }
     };
     for (li, layer) in project.layers.iter().enumerate() {
@@ -75,13 +76,14 @@ fn flatten(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas {
         }
         if !layer.is_group() {
             draw(&mut out, li);
-        } else if layer.visible && layer.opacity >= 1.0 {
+        } else if layer.visible && layer.opacity >= 1.0 && !project.blends_inside(li) {
             // Over is associative: at full opacity a group composited on its
             // own and then laid down is exactly its layers laid down directly.
             project.children(li).for_each(|c| draw(&mut out, c));
         } else if layer.visible && layer.opacity > 0.0 {
             // Otherwise its layers merge first and the group's opacity applies
-            // once, so they don't show through one another.
+            // once, so they don't show through one another — and a blend mode
+            // inside mixes with the group's own layers only.
             let mut group = Canvas::new(pw, ph);
             project.children(li).for_each(|c| draw(&mut group, c));
             composite_over(&mut out, &group, layer.opacity);
@@ -94,23 +96,33 @@ fn flatten(project: &Project, frame: usize, cam: Option<Camera>) -> Canvas {
 /// path when the transform is identity and the cell already matches the canvas
 /// size; otherwise inverse-maps each destination pixel and bilinearly samples
 /// the source.
-pub fn composite_layer(dst: &mut Canvas, src: &Canvas, xform: &Transform, opacity: f32, pw: u32, ph: u32) {
+pub fn composite_layer(
+    dst: &mut Canvas,
+    src: &Canvas,
+    xform: &Transform,
+    opacity: f32,
+    blend: BlendMode,
+    pw: u32,
+    ph: u32,
+) {
     let all = DirtyRect {
         min_x: 0,
         min_y: 0,
         max_x: pw,
         max_y: ph,
     };
-    composite_layer_in(dst, src, xform, opacity, pw, ph, all);
+    composite_layer_in(dst, src, xform, opacity, blend, pw, ph, all);
 }
 
 /// [`composite_layer`], writing only `rect` of `dst` — what redoing part of
 /// a group's merged image takes.
+#[allow(clippy::too_many_arguments)]
 pub fn composite_layer_in(
     dst: &mut Canvas,
     src: &Canvas,
     xform: &Transform,
     opacity: f32,
+    blend: BlendMode,
     pw: u32,
     ph: u32,
     rect: DirtyRect,
@@ -122,7 +134,7 @@ pub fn composite_layer_in(
         max_y: rect.max_y.min(ph),
     };
     if xform.is_identity() && src.width == pw && src.height == ph {
-        composite_over_in(dst, src, opacity, rect);
+        composite_over_in(dst, src, opacity, blend, rect);
         return;
     }
 
@@ -149,6 +161,10 @@ pub fn composite_layer_in(
             }
             let di = ((y * pw + x) * 4) as usize;
             let d = &mut dst.pixels_mut()[di..di + 4];
+            if blend != BlendMode::Normal {
+                crate::doc::blend::blend_px(blend, d, &s, sa);
+                continue;
+            }
             let da = d[3] as f32 / 255.0;
             let out_a = sa + da * (1.0 - sa);
             if out_a <= 0.0 {
@@ -229,6 +245,80 @@ mod tests {
 
     fn px(c: &Canvas, x: u32) -> [u8; 4] {
         c.px(x, 1)
+    }
+
+    /// A 4×1 project: a grey layer on the left half, then a layer over all of
+    /// it, opaque 128-grey, in `mode`.
+    fn over_grey(mode: BlendMode) -> Canvas {
+        let mut p = Project::new(4, 1, 12.0);
+        p.add_layer();
+        let mut under = Canvas::new(4, 1);
+        let mut over = Canvas::new(4, 1);
+        for x in 0..4usize {
+            if x < 2 {
+                under.pixels_mut()[x * 4..x * 4 + 4].copy_from_slice(&[200, 100, 50, 255]);
+            }
+            over.pixels_mut()[x * 4..x * 4 + 4].copy_from_slice(&[128, 128, 128, 255]);
+        }
+        for (li, c) in [under, over].into_iter().enumerate() {
+            let id = p.cells.len();
+            p.cells.push(c.into());
+            p.layers[li].set_key(0, id);
+        }
+        p.layers[1].blend = mode;
+        flatten_frame(&p, 0)
+    }
+
+    #[test]
+    fn export_mixes_each_layer_in_its_blend_mode() {
+        let m = over_grey(BlendMode::Multiply);
+        assert_eq!(m.px(0, 0), [100, 50, 25, 255], "multiplied with what is under it");
+        assert_eq!(m.px(3, 0), [128, 128, 128, 255], "over nothing, itself");
+        let s = over_grey(BlendMode::Screen);
+        assert_eq!(s.px(0, 0), [228, 178, 153, 255]);
+        assert_eq!(over_grey(BlendMode::Normal).px(0, 0), [128, 128, 128, 255]);
+    }
+
+    /// The same blend through a transform takes the sampled path, and mixes
+    /// the same.
+    #[test]
+    fn a_moved_layer_blends_like_one_in_place() {
+        let mut p = Project::new(4, 1, 12.0);
+        p.add_layer();
+        let mut under = Canvas::new(4, 1);
+        under.pixels_mut().chunks_exact_mut(4).for_each(|px| px.copy_from_slice(&[200, 100, 50, 255]));
+        let mut over = Canvas::new(8, 3);
+        over.pixels_mut().chunks_exact_mut(4).for_each(|px| px.copy_from_slice(&[128, 128, 128, 255]));
+        for (li, c) in [under, over].into_iter().enumerate() {
+            let id = p.cells.len();
+            p.cells.push(c.into());
+            p.layers[li].set_key(0, id);
+        }
+        p.layers[1].blend = BlendMode::Multiply;
+        assert_eq!(flatten_frame(&p, 0).px(1, 0), [100, 50, 25, 255]);
+    }
+
+    /// A blend mode inside a group mixes with the group's layers only — at
+    /// full opacity as at half — so the green under the group is untouched.
+    #[test]
+    fn a_blend_inside_a_group_stays_inside_it() {
+        let (mut p, g) = grouped();
+        // Green under the group instead of over it: move it to the bottom.
+        let green = p.layers.remove(p.layers.len() - 1);
+        p.layers.insert(0, green);
+        let g = g + 1;
+        // The red layer multiplies onto the blue one; the right half of the
+        // group is empty, so green shows there as it is.
+        let red = g - 1;
+        assert!(p.layers[red].in_group);
+        p.layers[red].blend = BlendMode::Multiply;
+        let out = flatten_frame(&p, 0);
+        assert_eq!(px(&out, 1), [0, 0, 0, 255], "red times blue, over green");
+        assert_eq!(px(&out, 6), [0, 255, 0, 255], "outside the group's paint, green as it is");
+        // Pass-through would have multiplied the red with the green too; at
+        // half opacity the group still keeps it inside.
+        p.layers[g].opacity = 0.5;
+        assert_eq!(px(&flatten_frame(&p, 0), 6), [0, 255, 0, 255]);
     }
 
     /// At half opacity the group's layers merge first: blue under red never
@@ -522,11 +612,11 @@ pub(crate) fn composite_over(dst: &mut Canvas, src: &Canvas, opacity: f32) {
         max_x: dst.width,
         max_y: dst.height,
     };
-    composite_over_in(dst, src, opacity, all);
+    composite_over_in(dst, src, opacity, BlendMode::Normal, all);
 }
 
-/// [`composite_over`] over only `rect`.
-fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, rect: DirtyRect) {
+/// [`composite_over`] over only `rect`, in `blend`.
+fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, blend: BlendMode, rect: DirtyRect) {
     debug_assert_eq!(dst.width, src.width);
     debug_assert_eq!(dst.height, src.height);
     let op = opacity.clamp(0.0, 1.0);
@@ -546,6 +636,10 @@ fn composite_over_in(dst: &mut Canvas, src: &Canvas, opacity: f32, rect: DirtyRe
         for (s, d) in span.chunks_exact(4).zip(out[at..at + span.len()].chunks_exact_mut(4)) {
             let sa = (s[3] as f32 / 255.0) * op;
             if sa <= 0.0 {
+                continue;
+            }
+            if blend != BlendMode::Normal {
+                crate::doc::blend::blend_px(blend, d, s, sa);
                 continue;
             }
             let da = d[3] as f32 / 255.0;
@@ -861,7 +955,7 @@ mod downscale_tests {
         let mut out = Canvas::new(w, h);
         let id = p.layers[0].resolve(0).unwrap();
         let xform = p.resolve_camera(0).apply(&p.layers[0].resolve_transform(0));
-        composite_layer(&mut out, p.cell(id).unwrap(), &xform, p.layers[0].opacity, w, h);
+        composite_layer(&mut out, p.cell(id).unwrap(), &xform, p.layers[0].opacity, BlendMode::Normal, w, h);
         out
     }
 
@@ -944,7 +1038,7 @@ mod downscale_tests {
         column(&mut p, 30, [0, 0, 0, 255]);
         let mut want = Canvas::new(64, 64);
         let id = p.layers[0].resolve(0).unwrap();
-        composite_layer(&mut want, p.cell(id).unwrap(), &p.layers[0].transform, 1.0, 64, 64);
+        composite_layer(&mut want, p.cell(id).unwrap(), &p.layers[0].transform, 1.0, BlendMode::Normal, 64, 64);
         assert!(flatten_doc(&p, 0).pixels() == want.pixels());
     }
 

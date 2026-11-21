@@ -1,6 +1,6 @@
 # `src/io/kra/xml.rs` — the XML parts of a .kra
 
-> **Source:** [src/io/kra/xml.rs](../../../../src/io/kra/xml.rs) · **Module:** `crate::io::kra::xml` · **Size:** 203 lines · Line links as of commit `c09072f`
+> **Source:** [src/io/kra/xml.rs](../../../../src/io/kra/xml.rs) · **Module:** `crate::io::kra::xml` · **Size:** 208 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 
@@ -60,9 +60,10 @@ The attributes of one `<layer>` element this app writes.
 | `visible` | `bool` | Visible flag. |
 | `locked` | `bool` | Locked flag. |
 | `selected` | `bool` | Whether Krita opens with it selected. |
+| `compositeop` | `&'a str` | Krita's name for the layer's blend mode: `BlendMode::krita_id`. |
 
 ### `const PROFILE`
-[src/io/kra/xml.rs:59](../../../../src/io/kra/xml.rs#L59)
+[src/io/kra/xml.rs:61](../../../../src/io/kra/xml.rs#L61)
 
 ```rust
 pub const PROFILE: &str = "sRGB built-in";
@@ -71,7 +72,7 @@ pub const PROFILE: &str = "sRGB built-in";
 The image profile's name. Krita registers LittleCMS's sRGB under this name at startup, and the bytes `super::SRGB_ICC` carries are that profile.
 
 ### `const KRITA_VERSION`
-[src/io/kra/xml.rs:63](../../../../src/io/kra/xml.rs#L63)
+[src/io/kra/xml.rs:65](../../../../src/io/kra/xml.rs#L65)
 
 ```rust
 const KRITA_VERSION: &str = "5.0.0";
@@ -82,7 +83,7 @@ The kritaVersion we claim. Old enough that any Krita 5 reads it without a "newer
 ## Free functions
 
 ### `parse`
-[src/io/kra/xml.rs:35](../../../../src/io/kra/xml.rs#L35)
+[src/io/kra/xml.rs:37](../../../../src/io/kra/xml.rs#L37)
 
 ```rust
 pub fn parse(text: &str) -> Result<roxmltree::Document<'_>, roxmltree::Error>
@@ -92,7 +93,7 @@ Parses XML as Krita writes it — every file has a `<!DOCTYPE>`, which roxmltree
 `allow_dtd: true` is set.
 
 ### `attr`
-[src/io/kra/xml.rs:41](../../../../src/io/kra/xml.rs#L41)
+[src/io/kra/xml.rs:43](../../../../src/io/kra/xml.rs#L43)
 
 ```rust
 pub fn attr(s: &str) -> String
@@ -102,7 +103,7 @@ Escapes text for use inside a double-quoted XML attribute (`&` → `&amp;`, `"` 
 control characters).
 
 ### `maindoc`
-[src/io/kra/xml.rs:66](../../../../src/io/kra/xml.rs#L66)
+[src/io/kra/xml.rs:68](../../../../src/io/kra/xml.rs#L68)
 
 ```rust
 pub fn maindoc(image: &str, width: u32, height: u32, layers: &[Item]) -> String
@@ -112,7 +113,7 @@ Builds `maindoc.xml`: the `<DOC>`/`<IMAGE>` header with size, colour profile and
 layer stack (top of the stack first, as Krita lists it).
 
 ### `write_item`
-[src/io/kra/xml.rs:90](../../../../src/io/kra/xml.rs#L90)
+[src/io/kra/xml.rs:92](../../../../src/io/kra/xml.rs#L92)
 
 ```rust
 fn write_item(s: &mut String, item: &Item, depth: usize)
@@ -122,7 +123,7 @@ Writes one stack entry indented `depth` spaces: a `<layer>` for a paint layer, a
 nested `<layers>` (recursing), or a carried Krita element verbatim.
 
 ### `keyframes`
-[src/io/kra/xml.rs:136](../../../../src/io/kra/xml.rs#L136)
+[src/io/kra/xml.rs:139](../../../../src/io/kra/xml.rs#L139)
 
 ```rust
 pub fn keyframes(keys: &[(usize, String)]) -> String
@@ -132,7 +133,7 @@ A raster layer's keyframes file: one keyframe per `(time, frame file)`. The same
 *cloned* keyframe (Krita 5) — the same drawing exposed again.
 
 ### `animation_index`
-[src/io/kra/xml.rs:152](../../../../src/io/kra/xml.rs#L152)
+[src/io/kra/xml.rs:155](../../../../src/io/kra/xml.rs#L155)
 
 ```rust
 pub fn animation_index(fps: f32, last_frame: usize, current: usize) -> String
@@ -142,7 +143,7 @@ pub fn animation_index(fps: f32, last_frame: usize, current: usize) -> String
 `0..last_frame`, and the current time.
 
 ### `documentinfo`
-[src/io/kra/xml.rs:166](../../../../src/io/kra/xml.rs#L166)
+[src/io/kra/xml.rs:169](../../../../src/io/kra/xml.rs#L169)
 
 ```rust
 pub fn documentinfo() -> &'static str
@@ -158,5 +159,5 @@ Run with `cargo test io::kra::xml::tests` · 2 tests
 
 | Test | What it checks |
 |---|---|
-| [`attr_escapes_quotes_and_markup`](../../../../src/io/kra/xml.rs#L180) | Attr escapes quotes and markup. |
-| [`maindoc_parses_and_marks_selection`](../../../../src/io/kra/xml.rs#L185) | Maindoc parses and marks selection. |
+| [`attr_escapes_quotes_and_markup`](../../../../src/io/kra/xml.rs#L183) | Attr escapes quotes and markup. |
+| [`maindoc_parses_and_marks_selection`](../../../../src/io/kra/xml.rs#L188) | Maindoc parses and marks selection. |

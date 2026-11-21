@@ -34,6 +34,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 
+use crate::doc::blend::BlendMode;
 use crate::doc::canvas::Canvas;
 use crate::doc::layer::{CellId, Layer};
 use crate::doc::project::Project;
@@ -133,6 +134,7 @@ pub struct LayerBase {
     /// One of a group's layers; a folded group.
     pub in_group: bool,
     pub collapsed: bool,
+    pub blend: BlendMode,
 }
 
 /// What Krita holds, as of the last sync: the send, or the last pull.
@@ -178,6 +180,7 @@ impl Baseline {
                     cell_size: l.cell_size(pw, ph),
                     in_group: l.in_group,
                     collapsed: l.collapsed,
+                    blend: l.blend,
                 };
                 for (f, e) in l.exposures.iter().enumerate().take(project.frame_count) {
                     let Some(id) = *e else { continue };
@@ -225,6 +228,7 @@ pub struct PulledLayer {
     pub group: bool,
     pub in_group: bool,
     pub collapsed: bool,
+    pub blend: BlendMode,
 }
 
 impl PulledLayer {
@@ -336,6 +340,7 @@ pub fn prepare(doc: KraDoc, base: &Baseline, present: &HashSet<String>) -> Pulle
                 group: kl.group,
                 in_group: kl.in_group,
                 collapsed: kl.collapsed,
+                blend: kl.blend,
             }
         })
         .collect();
@@ -367,6 +372,7 @@ struct LayerEdit {
     group: Option<bool>,
     in_group: Option<bool>,
     collapsed: Option<bool>,
+    blend: Option<BlendMode>,
 }
 
 impl LayerEdit {
@@ -379,6 +385,7 @@ impl LayerEdit {
             && self.group.is_none()
             && self.in_group.is_none()
             && self.collapsed.is_none()
+            && self.blend.is_none()
     }
 
     fn apply(self, l: &mut Layer, fc: usize, resolve: impl Fn(CellRef) -> CellId) {
@@ -393,6 +400,9 @@ impl LayerEdit {
         }
         if let Some(c) = self.collapsed {
             l.collapsed = c;
+        }
+        if let Some(b) = self.blend.filter(|_| !l.is_group()) {
+            l.blend = b;
         }
         if let Some(o) = self.opacity {
             l.opacity = o as f32 / 255.0;
@@ -637,6 +647,9 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
         if b.map_or(true, |b| b.collapsed != pl.collapsed) {
             edit.collapsed = Some(pl.collapsed);
         }
+        if b.map_or(true, |b| b.blend != pl.blend) {
+            edit.blend = Some(pl.blend);
+        }
         let attrs_changed = !edit.is_empty();
 
         let local = local_of.get(&pl.uuid).copied();
@@ -705,6 +718,7 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
                 locked: pl.locked,
                 in_group: pl.in_group,
                 collapsed: pl.collapsed,
+                blend: pl.blend,
                 ..b.clone()
             },
             (b, _) => {
@@ -734,6 +748,7 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
                     },
                     in_group: pl.in_group,
                     collapsed: pl.collapsed,
+                    blend: pl.blend,
                 }
             }
         };
@@ -756,6 +771,7 @@ pub fn plan(project: &Project, base: &Baseline, links: &HashMap<u64, String>, pu
                 edit.group = Some(pl.group);
                 edit.in_group = Some(pl.in_group);
                 edit.collapsed = Some(pl.collapsed);
+                edit.blend = Some(pl.blend);
                 report.added += 1;
                 Slot::Add(edit)
             }

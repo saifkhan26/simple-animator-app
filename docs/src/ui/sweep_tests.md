@@ -1,6 +1,6 @@
 # `src/ui/sweep_tests.rs` — headless layout sweep over every window (test-only)
 
-> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 1129 lines · Line links as of commit `c09072f`
+> **Source:** [src/ui/sweep_tests.rs](../../../src/ui/sweep_tests.rs) · **Module:** `crate::ui::sweep_tests` · **Size:** 1177 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 
@@ -372,7 +372,7 @@ fn report(findings: Vec<String>)
 Fails the test with every finding listed, if there are any.
 
 ### `snapshot`
-[src/ui/sweep_tests.rs:790](../../../src/ui/sweep_tests.rs#L790)
+[src/ui/sweep_tests.rs:797](../../../src/ui/sweep_tests.rs#L797)
 
 ```rust
 fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage
@@ -381,7 +381,7 @@ fn snapshot(rig: &mut Rig, ppp: f32) -> image::RgbaImage
 What `rig` draws, painted on the CPU into an image cropped to its window: egui's meshes over the theme background, at `ppp` pixels a point. For looking at a layout without starting the app, which would share the real config folder.
 
 ### `snapshot_of`
-[src/ui/sweep_tests.rs:797](../../../src/ui/sweep_tests.rs#L797)
+[src/ui/sweep_tests.rs:804](../../../src/ui/sweep_tests.rs#L804)
 
 ```rust
 fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage
@@ -390,7 +390,7 @@ fn snapshot_of(rig: &mut Rig, ppp: f32, crop: Rect) -> image::RgbaImage
 `snapshot`, cropped to `crop` rather than to the window: for a window with a menu open beside it.
 
 ### `guide_set`
-[src/ui/sweep_tests.rs:872](../../../src/ui/sweep_tests.rs#L872)
+[src/ui/sweep_tests.rs:879](../../../src/ui/sweep_tests.rs#L879)
 
 ```rust
 fn guide_set() -> Vec<crate::tools::perspective::PerspectiveGrid>
@@ -411,7 +411,7 @@ Run with `cargo test ui::sweep_tests` · 9 tests
 | [`every_window_stays_clean_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L547) | Pulled as narrow as it goes: what is left still doesn't overlap or spill. |
 | [`every_window_is_clean_with_its_sections_open`](../../../src/ui/sweep_tests.rs#L562) | Every folded section opened: nothing overlaps or spills, the window holds steady, and it gets no wider than it opened at — a section is laid out to the window, not the other way round. |
 | [`a_busy_project_leaves_every_window_its_size`](../../../src/ui/sweep_tests.rs#L588) | A busier project — more layers, long names, cleanup chains, a group, faded layers, a long scene, camera keys, a brush with many sizes remembered, brush values a drag left unrounded — leaves every window the size it was, and still clean. |
-| [`every_combo_box_opens_on_screen`](../../../src/ui/sweep_tests.rs#L665) | Every combo box opened, one at a time, with every section open: its list lands on the screen, and the window under it keeps its width. |
-| [`the_whole_ui_fits_common_screens`](../../../src/ui/sweep_tests.rs#L719) | The whole UI at common screen sizes: every window on screen, and no ID clashes between windows. |
-| [`the_brush_panel_keeps_its_rows_apart_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L764) | However narrow the Brush panel goes, the H/S/L fields stay clear of the Paste button after them, and the backdrop row keeps its colour and opacity. (Their frames, not their text, would collide, which the overlap sweep doesn't see.) |
-| [`snapshots`](../../../src/ui/sweep_tests.rs#L908) | Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots` |
+| [`every_combo_box_opens_on_screen`](../../../src/ui/sweep_tests.rs#L672) | Every combo box opened, one at a time, with every section open: its list lands on the screen, and the window under it keeps its width. |
+| [`the_whole_ui_fits_common_screens`](../../../src/ui/sweep_tests.rs#L726) | The whole UI at common screen sizes: every window on screen, and no ID clashes between windows. |
+| [`the_brush_panel_keeps_its_rows_apart_at_its_narrowest`](../../../src/ui/sweep_tests.rs#L771) | However narrow the Brush panel goes, the H/S/L fields stay clear of the Paste button after them, and the backdrop row keeps its colour and opacity. (Their frames, not their text, would collide, which the overlap sweep doesn't see.) |
+| [`snapshots`](../../../src/ui/sweep_tests.rs#L915) | Writes the Brush panel and Settings as PNGs into `SNAPSHOT_DIR`, for a look at the layout. `SNAPSHOT_DIR=... cargo test -- --ignored snapshots` |

@@ -587,7 +587,7 @@ fn every_window_is_clean_with_its_sections_open() {
 #[test]
 fn a_busy_project_leaves_every_window_its_size() {
     type Step = (&'static str, fn(&mut AppState));
-    let steps: [Step; 11] = [
+    let steps: [Step; 12] = [
         ("12 more layers", |s| {
             for k in 0..12 {
                 s.project.add_layer();
@@ -616,6 +616,13 @@ fn a_busy_project_leaves_every_window_its_size() {
         ("faded layers, the long name's too", |s| {
             for l in &mut s.project.layers {
                 l.opacity = 0.35;
+            }
+        }),
+        ("blend modes and alpha locks, the long name's too", |s| {
+            let modes = crate::doc::blend::BlendMode::ALL;
+            for (k, l) in s.project.layers.iter_mut().filter(|l| !l.is_group()).enumerate() {
+                l.blend = modes[1 + k % (modes.len() - 1)];
+                l.alpha_lock = true;
             }
         }),
         ("240 frames", |s| s.project.ensure_frame_count(240)),
@@ -933,6 +940,47 @@ fn snapshots() {
     (rig.state.recolor.from, rig.state.recolor.to) = ([200, 40, 40], [40, 80, 220]);
     rig.settle();
     snapshot(&mut rig, 2.0).save(dir.join("recolor.png")).unwrap();
+    // Blend modes: their marks on the rows, then the menu open.
+    let mut rig = Rig::new(Win::Panel(PanelId::Layers));
+    {
+        use crate::doc::blend::BlendMode;
+        let p = &mut rig.state.project;
+        p.add_layer();
+        p.add_layer();
+        p.add_layer();
+        p.layers[1].name = "Shadows".into();
+        p.layers[1].blend = BlendMode::Multiply;
+        p.layers[2].name = "Rim light".into();
+        p.layers[2].blend = BlendMode::Screen;
+        p.layers[2].opacity = 0.6;
+        p.layers[3].name = "Glow, cleanup pass two".into();
+        p.layers[3].blend = BlendMode::Add;
+        p.layers[3].alpha_lock = true;
+        p.layers[3].opacity = 0.8;
+        p.current_layer = 1;
+    }
+    rig.settle();
+    snapshot(&mut rig, 2.0).save(dir.join("layers_blend.png")).unwrap();
+    let shapes = rig.settle();
+    let combo = texts(&shapes)
+        .into_iter()
+        .filter(|t| t.text.contains("Multiply"))
+        .min_by(|a, b| a.rect.min.y.total_cmp(&b.rect.min.y))
+        .expect("the blend menu")
+        .rect
+        .center();
+    rig.click(combo);
+    rig.settle();
+    let menu = rig.ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| l.order == egui::Order::Foreground)
+            .filter_map(|l| egui::AreaState::load(&rig.ctx, l.id).map(|s| s.rect()))
+            .fold(rig.rect(), |a, b| a.union(b))
+    });
+    snapshot_of(&mut rig, 2.0, menu.expand(4.0)).save(dir.join("layers_blend_menu.png")).unwrap();
+
     // A layer reusing drawings: numbered bars, then the Drawing picker open
     // on one. Thumbnails come out as blank cards here: this draws text and
     // shapes, not images.

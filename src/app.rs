@@ -1681,6 +1681,9 @@ pub struct AppState {
     /// the row until it is let go, even at 100%, and the slider over the
     /// list leaves the undo step the row opened alone.
     pub opacity_row_uid: Option<u64>,
+    /// The layer a Ctrl+wheel over its row is changing the opacity of, and
+    /// until when the turn of the wheel stays one undo step.
+    pub opacity_wheel: Option<(u64, std::time::Instant)>,
     /// What a group being transformed turns and scales about, in document
     /// space: the middle of its layers when the drag started.
     group_pivot: Option<(f32, f32)>,
@@ -2053,6 +2056,7 @@ impl AppState {
             layer_xform_before: None,
             layer_opacity_before: None,
             opacity_row_uid: None,
+            opacity_wheel: None,
             group_pivot: None,
             xform_sync_last: None,
             camera_edit: false,
@@ -2976,7 +2980,10 @@ impl AppState {
                     // Passing the *baked* size as the doc size keeps the
                     // transform maths centred on the same point, since the
                     // baked cell is itself centred on the doc.
-                    crate::io::composite::composite_layer(&mut out, &src, &xform, l.opacity, bw, bh);
+                    // The lower layer down as it is; the upper in its blend
+                    // mode, mixed with the lower one alone.
+                    let blend = if idx == li { l.blend } else { crate::doc::blend::BlendMode::Normal };
+                    crate::io::composite::composite_layer(&mut out, &src, &xform, l.opacity, blend, bw, bh);
                 }
                 (f, out)
             })
@@ -6805,14 +6812,38 @@ impl AppState {
         Some(doc_to_cell(doc, &dst_xform, cell_w, cell_h, p.width, p.height))
     }
 
-    /// Render the layer linked from `layer_idx` via `lines_from` into the *cell
-    /// space* of that layer's own cell, so flood fill can treat its strokes as
-    /// walls. `None` when no link is set or the link can't be resolved on this
-    /// frame — the caller then falls back to plain same-layer filling.
+    /// The walls a fill on `layer_idx` reads when it takes its lines from
+    /// another layer: that layer's drawing, brought into the *cell space* of
+    /// `layer_idx`'s own cell, with `layer_idx`'s own drawing laid in with it
+    /// — lines drawn on the layer being filled are walls too, and so is the
+    /// paint already on it, as for a plain bucket. The two go together in the
+    /// order they stack. `None` when no link is set or the link can't be
+    /// resolved on this frame — the caller then falls back to plain
+    /// same-layer filling.
     ///
     /// The linked layer bounds the fill even when hidden or set as a reference
     /// layer: the link is an explicit choice, visibility is a display concern.
     fn fill_boundary(&self, layer_idx: usize, cell_w: u32, cell_h: u32) -> Option<Canvas> {
+        let lines = self.linked_lines(layer_idx, cell_w, cell_h)?;
+        let p = &self.project;
+        let own = p.layers[layer_idx]
+            .resolve(p.current_frame)
+            .and_then(|id| p.cell(id))
+            .filter(|c| (c.width, c.height) == (cell_w, cell_h));
+        let Some(own) = own else {
+            return Some(lines);
+        };
+        let src = p.layers[layer_idx].lines_from.unwrap_or(layer_idx);
+        // Bottom first, as the layers stack. Each at full strength: a faded
+        // layer's lines must still be solid walls.
+        let (mut under, over) = if src > layer_idx { (own.clone(), lines) } else { (lines, own.clone()) };
+        crate::io::composite::composite_over(&mut under, &over, 1.0);
+        Some(under)
+    }
+
+    /// The layer linked from `layer_idx` via `lines_from`, rendered into the
+    /// cell space of `layer_idx`'s own cell. See [`AppState::fill_boundary`].
+    fn linked_lines(&self, layer_idx: usize, cell_w: u32, cell_h: u32) -> Option<Canvas> {
         let p = &self.project;
         let dst_layer = p.layers.get(layer_idx)?;
         let src_idx = dst_layer.lines_from?;
@@ -6840,7 +6871,7 @@ impl AppState {
         // solid wall, or the fill leaks straight through it.
         let (pw, ph) = (p.width, p.height);
         let mut doc = Canvas::new(pw, ph);
-        crate::io::composite::composite_layer(&mut doc, src, &src_xform, 1.0, pw, ph);
+        crate::io::composite::composite_layer(&mut doc, src, &src_xform, 1.0, Default::default(), pw, ph);
         Some(doc_to_cell(doc, &dst_xform, cell_w, cell_h, pw, ph))
     }
 
@@ -6977,6 +7008,27 @@ impl AppState {
         for i in self.selected_layer_indices() {
             self.project.layers[i].opacity = v.clamp(0.0, 1.0);
         }
+    }
+
+    /// Set every selected layer's blend mode — a group's own stays Normal.
+    /// One undo step; nothing when none changes. Only the look changes:
+    /// the timeline selection and any lifted pixels stay as they are.
+    pub fn set_selected_blend(&mut self, mode: crate::doc::blend::BlendMode) {
+        let layers: Vec<usize> =
+            self.selected_layer_indices().into_iter().filter(|&i| !self.project.is_group(i)).collect();
+        if layers.iter().all(|&i| self.project.layers[i].blend == mode) {
+            return;
+        }
+        let before = undo::TimelineState::capture(&self.project);
+        for i in layers {
+            self.project.layers[i].blend = mode;
+        }
+        let after = undo::TimelineState::capture(&self.project);
+        self.history.push(undo::Command::Structural {
+            before,
+            after,
+            cell_pixels: Vec::new(),
+        });
     }
 
     /// Set layer `i`'s opacity alone, from the % on its row. One undo step
@@ -8523,6 +8575,7 @@ impl AppState {
             group: bool,
             in_group: bool,
             collapsed: bool,
+            blend: crate::doc::blend::BlendMode,
         }
         let mut layers: Vec<Imported> = Vec::new();
         for kl in &doc.layers {
@@ -8560,6 +8613,7 @@ impl AppState {
                 group: kl.group,
                 in_group: kl.in_group,
                 collapsed: kl.collapsed,
+                blend: kl.blend,
             });
         }
         // A group of nothing — every layer in it held back — isn't worth
@@ -8607,6 +8661,7 @@ impl AppState {
                 l.locked = im.locked;
                 l.in_group = im.in_group || (inherit && !im.group);
                 l.collapsed = im.collapsed;
+                l.blend = im.blend;
                 let base = p.cells.len();
                 if let Some((cw, ch)) = im.cells.first().map(|c| (c.width, c.height)).filter(|&s| s != (pw, ph)) {
                     l.cell_w = cw;
@@ -13686,5 +13741,141 @@ mod range_tests {
         st.reverse_track_selection();
         st.repeat_track_selection(3);
         assert_eq!(keys(&st), [0, 2, 4]);
+    }
+}
+
+#[cfg(test)]
+mod blend_tests {
+    use super::*;
+    use crate::doc::blend::BlendMode;
+
+    /// Three layers, the top two in a group, the bottom one active.
+    fn layered() -> AppState {
+        let mut st = AppState::for_test();
+        st.project.add_layer();
+        st.project.add_layer();
+        st.project.group_layers(&[1, 2]).expect("grouped");
+        st.project.current_layer = 0;
+        st
+    }
+
+    #[test]
+    fn a_blend_mode_is_one_undo_step_on_every_picked_layer() {
+        let mut st = layered();
+        let g = st.project.layers.iter().position(|l| l.is_group()).unwrap();
+        st.selected_layers.insert(st.project.layers[1].uid);
+        st.selected_layers.insert(st.project.layers[g].uid);
+        st.track_sel = [(0, 0)].into_iter().collect();
+        let steps = st.history.undo_len();
+        st.set_selected_blend(BlendMode::Multiply);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        assert_eq!(st.project.layers[0].blend, BlendMode::Multiply);
+        assert_eq!(st.project.layers[1].blend, BlendMode::Multiply);
+        assert_eq!(st.project.layers[g].blend, BlendMode::Normal, "a group has none of its own");
+        assert_eq!(st.track_sel, [(0, 0)].into_iter().collect(), "the timeline selection stays");
+        // The same again changes nothing and records nothing.
+        st.set_selected_blend(BlendMode::Multiply);
+        assert_eq!(st.history.undo_len(), steps + 1);
+        st.undo();
+        assert!(st.project.layers.iter().all(|l| l.blend == BlendMode::Normal));
+        st.redo();
+        assert_eq!(st.project.layers[1].blend, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn a_blend_mode_is_saved_with_the_project_and_autosaved_on_change() {
+        let mut st = layered();
+        let before = crate::io::project_file::content_key(&st.project);
+        st.set_selected_blend(BlendMode::Screen);
+        assert_ne!(crate::io::project_file::content_key(&st.project), before, "autosave sees it");
+    }
+}
+
+#[cfg(test)]
+mod fill_lines_tests {
+    use super::*;
+    use crate::tools::fill::{flood, FillOptions, Grain};
+
+    /// A 30×4 project: layer 0 a line at x = 10, layer 1 one at x = 20 of its
+    /// own, layer 1 taking its lines from layer 0. Both doc-sized, unmoved.
+    fn two_walls() -> AppState {
+        let mut st = AppState::for_test();
+        st.load_project(Project::new(30, 4, 24.0), None);
+        st.project.add_layer();
+        for (li, x) in [(0usize, 10u32), (1, 20)] {
+            let mut c = Canvas::new(30, 4);
+            for y in 0..4 {
+                let i = ((y * 30 + x) * 4) as usize;
+                c.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+            let id = st.project.cells.len();
+            st.project.cells.push(Arc::new(c));
+            st.project.layers[li].set_key(0, id);
+        }
+        st.project.layers[1].lines_from = Some(0);
+        st.project.current_layer = 1;
+        st
+    }
+
+    fn opts() -> FillOptions {
+        FillOptions {
+            tolerance: 24,
+            color: [200, 40, 40, 255],
+            expand: 0,
+            gap: 0,
+            alpha_lock: false,
+            opacity: 1.0,
+            grain: Grain::NONE,
+        }
+    }
+
+    #[test]
+    fn the_walls_are_the_linked_layer_s_lines_and_the_layer_s_own() {
+        let st = two_walls();
+        let walls = st.fill_source(1, 30, 4).expect("linked");
+        assert_eq!(walls.px(10, 1)[3], 255, "the linked layer's line");
+        assert_eq!(walls.px(20, 1)[3], 255, "the layer's own line");
+        assert_eq!(walls.px(15, 1)[3], 0);
+    }
+
+    /// A fill between the two lines stops at both: before, the layer's own
+    /// line was not seen, and the fill ran on to the canvas edge.
+    #[test]
+    fn a_fill_stops_at_lines_on_either_layer() {
+        let st = two_walls();
+        let walls = st.fill_source(1, 30, 4).unwrap();
+        let id = st.project.layers[1].resolve(0).unwrap();
+        let mut cell = (*st.project.cells[id]).clone();
+        flood(&mut cell, Some(&walls), 15, 1, opts());
+        assert_eq!(cell.px(12, 1), [200, 40, 40, 255], "between the lines");
+        assert_eq!(cell.px(25, 1)[3], 0, "past the layer's own line");
+        assert_eq!(cell.px(5, 1)[3], 0, "past the linked layer's line");
+    }
+
+    /// With the lines layer above the one being filled, its lines lie over
+    /// the fill layer's paint, as they show.
+    #[test]
+    fn the_two_go_together_in_the_order_they_stack() {
+        let mut st = two_walls();
+        // The fill layer's paint where the lines layer's line is, in red.
+        let own = st.project.layers[1].resolve(0).unwrap();
+        let c = st.project.cell_mut(own).unwrap();
+        let i = ((1 * 30 + 10) * 4) as usize;
+        c.pixels_mut()[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+        // Lines layer under the fill layer: the fill layer's red on top.
+        assert_eq!(st.fill_source(1, 30, 4).unwrap().px(10, 1), [255, 0, 0, 255]);
+        // Lines layer over it: the black line on top.
+        st.project.layers.swap(0, 1);
+        st.project.layers[0].lines_from = Some(1);
+        st.project.layers[1].lines_from = None;
+        assert_eq!(st.fill_source(0, 30, 4).unwrap().px(10, 1), [0, 0, 0, 255]);
+    }
+
+    /// No link: the plain bucket, reading the cell itself, as ever.
+    #[test]
+    fn without_a_link_the_bucket_reads_its_own_cell() {
+        let mut st = two_walls();
+        st.project.layers[1].lines_from = None;
+        assert!(st.fill_source(1, 30, 4).is_none());
     }
 }

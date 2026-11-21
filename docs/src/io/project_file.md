@@ -1,6 +1,6 @@
 # `src/io/project_file.rs` — saving and opening `.anim` projects
 
-> **Source:** [src/io/project_file.rs](../../../src/io/project_file.rs) · **Module:** `crate::io::project_file` · **Size:** 1029 lines · Line links as of commit `c09072f`
+> **Source:** [src/io/project_file.rs](../../../src/io/project_file.rs) · **Module:** `crate::io::project_file` · **Size:** 1110 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 
@@ -227,7 +227,7 @@ These four methods are the interface postcard calls to get bytes. The associated
 ## Types
 
 ### `const MAGIC`
-[src/io/project_file.rs:24](../../../src/io/project_file.rs#L24)
+[src/io/project_file.rs:25](../../../src/io/project_file.rs#L25)
 
 ```rust
 const MAGIC: &[u8; 4] = b"ANIM";
@@ -237,18 +237,27 @@ const MAGIC: &[u8; 4] = b"ANIM";
 start with them is refused with "not an Animator project file".
 
 ### `const VERSION`
-[src/io/project_file.rs:36](../../../src/io/project_file.rs#L36)
+[src/io/project_file.rs:41](../../../src/io/project_file.rs#L41)
 
 ```rust
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 ```
 
 `u32 = 8`. The format version this build writes. The comment above it is the version
 history (see the table above). A test in `pins` fails if it changes, so a format bump is
 always deliberate.
 
+### `const PLAIN_VERSION`
+[src/io/project_file.rs:43](../../../src/io/project_file.rs#L43)
+
+```rust
+const PLAIN_VERSION: u32 = 8;
+```
+
+What a project with no blend mode is written as: see `VERSION`.
+
 ### `const EXT`
-[src/io/project_file.rs:37](../../../src/io/project_file.rs#L37)
+[src/io/project_file.rs:44](../../../src/io/project_file.rs#L44)
 
 ```rust
 const EXT: &str = "anim";
@@ -257,7 +266,7 @@ const EXT: &str = "anim";
 `&str = "anim"`. The file extension used in the Save / Open dialog filters.
 
 ### `const BUF`
-[src/io/project_file.rs:51](../../../src/io/project_file.rs#L51)
+[src/io/project_file.rs:58](../../../src/io/project_file.rs#L58)
 
 ```rust
 const BUF: usize = 256 * 1024;
@@ -269,7 +278,7 @@ load). The comment says it is "generous on purpose": one allocation per save, an
 the difference between a save you notice and one you do not.
 
 ### `struct Stream`
-[src/io/project_file.rs:135](../../../src/io/project_file.rs#L135)
+[src/io/project_file.rs:151](../../../src/io/project_file.rs#L151)
 
 A postcard *flavor* (input adapter) that reads from any `Read` stream instead of from a
 byte slice already in memory. The `<R>` means it works for any reader type.
@@ -280,7 +289,7 @@ byte slice already in memory. The `<R>` means it works for any reader type.
 | `scratch` | `Vec<u8>` | One reusable buffer. Each cell's pixel bytes are read into it, then turned into a `Canvas`; the next cell reuses it. So memory holds at most the project being built plus the largest single cell. |
 
 ### `const MAX_BYTES`
-[src/io/project_file.rs:152](../../../src/io/project_file.rs#L152)
+[src/io/project_file.rs:168](../../../src/io/project_file.rs#L168)
 
 ```rust
 const MAX_BYTES: usize = 16384 * 16384 * 4;
@@ -291,7 +300,7 @@ damaged length field larger than this is treated as an error rather than an atte
 allocate that much memory. 16384² is the largest texture a GPU takes.
 
 ### `type Stream::Remainder`
-[src/io/project_file.rs:155](../../../src/io/project_file.rs#L155)
+[src/io/project_file.rs:171](../../../src/io/project_file.rs#L171)
 
 ```rust
 type Remainder = R;
@@ -300,7 +309,7 @@ type Remainder = R;
 postcard's `Flavor` trait asks what is left over when decoding ends; for `Stream` it is the reader `R` itself, handed back.
 
 ### `type Stream::Source`
-[src/io/project_file.rs:156](../../../src/io/project_file.rs#L156)
+[src/io/project_file.rs:172](../../../src/io/project_file.rs#L172)
 
 ```rust
 type Source = R;
@@ -309,7 +318,7 @@ type Source = R;
 The other associated type of postcard's `Flavor`: where bytes come from — the same reader `R`.
 
 ### `struct HashWriter`
-[src/io/project_file.rs:865](../../../src/io/project_file.rs#L865)
+[src/io/project_file.rs:944](../../../src/io/project_file.rs#L944)
 
 Feeds what postcard writes straight into a hasher, so hashing a layer never builds its bytes in memory.
 
@@ -320,7 +329,7 @@ Feeds what postcard writes straight into a hasher, so hashing a layer never buil
 ## Free functions
 
 ### `level`
-[src/io/project_file.rs:44](../../../src/io/project_file.rs#L44)
+[src/io/project_file.rs:51](../../../src/io/project_file.rs#L51)
 
 ```rust
 fn level() -> Compression
@@ -336,7 +345,7 @@ the CPU time. Saving a few hundred MB must not stall on the compressor.
 compressed files.
 
 ### `encode`
-[src/io/project_file.rs:58](../../../src/io/project_file.rs#L58)
+[src/io/project_file.rs:65](../../../src/io/project_file.rs#L65)
 
 ```rust
 fn encode(project: &Project) -> Result<(Vec<u8>, u64)>
@@ -380,7 +389,7 @@ const file = Buffer.concat([header, zlib.deflateSync(body, { level: 1 })]);
 **Used by:** [`save_to`](#save_to); many tests.
 
 ### `decode`
-[src/io/project_file.rs:90](../../../src/io/project_file.rs#L90)
+[src/io/project_file.rs:103](../../../src/io/project_file.rs#L103)
 
 ```rust
 fn decode(bytes: &[u8]) -> Result<Project>
@@ -394,7 +403,7 @@ without touching the disk.
 **Used by:** the tests in this file.
 
 ### `decode_from`
-[src/io/project_file.rs:98](../../../src/io/project_file.rs#L98)
+[src/io/project_file.rs:111](../../../src/io/project_file.rs#L111)
 
 ```rust
 fn decode_from(mut input: impl Read) -> Result<Project>
@@ -432,7 +441,7 @@ project's size at once.
 **Used by:** [`load_from`](#load_from), [`decode`](#tests).
 
 ### `stream`
-[src/io/project_file.rs:125](../../../src/io/project_file.rs#L125)
+[src/io/project_file.rs:141](../../../src/io/project_file.rs#L141)
 
 ```rust
 fn stream<T: serde::de::DeserializeOwned>(body: impl Read) -> Result<T>
@@ -457,7 +466,7 @@ let old: ProjectV7 = stream(file_after_header)?;             // v7, then old.int
 ## `impl<R> Stream<R>`
 
 ### `Stream::new`
-[src/io/project_file.rs:141](../../../src/io/project_file.rs#L141)
+[src/io/project_file.rs:157](../../../src/io/project_file.rs#L157)
 
 ```rust
 fn new(input: R) -> Self
@@ -470,7 +479,7 @@ Wraps a reader in a `Stream` with an empty scratch buffer.
 ## `impl<'de, R: Read + 'de> postcard::de_flavors::Flavor<'de> for Stream<R>`
 
 ### `Stream::pop`
-[src/io/project_file.rs:158](../../../src/io/project_file.rs#L158)
+[src/io/project_file.rs:174](../../../src/io/project_file.rs#L174)
 
 ```rust
 fn pop(&mut self) -> postcard::Result<u8>
@@ -481,7 +490,7 @@ reported to postcard as `DeserializeUnexpectedEnd`, which is how a truncated fil
 an error.
 
 ### `Stream::try_take_n`
-[src/io/project_file.rs:168](../../../src/io/project_file.rs#L168)
+[src/io/project_file.rs:184](../../../src/io/project_file.rs#L184)
 
 ```rust
 fn try_take_n(&mut self, _ct: usize) -> postcard::Result<&'de [u8]>
@@ -492,7 +501,7 @@ whole parse. This flavor always says no (`DeserializeUnexpectedEnd`): nothing in
 borrows from its file, and a stream has no long-lived buffer to lend.
 
 ### `Stream::try_take_n_temp`
-[src/io/project_file.rs:172](../../../src/io/project_file.rs#L172)
+[src/io/project_file.rs:188](../../../src/io/project_file.rs#L188)
 
 ```rust
 fn try_take_n_temp<'a>(&'a mut self, ct: usize) -> postcard::Result<&'a [u8]>
@@ -514,7 +523,7 @@ them out only until the next call. This is the path a cell's pixel byte string t
 The `where 'de: 'a` line says "the input lifetime outlives this temporary borrow".
 
 ### `Stream::finalize`
-[src/io/project_file.rs:189](../../../src/io/project_file.rs#L189)
+[src/io/project_file.rs:205](../../../src/io/project_file.rs#L205)
 
 ```rust
 fn finalize(self) -> postcard::Result<R>
@@ -525,7 +534,7 @@ Called when parsing is done; gives back the underlying reader.
 ## Free functions
 
 ### `decode_uncompressed`
-[src/io/project_file.rs:195](../../../src/io/project_file.rs#L195)
+[src/io/project_file.rs:211](../../../src/io/project_file.rs#L211)
 
 ```rust
 fn decode_uncompressed(version: u32, body: &[u8]) -> Result<Project>
@@ -549,7 +558,7 @@ same layout as v6, it just was not compressed); 4 → `ProjectV4`; 3 → `Projec
 **Used by:** [`decode_from`](#decode_from).
 
 ### `save_to`
-[src/io/project_file.rs:768](../../../src/io/project_file.rs#L768)
+[src/io/project_file.rs:847](../../../src/io/project_file.rs#L847)
 
 ```rust
 pub fn save_to(project: &Project, path: &Path) -> Result<()>
@@ -578,7 +587,7 @@ project so drawing can continue; the result is sent back over a channel and coll
 `poll_save_job`. Also the `saves_and_loads_a_real_file_losslessly` test.
 
 ### `write_replacing`
-[src/io/project_file.rs:793](../../../src/io/project_file.rs#L793)
+[src/io/project_file.rs:872](../../../src/io/project_file.rs#L872)
 
 ```rust
 pub fn write_replacing(path: &Path, bytes: &[u8]) -> Result<()>
@@ -589,7 +598,7 @@ Write `bytes` to `path` without ever leaving a half-written file there.
 They go to a sibling `<name>.saving` first, are flushed to the disk, and only then renamed over `path` — on Windows a rename replaces the target in one step. Writing straight into `path` would truncate the last good save before the first new byte landed: a crash, a power cut or a full disk part-way through would leave neither version. On failure the `.saving` file is removed and `path` is untouched.
 
 ### `sibling`
-[src/io/project_file.rs:812](../../../src/io/project_file.rs#L812)
+[src/io/project_file.rs:891](../../../src/io/project_file.rs#L891)
 
 ```rust
 fn sibling(path: &Path, suffix: &str) -> PathBuf
@@ -598,7 +607,7 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf
 `path` with `suffix` added to its file name: `a.anim` → `a.anim.saving`.
 
 ### `content_key`
-[src/io/project_file.rs:835](../../../src/io/project_file.rs#L835)
+[src/io/project_file.rs:914](../../../src/io/project_file.rs#L914)
 
 ```rust
 pub fn content_key(project: &Project) -> u64
@@ -616,7 +625,7 @@ Left out on purpose, because they move without the work changing:
 ## `impl<H: Hasher> std::io::Write for HashWriter<'_, H>`
 
 ### `HashWriter::write`
-[src/io/project_file.rs:868](../../../src/io/project_file.rs#L868)
+[src/io/project_file.rs:947](../../../src/io/project_file.rs#L947)
 
 ```rust
 fn write(&mut self, buf: &[u8]) -> std::io::Result<usize>
@@ -625,7 +634,7 @@ fn write(&mut self, buf: &[u8]) -> std::io::Result<usize>
 Hands the bytes to the hasher and reports all of them taken.
 
 ### `HashWriter::flush`
-[src/io/project_file.rs:872](../../../src/io/project_file.rs#L872)
+[src/io/project_file.rs:951](../../../src/io/project_file.rs#L951)
 
 ```rust
 fn flush(&mut self) -> std::io::Result<()>
@@ -636,7 +645,7 @@ Nothing to flush: a hasher keeps no buffer.
 ## Free functions
 
 ### `ask_save_path`
-[src/io/project_file.rs:880](../../../src/io/project_file.rs#L880)
+[src/io/project_file.rs:959](../../../src/io/project_file.rs#L959)
 
 ```rust
 pub fn ask_save_path(current: Option<&Path>) -> Option<PathBuf>
@@ -657,7 +666,7 @@ filtered to `.anim` files.
 path is remembered yet).
 
 ### `load_from`
-[src/io/project_file.rs:901](../../../src/io/project_file.rs#L901)
+[src/io/project_file.rs:980](../../../src/io/project_file.rs#L980)
 
 ```rust
 pub fn load_from(path: &Path) -> Result<Project>
@@ -677,7 +686,7 @@ decode error).
 [webp_export.rs](webp_export.md) tests; this file's tests.
 
 ### `load_dialog`
-[src/io/project_file.rs:910](../../../src/io/project_file.rs#L910)
+[src/io/project_file.rs:989](../../../src/io/project_file.rs#L989)
 
 ```rust
 pub fn load_dialog() -> Result<Option<(Project, PathBuf)>>
@@ -710,56 +719,60 @@ migration) and `pins` (byte-exact "nothing changed by accident" checks).
 
 | Test | What it checks |
 |---|---|
-| [`decodes_v2_project`](../../../src/io/project_file.rs#L224) | A hand-built v2 file (no `track_points`) decodes and migrates: frame count, layer name and exposures kept, `track_points` empty. |
-| [`decodes_v3_project`](../../../src/io/project_file.rs#L263) | A v3 file keeps its track points and gets an identity camera, no camera keys and a 0×0 (use project size) cell size. |
-| [`decodes_v4_project`](../../../src/io/project_file.rs#L305) | A v4 file keeps its camera and cell size, and its transform keys come back with `Ease::Linear` (same playback as before `ease` existed). |
-| [`saves_a_project_with_freed_cells`](../../../src/io/project_file.rs#L368) | A project with a freed (0×0 tombstone) cell saves and loads; this once panicked and crashed the app during a background save. |
-| [`round_trips_current_project`](../../../src/io/project_file.rs#L384) | `encode` stamps `VERSION`, and track points, cell size, camera, camera keys and key eases all survive a round trip. |
-| [`pixels_survive_the_round_trip_exactly`](../../../src/io/project_file.rs#L429) | A cell filled with a pattern that has no long runs comes back byte-identical (guards against a lossy or truncating codec). |
-| [`decodes_v5_project`](../../../src/io/project_file.rs#L452) | An uncompressed v5 file opens with name, cell size, camera keys and fps intact and nothing clipped. |
-| [`decodes_v6_project`](../../../src/io/project_file.rs#L514) | A compressed v6 file opens with both layers and no clip / alpha lock. |
-| [`clipping_and_alpha_lock_survive_a_save`](../../../src/io/project_file.rs#L534) | `clip` and `alpha_lock` flags come back on the right layers. |
-| [`groups_survive_a_save`](../../../src/io/project_file.rs#L548) | A collapsed, half-opaque group keeps its header, members, `collapsed` flag and opacity. |
-| [`a_v7_file_opens_without_groups`](../../../src/io/project_file.rs#L564) | A v7 file keeps its clipping and opens with every layer ungrouped. |
-| [`compression_actually_shrinks_sparse_cells`](../../../src/io/project_file.rs#L618) | Five blank 256×256 cells pack more than 100× smaller than the raw postcard body, and the reported raw size is the true body size. |
-| [`rejects_a_truncated_body`](../../../src/io/project_file.rs#L643) | A file cut short, or a header with no body, is an error, not a panic or a half-built project. |
-| [`measure_ratio_and_time`](../../../src/io/project_file.rs#L654) | `#[ignore]` measurement harness: 12 cells of 1080p fake line art; prints raw / packed size and encode / decode times. Run with `-- --ignored --nocapture`. |
-| [`saves_and_loads_a_real_file_losslessly`](../../../src/io/project_file.rs#L706) | `save_to` + `load_from` through a real temp file: pixels byte-identical and the file smaller than the raw body. |
-| [`rejects_unsupported_version`](../../../src/io/project_file.rs#L740) | A version newer than `VERSION` gives "unsupported project version"; a file starting `NOPE` is refused. |
-| [`a_saved_project_is_byte_for_byte_what_it_was`](../../../src/io/project_file.rs#L928) | (`pins`) The postcard body of the shared test scene (`composite::pins::scene`) still has the same length and FNV hash — any layout change fails here. |
-| [`the_format_version_has_not_moved`](../../../src/io/project_file.rs#L934) | (`pins`) `VERSION` is still 8. |
-| [`the_camera_s_session_options_stay_out_of_the_file`](../../../src/io/project_file.rs#L939) | (`pins`) Setting a session-only camera size does not change the saved bytes, and a load brings back default `camera_opts`. |
+| [`decodes_v2_project`](../../../src/io/project_file.rs#L240) | A hand-built v2 file (no `track_points`) decodes and migrates: frame count, layer name and exposures kept, `track_points` empty. |
+| [`decodes_v3_project`](../../../src/io/project_file.rs#L279) | A v3 file keeps its track points and gets an identity camera, no camera keys and a 0×0 (use project size) cell size. |
+| [`decodes_v4_project`](../../../src/io/project_file.rs#L321) | A v4 file keeps its camera and cell size, and its transform keys come back with `Ease::Linear` (same playback as before `ease` existed). |
+| [`saves_a_project_with_freed_cells`](../../../src/io/project_file.rs#L384) | A project with a freed (0×0 tombstone) cell saves and loads; this once panicked and crashed the app during a background save. |
+| [`round_trips_current_project`](../../../src/io/project_file.rs#L461) | `encode` stamps `VERSION`, and track points, cell size, camera, camera keys and key eases all survive a round trip. |
+| [`pixels_survive_the_round_trip_exactly`](../../../src/io/project_file.rs#L508) | A cell filled with a pattern that has no long runs comes back byte-identical (guards against a lossy or truncating codec). |
+| [`decodes_v5_project`](../../../src/io/project_file.rs#L531) | An uncompressed v5 file opens with name, cell size, camera keys and fps intact and nothing clipped. |
+| [`decodes_v6_project`](../../../src/io/project_file.rs#L593) | A compressed v6 file opens with both layers and no clip / alpha lock. |
+| [`clipping_and_alpha_lock_survive_a_save`](../../../src/io/project_file.rs#L613) | `clip` and `alpha_lock` flags come back on the right layers. |
+| [`groups_survive_a_save`](../../../src/io/project_file.rs#L627) | A collapsed, half-opaque group keeps its header, members, `collapsed` flag and opacity. |
+| [`a_v7_file_opens_without_groups`](../../../src/io/project_file.rs#L643) | A v7 file keeps its clipping and opens with every layer ungrouped. |
+| [`compression_actually_shrinks_sparse_cells`](../../../src/io/project_file.rs#L697) | Five blank 256×256 cells pack more than 100× smaller than the raw postcard body, and the reported raw size is the true body size. |
+| [`rejects_a_truncated_body`](../../../src/io/project_file.rs#L722) | A file cut short, or a header with no body, is an error, not a panic or a half-built project. |
+| [`measure_ratio_and_time`](../../../src/io/project_file.rs#L733) | `#[ignore]` measurement harness: 12 cells of 1080p fake line art; prints raw / packed size and encode / decode times. Run with `-- --ignored --nocapture`. |
+| [`saves_and_loads_a_real_file_losslessly`](../../../src/io/project_file.rs#L785) | `save_to` + `load_from` through a real temp file: pixels byte-identical and the file smaller than the raw body. |
+| [`rejects_unsupported_version`](../../../src/io/project_file.rs#L819) | A version newer than `VERSION` gives "unsupported project version"; a file starting `NOPE` is refused. |
+| [`a_saved_project_is_byte_for_byte_what_it_was`](../../../src/io/project_file.rs#L1007) | (`pins`) The postcard body of the shared test scene (`composite::pins::scene`) still has the same length and FNV hash — any layout change fails here. |
+| [`the_format_version_has_not_moved`](../../../src/io/project_file.rs#L1014) | (`pins`) `VERSION` is still 8. |
+| [`the_camera_s_session_options_stay_out_of_the_file`](../../../src/io/project_file.rs#L1020) | (`pins`) Setting a session-only camera size does not change the saved bytes, and a load brings back default `camera_opts`. |
 
-**Test helpers:** `v6_mirror` ([line 478](../../../src/io/project_file.rs#L478)) —
+**Test helpers:** `v6_mirror` ([line 557](../../../src/io/project_file.rs#L557)) —
 copies a `Project` into the v5/v6 mirror `ProjectV6`, field by field, the way a file of
 that era was written; used by `decodes_v5_project` and `decodes_v6_project`.
 
 ### `mod tests`
 
-Run with `cargo test io::project_file::tests` · 16 tests
+Run with `cargo test io::project_file::tests` · 19 tests
 
 | Test | What it checks |
 |---|---|
-| [`decodes_v2_project`](../../../src/io/project_file.rs#L224) | A v2-era file (no `track_points`) must decode and migrate cleanly. |
-| [`decodes_v3_project`](../../../src/io/project_file.rs#L263) | A v3-era file (no camera, no per-layer cell size) must decode and migrate to an identity camera, which composites exactly as v3 did. |
-| [`decodes_v4_project`](../../../src/io/project_file.rs#L305) | A v4-era file (transform keys without `ease`) must decode with its keys intact and default to Linear, which reproduces v4 playback exactly. |
-| [`saves_a_project_with_freed_cells`](../../../src/io/project_file.rs#L368) | A freed cell is 0×0 and holds nothing; saving one must still work. Saves panicked here once, which on a background save took the whole app down: reading a 0-wide canvas row by row asked for 0-byte rows. |
-| [`round_trips_current_project`](../../../src/io/project_file.rs#L384) | Current-version round trip through encode/decode. |
-| [`pixels_survive_the_round_trip_exactly`](../../../src/io/project_file.rs#L429) | Fill a cell with a pattern no compressor can fake its way through, and demand every byte back. Compression is lossless, so a drawing that survives a save is bit-identical — this is the test that keeps it that way if the codec is ever swapped. |
-| [`decodes_v5_project`](../../../src/io/project_file.rs#L452) | An uncompressed v5 file — everything written before compression landed — must still open. Hand-built rather than produced by `encode`, because `encode` only writes the current version now. |
-| [`decodes_v6_project`](../../../src/io/project_file.rs#L514) | A v6 file — deflated, no clipping yet — opens with nothing clipped. |
-| [`clipping_and_alpha_lock_survive_a_save`](../../../src/io/project_file.rs#L534) | Clipping and alpha lock survive a save. |
-| [`groups_survive_a_save`](../../../src/io/project_file.rs#L548) | Groups survive a save. |
-| [`a_v7_file_opens_without_groups`](../../../src/io/project_file.rs#L564) | A v7 file — clipping, no groups — opens with every layer ungrouped. |
-| [`compression_actually_shrinks_sparse_cells`](../../../src/io/project_file.rs#L618) | The point of the whole format bump. Blank cells are runs of zero bytes, so they must collapse to a tiny fraction of the raw postcard — if this ever fails, something has stopped compressing. |
-| [`rejects_a_truncated_body`](../../../src/io/project_file.rs#L643) | A half-copied file must fail, not panic or hand back a half-built project. Truncation is the realistic corruption for a save interrupted partway through. |
-| [`measure_ratio_and_time`](../../../src/io/project_file.rs#L654) | Measure ratio and time. |
-| [`saves_and_loads_a_real_file_losslessly`](../../../src/io/project_file.rs#L706) | The whole thing through a real file: write it, read it back, and demand the pixels byte for byte. `encode`/`decode` alone would not catch a framing or truncation bug that only shows up once bytes hit the disk. |
-| [`rejects_unsupported_version`](../../../src/io/project_file.rs#L740) | A file from a future build is refused with the supported range, rather than being fed to a parser that would read it as garbage. |
+| [`decodes_v2_project`](../../../src/io/project_file.rs#L240) | A v2-era file (no `track_points`) must decode and migrate cleanly. |
+| [`decodes_v3_project`](../../../src/io/project_file.rs#L279) | A v3-era file (no camera, no per-layer cell size) must decode and migrate to an identity camera, which composites exactly as v3 did. |
+| [`decodes_v4_project`](../../../src/io/project_file.rs#L321) | A v4-era file (transform keys without `ease`) must decode with its keys intact and default to Linear, which reproduces v4 playback exactly. |
+| [`saves_a_project_with_freed_cells`](../../../src/io/project_file.rs#L384) | A freed cell is 0×0 and holds nothing; saving one must still work. Saves panicked here once, which on a background save took the whole app down: reading a 0-wide canvas row by row asked for 0-byte rows. |
+| [`without_blend_modes_a_project_saves_as_v8_for_older_builds`](../../../src/io/project_file.rs#L405) | A project with no blend mode is written as v8 — the bytes builds from before blend modes wrote — so those builds still open it. |
+| [`blend_modes_save_as_v9_and_come_back`](../../../src/io/project_file.rs#L423) | One blend mode anywhere makes the file v9, and every mode comes back. |
+| [`the_v8_writer_and_reader_agree`](../../../src/io/project_file.rs#L445) | The v8 written for a plain project and the v8 an older build wrote are one layout: what the owned mirror reads, the borrowed one writes. |
+| [`round_trips_current_project`](../../../src/io/project_file.rs#L461) | Current-version round trip through encode/decode. |
+| [`pixels_survive_the_round_trip_exactly`](../../../src/io/project_file.rs#L508) | Fill a cell with a pattern no compressor can fake its way through, and demand every byte back. Compression is lossless, so a drawing that survives a save is bit-identical — this is the test that keeps it that way if the codec is ever swapped. |
+| [`decodes_v5_project`](../../../src/io/project_file.rs#L531) | An uncompressed v5 file — everything written before compression landed — must still open. Hand-built rather than produced by `encode`, because `encode` only writes the current version now. |
+| [`decodes_v6_project`](../../../src/io/project_file.rs#L593) | A v6 file — deflated, no clipping yet — opens with nothing clipped. |
+| [`clipping_and_alpha_lock_survive_a_save`](../../../src/io/project_file.rs#L613) | Clipping and alpha lock survive a save. |
+| [`groups_survive_a_save`](../../../src/io/project_file.rs#L627) | Groups survive a save. |
+| [`a_v7_file_opens_without_groups`](../../../src/io/project_file.rs#L643) | A v7 file — clipping, no groups — opens with every layer ungrouped. |
+| [`compression_actually_shrinks_sparse_cells`](../../../src/io/project_file.rs#L697) | The point of the whole format bump. Blank cells are runs of zero bytes, so they must collapse to a tiny fraction of the raw postcard — if this ever fails, something has stopped compressing. |
+| [`rejects_a_truncated_body`](../../../src/io/project_file.rs#L722) | A half-copied file must fail, not panic or hand back a half-built project. Truncation is the realistic corruption for a save interrupted partway through. |
+| [`measure_ratio_and_time`](../../../src/io/project_file.rs#L733) | Measure ratio and time. |
+| [`saves_and_loads_a_real_file_losslessly`](../../../src/io/project_file.rs#L785) | The whole thing through a real file: write it, read it back, and demand the pixels byte for byte. `encode`/`decode` alone would not catch a framing or truncation bug that only shows up once bytes hit the disk. |
+| [`rejects_unsupported_version`](../../../src/io/project_file.rs#L819) | A file from a future build is refused with the supported range, rather than being fed to a parser that would read it as garbage. |
 
 **Test helpers** (used only by the tests above):
 
-- [`v6_mirror`](../../../src/io/project_file.rs#L478) — `p` in the v5/v6 layout, as a file of that era wrote it.
+- [`version_of`](../../../src/io/project_file.rs#L398) — Version of.
+- [`v6_mirror`](../../../src/io/project_file.rs#L557) — `p` in the v5/v6 layout, as a file of that era wrote it.
 
 ### `mod pins`
 
@@ -767,9 +780,9 @@ Run with `cargo test io::project_file::pins` · 3 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_saved_project_is_byte_for_byte_what_it_was`](../../../src/io/project_file.rs#L928) | A saved project is byte for byte what it was. |
-| [`the_format_version_has_not_moved`](../../../src/io/project_file.rs#L934) | The format version has not moved. |
-| [`the_camera_s_session_options_stay_out_of_the_file`](../../../src/io/project_file.rs#L939) | The camera s session options stay out of the file. |
+| [`a_saved_project_is_byte_for_byte_what_it_was`](../../../src/io/project_file.rs#L1007) | A saved project is byte for byte what it was. |
+| [`the_format_version_has_not_moved`](../../../src/io/project_file.rs#L1014) | The format version has not moved. |
+| [`the_camera_s_session_options_stay_out_of_the_file`](../../../src/io/project_file.rs#L1020) | The camera s session options stay out of the file. |
 
 ### `mod replace_and_key_tests`
 
@@ -777,11 +790,11 @@ Run with `cargo test io::project_file::replace_and_key_tests` · 4 tests
 
 | Test | What it checks |
 |---|---|
-| [`a_save_replaces_the_old_file_and_leaves_no_temp_behind`](../../../src/io/project_file.rs#L964) | A save replaces the old file and leaves no temp behind. |
-| [`a_failed_replace_leaves_what_was_there`](../../../src/io/project_file.rs#L977) | A failed replace leaves what was there. |
-| [`the_content_key_follows_the_work_and_nothing_else`](../../../src/io/project_file.rs#L989) | The content key follows the work and nothing else. |
-| [`keyed_working_buffers_are_not_edits`](../../../src/io/project_file.rs#L1015) | Keyed working buffers are not edits. |
+| [`a_save_replaces_the_old_file_and_leaves_no_temp_behind`](../../../src/io/project_file.rs#L1045) | A save replaces the old file and leaves no temp behind. |
+| [`a_failed_replace_leaves_what_was_there`](../../../src/io/project_file.rs#L1058) | A failed replace leaves what was there. |
+| [`the_content_key_follows_the_work_and_nothing_else`](../../../src/io/project_file.rs#L1070) | The content key follows the work and nothing else. |
+| [`keyed_working_buffers_are_not_edits`](../../../src/io/project_file.rs#L1096) | Keyed working buffers are not edits. |
 
 **Test helpers** (used only by the tests above):
 
-- [`scratch`](../../../src/io/project_file.rs#L956) — Scratch.
+- [`scratch`](../../../src/io/project_file.rs#L1037) — Scratch.

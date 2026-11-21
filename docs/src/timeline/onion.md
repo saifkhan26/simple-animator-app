@@ -1,6 +1,6 @@
 # `src/timeline/onion.rs` — onion-skin settings and which ghosts to draw
 
-> **Source:** [src/timeline/onion.rs](../../../src/timeline/onion.rs) · **Module:** `crate::timeline::onion` · **Size:** 747 lines · Line links as of commit `c09072f`
+> **Source:** [src/timeline/onion.rs](../../../src/timeline/onion.rs) · **Module:** `crate::timeline::onion` · **Size:** 747 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 

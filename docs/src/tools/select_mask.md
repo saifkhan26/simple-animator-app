@@ -1,6 +1,6 @@
 # `src/tools/select_mask.rs` — the selection mask in document space
 
-> **Source:** [src/tools/select_mask.rs](../../../src/tools/select_mask.rs) · **Module:** `crate::tools::select_mask` · **Size:** 1698 lines · Line links as of commit `c09072f`
+> **Source:** [src/tools/select_mask.rs](../../../src/tools/select_mask.rs) · **Module:** `crate::tools::select_mask` · **Size:** 1698 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 

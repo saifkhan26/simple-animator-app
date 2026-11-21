@@ -28,6 +28,8 @@ pub struct LayerXml<'a> {
     pub visible: bool,
     pub locked: bool,
     pub selected: bool,
+    /// Krita's name for the layer's blend mode: `BlendMode::krita_id`.
+    pub compositeop: &'a str,
 }
 
 /// Parse XML the way Krita writes it: every part carries a `<!DOCTYPE>`,
@@ -97,13 +99,14 @@ fn write_item(s: &mut String, item: &Item, depth: usize) {
         Item::Layer(l) => {
             let _ = writeln!(
                 s,
-                "{pad}<layer nodetype=\"paintlayer\" filename=\"{}\" name=\"{}\" uuid=\"{}\" opacity=\"{}\" visible=\"{}\" locked=\"{}\" x=\"0\" y=\"0\" compositeop=\"normal\" colorspacename=\"RGBA\" channelflags=\"\" channellockflags=\"\" collapsed=\"0\" colorlabel=\"0\" onionskin=\"0\" intimeline=\"1\" keyframes=\"{}.keyframes.xml\"{}/>",
+                "{pad}<layer nodetype=\"paintlayer\" filename=\"{}\" name=\"{}\" uuid=\"{}\" opacity=\"{}\" visible=\"{}\" locked=\"{}\" x=\"0\" y=\"0\" compositeop=\"{}\" colorspacename=\"RGBA\" channelflags=\"\" channellockflags=\"\" collapsed=\"0\" colorlabel=\"0\" onionskin=\"0\" intimeline=\"1\" keyframes=\"{}.keyframes.xml\"{}/>",
                 attr(l.filename),
                 attr(l.name),
                 attr(l.uuid),
                 l.opacity,
                 l.visible as u8,
                 l.locked as u8,
+                attr(l.compositeop),
                 attr(l.filename),
                 selected(l),
             );
@@ -191,6 +194,7 @@ mod tests {
             visible: true,
             locked: false,
             selected: true,
+            compositeop: "multiply",
         })];
         let xml = maindoc("image", 640, 360, &layers);
         let doc = parse(&xml).unwrap();
@@ -198,5 +202,6 @@ mod tests {
         assert_eq!(layer.attribute("name"), Some("Ink & \"line\""));
         assert_eq!(layer.attribute("selected"), Some("true"));
         assert_eq!(layer.attribute("keyframes"), Some("layer1.keyframes.xml"));
+        assert_eq!(layer.attribute("compositeop"), Some("multiply"));
     }
 }

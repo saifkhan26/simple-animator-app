@@ -1,6 +1,6 @@
 # `src/doc/layer.rs` — one layer of the animation
 
-> **Source:** [src/doc/layer.rs](../../../src/doc/layer.rs) · **Module:** `crate::doc::layer` · **Size:** 406 lines · Line links as of commit `c09072f`
+> **Source:** [src/doc/layer.rs](../../../src/doc/layer.rs) · **Module:** `crate::doc::layer` · **Size:** 413 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 
@@ -79,7 +79,7 @@ pub type CellId = usize;
 The id of a drawing: an index into `Project::cells`.
 
 ### `struct TrackSample`
-[src/doc/layer.rs:28](../../../src/doc/layer.rs#L28)
+[src/doc/layer.rs:29](../../../src/doc/layer.rs#L29)
 
 One frame's stabilization tracking points, in document space. `a` is the primary point (translation); `b` is optional and enables rotation/scale correction when present on both the reference frame and the tracked frame.
 
@@ -89,7 +89,7 @@ One frame's stabilization tracking points, in document space. `a` is the primary
 | `b` | `Option<[f32; 2]>` | An optional second point; with both, rotation and zoom shake can be corrected too. |
 
 ### `struct Layer`
-[src/doc/layer.rs:34](../../../src/doc/layer.rs#L34)
+[src/doc/layer.rs:35](../../../src/doc/layer.rs#L35)
 
 One row of the layer stack: a paint layer with drawings exposed across the timeline, or a group header.
 
@@ -116,9 +116,10 @@ One row of the layer stack: a paint layer with drawings exposed across the timel
 | `kind` | `LayerKind` | A drawing layer, or a group's header row. See `crate::doc::groups`.  These three must stay the LAST fields: the `.anim` format (postcard) is positional, and v8 appended them. |
 | `in_group` | `bool` | One of the layers of the group whose header sits directly above this one's run. Groups hold layers, never groups. |
 | `collapsed` | `bool` | A group header shown folded, its layers out of sight in the panel and the tracks. |
+| `blend` | `BlendMode` | How this layer's colours mix with what is under it. Always Normal on a group. v9 appended it, and must stay the LAST field; a file whose layers are all Normal is still written as v8 (see `io::project_file`). |
 
 ### `enum LayerKind`
-[src/doc/layer.rs:118](../../../src/doc/layer.rs#L118)
+[src/doc/layer.rs:124](../../../src/doc/layer.rs#L124)
 
 What a row of the layer stack is.
 
@@ -142,7 +143,7 @@ thread.
 ## `impl Layer`
 
 ### `Layer::new`
-[src/doc/layer.rs:128](../../../src/doc/layer.rs#L128)
+[src/doc/layer.rs:134](../../../src/doc/layer.rs#L134)
 
 ```rust
 pub fn new(name: impl Into<String>, frames: usize) -> Self
@@ -153,7 +154,7 @@ unlocked, identity transform, the project's cell size, and a fresh `uid`. `vec![
 `Vec` of `n` `None`s.
 
 ### `Layer::group`
-[src/doc/layer.rs:155](../../../src/doc/layer.rs#L155)
+[src/doc/layer.rs:162](../../../src/doc/layer.rs#L162)
 
 ```rust
 pub fn group(name: impl Into<String>, frames: usize) -> Self
@@ -163,7 +164,7 @@ A new group header row named `name`. Uses struct update syntax: everything from 
 `kind: LayerKind::Group`.
 
 ### `Layer::is_group`
-[src/doc/layer.rs:162](../../../src/doc/layer.rs#L162)
+[src/doc/layer.rs:169](../../../src/doc/layer.rs#L169)
 
 ```rust
 pub fn is_group(&self) -> bool
@@ -172,7 +173,7 @@ pub fn is_group(&self) -> bool
 Whether this row is a group header.
 
 ### `Layer::cell_size`
-[src/doc/layer.rs:168](../../../src/doc/layer.rs#L168)
+[src/doc/layer.rs:175](../../../src/doc/layer.rs#L175)
 
 ```rust
 pub fn cell_size(&self, pw: u32, ph: u32) -> (u32, u32)
@@ -182,7 +183,7 @@ The pixel size of this layer's drawings: its own `cell_w`/`cell_h`, or the proje
 those are 0.
 
 ### `Layer::track_insert_frame`
-[src/doc/layer.rs:177](../../../src/doc/layer.rs#L177)
+[src/doc/layer.rs:184](../../../src/doc/layer.rs#L184)
 
 ```rust
 pub fn track_insert_frame(&mut self, at: usize)
@@ -192,7 +193,7 @@ Keeps the tracker points list aligned with `exposures` after a frame is inserted
 empty sample); does nothing when the tracker isn't used.
 
 ### `Layer::track_remove_frame`
-[src/doc/layer.rs:190](../../../src/doc/layer.rs#L190)
+[src/doc/layer.rs:197](../../../src/doc/layer.rs#L197)
 
 ```rust
 pub fn track_remove_frame(&mut self, at: usize)
@@ -201,7 +202,7 @@ pub fn track_remove_frame(&mut self, at: usize)
 Keeps tracker points aligned after frame `at` is removed.
 
 ### `Layer::pins_insert_frames`
-[src/doc/layer.rs:198](../../../src/doc/layer.rs#L198)
+[src/doc/layer.rs:205](../../../src/doc/layer.rs#L205)
 
 ```rust
 pub fn pins_insert_frames(&mut self, at: usize, n: usize)
@@ -211,7 +212,7 @@ After `n` frames are inserted at `at`, moves onion pins at or after `at` along b
 stays on its drawing.
 
 ### `Layer::pins_remove_frames`
-[src/doc/layer.rs:208](../../../src/doc/layer.rs#L208)
+[src/doc/layer.rs:215](../../../src/doc/layer.rs#L215)
 
 ```rust
 pub fn pins_remove_frames(&mut self, at: usize, n: usize)
@@ -221,7 +222,7 @@ After frames `at..at+n` are removed, drops pins on those frames and moves later 
 `retain` keeps only items passing the test (an in-place `filter`).
 
 ### `Layer::transform_keys_insert_frames`
-[src/doc/layer.rs:219](../../../src/doc/layer.rs#L219)
+[src/doc/layer.rs:226](../../../src/doc/layer.rs#L226)
 
 ```rust
 pub fn transform_keys_insert_frames(&mut self, at: usize, n: usize)
@@ -230,7 +231,7 @@ pub fn transform_keys_insert_frames(&mut self, at: usize, n: usize)
 Moves transform keys at or after `at` along by `n` frames after an insert.
 
 ### `Layer::transform_keys_remove_frames`
-[src/doc/layer.rs:229](../../../src/doc/layer.rs#L229)
+[src/doc/layer.rs:236](../../../src/doc/layer.rs#L236)
 
 ```rust
 pub fn transform_keys_remove_frames(&mut self, at: usize, n: usize)
@@ -239,7 +240,7 @@ pub fn transform_keys_remove_frames(&mut self, at: usize, n: usize)
 Drops transform keys on removed frames and moves later ones back by `n`.
 
 ### `Layer::resolve_transform`
-[src/doc/layer.rs:241](../../../src/doc/layer.rs#L241)
+[src/doc/layer.rs:248](../../../src/doc/layer.rs#L248)
 
 ```rust
 pub fn resolve_transform(&self, frame: usize) -> Transform
@@ -252,7 +253,7 @@ and after the last. Works the same way as `Camera::resolve`.
 **Example.** Keys at frame 0 (x = 0) and frame 10 (x = 100), linear: frame 5 → x = 50; frame 12 → x = 100.
 
 ### `Layer::has_transform_key`
-[src/doc/layer.rs:265](../../../src/doc/layer.rs#L265)
+[src/doc/layer.rs:272](../../../src/doc/layer.rs#L272)
 
 ```rust
 pub fn has_transform_key(&self, frame: usize) -> bool
@@ -261,7 +262,7 @@ pub fn has_transform_key(&self, frame: usize) -> bool
 Whether there's a transform key exactly on `frame`.
 
 ### `Layer::set_transform_key`
-[src/doc/layer.rs:271](../../../src/doc/layer.rs#L271)
+[src/doc/layer.rs:278](../../../src/doc/layer.rs#L278)
 
 ```rust
 pub fn set_transform_key(&mut self, frame: usize, transform: Transform)
@@ -271,7 +272,7 @@ Adds a transform key on `frame` (or replaces the existing one, keeping its easin
 sorted by frame.
 
 ### `Layer::set_transform_key_ease`
-[src/doc/layer.rs:287](../../../src/doc/layer.rs#L287)
+[src/doc/layer.rs:294](../../../src/doc/layer.rs#L294)
 
 ```rust
 pub fn set_transform_key_ease(&mut self, frame: usize, ease: Ease)
@@ -280,7 +281,7 @@ pub fn set_transform_key_ease(&mut self, frame: usize, ease: Ease)
 Sets the easing of the key on `frame`, if any.
 
 ### `Layer::delete_transform_key`
-[src/doc/layer.rs:293](../../../src/doc/layer.rs#L293)
+[src/doc/layer.rs:300](../../../src/doc/layer.rs#L300)
 
 ```rust
 pub fn delete_transform_key(&mut self, frame: usize)
@@ -289,7 +290,7 @@ pub fn delete_transform_key(&mut self, frame: usize)
 Removes the transform key on `frame`.
 
 ### `Layer::resolve`
-[src/doc/layer.rs:299](../../../src/doc/layer.rs#L299)
+[src/doc/layer.rs:306](../../../src/doc/layer.rs#L306)
 
 ```rust
 pub fn resolve(&self, frame: usize) -> Option<CellId>
@@ -299,7 +300,7 @@ Which drawing shows on `frame`: walks back from `frame` to the nearest key. `Non
 at or before it (an empty start of the layer).
 
 ### `Layer::is_key`
-[src/doc/layer.rs:315](../../../src/doc/layer.rs#L315)
+[src/doc/layer.rs:322](../../../src/doc/layer.rs#L322)
 
 ```rust
 pub fn is_key(&self, frame: usize) -> bool
@@ -309,7 +310,7 @@ True if `frame` has its own key (rather than holding an earlier one). `is_some_a
 reads "the slot exists and it holds `Some`".
 
 ### `Layer::set_key`
-[src/doc/layer.rs:319](../../../src/doc/layer.rs#L319)
+[src/doc/layer.rs:326](../../../src/doc/layer.rs#L326)
 
 ```rust
 pub fn set_key(&mut self, frame: usize, cell: CellId)
@@ -318,7 +319,7 @@ pub fn set_key(&mut self, frame: usize, cell: CellId)
 Puts drawing `cell` as a key on `frame` (ignored if `frame` is past the end).
 
 ### `Layer::hold`
-[src/doc/layer.rs:325](../../../src/doc/layer.rs#L325)
+[src/doc/layer.rs:332](../../../src/doc/layer.rs#L332)
 
 ```rust
 pub fn hold(&mut self, frame: usize)
@@ -334,11 +335,11 @@ Run with `cargo test doc::layer::tests` · 4 tests
 
 | Test | What it checks |
 |---|---|
-| [`resolve_transform_interpolates_linearly_by_default`](../../../src/doc/layer.rs#L346) | The scroll case: two keys, linear ease, even movement in between. |
-| [`resolve_transform_applies_ease_of_the_left_key`](../../../src/doc/layer.rs#L360) | Ease shapes the segment running *out of* the key it sits on. |
-| [`set_transform_key_preserves_ease`](../../../src/doc/layer.rs#L377) | Replacing a key keeps the ease already set on it — re-posing a keyframe shouldn't silently reset its timing. |
-| [`is_key_distinguishes_keys_from_holds`](../../../src/doc/layer.rs#L393) | Is key distinguishes keys from holds. |
+| [`resolve_transform_interpolates_linearly_by_default`](../../../src/doc/layer.rs#L353) | The scroll case: two keys, linear ease, even movement in between. |
+| [`resolve_transform_applies_ease_of_the_left_key`](../../../src/doc/layer.rs#L367) | Ease shapes the segment running *out of* the key it sits on. |
+| [`set_transform_key_preserves_ease`](../../../src/doc/layer.rs#L384) | Replacing a key keeps the ease already set on it — re-posing a keyframe shouldn't silently reset its timing. |
+| [`is_key_distinguishes_keys_from_holds`](../../../src/doc/layer.rs#L400) | Is key distinguishes keys from holds. |
 
 **Test helpers** (used only by the tests above):
 
-- [`keyed`](../../../src/doc/layer.rs#L336) — Keyed.
+- [`keyed`](../../../src/doc/layer.rs#L343) — Keyed.

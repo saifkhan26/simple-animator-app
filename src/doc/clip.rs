@@ -299,8 +299,11 @@ pub fn render_group(
             continue;
         };
         any = true;
-        let op = if opacity { p.layers[c].opacity } else { 1.0 };
-        crate::io::composite::composite_layer_in(out, &src, &xf(c), op, w, h, rect);
+        // As the group shows: each layer at its opacity and in its blend
+        // mode, mixing with the group's layers below it. As a mask, only
+        // coverage counts, and that is the same in every mode.
+        let (op, blend) = if opacity { (p.layers[c].opacity, p.layers[c].blend) } else { (1.0, Default::default()) };
+        crate::io::composite::composite_layer_in(out, &src, &xf(c), op, blend, w, h, rect);
     }
     out.dirty = None;
     any
@@ -316,7 +319,7 @@ pub fn group_sig(p: &Project, g: usize, frame: usize, opacity: bool, xf: &dyn Fn
     group_space(p, g, frame, xf).hash(&mut s);
     for c in p.children(g) {
         let l = &p.layers[c];
-        (c, p.shows(c), l.reference, l.resolve(frame)).hash(&mut s);
+        (c, p.shows(c), l.reference, l.resolve(frame), l.blend).hash(&mut s);
         let t = xf(c);
         [t.tx, t.ty, t.scale, t.rot].map(f32::to_bits).hash(&mut s);
         if opacity {

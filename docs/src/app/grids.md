@@ -1,6 +1,6 @@
 # `src/app/grids.rs` — perspective grids on the app side (per-file store, follow, keys, drags)
 
-> **Source:** [src/app/grids.rs](../../../src/app/grids.rs) · **Module:** `crate::app::grids` · **Size:** 912 lines · Line links as of commit `c09072f`
+> **Source:** [src/app/grids.rs](../../../src/app/grids.rs) · **Module:** `crate::app::grids` · **Size:** 912 lines · Line links as of commit `84b26e8`
 
 ## What this file is for
 
