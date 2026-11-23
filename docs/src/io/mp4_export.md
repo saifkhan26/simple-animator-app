@@ -1,6 +1,6 @@
 # `src/io/mp4_export.rs` — MP4 export through ffmpeg
 
-> **Source:** [src/io/mp4_export.rs](../../../src/io/mp4_export.rs) · **Module:** `crate::io::mp4_export` · **Size:** 197 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/io/mp4_export.rs](../../../src/io/mp4_export.rs) · **Module:** `crate::io::mp4_export` · **Size:** 197 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/app/select.rs` — the selection: mask, gestures and floating pixels
 
-> **Source:** [src/app/select.rs](../../../src/app/select.rs) · **Module:** `crate::app::select` · **Size:** 3102 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/app/select.rs](../../../src/app/select.rs) · **Module:** `crate::app::select` · **Size:** 3102 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

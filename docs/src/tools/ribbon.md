@@ -1,6 +1,6 @@
 # `src/tools/ribbon.rs` — the stroke rasteriser (ribbons and dabs)
 
-> **Source:** [src/tools/ribbon.rs](../../../src/tools/ribbon.rs) · **Module:** `crate::tools::ribbon` · **Size:** 1400 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/tools/ribbon.rs](../../../src/tools/ribbon.rs) · **Module:** `crate::tools::ribbon` · **Size:** 1400 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

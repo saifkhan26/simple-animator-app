@@ -1,6 +1,6 @@
 # `src/doc/camera.rs` — the camera (what each exported frame shows)
 
-> **Source:** [src/doc/camera.rs](../../../src/doc/camera.rs) · **Module:** `crate::doc::camera` · **Size:** 916 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/doc/camera.rs](../../../src/doc/camera.rs) · **Module:** `crate::doc::camera` · **Size:** 916 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

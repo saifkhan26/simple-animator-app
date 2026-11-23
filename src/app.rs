@@ -6241,8 +6241,9 @@ impl AppState {
             .collect()
     }
 
-    /// The curve the stroke in hand keeps to, once it has picked one — what
-    /// the canvas draws ahead of the pen.
+    /// The curve the stroke in hand keeps to, once it has picked one — for
+    /// tests to see which way a stroke went.
+    #[cfg(test)]
     pub fn snap_curve(&self) -> Option<guides::Candidate> {
         self.snap_lock.and_then(|l| l.curve)
     }

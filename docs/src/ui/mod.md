@@ -1,6 +1,6 @@
 # `src/ui/mod.rs` — the ui folder
 
-> **Source:** [src/ui/mod.rs](../../../src/ui/mod.rs) · **Module:** `crate::ui` · **Size:** 14 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/ui/mod.rs](../../../src/ui/mod.rs) · **Module:** `crate::ui` · **Size:** 14 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

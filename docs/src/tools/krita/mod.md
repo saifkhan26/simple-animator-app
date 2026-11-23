@@ -1,6 +1,6 @@
 # `src/tools/krita/mod.rs` — Krita's pixel brush engine, ported
 
-> **Source:** [src/tools/krita/mod.rs](../../../../src/tools/krita/mod.rs) · **Module:** `crate::tools::krita` · **Size:** 1589 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/tools/krita/mod.rs](../../../../src/tools/krita/mod.rs) · **Module:** `crate::tools::krita` · **Size:** 1589 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

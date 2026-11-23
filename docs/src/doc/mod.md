@@ -1,6 +1,6 @@
 # `src/doc/mod.rs` — The document model's table of contents
 
-> **Source:** [src/doc/mod.rs](../../../src/doc/mod.rs) · **Module:** `crate::doc` · **Size:** 15 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/doc/mod.rs](../../../src/doc/mod.rs) · **Module:** `crate::doc` · **Size:** 15 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

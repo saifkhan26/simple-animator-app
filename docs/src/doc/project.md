@@ -1,6 +1,6 @@
 # `src/doc/project.rs` — the animation document (Project)
 
-> **Source:** [src/doc/project.rs](../../../src/doc/project.rs) · **Module:** `crate::doc::project` · **Size:** 3117 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/doc/project.rs](../../../src/doc/project.rs) · **Module:** `crate::doc::project` · **Size:** 3117 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

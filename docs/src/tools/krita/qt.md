@@ -1,6 +1,6 @@
 # `src/tools/krita/qt.rs` — Qt's painting maths, reproduced
 
-> **Source:** [src/tools/krita/qt.rs](../../../../src/tools/krita/qt.rs) · **Module:** `crate::tools::krita::qt` · **Size:** 1725 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/tools/krita/qt.rs](../../../../src/tools/krita/qt.rs) · **Module:** `crate::tools::krita::qt` · **Size:** 1725 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 
