@@ -8466,7 +8466,8 @@ fn draw_cursor_guides(
 /// one. Before a stroke: every way it could go from the cursor, and — bright
 /// — a ruler or an ellipse close enough for a press to take. While a stroke
 /// is drawn (`drawing`): every way it could have gone, pinned where it
-/// started so none of them vanish or wander, with the way it took bright.
+/// started so none of them vanish or wander, all alike — the way it took is
+/// not singled out.
 fn cursor_guide_curves(
     state: &AppState,
     cursor: [f32; 2],
@@ -8484,13 +8485,10 @@ fn cursor_guide_curves(
     };
     let cands = state.snap_candidates(at);
     let mut out: Vec<_> = cands.iter().filter(|c| !c.fixed).map(|&c| (c, false)).collect();
-    let bright = if drawing {
-        state.snap_curve()
-    } else {
+    if !drawing {
         let tol = crate::app::SNAP_CAPTURE_PX / state.view_scale.max(1e-6);
-        guides::nearest_fixed(&cands, at, tol)
-    };
-    out.extend(bright.map(|c| (c, true)));
+        out.extend(guides::nearest_fixed(&cands, at, tol).map(|c| (c, true)));
+    }
     out
 }
 
@@ -9187,8 +9185,7 @@ fn draw_tool_cursor(state: &AppState, ui: &egui::Ui, canvas_rect: Rect, pos: egu
     let idle = state.stroke.is_none() && state.shape_drag.is_none();
     if state.perspective.cursor_guides && state.guiding() {
         // Every axis stays up while a stroke is drawn, pinned where it
-        // started; the way it took — what a freehand stroke follows by eye —
-        // is the bright one.
+        // started, all alike.
         draw_cursor_guides(state, &painter, &xf, canvas_rect, pos, !idle);
     }
 
@@ -11291,12 +11288,13 @@ mod perspective_tests {
             // Down, before the stroke shows its way: every axis still there.
             let held = super::cursor_guide_curves(&state, [503.0, 601.0], true);
             assert_eq!(held.len(), before.len(), "snap {snap}: none vanish at pen-down");
-            // On its way: every axis, pinned at the start, and the one it
-            // took bright on top.
+            // On its way: every axis, pinned at the start, all alike — the
+            // one it took is not singled out.
             state.snap_doc([560.0, 602.0]);
+            assert!(state.snap_curve().is_some(), "snap {snap}: it has picked its way");
             let held = super::cursor_guide_curves(&state, [560.0, 640.0], true);
-            assert_eq!(held.len(), before.len() + 1, "snap {snap}");
-            assert_eq!(held.iter().filter(|(_, b)| *b).count(), 1);
+            assert_eq!(held.len(), before.len(), "snap {snap}");
+            assert!(held.iter().all(|(_, bright)| !bright), "snap {snap}: none highlighted");
             for (c, _) in &held {
                 if let crate::tools::guides::SnapCurve::Line { origin, .. } = c.curve {
                     assert_eq!(origin, [500.0, 600.0], "pinned where the pen went down");
