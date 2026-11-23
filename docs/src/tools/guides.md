@@ -1,6 +1,6 @@
 # `src/tools/guides.rs` — snapping strokes to guides
 
-> **Source:** [src/tools/guides.rs](../../../src/tools/guides.rs) · **Module:** `crate::tools::guides` · **Size:** 1358 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/tools/guides.rs](../../../src/tools/guides.rs) · **Module:** `crate::tools::guides` · **Size:** 1358 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

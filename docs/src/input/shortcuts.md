@@ -1,6 +1,6 @@
 # `src/input/shortcuts.rs` — key bindings, the mouse-wheel map and `shortcuts.toml`
 
-> **Source:** [src/input/shortcuts.rs](../../../src/input/shortcuts.rs) · **Module:** `crate::input::shortcuts` · **Size:** 2498 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/input/shortcuts.rs](../../../src/input/shortcuts.rs) · **Module:** `crate::input::shortcuts` · **Size:** 2498 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

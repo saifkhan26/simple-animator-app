@@ -1,6 +1,6 @@
 # `src/timeline/mod.rs` — the timeline folder
 
-> **Source:** [src/timeline/mod.rs](../../../src/timeline/mod.rs) · **Module:** `crate::timeline` · **Size:** 5 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/timeline/mod.rs](../../../src/timeline/mod.rs) · **Module:** `crate::timeline` · **Size:** 5 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 

@@ -1,6 +1,6 @@
 # `src/tools/axis_lock.rs` — Shift-lock geometry for drags
 
-> **Source:** [src/tools/axis_lock.rs](../../../src/tools/axis_lock.rs) · **Module:** `crate::tools::axis_lock` · **Size:** 121 lines · Line links as of commit `0a6b2ae`
+> **Source:** [src/tools/axis_lock.rs](../../../src/tools/axis_lock.rs) · **Module:** `crate::tools::axis_lock` · **Size:** 121 lines · Line links as of commit `76a196a`
 
 ## What this file is for
 
